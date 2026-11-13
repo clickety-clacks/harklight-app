@@ -395,7 +395,6 @@ public final class ClientRepository: @unchecked Sendable {
         defer { lock.unlock() }
         try validate(suppliedContext)
         let request = try boundRequest(selector, context: suppliedContext)
-        guard state.replayBarrier == nil else { throw AttentionStoreError.replayAlreadyActive }
         guard isUUIDv4(intentID) else { throw AttentionStoreError.invalidSubmission }
         let interface = requestInterface(for: request)
         guard validateDraft(draft, for: interface) else { throw AttentionStoreError.invalidDraft }
@@ -484,7 +483,6 @@ public final class ClientRepository: @unchecked Sendable {
         try validate(suppliedContext)
         let request = try boundRequest(selector, context: suppliedContext)
         guard suppliedContext.transportMode == .relay || suppliedContext.transportMode == .fixture,
-              state.replayBarrier == nil,
               isUUIDv4(intentID) else { throw AttentionStoreError.invalidSubmission }
         let descriptorFingerprint = fingerprint(request.answerDescription?.canonicalJSON ?? "")
         var fingerprintParts = [
@@ -787,7 +785,7 @@ public final class ClientRepository: @unchecked Sendable {
     }
 
     /// A server that cannot parse the agreed No comment frame leaves the
-    /// request unanswered and releases it for ordinary answer methods.
+    /// request unanswered and retains the failed identity for explicit Retry.
     public func recordNoCommentUnsupported(_ intentID: UUID,
                                            operationID: UUID,
                                            context suppliedContext: ProfileContext) throws {
@@ -1975,20 +1973,23 @@ public final class ClientRepository: @unchecked Sendable {
         return state.cursor
     }
 
-    /// Exact operation originals that must be covered before a new paging checkpoint.
-    /// The ordinary outbox and accepted-awaiting-terminal index are disjoint by design.
+    /// Reconcile durable, unfinished user operations, including accepted receipts
+    /// whose terminal has not arrived. The transient send queue can be empty on
+    /// restart or while an independent send is in flight.
     public func inboxOperationInventory(context suppliedContext: ProfileContext) throws -> [Submission] {
         lock.lock()
         defer { lock.unlock() }
         try validate(suppliedContext)
         guard suppliedContext.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
-        var seen = Set<UUID>()
-        var inventory: [Submission] = []
-        for id in state.outboxOrder {
-            guard let submission = state.intents[id], seen.insert(submission.operationID).inserted else { continue }
-            inventory.append(submission)
-        }
-        return inventory
+        return state.intents.values.filter { submission in
+            guard state.intentByRequest[submission.requestKey] == submission.intentID else { return false }
+            switch submission.disposition {
+            case .pending, .lost: return true
+            case .accepted:
+                return Self.isAcceptedAwaitingTerminalReplay(submission, appliedEvents: state.appliedEvents)
+            default: return false
+            }
+        }.sorted { $0.operationID.uuidString < $1.operationID.uuidString }
     }
 
     public func beginInboxCandidate(startupID: String,
@@ -2387,9 +2388,16 @@ public final class ClientRepository: @unchecked Sendable {
                       !Self.isAccepted(submission) else { throw AttentionStoreError.inboxPageConflict }
                 Self.recordInboxOperationFailure(submission, in: &next)
             case .notCommittedAtSnapshot:
-                guard receipt.result == nil, receipt.reason == nil,
-                      !Self.isAccepted(submission) else {
+                guard receipt.result == nil, receipt.reason == nil else {
                     throw AttentionStoreError.inboxPageConflict
+                }
+                // An independent send can commit after this frozen snapshot.
+                // Its accepted receipt must survive the older "not committed"
+                // answer until the later terminal is replayed.
+                if case let .accepted(sequence) = submission.disposition {
+                    guard let sequence, sequence > (candidate.highWater ?? 0) else {
+                        throw AttentionStoreError.inboxPageConflict
+                    }
                 }
                 if let terminal = receipt.terminal {
                     guard case let .terminal(key, _, _) = terminal.body,
@@ -2583,7 +2591,7 @@ public final class ClientRepository: @unchecked Sendable {
         }
         return AttentionStoreSnapshot(requests: publishedRequests,
                                       drafts: visibleDrafts,
-                                      intents: state.replayPublishedIntents ?? state.intents,
+                                      intents: state.intents,
                                       outbox: sortedOutbox,
                                       remoteStates: state.replayPublishedStates ?? state.remoteStates,
                                       fixtureSessions: visibleSessions,
@@ -3760,7 +3768,13 @@ public final class ClientRepository: @unchecked Sendable {
         for key in queuedKeys {
             let terminal = next.remoteStates[key]?.isTerminal == true || next.inboxReferences?[key]?.isTerminal == true
             let absent = checkpoint.nextCursor == nil && !checkpoint.currentKeys.contains(key)
-            if terminal || absent { dropUnsentAnswer(for: key, in: &next) }
+            if terminal {
+                dropUnsentAnswer(for: key, in: &next)
+            } else if absent, next.intentByRequest[key] == nil {
+                // Missing cached content may clear an editor, but it is not a
+                // Server rejection of an already accepted user operation.
+                dropUnsentAnswer(for: key, in: &next)
+            }
         }
     }
 

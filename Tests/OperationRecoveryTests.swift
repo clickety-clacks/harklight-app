@@ -16,6 +16,8 @@ final class OperationRecoveryTests: XCTestCase {
                     operationID: original.operationID, context: context)
             }
             let restarted = try ClientRepository(context: context, persistence: persistence)
+            XCTAssertEqual(try restarted.inboxOperationInventory(context: context).map(\.operationID),
+                           [original.operationID], "Reconciliation must not depend on a populated send queue.")
             try restarted.queueRecoverableOperations(context: context)
             XCTAssertEqual(try restarted.snapshot(context: context).outbox.map(\.operationID),
                            [original.operationID], "Recovery cannot depend on replay or its ACK.")
@@ -61,12 +63,97 @@ final class OperationRecoveryTests: XCTestCase {
         let restarted = try ClientRepository(context: context, persistence: persistence)
         XCTAssertEqual(try restarted.acceptedOperationsAwaitingTerminalReplay(context: context).map(\.operationID),
                        [original.operationID])
+        XCTAssertEqual(try restarted.inboxOperationInventory(context: context).map(\.operationID),
+                       [original.operationID])
         try confirm(restarted, context: context, key: key, payload: payload)
         try restarted.queueRecoverableOperations(context: context)
         XCTAssertTrue(try restarted.snapshot(context: context).outbox.isEmpty,
                       "Accepted receipt waits for the actual Server terminal rather than sending again.")
         XCTAssertEqual(try restarted.lookupIntent(original.intentID, context: context)?.wireFrame,
                        original.wireFrame)
+    }
+
+    func testEmptySnapshotDoesNotDeleteUnresolvedUserOperation() throws {
+        let (context, key, payload) = try fixture()
+        let persistence = MemoryPendingActionPersistence()
+        let first = try ClientRepository(context: context, persistence: persistence)
+        try confirm(first, context: context, key: key, payload: payload)
+        let original = try submit(first, context: context, key: key)
+        let restarted = try ClientRepository(context: context, persistence: persistence)
+        let batch = InboxReceiptBatch(batchID: "pending", operationIDs: [original.operationID])
+        _ = try restarted.beginInboxCandidate(startupID: "empty", since: 0,
+            batches: [batch], context: context)
+        try restarted.saveInboxInitialPage(snapshotID: "empty", highWater: 1, items: [],
+            nextCursor: nil, receiptCursor: nil, context: context)
+        try restarted.saveInboxReceiptBatch(batch.batchID, results: [InboxOperationReceipt(
+            operationID: original.operationID, status: .notCommittedAtSnapshot)], context: context)
+        _ = try restarted.prepareInboxCheckpointAcknowledgement(context: context)
+        _ = try restarted.acceptInboxCheckpoint(snapshotID: "empty", highWater: 1, context: context)
+        try restarted.queueRecoverableOperations(context: context)
+        let recovered = try XCTUnwrap(restarted.snapshot(context: context).outbox.first)
+        XCTAssertEqual(recovered.operationID, original.operationID)
+        XCTAssertEqual(recovered.wireFrame, original.wireFrame)
+        let again = try ClientRepository(context: context, persistence: persistence)
+        XCTAssertEqual(try again.lookupIntent(original.intentID, context: context)?.operationID,
+                       original.operationID)
+    }
+
+    func testSendAcceptedDuringFrozenSnapshotKeepsItsLaterReceipt() throws {
+        let (context, key, payload) = try fixture()
+        let persistence = MemoryPendingActionPersistence()
+        let first = try ClientRepository(context: context, persistence: persistence)
+        try confirm(first, context: context, key: key, payload: payload)
+        let original = try submit(first, context: context, key: key)
+        let restarted = try ClientRepository(context: context, persistence: persistence)
+        let batch = InboxReceiptBatch(batchID: "in-flight", operationIDs: [original.operationID])
+        _ = try restarted.beginInboxCandidate(startupID: "frozen", since: 0,
+            batches: [batch], context: context)
+        try restarted.saveInboxInitialPage(snapshotID: "frozen", highWater: 1,
+            items: [InboxSnapshotItem(acceptance: RelayEvent(sequence: 1,
+                body: .delivery(StoredRequest(key: key, originalPayload: payload), .message)))],
+            nextCursor: nil, receiptCursor: nil, context: context)
+        try restarted.recordAcceptedOperation(original.intentID, operationID: original.operationID,
+            terminalSequence: 2, context: context)
+        try restarted.saveInboxReceiptBatch(batch.batchID, results: [InboxOperationReceipt(
+            operationID: original.operationID, status: .notCommittedAtSnapshot)], context: context)
+        _ = try restarted.prepareInboxCheckpointAcknowledgement(context: context)
+        _ = try restarted.acceptInboxCheckpoint(snapshotID: "frozen", highWater: 1, context: context)
+        try restarted.queueRecoverableOperations(context: context)
+        let snapshot = try restarted.snapshot(context: context)
+        XCTAssertEqual(snapshot.cursor, 1, "A send response cannot advance the replay cursor.")
+        XCTAssertEqual(snapshot.intents[original.intentID]?.disposition, .accepted(sequence: 2))
+        XCTAssertTrue(snapshot.outbox.isEmpty, "An accepted operation waits for its later Server terminal.")
+    }
+
+    func testReplayInProgressDoesNotBlockNewAnswerOrHideItsPendingIntent() throws {
+        let (context, key, payload) = try fixture()
+        let persistence = MemoryPendingActionPersistence()
+        let repository = try ClientRepository(context: context, persistence: persistence)
+        try confirm(repository, context: context, key: key, payload: payload)
+        try repository.beginReplay(through: UInt64.max, context: context)
+        let operation = try submit(repository, context: context, key: key)
+        let visible = try repository.snapshot(context: context)
+        XCTAssertNotNil(visible.replayBarrier)
+        XCTAssertEqual(visible.intents[operation.intentID]?.disposition, .pending,
+                       "Local pending state appears while Server replay is still in progress.")
+        let queued = try repository.queueOriginalOperationForUserTap(operation.intentID, context: context)
+        XCTAssertEqual(queued.operationID, operation.operationID)
+        XCTAssertEqual(queued.wireFrame, operation.wireFrame)
+        let restarted = try ClientRepository(context: context, persistence: persistence)
+        XCTAssertEqual(try restarted.lookupIntent(operation.intentID, context: context)?.wireFrame,
+                       operation.wireFrame)
+    }
+
+    func testReplayInProgressDoesNotBlockNoCommentAcceptance() throws {
+        let (context, key, payload) = try fixture()
+        let repository = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        try confirm(repository, context: context, key: key, payload: payload)
+        let port = AttentionDomainPort(store: repository)
+        let selector = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first?.selector)
+        try repository.beginReplay(through: UInt64.max, context: context)
+        let receipt = try port.submitNoComment(context: port.context, selector: selector, intentID: UUID())
+        XCTAssertEqual(try repository.snapshot(context: context).intents[receipt.intentID]?.disposition, .pending)
+        XCTAssertNotNil(try repository.snapshot(context: context).replayBarrier)
     }
 
     private func fixture() throws -> (ProfileContext, RequestKey, JSONValue) {
@@ -82,11 +169,19 @@ final class OperationRecoveryTests: XCTestCase {
     private func confirm(_ repository: ClientRepository, context: ProfileContext,
                          key: RequestKey, payload: JSONValue) throws {
         let snapshot = UUID().uuidString
-        _ = try repository.beginInboxCandidate(startupID: snapshot, since: 0, batches: [], context: context)
+        let inventory = try repository.inboxOperationInventory(context: context)
+        let batches = inventory.isEmpty ? [] : [InboxReceiptBatch(batchID: "saved-operations",
+            operationIDs: inventory.map(\.operationID))]
+        _ = try repository.beginInboxCandidate(startupID: snapshot, since: 0, batches: batches, context: context)
         try repository.saveInboxInitialPage(snapshotID: snapshot, highWater: 1,
             items: [InboxSnapshotItem(acceptance: RelayEvent(sequence: 1,
                 body: .delivery(StoredRequest(key: key, originalPayload: payload), .message)))],
             nextCursor: nil, receiptCursor: nil, context: context)
+        if let batch = batches.first {
+            try repository.saveInboxReceiptBatch(batch.batchID, results: inventory.map {
+                InboxOperationReceipt(operationID: $0.operationID, status: .notCommittedAtSnapshot)
+            }, context: context)
+        }
         _ = try repository.prepareInboxCheckpointAcknowledgement(context: context)
         _ = try repository.acceptInboxCheckpoint(snapshotID: snapshot, highWater: 1, context: context)
     }

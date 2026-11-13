@@ -407,6 +407,19 @@ final class NativeRelayCoreTests: XCTestCase {
 
     private func data(_ text: String) -> Data { Data((text + "\n").utf8) }
 
+    private func snapshotItem(_ key: RequestKey, payload: JSONValue, sequence: UInt64 = 1) -> JSONValue {
+        .object([JSONMember("acceptance", .object([
+            JSONMember("v", .number(JSONNumber(lexeme: "1"))),
+            JSONMember("type", .string(ExactText("delivery"))),
+            JSONMember("seq", .number(JSONNumber(lexeme: String(sequence)))),
+            JSONMember("sender_id", .string(key.senderID)),
+            JSONMember("message_id", .string(key.messageID)),
+            JSONMember("origin", .string(ExactText("source"))),
+            JSONMember("as", .string(ExactText("message"))),
+            JSONMember("message", payload)
+        ]))])
+    }
+
     private func setup() throws -> (ProfileContext, ClientRepository, Session) {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
                                        personID: ExactText("person-A"),
@@ -487,7 +500,8 @@ final class NativeRelayCoreTests: XCTestCase {
         let request = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first)
         XCTAssertEqual(request.lifecycleStatus, .open)
         XCTAssertTrue(request.noCommentUnavailable)
-        XCTAssertNil(request.intentReceipt)
+        XCTAssertEqual(request.intentReceipt?.intentID, receipt.intentID,
+                       "A true refusal retains the original identity for explicit Retry.")
         XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty)
         XCTAssertEqual(try port.lookupIntent(context: port.context, intentID: receipt.intentID)?.localState,
                        .unsupported)
@@ -502,12 +516,14 @@ final class NativeRelayCoreTests: XCTestCase {
             body: .delivery(StoredRequest(key: key, originalPayload: payload), .message)), context: context)
         let port = AttentionDomainPort(store: store)
         let selector = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first?.selector)
-        _ = try port.submitNoComment(context: port.context, selector: selector, intentID: UUID())
-        let persistedOperationID = try XCTUnwrap(store.snapshot(context: context).outbox.first?.operationID)
+        let receipt = try port.submitNoComment(context: port.context, selector: selector, intentID: UUID())
+        let persistedOperationID = try XCTUnwrap(store.lookupIntent(receipt.intentID, context: context)?.operationID)
 
         let failure = URLError(.networkConnectionLost)
         session.sendFailure = failure
         let collected = DiagnosticEventCollector()
+        session.snapshotHighWater = 1
+        session.initialItems = [snapshotItem(key, payload: payload)]
         let core = try NativeRelayCore(store: store, context: context, session: session,
                                        onDiagnostic: { collected.append($0) })
 
@@ -529,7 +545,7 @@ final class NativeRelayCoreTests: XCTestCase {
         XCTAssertEqual(event.postAckFailureStep, .drainPendingOperations)
         XCTAssertEqual(event.postAckFailureErrorCode,
                        "url_session_error_code_\(URLError.networkConnectionLost.rawValue)")
-        XCTAssertEqual(try store.snapshot(context: context).outbox.map(\.operationID), [persistedOperationID],
+        XCTAssertEqual(try store.lookupIntent(receipt.intentID, context: context)?.operationID, persistedOperationID,
                        "Failure diagnostics must leave the exact pending operation available for safe retry.")
     }
 
@@ -587,7 +603,7 @@ final class NativeRelayCoreTests: XCTestCase {
         storeErrors.forEach { assertRoundTrip($0) }
     }
 
-    func testInboxReconciliationAddsPersistedNoCommentIDWithoutChangingOrdinaryFrame() async throws {
+    func testInboxReconciliationIncludesDurableNoCommentIDWithoutChangingOrdinaryFrame() async throws {
         let (context, store, session) = try setup()
         let key = RequestKey(accountScope: context.identity.personID,
                              senderID: ExactText("sender"), messageID: ExactText("reconcile-no-comment"))
@@ -607,6 +623,7 @@ final class NativeRelayCoreTests: XCTestCase {
         XCTAssertEqual(String(decoding: persisted.wireFrame, as: UTF8.self),
                        #"{"type":"answer_no_comment","request_id":"reconcile-no-comment","request_revision":1}"# + "\n")
 
+        session.initialItems = [snapshotItem(key, payload: payload)]
         session.snapshotHighWater = 10
         session.frames = [data(#"{"v":1,"type":"resynced","seq":10}"#)]
         let core = try NativeRelayCore(store: store, context: context, session: session)
@@ -626,9 +643,11 @@ final class NativeRelayCoreTests: XCTestCase {
         XCTAssertEqual(String(decoding: try XCTUnwrap(session.sent.first?.0), as: UTF8.self),
                        String(decoding: persisted.wireFrame, as: UTF8.self),
                        "Ordinary delivery must continue using the unchanged persisted frame.")
-        XCTAssertEqual(try store.snapshot(context: context).outbox.map(\.operationID),
-                       [persisted.operationID],
+        XCTAssertEqual(try store.lookupIntent(submitted.intentID, context: context)?.operationID,
+                       persisted.operationID,
                        "An unresolved ordinary send keeps the same durable operation pending.")
+        XCTAssertEqual(try store.lookupIntent(submitted.intentID, context: context)?.disposition, .lost)
+        XCTAssertEqual(session.sent.count, 1)
     }
 
     func testMissingInboxResultStaysPendingWhileOtherResultsCheckpointAndDeliveryContinue() async throws {
@@ -655,6 +674,8 @@ final class NativeRelayCoreTests: XCTestCase {
             selector: answerSelector, intentID: UUID(),
             inputs: [.compatibilityValue(action: ExactText("yes"))]))
 
+        session.initialItems = [snapshotItem(noCommentKey, payload: noCommentPayload),
+                                snapshotItem(answerKey, payload: answerPayload, sequence: 2)]
         session.snapshotHighWater = 10
         session.missingReconciliationOperationIDs = [noComment.opID]
         session.frames = [data(#"{"v":1,"type":"resynced","seq":10}"#)]
@@ -663,8 +684,9 @@ final class NativeRelayCoreTests: XCTestCase {
         XCTAssertEqual(high, 10)
 
         let snapshot = try store.snapshot(context: context)
-        XCTAssertEqual(snapshot.intents[noComment.intentID]?.disposition, .pending)
-        XCTAssertEqual(Set(snapshot.outbox.map(\.operationID)), Set([noComment.opID, answer.opID]))
+        XCTAssertEqual(snapshot.intents[noComment.intentID]?.disposition, .lost)
+        XCTAssertEqual(Set(snapshot.intents.values.filter { $0.disposition == .lost }.map(\.operationID)),
+                       Set([noComment.opID, answer.opID]))
         XCTAssertEqual(snapshot.cursor, 10)
         XCTAssertTrue(snapshot.inboxCheckpoint?.checkpointAccepted == true,
                       "One missing operation result must not block the rest of the checkpoint.")
@@ -703,6 +725,8 @@ final class NativeRelayCoreTests: XCTestCase {
             selector: answerSelector, intentID: UUID(),
             inputs: [.compatibilityValue(action: ExactText("yes"))]))
 
+        session.initialItems = [snapshotItem(refusedKey, payload: refusedPayload),
+                                snapshotItem(answerKey, payload: answerPayload, sequence: 2)]
         session.snapshotHighWater = 10
         session.reconciliationOverrides[refused.opID] = try JSONValue.parse(data(#"{"op_id":"\#(refused.opID.uuidString.lowercased())","status":"refused","reason":"invalid_field"}"#))
         session.frames = [data(#"{"v":1,"type":"resynced","seq":10}"#)]
@@ -712,7 +736,8 @@ final class NativeRelayCoreTests: XCTestCase {
 
         let snapshot = try store.snapshot(context: context)
         XCTAssertEqual(snapshot.intents[refused.intentID]?.disposition, .failed)
-        XCTAssertEqual(snapshot.outbox.map(\.operationID), [answer.opID])
+        XCTAssertEqual(snapshot.intents[answer.intentID]?.disposition, .lost)
+        XCTAssertEqual(snapshot.intents[answer.intentID]?.operationID, answer.opID)
         XCTAssertEqual(snapshot.cursor, 10)
         XCTAssertTrue(snapshot.inboxCheckpoint?.checkpointAccepted == true)
         XCTAssertEqual(session.sent.map(\.1), [answer.opID],
@@ -744,6 +769,7 @@ final class NativeRelayCoreTests: XCTestCase {
         let selector = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first?.selector)
         let noComment = try port.submitNoComment(context: port.context,
             selector: selector, intentID: UUID())
+        session.initialItems = [snapshotItem(key, payload: payload)]
         session.snapshotHighWater = 10
         session.reconciliationOverrides[noComment.opID] = try JSONValue.parse(data(#"{"op_id":"\#(noComment.opID.uuidString.lowercased())","status":"committed","result":{"v":1,"type":"ok","seq":11,"terminal_kind":"no_comment","duplicate":false},"terminal":{"v":1,"type":"lifecycle","seq":11,"sender_id":"sender","message_id":"no-comment-after-watermark","origin":"installation-A","state":"answered","at":11,"by":"answer_no_comment","terminal_kind":"no_comment","answer_outcome":{"kind":"no_comment"}}}"#))
         session.frames = [data(#"{"v":1,"type":"resynced","seq":10}"#)]
@@ -758,7 +784,8 @@ final class NativeRelayCoreTests: XCTestCase {
         XCTAssertEqual(snapshot.inboxCheckpoint?.highWater, 10)
         XCTAssertEqual(snapshot.remoteStates[key]?.state, .noComment)
         XCTAssertEqual(snapshot.remoteStates[key]?.eventSequence, 11)
-        XCTAssertEqual(snapshot.intents[noComment.intentID]?.disposition, .accepted(sequence: 11))
+        XCTAssertNil(snapshot.intents[noComment.intentID],
+                     "The actual Server terminal settles the local pending operation.")
         XCTAssertTrue(snapshot.outbox.isEmpty)
         let receipt = try XCTUnwrap(snapshot.inboxCheckpoint?.batches.first?.results?.first)
         XCTAssertEqual(receipt.status, .committed)
@@ -777,6 +804,7 @@ final class NativeRelayCoreTests: XCTestCase {
         let selector = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first?.selector)
         let noComment = try port.submitNoComment(context: port.context,
             selector: selector, intentID: UUID())
+        session.initialItems = [snapshotItem(key, payload: payload)]
         session.snapshotHighWater = 10
         session.reconciliationOverrides[noComment.opID] = try JSONValue.parse(data(#"{"op_id":"\#(noComment.opID.uuidString.lowercased())","status":"committed","result":{"v":1,"type":"ok","seq":11,"terminal_kind":"no_comment","duplicate":true},"terminal":{"v":1,"type":"lifecycle","seq":11,"sender_id":"sender","message_id":"existing-no-comment-terminal","origin":"installation-A","state":"answered","at":11,"by":"answer_no_comment","terminal_kind":"no_comment","answer_outcome":{"kind":"no_comment"}}}"#))
         session.frames = [data(#"{"v":1,"type":"resynced","seq":10}"#)]
@@ -791,7 +819,8 @@ final class NativeRelayCoreTests: XCTestCase {
         XCTAssertEqual(snapshot.inboxCheckpoint?.highWater, 10)
         XCTAssertEqual(snapshot.remoteStates[key]?.state, .noComment)
         XCTAssertEqual(snapshot.remoteStates[key]?.eventSequence, 11)
-        XCTAssertEqual(snapshot.intents[noComment.intentID]?.disposition, .accepted(sequence: 11))
+        XCTAssertNil(snapshot.intents[noComment.intentID],
+                     "The actual Server terminal settles the local pending operation.")
         XCTAssertTrue(snapshot.outbox.isEmpty,
                       "A pre-existing No Comment terminal is adopted as success, not recorded as refusal.")
         let receipt = try XCTUnwrap(snapshot.inboxCheckpoint?.batches.first?.results?.first)
@@ -839,7 +868,7 @@ final class NativeRelayCoreTests: XCTestCase {
         let retry = try port.submit(SubmitIntent(context: port.context, selector: currentSelector,
             intentID: UUID(), inputs: [.compatibilityValue(action: ExactText("yes"))]))
         XCTAssertEqual(retry.selector.requestRevision, 2)
-        XCTAssertEqual(try store.snapshot(context: context).outbox.first?.requestRevision, 2)
+        XCTAssertEqual(try store.lookupIntent(retry.intentID, context: context)?.requestRevision, 2)
     }
 
     func testForeignDeliveryAndTerminalCommitBeforeOneContiguousACK() async throws {
@@ -1077,7 +1106,7 @@ final class NativeRelayCoreTests: XCTestCase {
         XCTAssertEqual(listItems.first?.scoreKind, .current)
     }
 
-    func testCheckpointKeepsCachedRowsAnswerableUntilTheirStablePageArrives() async throws {
+    func testAcceptedCachedRowActionSurvivesReplacementUntilItsStablePageArrives() async throws {
         let (context, store, session) = try setup()
         let payload = try JSONValue.parse(Data(#"{"title":"Prompt","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"yes","label":"Yes","kind":"value","value":{"ok":true}}]}}"#.utf8))
         func key(_ sequence: Int) -> RequestKey {
@@ -1102,23 +1131,26 @@ final class NativeRelayCoreTests: XCTestCase {
 
         let port = AttentionDomainPort(store: store)
         let staleSelector = try XCTUnwrap(port.inspect(context: port.context, request: key(21)).requests.first?.selector)
+        let cachedAnswer = try port.submit(SubmitIntent(context: port.context, selector: staleSelector,
+            intentID: UUID(), inputs: [.compatibilityValue(action: ExactText("yes"))]))
+        let original = try XCTUnwrap(store.lookupIntent(cachedAnswer.intentID, context: context))
         let core = try NativeRelayCore(store: store, context: context, session: session)
         _ = try await core.resyncAndDrainOutbox()
 
         let bounded = try store.snapshot(context: context)
         XCTAssertEqual(bounded.inboxCurrentKeys?.count, 20)
         XCTAssertEqual(try port.inspect(context: port.context, request: key(1)).requests.first?.inboxStateIsCurrent, true)
-        XCTAssertEqual(try port.inspect(context: port.context, request: key(21)).requests.first?.inboxStateIsCurrent, false)
-        let cachedAnswer = try port.submit(SubmitIntent(context: port.context, selector: staleSelector,
-            intentID: UUID(), inputs: [.compatibilityValue(action: ExactText("yes"))]))
         XCTAssertEqual(cachedAnswer.selector.requestRevision, 1)
-        XCTAssertEqual(try store.snapshot(context: context).outbox.count, 1,
-                       "An incomplete inbox listing never blocks an answer the person chose to send.")
+        XCTAssertEqual(session.sent.map(\.1), [cachedAnswer.opID],
+                       "The accepted action sends without waiting for its older content page.")
+        XCTAssertEqual(session.sent.first?.0, original.wireFrame)
+        XCTAssertEqual(try store.lookupIntent(cachedAnswer.intentID, context: context)?.disposition, .lost)
 
         let fetched = try await core.fetchNextInboxPage()
         XCTAssertTrue(fetched)
         XCTAssertEqual(try store.snapshot(context: context).inboxCurrentKeys?.count, 21)
-        XCTAssertEqual(try store.snapshot(context: context).outbox.count, 1)
+        XCTAssertEqual(session.sent.count, 1, "Loading the older page does not duplicate the send.")
+        XCTAssertEqual(try store.lookupIntent(cachedAnswer.intentID, context: context)?.wireFrame, original.wireFrame)
     }
 
     func testUnloadedPostCheckpointTerminalSurvivesRestartAndMergesOnItsPage() async throws {
@@ -1355,50 +1387,58 @@ final class NativeRelayCoreTests: XCTestCase {
         let firstCore = try NativeRelayCore(store: store, context: context, session: firstSession)
         try await firstCore.sendOriginalOperationForUserTap(receipt.intentID)
         XCTAssertEqual(firstSession.sent.first?.1, receipt.opID)
-        XCTAssertEqual(try store.snapshot(context: context).outbox.count, 1)
+        XCTAssertEqual(try store.lookupIntent(receipt.intentID, context: context)?.disposition, .lost)
 
         let restartedContext = ProfileContext(identity: identity, transportMode: .relay)
         let restarted = try ClientRepository(context: restartedContext, persistence: persistence)
         let secondSession = Session(identity)
+        secondSession.snapshotHighWater = 1
+        secondSession.initialItems = [snapshotItem(key, payload: payload)]
+        secondSession.frames = [data(#"{"v":1,"type":"resynced","seq":1}"#)]
         secondSession.result = .accepted(operationID: receipt.opID, terminalSequence: 9)
         let secondCore = try NativeRelayCore(store: restarted,
                                              context: restartedContext,
                                              session: secondSession)
-        try await secondCore.sendOriginalOperationForUserTap(receipt.intentID)
+        XCTAssertEqual(try restarted.snapshot(context: restartedContext).cursor, 0,
+                       "The pending file does not restore Server-owned state.")
+        _ = try await secondCore.resyncAndDrainOutbox()
+        XCTAssertEqual(secondSession.sent.map(\.1), [receipt.opID],
+                       "Restart recovery sends the saved operation without another tap.")
         XCTAssertEqual(secondSession.sent.first?.0, firstSession.sent.first?.0)
         XCTAssertEqual(try restarted.snapshot(context: restartedContext).cursor, 1,
                        "An operation receipt at sequence 9 cannot jump the durable relay cursor.")
         XCTAssertTrue(try restarted.snapshot(context: restartedContext).outbox.isEmpty)
     }
 
-    func testCacheBackedResyncDoesNotSendUntilTappedAndRetryReusesOperationID() async throws {
+    func testCacheBackedResyncAutomaticallyRecoversSameOperationAcrossReconnect() async throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
                                        personID: ExactText("person-cache"),
                                        deviceID: ExactText("installation-cache"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
         let persistence = MemoryPendingActionPersistence()
-        let store = try ClientRepository(context: context,
+        let initialStore = try ClientRepository(context: context,
                                              persistence: persistence)
         let key = RequestKey(accountScope: identity.personID,
                              senderID: ExactText("sender"),
                              messageID: ExactText("cached-request"))
         let payload = try JSONValue.parse(data(#"{"title":"Question","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"yes","label":"Yes","kind":"value","value":{"ok":true}}]}}"#))
         let seedRequest = StoredRequest(key: key, originalPayload: payload)
-        _ = try store.apply(RelayEvent(sequence: 1, body: .delivery(seedRequest, .message)),
+        _ = try initialStore.apply(RelayEvent(sequence: 1, body: .delivery(seedRequest, .message)),
                             context: context)
-        let request = try XCTUnwrap(store.snapshot(context: context).requests[key])
+        let request = try XCTUnwrap(initialStore.snapshot(context: context).requests[key])
         let cachedState = CachedAttentionServerState(identity: context.identity,
             requests: [key: request], remoteStates: [:], cursor: 1, conversationCursor: 0,
             conversations: [:], inboxView: nil, currentRequestKeys: [key])
-        let port = AttentionDomainPort(store: store)
+        let port = AttentionDomainPort(store: initialStore)
         let selector = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first?.selector)
         let receipt = try port.submit(SubmitIntent(context: port.context, selector: selector,
             intentID: UUID(), inputs: [.compatibilityValue(action: ExactText("yes"))]))
 
+        let store = try ClientRepository(context: context, persistence: persistence)
         XCTAssertEqual(try store.snapshot(context: context).cursor, 0,
                        "The old relay cursor is discarded before the cache snapshot is restored.")
         XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty,
-                      "Migration retains the answer for a tap without leaving it in an auto-send queue.")
+                      "Loading the pending file itself does not perform network I/O.")
         try store.restoreCachedServerState(cachedState, context: context)
         XCTAssertEqual(try store.snapshot(context: context).cursor, 1,
                        "The saved server cursor resumes the next snapshot.")
@@ -1425,34 +1465,21 @@ final class NativeRelayCoreTests: XCTestCase {
             .first { $0.contains("\"type\":\"inbox_start\"") })
         XCTAssertTrue(inboxStart.contains("\"since\":1"),
                       "Cache-backed sync resumes from the cached cursor.")
-        XCTAssertTrue(session.sent.isEmpty, "Refresh and legacy drain entry points do not resend cached answers.")
-
-        let callStates = SendCallStateRecorder()
-        session.result = .unresolved
-        try await core.sendOriginalOperationForUserTap(receipt.intentID,
-            onSendCallStateChange: { await callStates.append($0) })
-        let firstCallStates = await callStates.recordedStates()
-        XCTAssertEqual(firstCallStates, [true, false])
-        XCTAssertEqual(session.sent.map { $0.1 }, [receipt.opID])
-        XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty,
-                      "An uncertain send is retained for Retry, not left for background drain.")
-
-        _ = try await core.resyncAndDrainOutbox()
-        XCTAssertEqual(session.sent.count, 1)
-
+        XCTAssertEqual(session.sent.map(\.1), [receipt.opID])
+        XCTAssertEqual(try store.lookupIntent(receipt.intentID, context: context)?.disposition, .lost)
         session.result = .accepted(operationID: receipt.opID, terminalSequence: 2)
-        try await core.sendOriginalOperationForUserTap(receipt.intentID,
-            onSendCallStateChange: { await callStates.append($0) })
-
-        let allCallStates = await callStates.recordedStates()
-        XCTAssertEqual(allCallStates, [true, false, true, false])
-        XCTAssertEqual(session.sent.map { $0.1 }, [receipt.opID, receipt.opID])
+        _ = try await core.resyncAndDrainOutbox()
+        XCTAssertEqual(session.sent.map(\.1), [receipt.opID, receipt.opID])
         XCTAssertEqual(session.sent.first?.0, session.sent.last?.0,
-                       "Manual retry reuses the identical operation id and frame.")
+                       "Automatic recovery reuses the identical operation ID and frame.")
+        XCTAssertEqual(try store.snapshot(context: context).cursor, 1,
+                       "The accepted response is not a replay cursor.")
         XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty)
+        _ = try await core.resyncAndDrainOutbox()
+        XCTAssertEqual(session.sent.count, 2, "An accepted operation is not sent again while awaiting its terminal.")
     }
 
-    func testCacheBackedRefreshDoesNotQueueAcceptedAnswerForAutomaticReconciliation() throws {
+    func testAcceptedAnswerRemainsInReceiptInventoryWithoutOrdinaryResend() throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
                                        personID: ExactText("person-accepted-cache"),
                                        deviceID: ExactText("installation-accepted-cache"))
@@ -1478,8 +1505,8 @@ final class NativeRelayCoreTests: XCTestCase {
         XCTAssertNotNil(migrated.intents[receipt.intentID],
                         "The send-call result remains available for its status.")
         XCTAssertTrue(migrated.outbox.isEmpty)
-        XCTAssertTrue(try store.inboxOperationInventory(context: context).isEmpty,
-                      "A later refresh does not resubmit or reconcile a previously accepted answer.")
+        XCTAssertEqual(try store.inboxOperationInventory(context: context).map(\.operationID), [receipt.opID],
+                       "A later refresh reconciles the accepted receipt without sending another answer.")
     }
 
     func testCheckpointReconcilesAcceptedOriginalAndAppliesItsActualTerminalSequenceOnce() async throws {
@@ -1507,11 +1534,16 @@ final class NativeRelayCoreTests: XCTestCase {
         XCTAssertEqual(try restarted.acceptedOperationsAwaitingTerminalReplay(context: restartedContext)
             .map(\.operationID), [receipt.opID])
         let session = Session(identity)
+        session.initialItems = [snapshotItem(key, payload: payload)]
         session.snapshotHighWater = 10
         let committedResult = try JSONValue.parse(data(#"{"op_id":"\#(receipt.opID.uuidString.lowercased())","status":"committed","result":{"v":1,"type":"ok","seq":2,"duplicate":true},"terminal":{"v":1,"type":"lifecycle","seq":2,"sender_id":"sender","message_id":"accepted-awaiting","origin":"other-installation","state":"answered","at":2}}"#))
         session.reconciliationOverrides[receipt.opID] = committedResult
         session.frames = [data(#"{"v":1,"type":"resynced","seq":10}"#)]
-        let core = try NativeRelayCore(store: restarted, context: restartedContext, session: session)
+        let cacheURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".json")
+        defer { try? FileManager.default.removeItem(at: cacheURL) }
+        let cache = FileServerStateCache(identity: identity, fileURL: cacheURL)
+        let core = try NativeRelayCore(store: restarted, context: restartedContext, session: session,
+                                       serverStateCache: cache)
 
         let high = try await core.resyncAndDrainOutbox()
         XCTAssertEqual(high, 10)
@@ -1549,7 +1581,12 @@ final class NativeRelayCoreTests: XCTestCase {
         let recoveredContext = ProfileContext(identity: identity, transportMode: .relay)
         let recovered = try ClientRepository(context: recoveredContext, persistence: persistence)
         XCTAssertEqual(try recovered.acceptedOperationsAwaitingTerminalReplay(context: recoveredContext).count, 0)
+        XCTAssertNil(try recovered.snapshot(context: recoveredContext).remoteStates[key],
+                     "Pending storage does not contain Server-owned truth.")
+        let loaded = try await FileServerStateCache(identity: identity, fileURL: cacheURL).load()
+        try recovered.restoreCachedServerState(XCTUnwrap(loaded).attentionDomainState(for: identity), context: recoveredContext)
         XCTAssertEqual(try recovered.snapshot(context: recoveredContext).remoteStates[key]?.eventSequence, 2)
+        XCTAssertTrue(session.sent.isEmpty, "Receipt reconciliation must not resend the accepted operation.")
     }
 
     func testAcceptedOriginalOperationReplayIsJoinedToItsSavedBinding() async throws {
@@ -1565,7 +1602,7 @@ final class NativeRelayCoreTests: XCTestCase {
         let selector = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first?.selector)
         let receipt = try port.submit(SubmitIntent(context: port.context, selector: selector,
             intentID: UUID(), inputs: [.compatibilityValue(action: ExactText("yes"))]))
-        let submission = try XCTUnwrap(store.snapshot(context: context).outbox.first)
+        let submission = try XCTUnwrap(store.lookupIntent(receipt.intentID, context: context))
         session.result = .accepted(operationID: receipt.opID, terminalSequence: 2)
         session.supportsPostCheckpointInboxEvents = true
         session.postCheckpointEventAfterAccept = data(#"{"v":1,"type":"lifecycle","seq":2,"sender_id":"sender","message_id":"answer-request","origin":"other-installation","state":"answered","at":2}"#)
@@ -1574,6 +1611,8 @@ final class NativeRelayCoreTests: XCTestCase {
              data(#"{"v":1,"type":"resynced","seq":1}"#)]
         ]
         let events = DiagnosticEventCollector()
+        session.snapshotHighWater = 1
+        session.initialItems = [snapshotItem(key, payload: payload)]
         let core = try NativeRelayCore(store: store, context: context, session: session,
                                        onDiagnostic: { events.append($0) })
 
@@ -1623,6 +1662,8 @@ final class NativeRelayCoreTests: XCTestCase {
         ]
         session.resyncFailureOnCall = 2
         let events = DiagnosticEventCollector()
+        session.snapshotHighWater = 1
+        session.initialItems = [snapshotItem(key, payload: payload)]
         let core = try NativeRelayCore(store: store, context: context, session: session,
                                        onDiagnostic: { events.append($0) })
 
