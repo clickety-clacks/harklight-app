@@ -90,8 +90,10 @@ final class ReleaseNotesUITests: XCTestCase {
         revealHistoryElement(pendingHeader, in: app)
         XCTAssertTrue(pendingHeader.exists,
                       "The pending release uses the installed build number.")
-        XCTAssertTrue(app.staticTexts["Version 0.1.0 · First confirmed in Build 106"].exists,
-                      "A later installed build must not relabel the historical update.")
+        // The Build 106 heading was checked above; the list is lazy, so after
+        // scrolling assert that no heading took the installed build's number.
+        XCTAssertFalse(app.staticTexts["Version 0.1.0 · First confirmed in Build 107"].exists,
+                       "A later installed build must not relabel the historical update.")
 
         app.buttons["Done"].tap()
         let settings = app.buttons["inbox-settings"]

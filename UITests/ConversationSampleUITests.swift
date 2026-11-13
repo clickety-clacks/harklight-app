@@ -536,9 +536,10 @@ final class ConversationSampleUITests: XCTestCase {
                        "The top of the long history must be off screen when the chat lands on the reply.\n\(app.debugDescription)")
         capture("reply-item-tap-landed-on-earliest-unseen-reply", app)
 
-        let requestHeading = app.buttons["request-heading"]
-        XCTAssertTrue(requestHeading.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(requestHeading.label.contains("Unread conversation"), requestHeading.debugDescription)
+        // Revision 7 carries unread chat turns on the chat button's badge only.
+        let chatButton = app.buttons["bubble.left"]
+        XCTAssertTrue(chatButton.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertEqual(chatButton.value as? String, "1 item", chatButton.debugDescription)
 
         let newestReply = app.staticTexts.matching(
             NSPredicate(format: "label CONTAINS %@", "Newest unseen chat reply: the revised draft")
@@ -550,8 +551,8 @@ final class ConversationSampleUITests: XCTestCase {
         }
         XCTAssertTrue(newestReply.isHittable,
                       "Scrolling to the later reply must bring it into the chat viewport.\n\(app.debugDescription)")
-        let readLabel = NSPredicate(format: "label CONTAINS %@", "Conversation read")
-        expectation(for: readLabel, evaluatedWith: requestHeading)
+        let readBadge = NSPredicate(format: "value != %@", "1 item")
+        expectation(for: readBadge, evaluatedWith: chatButton)
         waitForExpectations(timeout: 5)
     }
 

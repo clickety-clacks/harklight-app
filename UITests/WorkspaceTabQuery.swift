@@ -24,6 +24,19 @@ func workspaceSearchField(in app: XCUIApplication) -> XCUIElement {
     return field
 }
 
+/// Leaves search through the system's close control, which returns to the
+/// tab the person searched from.
+@MainActor
+func leaveWorkspaceSearch(in app: XCUIApplication) {
+    for label in ["Close", "Cancel"] {
+        let button = app.buttons[label]
+        if button.exists && button.isHittable {
+            button.tap()
+            return
+        }
+    }
+}
+
 @MainActor
 func workspaceBackButton(in app: XCUIApplication) -> XCUIElement {
     let toolbarBack = app.toolbars.buttons["BackButton"]

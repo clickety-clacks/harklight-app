@@ -3061,10 +3061,6 @@ private struct LiveCompatibilityActions: View {
                 accessibilityValue: "Completed", symbolName: "checkmark")
         } else if let seenStatus = request.informationalSeenStatus {
             VStack(alignment: .leading, spacing: 8) {
-                Label("FYI", systemImage: "info.circle.fill")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(detailColors.label)
-                    .accessibilityIdentifier("request-seen-form-label")
                 switch seenStatus {
                 case .available:
                     Button {

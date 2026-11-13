@@ -1290,7 +1290,14 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                 switch newRootTab {
                 case .inbox: workspaceTab = .inbox
                 case .replied: workspaceTab = .replied
-                case .search: break
+                case .search:
+                    // One tap on the search tab focuses its field on iPhone. The
+                    // search list is rebuilt for the tab it searches, so focus is
+                    // set here as well as by the system activation. iPad leaves the
+                    // field unfocused so the keyboard does not cover the view.
+                    if horizontalSizeClass == .compact {
+                        Task { @MainActor in searchFieldFocused = true }
+                    }
                 }
                 if newRootTab != .search, !search.isEmpty { search = "" }
             }
@@ -1531,8 +1538,11 @@ struct InboxList: View {
     /// Rows sit on the page background on iPhone. On iPad the list is in the
     /// system's floating glass sidebar, so rows leave the glass showing.
     private var rowSurface: Color {
+        isPadSidebar ? .clear : designPalette.background
+    }
+
+    private var isPadSidebar: Bool {
         UIDevice.current.userInterfaceIdiom == .pad && horizontalSizeClass != .compact
-            ? .clear : designPalette.background
     }
 
     private var listTint: Color {
@@ -2814,12 +2824,13 @@ struct InboxRowContent: View {
 
     @ViewBuilder
     private var titleTrailingStatus: some View {
-        if let chatUnread = row.chatUnread {
-            Image(systemName: chatUnread ? "flag.fill" : "flag")
+        // Only a chat with an unread turn is marked; a read chat shows nothing.
+        if row.chatUnread == true {
+            Image(systemName: "flag.fill")
                 .font(.system(size: 14, weight: .semibold))
                 .frame(width: 16, height: 16)
-                .foregroundStyle(chatUnread ? palette.amber : palette.label)
-                .accessibilityLabel(chatUnread ? "Unread conversation" : "Conversation read")
+                .foregroundStyle(palette.amber)
+                .accessibilityLabel("Unread conversation")
         }
         if row.localSeenSelected || row.informationalSeenStatus == .confirmed {
             Image(systemName: "checkmark")

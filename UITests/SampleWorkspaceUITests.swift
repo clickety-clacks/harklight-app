@@ -35,9 +35,9 @@ final class SampleWorkspaceUITests: XCTestCase {
             XCTAssertTrue(app.descendants(matching: .any)["message-kind-success"].exists,
                           app.debugDescription)
             XCTAssertTrue(app.buttons["request-seen-action"].exists,
-                          "The FYI label leaves the existing Seen action available.")
-            XCTAssertTrue(app.descendants(matching: .any)["request-seen-form-label"].exists,
-                          "The legacy Seen-only form is separately labelled FYI.")
+                          "The typed FYI message keeps the existing Seen action available.")
+            XCTAssertFalse(app.descendants(matching: .any)["request-seen-form-label"].exists,
+                           "Revision 7 draws no FYI label above the Seen button.")
             capture("Success kind detail · Reduce Motion \(motionLabel)", app)
 
             showList(app)
@@ -61,7 +61,7 @@ final class SampleWorkspaceUITests: XCTestCase {
             XCTAssertFalse(legacySeen.label.contains("FYI"),
                            "The Seen descriptor does not create a stored type label.")
             legacySeen.tap()
-            XCTAssertTrue(app.descendants(matching: .any)["request-seen-form-label"].waitForExistence(timeout: 5),
+            XCTAssertTrue(app.buttons["request-seen-action"].waitForExistence(timeout: 5),
                           app.debugDescription)
             XCTAssertFalse(app.descendants(matching: .any)["message-type-fyi"].exists,
                            "An untyped legacy Seen message remains untyped.")

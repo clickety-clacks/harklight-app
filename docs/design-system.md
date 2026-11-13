@@ -242,12 +242,13 @@ None is open. Both questions raised in the draft were decided by the Client PO i
 - `Sources/HarklightTypography.swift` resolves type roles, including the bundled Fraunces (`Resources/Fraunces.ttf`, SIL Open Font License in `Resources/Fraunces-OFL.txt`) with its optical size following the point size.
 - `Sources/HarklightSurfaces.swift` holds the shared form section, sheet surface and Done button used by Settings and other sheets.
 
-## 10. Where the page and this contract differed
+## 10. Rulings where the page and this contract differed
 
-The page governs (section 1). The build follows it in these places; each is recorded on the work item for a ruling.
+The Client PO ruled on these on 2026-11-13 (verdict `att_497f07a8`): where the accepted drawing shows a choice, the drawing wins.
 
-- C7 Seen: the drawing shows a plain glass button with an eye symbol under the text; the teal tint is on the top-right check.
-- Today's "FYI" label above a legacy Seen button is kept; the page does not list it as removed.
-- A read chat keeps an outline flag in `label`; the page draws only the filled amber flag for an unread turn.
-- The open message heading no longer carries a chat icon; the chat button's badge carries it, as drawn.
-- `.searchable` sits on the search tab's content rather than the tab view, because on the tab view it also floated a field over the Inbox tab. There is still one search, reached from the search tab; it searches the list the person came from.
+- C7 Seen: the button under the text is a plain glass button with an eye symbol; the top-right check stays teal.
+- No "FYI" label above the Seen button.
+- A read chat shows no icon; only an unread chat shows the filled amber flag.
+- Before typing, the search tab shows the list the person came from; typing filters that list. One search, in one tab. `.searchable` sits on the search tab's content, because on the tab view it also floated a field over the Inbox tab.
+- The Settings heading stays "Connection status".
+- The open message heading has no chat icon; the chat button's badge carries unread turns.
