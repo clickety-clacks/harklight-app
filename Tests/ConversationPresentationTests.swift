@@ -276,7 +276,7 @@ final class ConversationPresentationTests: XCTestCase {
         XCTAssertNil(availability.message(for: context))
     }
 
-    func testCachedRelayConversationCannotAuthorizeSendReadOrOpenedActions() async throws {
+    func testCachedRelayConversationRemainsEditableAndSendableBeforeCatchUp() async throws {
         await NativeRelayLifecycle.shared.deactivate()
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
                                        personID: ExactText("cache-person"), deviceID: ExactText("cache-device"))
@@ -308,13 +308,17 @@ final class ConversationPresentationTests: XCTestCase {
         let model = try LivePresentationStore(store: cacheBackedStore, context: context)
 
         XCTAssertTrue(model.conversation(for: key)?.allowsDiscussion == true)
-        XCTAssertFalse(model.canSendDiscussion(for: key))
-        model.markConversationRead(key, through: ExactText("reply"))
-        model.reportMessageContentOpened(try XCTUnwrap(model.request(for: key)))
-
-        XCTAssertNil(try cacheBackedStore.conversationSnapshot(context: context)
-            .threads[key]?.accountReadThroughConversationSequence)
-        XCTAssertTrue(try cacheBackedStore.snapshot(context: context).pendingMessageOpens.isEmpty)
+        XCTAssertEqual(model.conversationAvailabilityState, .unconfirmed)
+        model.beginRefresh()
+        defer { model.endRefresh() }
+        XCTAssertTrue(model.canEditDiscussionDraft(for: key))
+        XCTAssertTrue(model.canSendDiscussion(for: key))
+        XCTAssertTrue(model.updateConversation(for: key, revision: 1, text: "During catch-up"))
+        let operation = try cacheBackedStore.prepareDiscussion(binding, context: context)
+        let draft = try XCTUnwrap(cacheBackedStore.conversationSnapshot(context: context).threads[key]?.drafts[1])
+        XCTAssertEqual(draft.text, ExactText("During catch-up"))
+        XCTAssertEqual(draft.operationID, operation)
+        XCTAssertEqual(draft.disposition, .submitting(operation))
     }
 
     func testConversationPanelSeparatesNoChatFromLoadingAndUnavailableStates() {
@@ -323,23 +327,23 @@ final class ConversationPresentationTests: XCTestCase {
         XCTAssertEqual(ConversationPanelEmptyState.resolve(availability: .unavailable,
             isRefreshing: false, hasConnectionWarning: false, canCheckAvailability: true), .chatUnavailable)
         XCTAssertEqual(ConversationPanelEmptyState.resolve(availability: .available,
-            isRefreshing: true, hasConnectionWarning: false, canCheckAvailability: true), .checkingAvailability)
+            isRefreshing: true, hasConnectionWarning: false, canCheckAvailability: true), .historyPending)
         XCTAssertEqual(ConversationPanelEmptyState.resolve(availability: .available,
             isRefreshing: false, hasConnectionWarning: true, canCheckAvailability: true), .connectionUnavailable,
             "A later connection failure must not turn a missing thread into a sender-attributed no-chat claim.")
         XCTAssertEqual(ConversationPanelEmptyState.resolve(availability: .unconfirmed,
-            isRefreshing: true, hasConnectionWarning: false, canCheckAvailability: true), .checkingAvailability)
+            isRefreshing: true, hasConnectionWarning: false, canCheckAvailability: true), .historyPending)
         XCTAssertEqual(ConversationPanelEmptyState.resolve(availability: .unconfirmed,
             isRefreshing: false, hasConnectionWarning: true, canCheckAvailability: true), .connectionUnavailable)
         XCTAssertEqual(ConversationPanelEmptyState.resolve(availability: .unavailable,
-            isRefreshing: false, hasConnectionWarning: true, canCheckAvailability: true), .connectionUnavailable,
-            "A later relay failure supersedes a previous server capability response.")
+            isRefreshing: false, hasConnectionWarning: true, canCheckAvailability: true), .chatUnavailable,
+            "An actual capability refusal remains specific to chat, regardless of catch-up.")
         XCTAssertEqual(ConversationPanelEmptyState.resolve(availability: .unavailable,
-            isRefreshing: true, hasConnectionWarning: false, canCheckAvailability: true), .checkingAvailability)
+            isRefreshing: true, hasConnectionWarning: false, canCheckAvailability: true), .chatUnavailable)
         XCTAssertEqual(ConversationPanelEmptyState.resolve(availability: .unconfirmed,
             isRefreshing: false, hasConnectionWarning: false, canCheckAvailability: false), .offline)
         XCTAssertEqual(ConversationPanelEmptyState.resolve(availability: .unconfirmed,
-            isRefreshing: false, hasConnectionWarning: false, canCheckAvailability: true), .availabilityUnconfirmed)
+            isRefreshing: false, hasConnectionWarning: false, canCheckAvailability: true), .historyPending)
     }
 
     func testCachedClosedChatKeepsDraftEditableWithoutAuthorizingSend() throws {

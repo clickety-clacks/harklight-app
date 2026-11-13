@@ -6,18 +6,18 @@ import QuickLook
 
 enum ConversationPanelEmptyState: Equatable {
     case noChat
-    case checkingAvailability
+    case historyPending
     case chatUnavailable
     case connectionUnavailable
     case offline
-    case availabilityUnconfirmed
 
     @MainActor
     static func resolve(availability: NativeConversationAvailability.State,
                         isRefreshing: Bool,
                         hasConnectionWarning: Bool,
                         canCheckAvailability: Bool) -> Self {
-        if isRefreshing { return .checkingAvailability }
+        if availability == .unavailable { return .chatUnavailable }
+        if isRefreshing { return .historyPending }
         if hasConnectionWarning { return .connectionUnavailable }
 
         switch availability {
@@ -26,7 +26,7 @@ enum ConversationPanelEmptyState: Equatable {
         case .available:
             return .noChat
         case .unconfirmed:
-            return canCheckAvailability ? .availabilityUnconfirmed : .offline
+            return canCheckAvailability ? .historyPending : .offline
         }
     }
 }
@@ -193,10 +193,10 @@ struct ConversationPanel: View {
                         ContentUnavailableView("No chat", systemImage: "bubble.left.and.bubble.right",
                             description: Text("The agent that sent this didn’t open a chat for it. You can still respond to the message itself."))
                             .accessibilityIdentifier("conversation-no-chat-empty-state")
-                    case .checkingAvailability:
-                        ProgressView("Checking chat availability…")
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
-                            .accessibilityIdentifier("conversation-availability-checking")
+                    case .historyPending:
+                        ContentUnavailableView("Chat history hasn’t arrived yet", systemImage: "bubble.left.and.bubble.right",
+                            description: Text("Messages will appear here as they arrive."))
+                            .accessibilityIdentifier("conversation-history-pending")
                     case .chatUnavailable:
                         ContentUnavailableView("Chat unavailable", systemImage: "bubble.left.and.bubble.right",
                             description: Text("Chat is not available on this server yet."))
@@ -209,10 +209,6 @@ struct ConversationPanel: View {
                         ContentUnavailableView("Chat status unavailable offline", systemImage: "wifi.slash",
                             description: Text("This offline view cannot confirm whether a chat was opened."))
                             .accessibilityIdentifier("conversation-status-offline")
-                    case .availabilityUnconfirmed:
-                        ContentUnavailableView("Chat status not confirmed", systemImage: "questionmark.bubble",
-                            description: Text("The server has not confirmed whether a chat was opened yet."))
-                            .accessibilityIdentifier("conversation-status-unconfirmed")
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)

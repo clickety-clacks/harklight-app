@@ -483,11 +483,7 @@ final class NativeAppLaunch {
             notificationNavigationMessage = "The sender retracted this message."
         } else if presentation.request(for: key) != nil {
             notificationNavigationMessage = nil
-            if deepLink.opensChat && presentation.conversationAvailabilityState == .unconfirmed {
-                await refreshLive()
-            } else {
-                pendingMessageDeepLink = nil
-            }
+            pendingMessageDeepLink = nil
         } else {
             notificationNavigationMessage = "Looking for this message."
             await refreshLive()
@@ -530,7 +526,9 @@ final class NativeAppLaunch {
                 opensChat = presentation.conversation(for: key) != nil
                 chatTargetFallsBackToMessage = !opensChat
             case .unconfirmed:
-                opensChat = false
+                // Opening cached chat is a local navigation action, not a
+                // promise that replay or capability discovery has completed.
+                opensChat = true
                 chatTargetFallsBackToMessage = false
             }
         } else {
@@ -1017,9 +1015,6 @@ final class NativeAppLaunch {
         } else if presentation.request(for: key) != nil {
             navigateToMessage(key, in: presentation, from: deepLink)
             notificationNavigationMessage = nil
-            if deepLink.opensChat && presentation.conversationAvailabilityState == .unconfirmed {
-                return
-            }
             pendingMessageDeepLink = nil
         } else {
             if notificationNavigation?.request != key {
