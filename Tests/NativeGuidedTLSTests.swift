@@ -1256,6 +1256,69 @@ final class NativeGuidedTLSTests: XCTestCase {
         }
     }
 
+    func testAnswerAndSeenTransportDoNotWaitForAnotherConnectionsReplayAcknowledgement() async throws {
+        let namespace = "Harklight.independent-answer-test." + UUID().uuidString
+        let identity = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
+        defer {
+            SecItemDelete([kSecClass as String: kSecClassCertificate,
+                           kSecAttrLabel as String: identity.label] as CFDictionary)
+            SecItemDelete([kSecClass as String: kSecClassKey,
+                           kSecAttrApplicationTag as String: Data(namespace.utf8)] as CFDictionary)
+        }
+        let acknowledgementArrived = expectation(description: "Replay ACK request is held by relay")
+        let answersArrived = expectation(description: "Reply and Seen reach relay while ACK remains held")
+        answersArrived.expectedFulfillmentCount = 2
+        let relay = try LocalRelayWebSocket(expectedDevice: identity.deviceID) { text in
+            guard let value = try? JSONValue.parse(Data(text.utf8)) else { return [] }
+            if value.uniqueValue(named: "type")?.stringValue?.rawValue == "ack" {
+                acknowledgementArrived.fulfill()
+                return [] // Deliberately never confirm the replay cursor.
+            }
+            if value.uniqueValue(named: "type")?.stringValue?.rawValue == "answer" {
+                answersArrived.fulfill()
+                return ["{\"v\":1,\"type\":\"ok\",\"seq\":7}\n"]
+            }
+            return []
+        }
+        defer { relay.close() }
+        let port = try await relay.start()
+        let context = ProfileContext(identity: ProfileIdentity(
+            trustedRelayAuthority: ExactText("localhost"), personID: ExactText("test-person"),
+            deviceID: ExactText(identity.deviceID)), transportMode: .relay)
+        let url = try XCTUnwrap(URL(string: "wss://localhost:\(port)/relay"))
+        let replay = try URLSessionInstallationSession(profile: context, relayURL: url,
+            clientIdentity: TrustedKeychainIdentity(identity.value), trustedRootDER: relay.rootDER)
+        let sending = try URLSessionInstallationSession(profile: context, relayURL: url,
+            clientIdentity: TrustedKeychainIdentity(identity.value), trustedRootDER: relay.rootDER)
+        let heldAck = Task {
+            try await replay.acknowledge(Data(#"{"v":1,"type":"ack","seq":1,"ref":"native-ack"}"#.utf8))
+        }
+        await fulfillment(of: [acknowledgementArrived], timeout: 5)
+        let sendsCompleted = expectation(description: "Both send responses complete before replay ACK")
+        let sends = Task {
+            defer { sendsCompleted.fulfill() }
+            for answer in [JSONValue.null, .string(ExactText("Saved reply"))] {
+            let operation = UUID()
+            let frame = JSONValue.object([
+                JSONMember("v", .number(JSONNumber(lexeme: "1"))),
+                JSONMember("type", .string(ExactText("answer"))),
+                JSONMember("sender_id", .string(ExactText("sender"))),
+                JSONMember("message_id", .string(ExactText(operation.uuidString))),
+                JSONMember("request_revision", .number(JSONNumber(lexeme: "1"))),
+                JSONMember("op_id", .string(ExactText(operation.uuidString.lowercased()))),
+                JSONMember("answer", answer)
+            ])
+            let result = try await sending.sendOriginalOperation(Data((frame.jsonString + "\n").utf8), operationID: operation)
+            XCTAssertEqual(result, .accepted(operationID: operation, terminalSequence: 7))
+        }
+        }
+        await fulfillment(of: [answersArrived, sendsCompleted], timeout: 5)
+        await sending.close()
+        await replay.close()
+        try await sends.value
+        do { try await heldAck.value; XCTFail("The withheld cursor was never confirmed") } catch {}
+    }
+
     func testOlderRelayUnsupportedVersionResponseMarksNoCommentUnsupported() async throws {
         let namespace = "Harklight.no-comment-compatibility-test." + UUID().uuidString
         let identity = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
