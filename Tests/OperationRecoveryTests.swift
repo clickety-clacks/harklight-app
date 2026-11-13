@@ -3,7 +3,7 @@ import Foundation
 import XCTest
 
 final class OperationRecoveryTests: XCTestCase {
-    func testInterruptedOperationWaitsForCurrentServerThenQueuesExactFrameAfterRestart() throws {
+    func testInterruptedOperationQueuesExactFrameBeforeReplayAfterRestart() throws {
         for lostReply in [false, true] {
             let (context, key, payload) = try fixture()
             let persistence = MemoryPendingActionPersistence()
@@ -17,9 +17,10 @@ final class OperationRecoveryTests: XCTestCase {
             }
             let restarted = try ClientRepository(context: context, persistence: persistence)
             try restarted.queueRecoverableOperations(context: context)
-            XCTAssertTrue(try restarted.snapshot(context: context).outbox.isEmpty,
-                          "Saved intent alone cannot authorize sending against stale Server state.")
-            try confirm(restarted, context: context, key: key, payload: payload)
+            XCTAssertEqual(try restarted.snapshot(context: context).outbox.map(\.operationID),
+                           [original.operationID], "Recovery cannot depend on replay or its ACK.")
+            XCTAssertTrue(try restarted.snapshot(context: context).requests.isEmpty,
+                          "This check exercises recovery before Server pages are restored.")
             try restarted.queueRecoverableOperations(context: context)
             try restarted.queueRecoverableOperations(context: context)
             let queued = try restarted.snapshot(context: context).outbox

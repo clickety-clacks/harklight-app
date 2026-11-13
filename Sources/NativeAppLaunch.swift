@@ -157,7 +157,7 @@ final class NativeAppLaunch {
                     progress,
                     operationSnapshot: NativeRelayLifecycle.shared.foregroundOperationDiagnostics(for: material.context))
                 if case let .live(presentation) = self.state {
-                    presentation.connectionWarning = progress.outcome == .confirmed ? nil : progress.message
+                    presentation.connectionWarning = progress.outcome == .confirmed ? nil : progress.userFacingMessage
                 }
             }
             guard self.activationGeneration == epoch else {
@@ -187,7 +187,7 @@ final class NativeAppLaunch {
             let reached = connect.outcome == .confirmed
             if reached { try self.enrollment.markForegroundRelayConfirmed(for: record.deviceID) }
             if case let .live(presentation) = self.state {
-                presentation.connectionWarning = reached ? nil : connect.message
+                presentation.connectionWarning = reached ? nil : connect.userFacingMessage
             }
             return reached
         }
@@ -1354,7 +1354,11 @@ final class LivePresentationStore {
     private(set) var pushRegistrationWarning: String?
     private var storedConnectionWarning: String?
     var connectionWarning: String? {
-        get { NativeRelayLifecycle.shared.refreshFailureMessage(for: profileContext) ?? storedConnectionWarning }
+        get {
+            guard NativeRelayLifecycle.shared.refreshFailureMessage(for: profileContext) != nil ||
+                    storedConnectionWarning != nil else { return nil }
+            return "Waiting for the server. Your pending actions are saved."
+        }
         set { storedConnectionWarning = newValue }
     }
     private(set) var failedResponseWarnings: [RequestKey: FailedResponseWarning] = [:]
@@ -1398,22 +1402,11 @@ final class LivePresentationStore {
     @ObservationIgnored private let conversationFiles: ConversationFileStorage?
     @ObservationIgnored private let profileContext: ProfileContext
     var notificationContext: ProfileContext { profileContext }
-    var canSendToCurrentServer: Bool {
-        guard profileContext.transportMode == .relay,
-              attentionStore.requiresConfirmedServerProjection else {
-            return permitsDelivery && !isReadOnly
-        }
-        return permitsDelivery && !isReadOnly &&
-            NativeRelayLifecycle.shared.hasConfirmedServerSnapshot(for: profileContext)
-    }
+    // Delivery permission is independent of connection and catch-up status.
+    // The durable intent queue accepts actions while transport is unavailable.
+    var canSendToCurrentServer: Bool { permitsDelivery && !isReadOnly }
     func actionUnavailableReason(for key: RequestKey) -> String? {
         guard permitsDelivery, !isReadOnly else { return "This message is read-only." }
-        guard canSendToCurrentServer else {
-            return connectionWarning ?? "Connect to the server and refresh the inbox before answering."
-        }
-        guard profileContext.transportMode != .relay || request(for: key)?.inboxStateIsCurrent == true else {
-            return "Refresh this message before answering. Its saved status is not current."
-        }
         return nil
     }
 
@@ -1441,7 +1434,7 @@ final class LivePresentationStore {
         return conversationThreads[key]?.allowsDiscussion == true
     }
     func canSendDiscussion(for key: RequestKey) -> Bool {
-        canUseCurrentServerState(for: key) && conversationThreads[key]?.allowsDiscussion == true
+        canSendToCurrentServer && conversationThreads[key]?.allowsDiscussion == true
     }
     @ObservationIgnored var notificationProjectionDidChange: (() -> Void)?
     @ObservationIgnored var confirmedRelayRefresh: (() -> Void)?
@@ -2307,7 +2300,7 @@ final class LivePresentationStore {
             declaredMessageType: request.messageType,
             declaredMessageKind: request.messageKind,
             canMarkSeen: canSendToCurrentServer &&
-                !retracted && request.inboxStateIsCurrent && request.lifecycleStatus == .open &&
+                !retracted && request.lifecycleStatus == .open &&
                 request.intentReceipt == nil && request.informationalSeenStatus == .available,
             canNoComment: canNoComment(request, isRetracted: retracted),
             noCommentUnavailable: request.noCommentUnavailable,
@@ -2350,7 +2343,7 @@ final class LivePresentationStore {
     }
 
     private func canNoComment(_ request: PresentedRequest, isRetracted: Bool) -> Bool {
-        guard canSendToCurrentServer, !isRetracted, request.inboxStateIsCurrent,
+        guard canSendToCurrentServer, !isRetracted,
               request.lifecycleStatus == .open, request.intentReceipt == nil,
               request.informationalSeenStatus == nil else { return false }
         // No comment is its own wire answer and does not depend on the
@@ -2541,7 +2534,6 @@ final class LivePresentationStore {
     func canRetryUnconfirmedAnswer(for key: RequestKey) -> Bool {
         guard canSendToCurrentServer,
               let request = request(for: key),
-              request.inboxStateIsCurrent,
               let receipt = request.intentReceipt,
               [.terminalUnconfirmed, .notDelivered, .unsupported].contains(receipt.localState),
               request.lifecycleStatus == .open || request.lifecycleStatus == .pending,
@@ -2563,7 +2555,6 @@ final class LivePresentationStore {
               let request = request(for: key),
               let warning = failedResponseWarning(for: key, revision: request.requestRevision),
               warning.canRetry,
-              request.inboxStateIsCurrent,
               request.lifecycleStatus == .open,
               request.informationalSeenStatus == nil,
               request.staleAnswerRevision == nil,
@@ -2932,8 +2923,7 @@ final class LivePresentationStore {
         let revision: UInt64?
         if !selectionIsLocal {
             guard let request = try? inspectedRequest(key, revision: requestRevision),
-                  request.inboxStateIsCurrent,
-                  !isRetracted(key), request.lifecycleStatus == .open,
+                      !isRetracted(key), request.lifecycleStatus == .open,
                   request.intentReceipt == nil, request.informationalSeenStatus == nil else { return false }
             revision = request.requestRevision
             selectNoComment(for: key, requestRevision: revision)

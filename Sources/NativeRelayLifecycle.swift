@@ -328,6 +328,15 @@ struct NativeForegroundConnectProgress: Equatable, Sendable {
         terminalReason = .generationInvalidated
     }
 
+    /// Product status; detailed replay and acknowledgement facts remain in `message`.
+    var userFacingMessage: String {
+        switch outcome {
+        case .confirmed: "Connected"
+        case .connecting: "Connecting to the server… Your pending actions are saved."
+        case .timedOut, .incomplete: "Can't reach the server. Your pending actions are saved."
+        }
+    }
+
     var headline: String {
         guard outcome != .confirmed else { return "Connected" }
         switch lastConfirmedStage {

@@ -653,7 +653,7 @@ public final class ClientRepository: @unchecked Sendable {
         return true
     }
 
-    /// Reuses the exact saved operation after checking the current Server view.
+    /// Reuses the exact saved operation without waiting for replay or its ACK.
     /// Explicit Retry may also reactivate a definitive failure; automatic
     /// recovery only selects pending or uncertain operations.
     @discardableResult
@@ -669,15 +669,11 @@ public final class ClientRepository: @unchecked Sendable {
               state.intentByRequest[submission.requestKey] == intentID else {
             throw AttentionStoreError.intentMissing
         }
-        let currentKeys = state.inboxCheckpoint.flatMap { $0.checkpointAccepted ? $0.currentKeys : nil }
-        guard state.requests[submission.requestKey] != nil,
-              currentKeys?.contains(submission.requestKey) == true,
-              state.remoteStates[submission.requestKey]?.isTerminal != true else {
+        // The saved request already binds the intended revision and exact bytes.
+        // Server validation, not a local catch-up checkpoint, decides whether it
+        // can still apply. A known final state is item-specific unavailability.
+        guard state.remoteStates[submission.requestKey]?.isTerminal != true else {
             throw AttentionStoreError.requestClosed
-        }
-        let currentRevision = state.conversation?.threads[submission.requestKey]?.currentRevision ?? 1
-        guard (submission.requestRevision ?? 1) == currentRevision else {
-            throw AttentionStoreError.intentConflict
         }
         switch submission.disposition {
         case .pending, .lost, .failed, .unsupported:
@@ -692,8 +688,8 @@ public final class ClientRepository: @unchecked Sendable {
         return submission
     }
 
-    /// Queue accepted user intent only after the Server has supplied its current
-    /// request and revision. Missing pages are not evidence of a failed send.
+    /// Queue locally accepted work even before replay supplies any request page.
+    /// The operation's saved identity and bytes are sufficient for Server retry.
     public func queueRecoverableOperations(context suppliedContext: ProfileContext) throws {
         writerLock.lock()
         defer { writerLock.unlock() }
@@ -701,14 +697,11 @@ public final class ClientRepository: @unchecked Sendable {
         defer { lock.unlock() }
         try validate(suppliedContext)
         guard suppliedContext.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
-        guard let checkpoint = state.inboxCheckpoint, checkpoint.checkpointAccepted else { return }
         var next = state
         next.outboxOrder = []
         for (key, id) in state.intentByRequest.sorted(by: { $0.value.uuidString < $1.value.uuidString }) {
             guard var operation = state.intents[id],
-                  checkpoint.currentKeys.contains(key), state.requests[key] != nil,
-                  state.remoteStates[key]?.isTerminal != true,
-                  (operation.requestRevision ?? 1) == (state.conversation?.threads[key]?.currentRevision ?? 1) else { continue }
+                  state.remoteStates[key]?.isTerminal != true else { continue }
             switch operation.disposition {
             case .pending, .lost: break
             default: continue

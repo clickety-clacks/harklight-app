@@ -1508,7 +1508,7 @@ struct LiveRequestDetail: View {
         }
         guard locallyValid else { return false }
         if localExample != nil || fixtureStore != nil { return true }
-        return store.canSendToCurrentServer && request.inboxStateIsCurrent
+        return store.canSendToCurrentServer
     }
 
     private var canOfferNoComment: Bool {
@@ -1517,7 +1517,6 @@ struct LiveRequestDetail: View {
         if let localExample { return localExample.canDeclineLocally }
         if let fixtureStore { return fixtureStore.canSendNoCommentLocally(for: request.key) }
         guard !store.isReadOnly, store.canSendToCurrentServer,
-              request.inboxStateIsCurrent,
               !store.isRetracted(request.key), request.lifecycleStatus == .open,
               request.intentReceipt == nil else { return false }
         return true
