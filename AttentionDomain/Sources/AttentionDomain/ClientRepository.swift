@@ -195,6 +195,7 @@ public final class ClientRepository: @unchecked Sendable {
             state.pendingMessageOpens = queue.messageOpens
             state.pendingConversations = queue.conversations
             state.pendingReadPositions = queue.readPositions
+            acceptedAwaitingTerminalReplay = Self.acceptedAwaitingTerminalReplay(in: state)
         }
     }
 
@@ -652,8 +653,9 @@ public final class ClientRepository: @unchecked Sendable {
         return true
     }
 
-    /// Queues one answer operation only for an explicit user retry. The exact
-    /// operation and id are reused; no background refresh calls this method.
+    /// Reuses the exact saved operation after checking the current Server view.
+    /// Explicit Retry may also reactivate a definitive failure; automatic
+    /// recovery only selects pending or uncertain operations.
     @discardableResult
     public func queueOriginalOperationForUserTap(_ intentID: UUID,
                                                  context suppliedContext: ProfileContext) throws -> Submission {
@@ -678,7 +680,7 @@ public final class ClientRepository: @unchecked Sendable {
             throw AttentionStoreError.intentConflict
         }
         switch submission.disposition {
-        case .pending, .lost:
+        case .pending, .lost, .failed, .unsupported:
             submission.disposition = .pending
         default:
             throw AttentionStoreError.intentConflict
@@ -690,7 +692,35 @@ public final class ClientRepository: @unchecked Sendable {
         return submission
     }
 
-    /// Retains the exact answer operation for a later explicit Retry tap.
+    /// Queue accepted user intent only after the Server has supplied its current
+    /// request and revision. Missing pages are not evidence of a failed send.
+    public func queueRecoverableOperations(context suppliedContext: ProfileContext) throws {
+        writerLock.lock()
+        defer { writerLock.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard suppliedContext.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
+        guard let checkpoint = state.inboxCheckpoint, checkpoint.checkpointAccepted else { return }
+        var next = state
+        next.outboxOrder = []
+        for (key, id) in state.intentByRequest.sorted(by: { $0.value.uuidString < $1.value.uuidString }) {
+            guard var operation = state.intents[id],
+                  checkpoint.currentKeys.contains(key), state.requests[key] != nil,
+                  state.remoteStates[key]?.isTerminal != true,
+                  (operation.requestRevision ?? 1) == (state.conversation?.threads[key]?.currentRevision ?? 1) else { continue }
+            switch operation.disposition {
+            case .pending, .lost: break
+            default: continue
+            }
+            operation.disposition = .pending
+            next.intents[id] = operation
+            if !next.outboxOrder.contains(id) { next.outboxOrder.append(id) }
+        }
+        if next.outboxOrder != state.outboxOrder || next.intents != state.intents { try commit(next) }
+    }
+
+    /// Retains the exact answer operation for recovery on a later connection.
     public func recordUnresolvedOperation(_ intentID: UUID,
                                           operationID: UUID,
                                           context suppliedContext: ProfileContext) throws {
@@ -790,7 +820,6 @@ public final class ClientRepository: @unchecked Sendable {
         var next = state
         next.intents[intentID] = intent
         next.outboxOrder.removeAll(where: { $0 == intentID })
-        next.intentByRequest.removeValue(forKey: intent.requestKey)
         if var published = next.replayPublishedIntents {
             published[intentID] = intent
             next.replayPublishedIntents = published
@@ -798,8 +827,8 @@ public final class ClientRepository: @unchecked Sendable {
         try commit(next)
     }
 
-    /// A correlated relay error proves this operation was not delivered. Retain
-    /// the receipt for history while releasing its active request/outbox lock.
+    /// A correlated relay error stops automatic delivery. Keep the operation
+    /// durable so the person's Retry uses its original identity and payload.
     public func recordAnswerNotDelivered(_ intentID: UUID,
                                          operationID: UUID,
                                          context suppliedContext: ProfileContext) throws {
@@ -825,7 +854,6 @@ public final class ClientRepository: @unchecked Sendable {
         var next = state
         next.intents[intentID] = intent
         next.outboxOrder.removeAll(where: { $0 == intentID })
-        next.intentByRequest.removeValue(forKey: intent.requestKey)
         if var published = next.replayPublishedIntents {
             published[intentID] = intent
             next.replayPublishedIntents = published
@@ -1786,9 +1814,6 @@ public final class ClientRepository: @unchecked Sendable {
         failed.disposition = .failed
         state.intents[submission.intentID] = failed
         state.outboxOrder.removeAll(where: { $0 == submission.intentID })
-        if state.intentByRequest[submission.requestKey] == submission.intentID {
-            state.intentByRequest.removeValue(forKey: submission.requestKey)
-        }
         if var published = state.replayPublishedIntents {
             published[submission.intentID] = failed
             state.replayPublishedIntents = published
@@ -3688,7 +3713,7 @@ public final class ClientRepository: @unchecked Sendable {
         let ids = next.intents.compactMap { id, operation -> UUID? in
             guard operation.requestKey == key else { return nil }
             switch operation.disposition {
-            case .pending, .lost: return id
+            case .pending, .lost, .accepted, .failed, .unsupported: return id
             default: return nil
             }
         }
@@ -4097,8 +4122,9 @@ private struct RetiredUnsentInput: Decodable {
     }
 }
 
-/// Only unsent/uncertain local requests cross a process restart. No Server
-/// question, terminal, revision, read position or replay cursor is encoded here.
+/// User operations remain durable until the Server confirms their terminal.
+/// Failure and acceptance receipts describe delivery, never cached message truth.
+/// No Server question, terminal, read position or replay cursor is encoded here.
 private struct PersistedPendingActions: Codable {
     let version: Int
     let profileIdentity: ProfileIdentity
@@ -4118,7 +4144,7 @@ private struct PersistedPendingActions: Codable {
         let pending = state.intents.filter { id, operation in
             guard state.intentByRequest[operation.requestKey] == id else { return false }
             switch operation.disposition {
-            case .pending, .lost: return true
+            case .pending, .lost, .accepted, .failed, .unsupported: return true
             default: return false
             }
         }

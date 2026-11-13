@@ -479,6 +479,67 @@ public actor NativeRelayCore {
                 inboxViewRequestedOnConnection = true
                 await refreshInboxView(using: pagingSession)
             }
+            // Replay/current revision wins before an interrupted user operation
+            // is eligible to resume. Never rebuild its payload or operation ID.
+            try store.queueRecoverableOperations(context: context)
+            let acceptedBeforeDrain = Set(try store.acceptedOperationsAwaitingTerminalReplay(context: context)
+                .map(\.operationID))
+            failedStep = .readOutboxBeforeDrain
+            let pendingBeforeDrain = try store.snapshot(context: context).outbox
+            let attempted: Int
+            do {
+                failedStep = .drainPendingOperations
+                attempted = try await drainPending()
+            } catch {
+                // A later operation may fail after an earlier operation was
+                // accepted. Record that the accepted operation's terminal replay
+                // was not reached, without attributing the later operation's
+                // transport error to it.
+                let acceptedAfterInterruptedDrain = (try? store.acceptedOperationsAwaitingTerminalReplay(context: context)) ?? []
+                for submission in acceptedAfterInterruptedDrain where !acceptedBeforeDrain.contains(submission.operationID) {
+                    diagnoseOperationReplay(.unresolved,
+                             causeCode: "follow_on_replay_not_reached",
+                             submission: submission, receipt: .acceptedAwaitingReplay)
+                }
+                throw error
+            }
+            if attempted > 0 {
+                failedStep = .readOutboxAfterDrain
+                let afterDrain = try store.snapshot(context: context)
+                let newlyAccepted = pendingBeforeDrain.compactMap { pending -> Submission? in
+                    guard let recorded = afterDrain.intents[pending.intentID],
+                          case .accepted = recorded.disposition else { return nil }
+                    return recorded
+                }
+                for submission in newlyAccepted {
+                    acceptedReplaySubmissions[submission.operationID] = submission
+                    if operationReplayDiagnosticStates[submission.operationID] == nil {
+                        diagnoseOperationReplay(.began, submission: submission,
+                                                receipt: .acceptedAwaitingReplay)
+                    }
+                }
+                failedStep = .readAcceptedOperationsAfterDrain
+                let acceptedAfterDrain = try store.acceptedOperationsAwaitingTerminalReplay(context: context)
+                let trackingSubmissions = Array(acceptedReplaySubmissions.values)
+                if let eventStream = pagingSession as? any AuthenticatedInboxEventStreamSession,
+                   eventStream.supportsPostCheckpointInboxEvents {
+                    let terminalSequence = (acceptedAfterDrain + newlyAccepted)
+                        .compactMap(Self.acceptedTerminalSequence).max()
+                    if let terminalSequence {
+                        failedStep = .waitForAcceptedOperationAcknowledgement
+                        try await waitForPostCheckpointAcknowledgement(through: terminalSequence)
+                    }
+                    completeAcceptedOperationReplayDiagnostics(trackingSubmissions)
+                    failedStep = .readInboxCursorAfterAcknowledgement
+                    high = try store.snapshot(context: context).cursor
+                } else {
+                    failedStep = .replayInboxAfterDrain
+                    high = try await replayInboxAndAcknowledge(
+                        since: high,
+                        trackingAcceptedOperations: acceptedAfterDrain + newlyAccepted,
+                        using: pagingSession)
+                }
+            }
             failedStep = .readFinalRelayCursor
             let durableCursor = try store.snapshot(context: context).cursor
             failedStep = .validateRelayState
@@ -1944,15 +2005,7 @@ public actor NativeRelayCore {
         defer { releaseBusy() }
         try validate()
 
-        do {
-            _ = try store.queueOriginalOperationForUserTap(intentID, context: context)
-        } catch {
-            if let storeError = error as? AttentionStoreError,
-               storeError == .requestClosed || storeError == .intentConflict {
-                try? store.discardUnsentOperation(intentID, context: context)
-            }
-            throw error
-        }
+        _ = try store.queueOriginalOperationForUserTap(intentID, context: context)
 
         let pending = try store.snapshot(context: context).outbox
         guard pending.contains(where: { $0.intentID == intentID }) else {
@@ -2036,6 +2089,8 @@ public actor NativeRelayCore {
                                                                  operationID: submission.operationID)
             } catch {
                 if let onSendCallStateChange { await onSendCallStateChange(false) }
+                try store.recordUnresolvedOperation(submission.intentID,
+                    operationID: submission.operationID, context: context)
                 diagnose(.answer, .originalOperationDelivery,
                          NativeDiagnosticCauseCode.unresolvedTransition(for: error), error: error,
                          operationID: submission.operationID, request: submission.requestKey,

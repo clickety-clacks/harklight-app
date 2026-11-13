@@ -125,8 +125,8 @@ public enum IntentDisposition: Equatable, Codable, Sendable {
     case pending
     case accepted(sequence: UInt64?)
     case lost
-    /// The relay explicitly rejected this operation, so it is safe to remove
-    /// its active outbox lock and let the person choose another answer.
+    /// The relay explicitly rejected this operation. Stop automatic attempts
+    /// but retain its identity and payload for an explicit Retry.
     case failed
     /// The relay declined the submitted revision and named the current one.
     case staleRevision(currentRevision: UInt64)

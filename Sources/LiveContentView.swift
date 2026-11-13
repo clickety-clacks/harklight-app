@@ -1837,7 +1837,8 @@ struct LiveRequestDetail: View {
                 }
                 if !isSupersedesReadOnly, localExample == nil, fixtureStore == nil,
                    request.inboxStateIsCurrent,
-                   request.intentReceipt?.localState == .terminalUnconfirmed {
+                   let receipt = request.intentReceipt,
+                   [.terminalUnconfirmed, .notDelivered, .unsupported].contains(receipt.localState) {
                     Button("Retry") { _ = store.retryUnconfirmedAnswerFromUser(request.key) }
                         .buttonStyle(.bordered)
                         .disabled(!store.canRetryUnconfirmedAnswer(for: request.key))

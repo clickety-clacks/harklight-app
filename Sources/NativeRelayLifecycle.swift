@@ -1532,11 +1532,29 @@ final class NativeRelayLifecycle {
         guard context == expected, let configuration, self.core != nil else {
             throw NativeRelayCoreError.inactive
         }
+        let beforeRefresh = try configuration.store.snapshot(context: expected).intents[intentID]
+        let explicitlyRetriesFailure: Bool
+        switch beforeRefresh?.disposition {
+        case .failed?, .unsupported?: explicitlyRetriesFailure = true
+        default: explicitlyRetriesFailure = false
+        }
         let current = await refreshFlights.coalesced()
         guard context == expected, current.relayConfirmed,
               confirmedRelayContext == expected, let activeCore = self.core else {
-            try? configuration.store.discardUnsentOperation(intentID, context: expected)
+            // A failed refresh does not prove the saved operation was never sent.
             throw NativeRelayCoreError.inactive
+        }
+        let saved = try configuration.store.snapshot(context: expected).intents[intentID]
+        guard let saved else {
+            // The current Server terminal may already have retired this intent.
+            onSendCallCompleted()
+            return current
+        }
+        switch saved.disposition {
+        case .failed where explicitlyRetriesFailure, .unsupported where explicitlyRetriesFailure: break
+        default:
+            onSendCallCompleted()
+            return current
         }
         do {
             try await activeCore.sendOriginalOperationForUserTap(
@@ -1546,9 +1564,6 @@ final class NativeRelayLifecycle {
                 })
         } catch {
             onSendCallCompleted()
-            if let relayError = error as? NativeRelayCoreError, relayError == .inactive {
-                try? configuration.store.discardUnsentOperation(intentID, context: expected)
-            }
             throw error
         }
         onSendCallCompleted()

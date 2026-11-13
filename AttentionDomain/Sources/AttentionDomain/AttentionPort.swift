@@ -814,7 +814,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
             relayOutcome = .accepted(sequence: sequence)
         case .lost:
             // A missing send reply does not establish a terminal failure. The
-            // same operation waits for an explicit retry or server evidence.
+            // same operation waits for automatic recovery or server evidence.
             localState = .queuedForRelay
             relayOutcome = .unknown
         case .failed:

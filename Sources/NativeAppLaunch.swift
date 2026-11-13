@@ -2533,9 +2533,11 @@ final class LivePresentationStore {
         guard canSendToCurrentServer,
               let request = request(for: key),
               request.inboxStateIsCurrent,
-              request.intentReceipt?.localState == .terminalUnconfirmed,
+              let receipt = request.intentReceipt,
+              [.terminalUnconfirmed, .notDelivered, .unsupported].contains(receipt.localState),
               request.lifecycleStatus == .open || request.lifecycleStatus == .pending,
-              !request.answerNotDelivered, !isRetracted(key) else { return false }
+              request.staleAnswerRevision == nil, !isRetracted(key),
+              !sendingAnswerIntentIDs.contains(receipt.intentID) else { return false }
         return true
     }
 
@@ -3508,9 +3510,10 @@ final class LivePresentationStore {
             if request.answerNotDelivered || request.noCommentUnavailable {
                 if let failed = failureSubmission(for: request, among: candidates,
                                                   diagnosticEvents: diagnosticEvents) {
-                    let retryOperationID = refreshed[request.key].flatMap {
-                        $0.failedOperationID == failed.operationID ? $0.retryOperationID : nil
-                    }
+                    let retryOperationID = request.intentReceipt?.opID == failed.operationID
+                        ? failed.operationID : refreshed[request.key].flatMap {
+                            $0.failedOperationID == failed.operationID ? $0.retryOperationID : nil
+                        }
                     refreshed[request.key] = makeFailedResponseWarning(
                         for: request, submission: failed, retryOperationID: retryOperationID,
                         diagnosticEvents: diagnosticEvents)
