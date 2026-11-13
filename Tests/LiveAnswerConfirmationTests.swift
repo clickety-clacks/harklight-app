@@ -653,7 +653,7 @@ final class LiveAnswerConfirmationTests: XCTestCase {
                        "Answered by default: Hold for now")
     }
 
-    func testServerSuppliedSeenAnswerConfirmsWithoutLocalReceipt() throws {
+    func testServerSuppliedSeenOutcomeConfirmsWithoutLocalReceipt() throws {
         let context = ProfileContext(identity: ProfileIdentity(
             trustedRelayAuthority: ExactText("relay.example"), personID: ExactText("person"),
             deviceID: ExactText("device")), transportMode: .relay)
@@ -664,15 +664,15 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         _ = try store.apply(RelayEvent(sequence: 1, body: .delivery(
             StoredRequest(key: key, originalPayload: payload), .message)), context: context)
         let live = try LivePresentationStore(store: store, context: context)
-        let terminal = Data(#"{"v":1,"type":"lifecycle","seq":2,"sender_id":"sender","message_id":"sample","origin":"device","state":"answered","answer":{"acknowledgment":"seen"}}"#.utf8)
+        let terminal = Data(#"{"v":1,"type":"lifecycle","seq":2,"sender_id":"sender","message_id":"sample","origin":"device","state":"answered","answer_outcome":{"kind":"seen"}}"#.utf8)
         _ = try store.apply(RelayWire(profile: context).decodeEvent(terminal), context: context)
         try live.refreshFromDurableStore()
 
         let request = try XCTUnwrap(live.request(for: key))
         XCTAssertEqual(request.lifecycleStatus, .answered)
-        XCTAssertNil(request.accountAnswerOutcome)
+        XCTAssertEqual(request.accountAnswerOutcome, .seen)
         XCTAssertEqual(request.informationalSeenStatus, .confirmed,
-                       "The authorized server answer confirms Seen without any device receipt.")
+                       "The shared server outcome confirms Seen without any device receipt.")
         XCTAssertNil(request.intentReceipt)
         XCTAssertNil(request.receiptFacts)
         XCTAssertTrue(try XCTUnwrap(live.inboxRows.first { $0.key == key }).status.contains("Seen"))

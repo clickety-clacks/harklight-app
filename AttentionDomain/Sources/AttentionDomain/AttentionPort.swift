@@ -1392,16 +1392,9 @@ public final class AttentionDomainPort: @unchecked Sendable {
             return .confirmed
         }
         guard request.hasExplicitInformationalSeenAction else { return nil }
-        let seenValue = JSONValue.object([
-            JSONMember("acknowledgment", .string(ExactText("seen")))
-        ])
-        if remote?.state == .answered,
-           remote?.authorizedOriginAnswer?.semanticallyEquals(seenValue) == true {
-            return .confirmed
-        }
         if submission?.isNoComment == true { return .resolvedWithoutSeen }
         if status == .open || status == .pending {
-            return submission?.answer.semanticallyEquals(seenValue) == true ? .pending : .available
+            return submission == nil ? .available : .pending
         }
         return .resolvedWithoutSeen
     }

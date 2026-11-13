@@ -3825,6 +3825,9 @@ public final class ClientRepository: @unchecked Sendable {
             case .text:
                 guard text != nil else { throw AttentionStoreError.invalidSubmission }
             }
+            // The informational descriptor identifies Seen; the device protocol
+            // represents that action with a null answer, not the descriptor value.
+            if request.hasExplicitInformationalSeenAction { return .null }
             return answer
         default:
             throw AttentionStoreError.unsupportedInterface

@@ -1053,7 +1053,7 @@ final class NativeGuidedTLSTests: XCTestCase {
                        .resolvedWithoutSeen,
                        "An answer-free terminal from another device is not a local operation receipt.")
         XCTAssertEqual(try XCTUnwrap(port.inspect(context: port.context, request: originSeenKey).requests.first).informationalSeenStatus,
-                       .confirmed, "An authorized origin answer remains sufficient confirmation.")
+                       .resolvedWithoutSeen, "An object-valued origin answer is not the Server shared Seen outcome.")
 
         let live = try LivePresentationStore(store: store, context: context)
         let availableSeenRow = try XCTUnwrap(live.inboxRows.first { $0.key == seenKey })
@@ -1067,7 +1067,7 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertEqual(nonSeenTerminalRow.informationalSeenStatus, .resolvedWithoutSeen)
 
         let receipt = try live.submit(seenKey, explicitCompatibilityAction: ExactText("seen"))
-        XCTAssertTrue(receipt.exactAnswer.semanticallyEquals(seenValue))
+        XCTAssertEqual(receipt.exactAnswer, .null)
         XCTAssertEqual(live.request(for: seenKey)?.informationalSeenStatus, .pending)
 
         try store.recordAcceptedOperation(receipt.intentID, operationID: receipt.opID,
@@ -1076,7 +1076,7 @@ final class NativeGuidedTLSTests: XCTestCase {
         try live.refreshFromDurableStore()
         XCTAssertEqual(live.request(for: seenKey)?.informationalSeenStatus, .resolvedWithoutSeen,
                        "An operation receipt alone cannot manufacture the server Seen value.")
-        try store.apply(RelayEvent(sequence: 9, body: .terminal(seenKey, .answered, seenValue)), context: context)
+        try store.apply(RelayEvent(sequence: 9, body: .terminal(seenKey, .answered, nil), accountAnswerOutcome: .seen), context: context)
         try live.refreshFromDurableStore()
         XCTAssertEqual(live.request(for: seenKey)?.informationalSeenStatus, .confirmed)
 
@@ -1134,7 +1134,7 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertEqual(legacyActions.map(\.label), [ExactText("Reply")])
 
         let receipt = try live.submit(seenKey, explicitCompatibilityAction: ExactText("seen"))
-        XCTAssertEqual(receipt.exactAnswer, seenAnswer)
+        XCTAssertEqual(receipt.exactAnswer, .null)
         XCTAssertEqual(live.request(for: seenKey)?.informationalSeenStatus, .pending)
 
         let queuedHigh = try await core.resyncAndDrainOutbox()
