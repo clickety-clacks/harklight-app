@@ -444,7 +444,10 @@ final class HarklightTests: XCTestCase {
                                        body: .delivery(StoredRequest(key: key, originalPayload: payload), .message)),
                             context: context)
         let cacheRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: cacheRoot) }
+        addTeardownBlock {
+            await NativeRelayLifecycle.shared.deactivate()
+            try? FileManager.default.removeItem(at: cacheRoot)
+        }
         let confirmation = try await NativeRelayLifecycle.shared.confirmInProcessSessionForTesting(
             store: store, context: context,
             session: ReplyCheckpointSession(identity: identity, key: key, payload: payload),
@@ -564,7 +567,7 @@ final class HarklightTests: XCTestCase {
     }
 
     @MainActor
-    func testAnswerControlsRemainAvailableWhileInboxFreshnessIsUnknown() throws {
+    func testAnswerControlsRemainAvailableWhileInboxFreshnessIsUnknown() async throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
                                        personID: ExactText("refresh-answer-\(UUID().uuidString)"),
                                        deviceID: ExactText("device-A"))
@@ -574,14 +577,17 @@ final class HarklightTests: XCTestCase {
         let key = RequestKey(accountScope: identity.personID,
                              senderID: ExactText("app:test"), messageID: ExactText("refresh-answer"))
         let payload = try JSONValue.parse(Data(#"{"sender_id":"app:test","message_id":"refresh-answer","title":"Refresh answer","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"reply","label":"Reply","kind":"text"}]}}"#.utf8))
-        let acceptance = RelayEvent(sequence: 1,
-            body: .delivery(StoredRequest(key: key, originalPayload: payload), .message))
-        _ = try store.beginInboxCandidate(startupID: "first", since: 0, batches: [], context: context)
-        try store.saveInboxInitialPage(snapshotID: "accepted-snapshot", highWater: 1,
-            items: [InboxSnapshotItem(acceptance: acceptance)],
-            nextCursor: nil, receiptCursor: nil, context: context)
-        _ = try store.prepareInboxCheckpointAcknowledgement(context: context)
-        _ = try store.acceptInboxCheckpoint(snapshotID: "accepted-snapshot", highWater: 1, context: context)
+        let cacheRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        addTeardownBlock {
+            await NativeRelayLifecycle.shared.deactivate()
+            try? FileManager.default.removeItem(at: cacheRoot)
+        }
+        let confirmation = try await NativeRelayLifecycle.shared.confirmInProcessSessionForTesting(
+            store: store, context: context,
+            session: ReplyCheckpointSession(identity: identity, key: key, payload: payload),
+            serverStateCache: FileServerStateCache(identity: identity,
+                fileURL: cacheRoot.appendingPathComponent("server-cache.json")))
+        XCTAssertTrue(confirmation.relayConfirmed)
         _ = try store.beginInboxCandidate(startupID: "refresh", since: 1, batches: [], context: context)
         let visible = try LivePresentationStore(store: store, context: context)
         let request = try XCTUnwrap(visible.request(for: key))
@@ -612,7 +618,10 @@ final class HarklightTests: XCTestCase {
                                                                      originalPayload: fixture.originalPayload), .message)),
                             context: context)
         let cacheRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: cacheRoot) }
+        addTeardownBlock {
+            await NativeRelayLifecycle.shared.deactivate()
+            try? FileManager.default.removeItem(at: cacheRoot)
+        }
         let cacheURL = cacheRoot.appendingPathComponent("server-cache.json")
         let cache = FileServerStateCache(identity: identity, fileURL: cacheURL)
         let confirmation = try await NativeRelayLifecycle.shared.confirmInProcessSessionForTesting(
