@@ -262,7 +262,10 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         live.submitNoCommentFromUser(key)
         XCTAssertTrue(live.draft(for: key)?.noCommentSelected == true,
                       "A swipe submission persists the explicit No comment choice for retry.")
-        let retry = try XCTUnwrap(store.snapshot(context: context).outbox.first)
+        let retryID = try XCTUnwrap(live.request(for: key)?.intentReceipt?.intentID)
+        let retry = try XCTUnwrap(store.snapshot(context: context).intents[retryID])
+        XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty,
+                      "Queueing a retry does not authorize automatic sending.")
         XCTAssertEqual(retry.answerKind, .noComment)
         XCTAssertEqual(String(decoding: retry.wireFrame, as: UTF8.self),
                        #"{"type":"answer_no_comment","request_id":"sample","request_revision":1}"# + "\n")
@@ -698,7 +701,11 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         let submitted = try XCTUnwrap(store.snapshot(context: context).intents[queuedID])
         XCTAssertEqual(String(decoding: submitted.wireFrame, as: UTF8.self),
                        #"{"type":"answer_no_comment","request_id":"reply-only","request_revision":1}"# + "\n")
-        XCTAssertNil(try store.snapshot(context: context).drafts[key])
+        let queuedDraft = try XCTUnwrap(store.snapshot(context: context).drafts[key])
+        var expectedDraft = RequestDraft(inputs: [:])
+        expectedDraft.noCommentSelected = true
+        XCTAssertEqual(queuedDraft, expectedDraft,
+                       "Only the queued No comment choice survives, never the local Reply text.")
         XCTAssertNil(try XCTUnwrap(live.request(for: key)).submittedAnswer,
                      "The queued No comment operation does not create a server answer.")
         XCTAssertEqual(submitted.answerKind, .noComment)
@@ -819,7 +826,9 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         let (context, store, live, key) = try await setup()
         _ = try store.apply(RelayEvent(sequence: 2, body: .terminal(key, .answered, nil)), context: context)
         live.submitFromUser(key)
-        XCTAssertEqual(live.actionError, "This request is no longer open for an answer.")
+        XCTAssertNil(live.actionError, "Show the server terminal state without claiming a local answer.")
+        XCTAssertEqual(live.request(for: key)?.lifecycleStatus, .answered)
+        XCTAssertNil(live.request(for: key)?.submittedAnswer)
         XCTAssertTrue(try store.snapshot(context: context).intents.isEmpty)
         XCTAssertNil(live.request(for: key)?.receiptFacts)
     }
