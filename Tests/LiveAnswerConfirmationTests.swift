@@ -625,7 +625,10 @@ final class LiveAnswerConfirmationTests: XCTestCase {
             items: decoded.items, nextCursor: nil, receiptCursor: nil, context: context)
         _ = try store.prepareInboxCheckpointAcknowledgement(context: context)
         _ = try store.acceptInboxCheckpoint(snapshotID: "snapshot", highWater: 2, context: context)
+        let cached = try ServerStateCacheSnapshot.make(identity: context.identity,
+            from: store.snapshot(context: context), conversations: store.conversationSnapshot(context: context))
         let reconnected = try ClientRepository(context: context, persistence: persistence)
+        try reconnected.restoreCachedServerState(cached.attentionDomainState(for: context.identity), context: context)
         let live = try LivePresentationStore(store: reconnected, context: context)
         let request = try XCTUnwrap(live.request(for: key))
         XCTAssertTrue(request.isDefaultAnswered)
@@ -636,7 +639,7 @@ final class LiveAnswerConfirmationTests: XCTestCase {
                        "Answered by default: Hold for now")
     }
 
-    func testOlderServerOriginOnlyAnswerDoesNotCreatePhoneSpecificSeenState() throws {
+    func testServerSuppliedSeenAnswerConfirmsWithoutLocalReceipt() throws {
         let context = ProfileContext(identity: ProfileIdentity(
             trustedRelayAuthority: ExactText("relay.example"), personID: ExactText("person"),
             deviceID: ExactText("device")), transportMode: .relay)
@@ -654,22 +657,13 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         let request = try XCTUnwrap(live.request(for: key))
         XCTAssertEqual(request.lifecycleStatus, .answered)
         XCTAssertNil(request.accountAnswerOutcome)
-        XCTAssertNil(request.informationalSeenStatus,
-                     "An older server's origin-only answer is not the shared account outcome.")
+        XCTAssertEqual(request.informationalSeenStatus, .confirmed,
+                       "The authorized server answer confirms Seen without any device receipt.")
         XCTAssertNil(request.intentReceipt)
         XCTAssertNil(request.receiptFacts)
-        XCTAssertTrue(try XCTUnwrap(live.inboxRows.first { $0.key == key }).status.contains("Answered"))
-        XCTAssertEqual(String(localized: LiveRequestDetail.answeredConfirmationTitle(
-            isDefaultAnswered: request.isDefaultAnswered)), "Answered",
-            "An older server's terminal stays generic instead of claiming Replied or Seen.")
+        XCTAssertTrue(try XCTUnwrap(live.inboxRows.first { $0.key == key }).status.contains("Seen"))
     }
 
-    func testRemoteRequestStateReadsPersistedRecordsWithoutAccountOutcome() throws {
-        let saved = try JSONDecoder().decode(RemoteRequestState.self,
-                                             from: Data(#"{"state":"answered"}"#.utf8))
-        XCTAssertEqual(saved.state, .answered)
-        XCTAssertNil(saved.accountAnswerOutcome)
-    }
 
     func testNoCommentCheckmarkCommitsWithoutSavingReplyContents() async throws {
         let (context, store, live, key) = try await setupReplyOnly()
@@ -697,7 +691,7 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         XCTAssertEqual(submitted.answerKind, .noComment)
     }
 
-    func testNoCommentUsesDisplayedRevisionAndStaleTapKeepsCurrentQuestionOpen() throws {
+    func testNoCommentUsesDisplayedRevisionAndStaleTapKeepsCurrentQuestionOpen() async throws {
         let context = ProfileContext(identity: ProfileIdentity(
             trustedRelayAuthority: ExactText("relay.example"), personID: ExactText("person"),
             deviceID: ExactText("device")), transportMode: .relay)
@@ -712,6 +706,7 @@ final class LiveAnswerConfirmationTests: XCTestCase {
             body: .delivery(StoredRequest(key: key, originalPayload: first), .message),
             conversation: RelayConversationMetadata(revision: 1, sessionHandle: ExactText("origin"))),
             context: context)
+        _ = try await confirmedPresentation(store: store, context: context, key: key, payload: first)
         try store.applyConversation(ConversationEvent(sequence: 1, binding: firstBinding,
             fact: .request(sessionHandle: ExactText("origin"), payload: first)), context: context)
 

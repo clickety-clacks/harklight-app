@@ -1385,11 +1385,11 @@ public final class AttentionDomainPort: @unchecked Sendable {
                                          status: AppLifecycleStatus,
                                          remote: RemoteRequestState?,
                                          submission: Submission?) -> InformationalSeenStatus? {
-        guard request.hasExplicitInformationalSeenAction else { return nil }
         if remote?.state == .answered,
            remote?.accountAnswerOutcome == .seen {
             return .confirmed
         }
+        guard request.hasExplicitInformationalSeenAction else { return nil }
         let seenValue = JSONValue.object([
             JSONMember("acknowledgment", .string(ExactText("seen")))
         ])
