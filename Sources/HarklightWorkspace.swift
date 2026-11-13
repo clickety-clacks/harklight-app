@@ -2329,7 +2329,7 @@ struct InboxList: View {
 
 private struct CompactSearchScrollClearance: ViewModifier {
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
-    @ScaledMetric(relativeTo: .largeTitle) private var bottomSearchClearance: CGFloat = 80
+    @ScaledMetric(relativeTo: .body) private var bottomSearchClearance: CGFloat = 80
 
     @ViewBuilder
     func body(content: Content) -> some View {

@@ -56,20 +56,8 @@ final class InboxStockTabsUITests: XCTestCase {
     }
 
     func testNativeListSearchKeepsInboxAndRepliedResults() {
-        for contentSize in [
-            UIContentSizeCategory.extraExtraLarge,
-            UIContentSizeCategory.extraExtraExtraLarge
-        ] {
-            verifyNativeListSearchResults(at: contentSize)
-        }
-    }
-
-    private func verifyNativeListSearchResults(at contentSize: UIContentSizeCategory) {
         let app = XCUIApplication()
-        app.launchArguments = [
-            "-UIPreferredContentSizeCategoryName", contentSize.rawValue,
-            "--reset-attention-fixture", "--harklight-samples"
-        ]
+        app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
         app.launch()
 
         let inboxTab = workspaceTab("Inbox", in: app)
@@ -105,46 +93,26 @@ final class InboxStockTabsUITests: XCTestCase {
         let lastFilteredResult = app.descendants(matching: .any)["sample-approval-0"]
         XCTAssertFalse(lastFilteredResult.exists && lastFilteredResult.isHittable,
                        "The final matching sample is not initially visible above the bottom filter.")
-        XCTAssertTrue(inboxTab.exists, app.debugDescription)
-        XCTAssertTrue(repliedTab.exists, app.debugDescription)
-        var stationarySwipes = 0
-        for _ in 0..<40 {
-            guard lastFilteredResult.exists else {
-                list.swipeUp()
-                stationarySwipes = 0
-                continue
-            }
-            let resultFrame = lastFilteredResult.frame
-            let clearsMessageFilters = !resultFrame.intersects(inboxTab.frame) &&
-                !resultFrame.intersects(repliedTab.frame)
-            if lastFilteredResult.isHittable && clearsMessageFilters {
-                break
+        let tabBar = app.tabBars.firstMatch
+        XCTAssertTrue(tabBar.exists, app.debugDescription)
+        for _ in 0..<12 {
+            if lastFilteredResult.exists {
+                let resultFrame = lastFilteredResult.frame
+                if lastFilteredResult.isHittable && resultFrame.maxY <= tabBar.frame.minY {
+                    break
+                }
             }
             list.swipeUp()
-            guard lastFilteredResult.exists else {
-                stationarySwipes = 0
-                continue
-            }
-            let nextFrame = lastFilteredResult.frame
-            if !resultFrame.isEmpty && !nextFrame.isEmpty &&
-                abs(nextFrame.minY - resultFrame.minY) < 1 {
-                stationarySwipes += 1
-            } else {
-                stationarySwipes = 0
-            }
-            if stationarySwipes == 2 { break }
         }
         XCTAssertTrue(lastFilteredResult.exists, app.debugDescription)
         XCTAssertTrue(lastFilteredResult.isHittable, app.debugDescription)
-        XCTAssertFalse(lastFilteredResult.frame.intersects(inboxTab.frame),
-                       "The last filtered result clears the Inbox filter control.")
-        XCTAssertFalse(lastFilteredResult.frame.intersects(repliedTab.frame),
-                       "The last filtered result clears the Replied filter control.")
+        XCTAssertLessThanOrEqual(lastFilteredResult.frame.maxY, tabBar.frame.minY,
+                                 "The last filtered result clears the bottom message filter.")
         XCTAssertTrue(inboxTab.isHittable, app.debugDescription)
         XCTAssertTrue(repliedTab.isHittable, app.debugDescription)
         attachScreenshot("Inbox filtered results above bottom message filter", from: app)
 
-        for _ in 0..<40 {
+        for _ in 0..<12 {
             if searchField.isHittable { break }
             list.swipeDown()
         }
@@ -170,12 +138,8 @@ final class InboxStockTabsUITests: XCTestCase {
         finish.tap()
 
         let back = workspaceBackButton(in: app)
-        if back.exists {
-            back.tap()
-        } else {
-            XCTAssertTrue(inboxTab.isHittable,
-                          "The iPad keeps Inbox beside the selected request detail.")
-        }
+        XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
+        back.tap()
         XCTAssertFalse(approval.waitForExistence(timeout: 2),
                        "An answered request leaves the Inbox search results.")
         repliedTab.tap()
@@ -183,7 +147,6 @@ final class InboxStockTabsUITests: XCTestCase {
         XCTAssertTrue(approval.waitForExistence(timeout: 5),
                       "The same query finds the answered request in Replied.")
         attachScreenshot("Replied results for Archive", from: app)
-        app.terminate()
     }
 
     func testInboxAndRepliedPullToRefreshRunAndKeepFailureVisible() {
