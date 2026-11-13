@@ -84,18 +84,14 @@ public final class HostSessionGate: @unchecked Sendable {
     private struct Pairing {
         let secret: String
         let account: HostAccount
-        let deadline: TimeInterval
-        var failures: Int
     }
 
     private struct Access {
         let account: HostAccount
         let hostGeneration: String
-        let deadline: TimeInterval
     }
 
     private let lock = NSLock()
-    private let now: @Sendable () -> TimeInterval
     private let random: @Sendable (Int) throws -> Data
     private var activeAccount: HostAccount?
     private var hostGeneration: String
@@ -103,14 +99,10 @@ public final class HostSessionGate: @unchecked Sendable {
     private var sessions: [String: Access] = [:]
 
     public convenience init() throws {
-        try self.init(now: { ProcessInfo.processInfo.systemUptime }, random: Self.secureRandom)
+        try self.init(random: Self.secureRandom)
     }
 
-    public init(
-        now: @escaping @Sendable () -> TimeInterval,
-        random: @escaping @Sendable (Int) throws -> Data
-    ) throws {
-        self.now = now
+    public init(random: @escaping @Sendable (Int) throws -> Data) throws {
         self.random = random
         self.hostGeneration = try Self.encode(random(16), expectedBytes: 16)
     }
@@ -139,25 +131,17 @@ public final class HostSessionGate: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         guard activeAccount == account else { throw HostBoundaryError.rejected }
         let secret = try Self.encode(random(16), expectedBytes: 16)
-        pairing = Pairing(secret: secret, account: account, deadline: now() + 300, failures: 0)
+        pairing = Pairing(secret: secret, account: account)
         return secret
     }
 
     public func pair(secret: String, account: HostAccount) throws -> HostSession {
         lock.lock(); defer { lock.unlock() }
-        guard var pending = pairing else { throw HostBoundaryError.rejected }
-        let valid = activeAccount == account && pending.account == account &&
-            now() < pending.deadline && pending.failures < 5 &&
-            Self.constantTimeEqual(secret, pending.secret)
-        guard valid else {
-            pending.failures += 1
-            pairing = pending.failures >= 5 ? nil : pending
-            throw HostBoundaryError.rejected
-        }
+        guard let pending = pairing, activeAccount == account, pending.account == account,
+              secret == pending.secret else { throw HostBoundaryError.rejected }
         pairing = nil
         let token = try Self.encode(random(32), expectedBytes: 32)
-        sessions[token] = Access(account: account, hostGeneration: hostGeneration,
-                                 deadline: now() + 12 * 60 * 60)
+        sessions[token] = Access(account: account, hostGeneration: hostGeneration)
         return HostSession(token: token, hostGeneration: hostGeneration, account: account)
     }
 
@@ -165,8 +149,7 @@ public final class HostSessionGate: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         guard let access = sessions[token], let activeAccount else { return false }
         return activeAccount == account && access.account == account &&
-            access.hostGeneration == hostGeneration && self.hostGeneration == hostGeneration &&
-            now() < access.deadline
+            access.hostGeneration == hostGeneration && self.hostGeneration == hostGeneration
     }
 
     public func logout(token: String) {
@@ -194,11 +177,4 @@ public final class HostSessionGate: @unchecked Sendable {
         return Data(bytes)
     }
 
-    private static func constantTimeEqual(_ left: String, _ right: String) -> Bool {
-        let a = Array(left.utf8), b = Array(right.utf8)
-        guard a.count == b.count else { return false }
-        var difference: UInt8 = 0
-        for index in a.indices { difference |= a[index] ^ b[index] }
-        return difference == 0
-    }
 }

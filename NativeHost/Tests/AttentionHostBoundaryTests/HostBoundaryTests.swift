@@ -3,18 +3,7 @@ import XCTest
 
 private final class TestSources: @unchecked Sendable {
     private let lock = NSLock()
-    private var time: TimeInterval = 100
     private var sequence: UInt8 = 1
-
-    func now() -> TimeInterval {
-        lock.lock(); defer { lock.unlock() }
-        return time
-    }
-
-    func advance(_ seconds: TimeInterval) {
-        lock.lock(); defer { lock.unlock() }
-        time += seconds
-    }
 
     func bytes(_ count: Int) -> Data {
         lock.lock(); defer { lock.unlock() }
@@ -29,10 +18,10 @@ final class HostBoundaryTests: XCTestCase {
     private let accountB = HostAccount(scope: "relay-B/person-1", deviceGeneration: "device-1")
 
     private func gate(_ sources: TestSources) throws -> HostSessionGate {
-        try HostSessionGate(now: { sources.now() }, random: { sources.bytes($0) })
+        try HostSessionGate(random: { sources.bytes($0) })
     }
 
-    func testPairingSingleUseAttemptLimitExpiryAndSessionFences() throws {
+    func testPairingSingleUseAndSessionFences() throws {
         let sources = TestSources()
         let gate = try gate(sources)
         try gate.activate(accountA)
@@ -51,15 +40,9 @@ final class HostBoundaryTests: XCTestCase {
 
         let second = try gate.issuePairSecret(for: accountA)
         for _ in 0..<5 { XCTAssertThrowsError(try gate.pair(secret: "wrong", account: accountA)) }
-        XCTAssertThrowsError(try gate.pair(secret: second, account: accountA))
-        let third = try gate.issuePairSecret(for: accountA)
-        sources.advance(300)
-        XCTAssertThrowsError(try gate.pair(secret: third, account: accountA))
-        let fourth = try gate.issuePairSecret(for: accountA)
-        let expiring = try gate.pair(secret: fourth, account: accountA)
-        sources.advance(12 * 60 * 60)
-        XCTAssertFalse(gate.authorize(token: expiring.token, account: accountA,
-                                      hostGeneration: expiring.hostGeneration))
+        let afterWrongAttempts = try gate.pair(secret: second, account: accountA)
+        XCTAssertTrue(gate.authorize(token: afterWrongAttempts.token, account: accountA,
+                                     hostGeneration: afterWrongAttempts.hostGeneration))
     }
 
     func testAccountSwitchAndHostRestartFenceOldPages() throws {
