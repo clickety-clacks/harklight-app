@@ -74,13 +74,13 @@ final class LoopbackHTTPServerTests: XCTestCase {
         XCTAssertEqual(script.0, 200)
         let unavailable = try await request(origin + "/api/pair", method: "POST", origin: origin)
         XCTAssertEqual(unavailable.0, 503)
-        let forbidden = try await request(origin + "/api/pair", method: "POST", origin: nil)
-        XCTAssertEqual(forbidden.0, 403)
+        let unavailableWithoutOrigin = try await request(origin + "/api/pair", method: "POST", origin: nil)
+        XCTAssertEqual(unavailableWithoutOrigin.0, 503)
         let hidden = try await request(origin + "/api/observe", method: "GET", origin: nil)
         XCTAssertEqual(hidden.0, 403)
     }
 
-    func testRealLoopbackPostBoundaryAndStaticAsset() async throws {
+    func testRealLoopbackAllowsArbitraryOriginButKeepsRequestShapeChecks() async throws {
         let server = LoopbackHTTPServer { request, boundary in
             if request.head.path == "/" {
                 guard (try? boundary.validateStatic(request.head)) != nil else {
@@ -109,9 +109,9 @@ final class LoopbackHTTPServerTests: XCTestCase {
         let foreign = try await request(origin + "/api/inspect", method: "POST",
                                         origin: "http://localhost:\(port)")
         let get = try await request(origin + "/api/inspect", method: "GET", origin: nil)
-        XCTAssertEqual(missing.0, 403)
-        XCTAssertEqual(null.0, 403)
-        XCTAssertEqual(foreign.0, 403)
+        XCTAssertEqual(missing.0, 200)
+        XCTAssertEqual(null.0, 200)
+        XCTAssertEqual(foreign.0, 200)
         XCTAssertEqual(get.0, 403)
     }
 
