@@ -49,7 +49,7 @@ final class SampleLibraryTests: XCTestCase {
     func testSampleActionsLeaveRealRequestsAndIdentityUntouched() throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"), personID: ExactText("person"), deviceID: ExactText("device"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
-        let domain = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
+        let domain = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
         let key = RequestKey(accountScope: identity.personID, senderID: ExactText("sender"), messageID: ExactText("real-message"))
         let payload = try JSONValue.parse(Data(#"{"sender_id":"sender","message_id":"real-message","created_at":1,"title":"Keep this real message"}"#.utf8))
         _ = try domain.apply(RelayEvent(sequence: 1, body: .delivery(StoredRequest(key: key, originalPayload: payload), .message)), context: context)

@@ -3,11 +3,11 @@ import HarklightNativeRelay
 import XCTest
 
 final class ConversationJoinTests: XCTestCase {
-    private func setup() throws -> (ProfileContext, MemoryAttentionStatePersistence, AttentionDomainStore, RequestKey) {
+    private func setup() throws -> (ProfileContext, MemoryPendingActionPersistence, ClientRepository, RequestKey) {
         let context = ProfileContext(identity: ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
             personID: ExactText("person"), deviceID: ExactText("reader")), transportMode: .relay)
-        let persistence = MemoryAttentionStatePersistence()
-        let domain = try AttentionDomainStore(context: context, persistence: persistence)
+        let persistence = MemoryPendingActionPersistence()
+        let domain = try ClientRepository(context: context, persistence: persistence)
         let key = RequestKey(accountScope: context.identity.personID, senderID: ExactText("sender"), messageID: ExactText("request"))
         return (context, persistence, domain, key)
     }
@@ -35,7 +35,7 @@ final class ConversationJoinTests: XCTestCase {
         let archived = try XCTUnwrap(port.inspectAnswerDraft(context: port.context, request: key, revision: 1))
         XCTAssertEqual(archived.draft.compatibility.selectedActionID, ExactText("old"))
         XCTAssertNil(archived.selector)
-        let restored = try AttentionDomainStore(context: context, persistence: persistence)
+        let restored = try ClientRepository(context: context, persistence: persistence)
         let thread = try XCTUnwrap(restored.conversationSnapshot(context: context).threads[key])
         XCTAssertEqual(thread.revisionNumbers, [1, 2])
         XCTAssertTrue(thread.currentContentRedacted)

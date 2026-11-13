@@ -36,7 +36,7 @@ private final class DelayedUserDefaults: UserDefaults, @unchecked Sendable {
     var delayedWriteThreadWasMain: Bool? { lock.withLock { delayedWriteWasOnMainThread } }
 }
 
-private final class DelayedAttentionPersistence: AttentionStatePersistence, @unchecked Sendable {
+private final class DelayedAttentionPersistence: PendingActionPersistence, @unchecked Sendable {
     private let lock = NSLock()
     private var data: Data?
     private var nextWriteDelay: TimeInterval?
@@ -117,7 +117,7 @@ final class FirstOpenScrollResponsivenessTests: XCTestCase {
             personID: ExactText("person"), deviceID: ExactText("device"))
         let context = ProfileContext(identity: identity, transportMode: .fixture)
         let persistence = DelayedAttentionPersistence()
-        let domain = try AttentionDomainStore(context: context, persistence: persistence)
+        let domain = try ClientRepository(context: context, persistence: persistence)
         let request = RequestKey(accountScope: identity.personID,
             senderID: ExactText("sender"), messageID: ExactText("request"))
         let binding = ConversationBinding(request: request, revision: 1)
@@ -157,7 +157,7 @@ final class FirstOpenScrollResponsivenessTests: XCTestCase {
             personID: ExactText("person"), deviceID: ExactText("device"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
         let persistence = DelayedAttentionPersistence()
-        let domain = try AttentionDomainStore(context: context, persistence: persistence)
+        let domain = try ClientRepository(context: context, persistence: persistence)
         _ = try domain.beginInboxCandidate(startupID: "first-open", since: 0,
             batches: [], context: context)
         let defaults = DelayedUserDefaults()
@@ -197,7 +197,7 @@ final class FirstOpenScrollResponsivenessTests: XCTestCase {
             personID: ExactText("person"), deviceID: ExactText("device"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
         let persistence = DelayedAttentionPersistence()
-        let domain = try AttentionDomainStore(context: context, persistence: persistence)
+        let domain = try ClientRepository(context: context, persistence: persistence)
         let request = RequestKey(accountScope: identity.personID,
             senderID: ExactText("sender"), messageID: ExactText("request"))
         let payload = try JSONValue.parse(Data(#"{"title":"Conversation"}"#.utf8))
@@ -248,7 +248,7 @@ final class FirstOpenScrollResponsivenessTests: XCTestCase {
                 personID: ExactText("person-\(count)"), deviceID: ExactText("device"))
             let context = ProfileContext(identity: identity, transportMode: .relay)
             let persistence = DelayedAttentionPersistence()
-            let domain = try AttentionDomainStore(context: context, persistence: persistence)
+            let domain = try ClientRepository(context: context, persistence: persistence)
             _ = try domain.beginInboxCandidate(startupID: "growing-backlog-\(count)", since: 0,
                 batches: [], context: context)
             let items = (1...count).reversed().map { sequence -> InboxSnapshotItem in
@@ -339,7 +339,7 @@ final class FirstOpenScrollResponsivenessTests: XCTestCase {
                 personID: ExactText("person-\(count)"), deviceID: ExactText("device"))
             let context = ProfileContext(identity: identity, transportMode: .relay)
             let persistence = DelayedAttentionPersistence()
-            let domain = try AttentionDomainStore(context: context, persistence: persistence)
+            let domain = try ClientRepository(context: context, persistence: persistence)
             let request = RequestKey(accountScope: identity.personID,
                 senderID: ExactText("sender"), messageID: ExactText("request"))
             let binding = ConversationBinding(request: request, revision: 1)

@@ -6,11 +6,11 @@ import XCTest
 
 @MainActor
 final class LiveAnswerConfirmationTests: XCTestCase {
-    private func setup() throws -> (ProfileContext, AttentionDomainStore, LivePresentationStore, RequestKey) {
+    private func setup() throws -> (ProfileContext, ClientRepository, LivePresentationStore, RequestKey) {
         let context = ProfileContext(identity: ProfileIdentity(
             trustedRelayAuthority: ExactText("relay.example"), personID: ExactText("person"),
             deviceID: ExactText("device")), transportMode: .relay)
-        let store = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
+        let store = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
         let key = RequestKey(accountScope: context.identity.personID,
                              senderID: ExactText("sender"), messageID: ExactText("sample"))
         let payload = try JSONValue.parse(Data(#"{"title":"Sample","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"got-it","label":"Got it","kind":"value","value":"got-it"}]}}"#.utf8))
@@ -19,11 +19,11 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         return (context, store, try LivePresentationStore(store: store, context: context), key)
     }
 
-    private func setupReplyOnly() throws -> (ProfileContext, AttentionDomainStore, LivePresentationStore, RequestKey) {
+    private func setupReplyOnly() throws -> (ProfileContext, ClientRepository, LivePresentationStore, RequestKey) {
         let context = ProfileContext(identity: ProfileIdentity(
             trustedRelayAuthority: ExactText("relay.example"), personID: ExactText("person"),
             deviceID: ExactText("device")), transportMode: .relay)
-        let store = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
+        let store = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
         let key = RequestKey(accountScope: context.identity.personID,
                              senderID: ExactText("sender"), messageID: ExactText("reply-only"))
         let payload = try JSONValue.parse(Data(#"{"title":"Reply-only request"}"#.utf8))
@@ -36,8 +36,8 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
             personID: ExactText("person"), deviceID: ExactText("device"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
-        let store = try AttentionDomainStore(context: context,
-            persistence: MemoryAttentionStatePersistence(), persistsOnlyLocalState: true)
+        let store = try ClientRepository(context: context,
+            persistence: MemoryPendingActionPersistence())
         let key = RequestKey(accountScope: identity.personID,
             senderID: ExactText("sender"), messageID: ExactText("cached-answer"))
         let payload = try JSONValue.parse(Data(#"{"title":"Cached question","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"got-it","label":"Got it","kind":"value","value":"got-it"}]}}"#.utf8))
@@ -45,7 +45,7 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         _ = try store.apply(RelayEvent(sequence: 1, body: .delivery(stored, .message)),
                             context: context)
         let inbox = try store.snapshot(context: context)
-        try store.restoreCachedServerState(CachedAttentionServerState(
+        try store.restoreCachedServerState(CachedAttentionServerState(identity: context.identity,
             requests: inbox.requests, remoteStates: inbox.remoteStates, cursor: inbox.cursor,
             conversationCursor: 0, conversations: [:], inboxView: nil,
             currentRequestKeys: [key]), context: context)
@@ -64,11 +64,11 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty)
     }
 
-    private func setupTextReplyOnly() throws -> (ProfileContext, AttentionDomainStore, LivePresentationStore, RequestKey) {
+    private func setupTextReplyOnly() throws -> (ProfileContext, ClientRepository, LivePresentationStore, RequestKey) {
         let context = ProfileContext(identity: ProfileIdentity(
             trustedRelayAuthority: ExactText("relay.example"), personID: ExactText("person"),
             deviceID: ExactText("device")), transportMode: .relay)
-        let store = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
+        let store = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
         let key = RequestKey(accountScope: context.identity.personID,
                              senderID: ExactText("sender"), messageID: ExactText("text-reply-only"))
         let payload = try JSONValue.parse(Data(#"{"title":"Text reply request","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"reply","label":"Reply","kind":"text"}]}}"#.utf8))
@@ -77,14 +77,14 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         return (context, store, try LivePresentationStore(store: store, context: context), key)
     }
 
-    private func commitAnswer(_ store: AttentionDomainStore, key: RequestKey) throws -> IntentReceipt {
+    private func commitAnswer(_ store: ClientRepository, key: RequestKey) throws -> IntentReceipt {
         let port = AttentionDomainPort(store: store)
         let selector = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first?.selector)
         return try port.submit(SubmitIntent(context: port.context, selector: selector, intentID: UUID(),
                                              inputs: [.compatibilityValue(action: ExactText("got-it"))]))
     }
 
-    private func commitNoComment(_ store: AttentionDomainStore, key: RequestKey) throws -> IntentReceipt {
+    private func commitNoComment(_ store: ClientRepository, key: RequestKey) throws -> IntentReceipt {
         let port = AttentionDomainPort(store: store)
         let selector = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first?.selector)
         return try port.submitNoComment(context: port.context, selector: selector, intentID: UUID())
@@ -539,8 +539,8 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         let (context, _, _, key) = try setup()
         let initialPayload = try JSONValue.parse(Data(#"{"title":"Choose","stake":"Earlier stake","by_when":1793200000000,"answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"old","label":"Old choice","kind":"value","value":1}]}}"#.utf8))
         // Replace the setup message with a fresh store to keep the event sequence coherent.
-        let freshStore = try AttentionDomainStore(context: context,
-            persistence: MemoryAttentionStatePersistence())
+        let freshStore = try ClientRepository(context: context,
+            persistence: MemoryPendingActionPersistence())
         _ = try freshStore.apply(RelayEvent(sequence: 1,
             body: .delivery(StoredRequest(key: key, originalPayload: initialPayload), .message)),
             context: context)
@@ -576,8 +576,8 @@ final class LiveAnswerConfirmationTests: XCTestCase {
 
     func testDefaultOutcomeWithoutValueStillShowsTextAndDefaultStatus() throws {
         let (context, _, _, key) = try setup()
-        let store = try AttentionDomainStore(context: context,
-            persistence: MemoryAttentionStatePersistence())
+        let store = try ClientRepository(context: context,
+            persistence: MemoryPendingActionPersistence())
         let payload = try JSONValue.parse(Data(#"{"title":"Choose","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"yes","label":"Yes","kind":"value","value":true}]}}"#.utf8))
         _ = try store.apply(RelayEvent(sequence: 1,
             body: .delivery(StoredRequest(key: key, originalPayload: payload), .message)), context: context)
@@ -603,14 +603,14 @@ final class LiveAnswerConfirmationTests: XCTestCase {
                        .defaultAnswer(value: .number(JSONNumber(lexeme: "2")),
                                       text: ExactText("Hold for now")))
 
-        let persistence = MemoryAttentionStatePersistence()
-        let store = try AttentionDomainStore(context: context, persistence: persistence)
+        let persistence = MemoryPendingActionPersistence()
+        let store = try ClientRepository(context: context, persistence: persistence)
         _ = try store.beginInboxCandidate(startupID: "startup", since: 0, batches: [], context: context)
         try store.saveInboxInitialPage(snapshotID: "snapshot", highWater: 2,
             items: decoded.items, nextCursor: nil, receiptCursor: nil, context: context)
         _ = try store.prepareInboxCheckpointAcknowledgement(context: context)
         _ = try store.acceptInboxCheckpoint(snapshotID: "snapshot", highWater: 2, context: context)
-        let reconnected = try AttentionDomainStore(context: context, persistence: persistence)
+        let reconnected = try ClientRepository(context: context, persistence: persistence)
         let live = try LivePresentationStore(store: reconnected, context: context)
         let request = try XCTUnwrap(live.request(for: key))
         XCTAssertTrue(request.isDefaultAnswered)
@@ -625,7 +625,7 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         let context = ProfileContext(identity: ProfileIdentity(
             trustedRelayAuthority: ExactText("relay.example"), personID: ExactText("person"),
             deviceID: ExactText("device")), transportMode: .relay)
-        let store = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
+        let store = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
         let key = RequestKey(accountScope: context.identity.personID,
                              senderID: ExactText("sender"), messageID: ExactText("sample"))
         let payload = try JSONValue.parse(Data(#"{"title":"Sample","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"seen","label":"Seen","kind":"value","value":{"acknowledgment":"seen"}}]}}"#.utf8))
@@ -686,7 +686,7 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         let context = ProfileContext(identity: ProfileIdentity(
             trustedRelayAuthority: ExactText("relay.example"), personID: ExactText("person"),
             deviceID: ExactText("device")), transportMode: .relay)
-        let store = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
+        let store = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
         let key = RequestKey(accountScope: context.identity.personID,
                              senderID: ExactText("sender"), messageID: ExactText("conversation"))
         let first = JSONValue.object([JSONMember("title", .string(ExactText("First wording")))])

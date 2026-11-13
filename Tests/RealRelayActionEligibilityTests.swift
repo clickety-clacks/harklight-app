@@ -50,12 +50,12 @@ final class RealRelayActionEligibilityTests: XCTestCase {
             // connection restores it into a fresh domain and presentation store.
             for coldLaunch in [false, true] {
                 let context = ProfileContext(identity: identity, transportMode: .relay)
-                let cache = FileServerStateCache(fileURL: cacheURL)
-                let domain = try AttentionDomainStore(context: context,
-                    persistence: MemoryAttentionStatePersistence(), persistsOnlyLocalState: true)
+                let cache = FileServerStateCache(identity: context.identity, fileURL: cacheURL)
+                let domain = try ClientRepository(context: context,
+                    persistence: MemoryPendingActionPersistence())
                 if coldLaunch {
                     let saved = try await cache.load()
-                    try domain.restoreCachedServerState(try XCTUnwrap(saved).attentionDomainState(), context: context)
+                    try domain.restoreCachedServerState(try XCTUnwrap(saved).attentionDomainState(for: context.identity), context: context)
                 }
                 let live = try LivePresentationStore(store: domain, context: context, diagnostics: journal)
                 let seen = RequestKey(accountScope: identity.personID,

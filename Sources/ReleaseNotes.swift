@@ -3,10 +3,6 @@ import Foundation
 import Observation
 import SwiftUI
 
-private struct PersistedAttentionStateHeader: Decodable {
-    let profileIdentity: ProfileIdentity
-}
-
 private struct GeneratedReleaseNotesFile: Decodable {
     let entries: [GeneratedReleaseNote]
 }
@@ -855,44 +851,9 @@ enum NativeInstallationHistory {
             return true
         }
 
-        let directoryURL: URL
-        if let attentionDirectoryURL {
-            directoryURL = attentionDirectoryURL
-        } else {
-            do {
-                directoryURL = try FileAttentionStatePersistence.applicationSupport().directoryURL
-            } catch {
-                return true
-            }
-        }
-        if hasPersistedAttentionState(in: directoryURL, fileManager: fileManager) { return true }
         return false
     }
 
-    static func hasPersistedAttentionState(
-        in directoryURL: URL,
-        fileManager: FileManager = .default
-    ) -> Bool {
-        guard fileManager.fileExists(atPath: directoryURL.path) else { return false }
-        do {
-            let files = try fileManager.contentsOfDirectory(
-                at: directoryURL,
-                includingPropertiesForKeys: [.isRegularFileKey])
-                .filter { $0.pathExtension == "plist" && !$0.lastPathComponent.hasPrefix(".") }
-            for url in files {
-                let data = try Data(contentsOf: url, options: .mappedIfSafe)
-                let header = try PropertyListDecoder().decode(PersistedAttentionStateHeader.self, from: data)
-                if header.profileIdentity.trustedRelayAuthority.rawValue.hasPrefix("fixture-only:") {
-                    continue
-                }
-                return true
-            }
-            return false
-        } catch {
-            // An unreadable profile may still contain real prior user data.
-            return true
-        }
-    }
 }
 
 struct ReleaseNotesSettingsSection: View {

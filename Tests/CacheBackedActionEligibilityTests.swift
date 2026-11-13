@@ -16,14 +16,14 @@ final class CacheBackedActionEligibilityTests: XCTestCase {
         let key = RequestKey(accountScope: identity.personID,
             senderID: ExactText("sender"), messageID: ExactText("seen"))
         let payload = try JSONValue.parse(Data(#"{"title":"Information","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"seen","label":"Seen","kind":"value","value":{"acknowledgment":"seen"}}]}}"#.utf8))
-        let previous = try AttentionDomainStore(context: context,
-            persistence: MemoryAttentionStatePersistence(), persistsOnlyLocalState: true)
+        let previous = try ClientRepository(context: context,
+            persistence: MemoryPendingActionPersistence())
         _ = try previous.apply(RelayEvent(sequence: 1,
             body: .delivery(StoredRequest(key: key, originalPayload: payload), .message)), context: context)
         let saved = try previous.snapshot(context: context)
-        let domain = try AttentionDomainStore(context: context,
-            persistence: MemoryAttentionStatePersistence(), persistsOnlyLocalState: true)
-        try domain.restoreCachedServerState(CachedAttentionServerState(
+        let domain = try ClientRepository(context: context,
+            persistence: MemoryPendingActionPersistence())
+        try domain.restoreCachedServerState(CachedAttentionServerState(identity: context.identity,
             requests: saved.requests, remoteStates: [:], cursor: 1, conversationCursor: 0,
             conversations: [:], inboxView: nil, currentRequestKeys: [key]), context: context)
         let live = try LivePresentationStore(store: domain, context: context)
@@ -142,17 +142,17 @@ final class CacheBackedActionEligibilityTests: XCTestCase {
             senderID: ExactText("sender"), messageID: ExactText("reply"))
         let seenPayload = try JSONValue.parse(Data(#"{"title":"Information","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"seen","label":"Seen","kind":"value","value":{"acknowledgment":"seen"}}]}}"#.utf8))
         let replyPayload = try JSONValue.parse(Data(#"{"title":"Question","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"reply","label":"Reply","kind":"text"}]}}"#.utf8))
-        let previousLaunch = try AttentionDomainStore(context: context,
-            persistence: MemoryAttentionStatePersistence(), persistsOnlyLocalState: true)
+        let previousLaunch = try ClientRepository(context: context,
+            persistence: MemoryPendingActionPersistence())
         for (index, item) in [(seen, seenPayload), (reply, replyPayload)].enumerated() {
             _ = try previousLaunch.apply(RelayEvent(sequence: UInt64(index + 1),
                 body: .delivery(StoredRequest(key: item.0, originalPayload: item.1), .message)),
                 context: context)
         }
         let requests = try previousLaunch.snapshot(context: context).requests
-        let domain = try AttentionDomainStore(context: context,
-            persistence: MemoryAttentionStatePersistence(), persistsOnlyLocalState: true)
-        try domain.restoreCachedServerState(CachedAttentionServerState(
+        let domain = try ClientRepository(context: context,
+            persistence: MemoryPendingActionPersistence())
+        try domain.restoreCachedServerState(CachedAttentionServerState(identity: context.identity,
             requests: requests, remoteStates: [:], cursor: 2, conversationCursor: 0,
             conversations: [:], inboxView: nil, currentRequestKeys: [seen, reply]), context: context)
         let live = try LivePresentationStore(store: domain, context: context)
@@ -169,7 +169,7 @@ final class CacheBackedActionEligibilityTests: XCTestCase {
             initialState: .live(live), refreshOperation: { _ in
             do {
                 let result = try await NativeRelayLifecycle.shared.confirmInProcessSessionForTesting(
-                    store: domain, context: context, session: relay, serverStateCache: FileServerStateCache())
+                    store: domain, context: context, session: relay, serverStateCache: FileServerStateCache(identity: context.identity))
                 try live.refreshFromDurableStore()
                 return result
             } catch {

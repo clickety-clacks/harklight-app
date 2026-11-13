@@ -3,14 +3,14 @@ import Foundation
 import XCTest
 
 /// Controls the persistence seam while still exercising the production file adapter.
-private final class PageFilePersistence: AttentionStatePersistence, @unchecked Sendable {
+private final class PageFilePersistence: PendingActionPersistence, @unchecked Sendable {
     enum Failure { case beforeReplacement, afterReplacement }
-    let file: FileAttentionStatePersistence
+    let file: FilePendingActionPersistence
     private let lock = NSLock()
     private var nextAction: (@Sendable () throws -> Void)?
     private var failure: Failure?
 
-    init(directory: URL) { file = FileAttentionStatePersistence(directoryURL: directory) }
+    init(directory: URL) { file = FilePendingActionPersistence(directoryURL: directory) }
 
     func onNextCommit(_ action: @escaping @Sendable () throws -> Void) {
         lock.withLock { nextAction = action }
@@ -56,7 +56,7 @@ private struct PageFixture: Sendable {
     let directory: URL
     let persistence: PageFilePersistence
     let context: ProfileContext
-    let store: AttentionDomainStore
+    let store: ClientRepository
     static let highWater: UInt64 = 10_000
 
     init() throws {
@@ -64,7 +64,7 @@ private struct PageFixture: Sendable {
         persistence = PageFilePersistence(directory: directory)
         context = ProfileContext(identity: ProfileIdentity(trustedRelayAuthority: ExactText("page-test"),
             personID: ExactText("person"), deviceID: ExactText("device")), transportMode: .relay)
-        store = try AttentionDomainStore(context: context, persistence: persistence)
+        store = try ClientRepository(context: context, persistence: persistence)
         _ = try store.beginInboxCandidate(startupID: "startup", since: 0, batches: [], context: context)
         try store.saveInboxInitialPage(snapshotID: "snapshot", highWater: Self.highWater,
             items: [item(1)], nextCursor: "older", receiptCursor: nil, context: context)
@@ -90,7 +90,7 @@ private struct PageFixture: Sendable {
             cursor: cursor, items: items ?? [item(2)], nextCursor: next, context: context)
     }
     func reopen() throws -> AttentionStoreSnapshot {
-        try AttentionDomainStore(context: context, persistence: persistence).snapshot(context: context)
+        try ClientRepository(context: context, persistence: persistence).snapshot(context: context)
     }
     func remove() { try? FileManager.default.removeItem(at: directory) }
 }
@@ -152,7 +152,7 @@ final class InboxPagePersistenceTests: XCTestCase {
         plist["inboxCheckpoint"] = checkpoint
         try f.persistence.file.commit(PropertyListSerialization.data(fromPropertyList: plist, format: .binary, options: 0),
                                       identity: f.context.identity)
-        let restored = try AttentionDomainStore(context: f.context, persistence: f.persistence)
+        let restored = try ClientRepository(context: f.context, persistence: f.persistence)
         try restored.saveInboxOlderPage(snapshotID: "snapshot", highWater: PageFixture.highWater,
             cursor: "last", items: [f.item(2)], nextCursor: nil, context: f.context)
         XCTAssertEqual(try f.reopen().inboxSourceOrder, [f.key(3), f.key(1), f.key(2)])
@@ -302,7 +302,7 @@ final class InboxPagePersistenceTests: XCTestCase {
             let f = try PageFixture()
             defer { f.remove() }
             try f.persistence.file.commit(bytes, identity: f.context.identity)
-            let store = try AttentionDomainStore(context: f.context, persistence: f.persistence)
+            let store = try ClientRepository(context: f.context, persistence: f.persistence)
             let entered = DispatchSemaphore(value: 0), readStarted = DispatchSemaphore(value: 0)
             f.persistence.onNextCommit {
                 entered.signal()
@@ -331,7 +331,7 @@ final class InboxPagePersistenceTests: XCTestCase {
             }
             let milliseconds = try reader.value()
             try writer.value()
-            XCTAssertEqual(try AttentionDomainStore(context: f.context, persistence: f.persistence)
+            XCTAssertEqual(try ClientRepository(context: f.context, persistence: f.persistence)
                 .snapshot(context: f.context).requests.count, 421)
             print("PAGE_READER_INTERVAL sample=\(sample) seed_bytes=\(bytes.count) retained=401 page=20 cursor_read_ms=\(milliseconds)")
         }

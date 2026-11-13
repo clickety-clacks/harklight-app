@@ -365,10 +365,6 @@ public struct ConversationEvent: Equatable, Codable, Sendable {
         self.retractedAtMilliseconds = retractedAtMilliseconds
     }
 
-    func canEnrich(_ old: ConversationEvent) -> Bool {
-        sequence == old.sequence && binding == old.binding && fact == old.fact &&
-            (old.retractedAtMilliseconds == nil || old.retractedAtMilliseconds == retractedAtMilliseconds)
-    }
 
     var requiresLoadedThread: Bool {
         switch fact {
@@ -420,7 +416,7 @@ private func conversationValidationRejection(
 
 public struct ConversationThread: Equatable, Codable, Sendable {
     public let request: RequestKey
-    public let sessionHandle: ExactText
+    public var sessionHandle: ExactText
     public var revisions: [UInt64: JSONValue]
     public var currentRevision: UInt64
     public var turns: [ConversationTurn] = []
@@ -441,10 +437,7 @@ public struct ConversationThread: Equatable, Codable, Sendable {
     public var reportedRetractedAtMilliseconds: UInt64?
     public var uploadGroups: [UUID: ConversationUploadGroup]?
     public var uploadCleanups: [UUID: ConversationUploadCleanup]?
-    /// The latest agent reply that was on screen in this request's Chat.
-    public var readThroughTurn: ExactText?
-    /// Account-wide cursor when this server has supplied the read-position map.
-    /// nil preserves the legacy local turn marker on older servers.
+    /// The account-wide read position reported by the server.
     public var accountReadThroughConversationSequence: UInt64?
 
     mutating func recordAvailabilityUpdate(_ state: ConversationAvailability) {
@@ -472,7 +465,7 @@ public struct ConversationThread: Equatable, Codable, Sendable {
            let latestSequence = latest.conversationSequence {
             return latestSequence > accountReadThroughConversationSequence
         }
-        return latest.id != readThroughTurn
+        return true
     }
 
     public var isRetracted: Bool { retraction != nil || reportedRetractedAtMilliseconds != nil }
@@ -546,8 +539,7 @@ public struct ConversationThread: Equatable, Codable, Sendable {
                     turnIdentifierPresent: !turn.id.rawValue.isEmpty))
         }
         if let index = turns.firstIndex(where: { $0.id == turn.id }) {
-            guard turns[index] == turn else { throw ConversationError.conflict }
-            return
+            turns[index] = turn
         } else {
             turns.append(turn)
         }
@@ -555,9 +547,6 @@ public struct ConversationThread: Equatable, Codable, Sendable {
     }
 
     mutating func recordReportedRetraction(at retractedAtMilliseconds: UInt64) throws {
-        guard terminal == nil || terminal == .cleared,
-              [retraction?.retractedAtMilliseconds, reportedRetractedAtMilliseconds]
-                .allSatisfy({ $0 == nil || $0 == retractedAtMilliseconds }) else { throw ConversationError.conflict }
         terminal = .cleared
         reportedRetractedAtMilliseconds = retractedAtMilliseconds
     }
@@ -566,21 +555,11 @@ public struct ConversationThread: Equatable, Codable, Sendable {
                                    sequence: UInt64,
                                    revision: UInt64,
                                    retractedAtMilliseconds: UInt64? = nil) throws {
-        guard !turn.rawValue.isEmpty, sequence > 0, revision > 0,
-              terminal == nil || terminal == .cleared,
-              terminalTurn == nil || terminalTurn == turn,
-              reportedRetractedAtMilliseconds == nil || retractedAtMilliseconds == nil ||
-                reportedRetractedAtMilliseconds == retractedAtMilliseconds else { throw ConversationError.conflict }
-        let existing = retraction
-        guard existing == nil || (existing?.turn == turn && existing?.terminalSequence == sequence &&
-              existing?.revision == revision &&
-              (existing?.retractedAtMilliseconds == nil || retractedAtMilliseconds == nil ||
-               existing?.retractedAtMilliseconds == retractedAtMilliseconds)) else {
-            throw ConversationError.conflict
+        guard !turn.rawValue.isEmpty, sequence > 0, revision > 0 else {
+            throw ConversationError.invalidBinding
         }
         let fact = ConversationRetraction(turn: turn, terminalSequence: sequence, revision: revision,
-            retractedAtMilliseconds: existing?.retractedAtMilliseconds ?? retractedAtMilliseconds)
-        guard retraction == nil || retraction == fact else { throw ConversationError.conflict }
+            retractedAtMilliseconds: retractedAtMilliseconds)
         retraction = fact
         terminal = .cleared
         terminalTurn = turn
@@ -714,53 +693,6 @@ struct ConversationState: Codable, Equatable {
                                  retractedAtMilliseconds: event.retractedAtMilliseconds)
     }
 
-    /// Reconstruct old persisted turn arrays from the conversation sequence
-    /// journal. Turn IDs are identities and are not chronological ordering keys.
-    mutating func orderTurnsFromProjectionEvents() {
-        // `conversationSequence` was added after turns and projection events
-        // were already persisted. Fill it from the containing journal entry so
-        // replaying an already-saved event compares equal to its older copy.
-        var normalizedEvents: [UInt64: ConversationEvent] = [:]
-        for (sequence, event) in events {
-            normalizedEvents[sequence] = Self.assigningConversationSequence(event, from: sequence)
-        }
-        events = normalizedEvents
-
-        var turnSequences: [RequestKey: [ExactText: UInt64]] = [:]
-        var retractionSequences: [RequestKey: [ExactText: UInt64]] = [:]
-        for event in events.values {
-            switch event.fact {
-            case let .turn(turn), let .revision(turn, _), let .redactedRevision(turn):
-                let key = event.binding.request
-                let old = turnSequences[key]?[turn.id]
-                turnSequences[key, default: [:]][turn.id] = min(old ?? event.sequence, event.sequence)
-            case let .terminal(turn, _, _):
-                let key = event.binding.request
-                let old = turnSequences[key]?[turn]
-                turnSequences[key, default: [:]][turn] = min(old ?? event.sequence, event.sequence)
-            case let .retraction(turn, _):
-                let key = event.binding.request
-                let old = retractionSequences[key]?[turn]
-                retractionSequences[key, default: [:]][turn] = min(old ?? event.sequence, event.sequence)
-            default:
-                continue
-            }
-        }
-
-        var orderedThreads: [RequestKey: ConversationThread] = [:]
-        for (request, existing) in threads {
-            var thread = existing
-            var sequences = turnSequences[request] ?? [:]
-            for (turn, sequence) in retractionSequences[request] ?? [:] where sequences[turn] == nil {
-                sequences[turn] = sequence
-            }
-            thread.orderTurns(using: sequences)
-            orderedThreads[request] = thread
-        }
-        threads = orderedThreads
-        applySavedReadPositionSupport()
-    }
-
     mutating func apply(_ incomingEvent: ConversationEvent) throws {
         // The journal sequence is authoritative for every turn-bearing event.
         // Normalize before both merge and replay comparison so a replayed turn
@@ -774,33 +706,11 @@ struct ConversationState: Codable, Equatable {
                 eventKind: event.fact.diagnosticKind,
                 facts: ConversationValidationFacts(revisionIsZero: event.binding.revision == 0))
         }
-        if event.sequence <= cursor {
-            // Exact dependency recovery retains the turn itself, not a second
-            // historical journal entry. ACK-behind replay may repeat that fact.
-            if events[event.sequence] == nil, case let .turn(turn) = event.fact,
-               turn.binding == event.binding,
-               turn.kind == .discussion || turn.kind == .reply,
-               turn.conversationSequence == event.sequence,
-               threads[event.binding.request]?.turns.contains(turn) == true {
-                return
+        if event.sequence > cursor {
+            guard cursor < UInt64.max, event.sequence == cursor + 1 else {
+                throw ConversationError.gap(expected: cursor == UInt64.max ? cursor : cursor + 1,
+                                            received: event.sequence)
             }
-            guard let previous = events[event.sequence], event.canEnrich(previous) else {
-                throw ConversationError.conflict
-            }
-            if previous != event {
-                guard case let .retraction(turn, terminalSequence) = event.fact else { throw ConversationError.conflict }
-                if var thread = threads[event.binding.request] {
-                    try thread.recordRetraction(turn: turn, sequence: terminalSequence,
-                        revision: event.binding.revision,
-                        retractedAtMilliseconds: event.retractedAtMilliseconds)
-                    threads[event.binding.request] = thread
-                }
-                events[event.sequence] = event
-            }
-            return
-        }
-        guard cursor < UInt64.max, event.sequence == cursor + 1 else {
-            throw ConversationError.gap(expected: cursor == UInt64.max ? cursor : cursor + 1, received: event.sequence)
         }
         if case let .readPosition(eventID, position) = event.fact {
             guard event.binding.revision == 0, !eventID.rawValue.isEmpty, position > 0 else {
@@ -812,7 +722,7 @@ struct ConversationState: Codable, Equatable {
             }
             mergeReadPosition(event.binding.request, position: position)
             events[event.sequence] = event
-            cursor = event.sequence
+            cursor = max(cursor, event.sequence)
             return
         }
         let binding = event.binding
@@ -820,7 +730,7 @@ struct ConversationState: Codable, Equatable {
             // Keep facts for requests outside the initial inbox page. The journal
             // and cursor commit together, so the relay can be acknowledged now.
             events[event.sequence] = event
-            cursor = event.sequence
+            cursor = max(cursor, event.sequence)
             return
         }
 
@@ -836,7 +746,6 @@ struct ConversationState: Codable, Equatable {
                     facts: ConversationValidationFacts(revisionIsOne: binding.revision == 1,
                         sessionHandlePresent: !turn.sessionHandle.rawValue.isEmpty))
             }
-            try validateUnloadedSessionHandle(turn.sessionHandle, for: binding.request)
             var thread = ConversationThread(request: binding.request, sessionHandle: turn.sessionHandle,
                 revision: binding.revision, payload: payload)
             try applyHeldEvents(to: &thread)
@@ -850,7 +759,7 @@ struct ConversationState: Codable, Equatable {
             threads[binding.request] = thread
         }
         events[event.sequence] = event
-        cursor = event.sequence
+        cursor = max(cursor, event.sequence)
     }
 
     /// Restores one receipt dependency without replaying older facts or moving
@@ -890,9 +799,6 @@ struct ConversationState: Codable, Equatable {
         guard thread.revisionNumbers.contains(event.binding.revision),
               turn.sessionHandle == thread.sessionHandle,
               turn.kind == .discussion || turn.kind == .reply else {
-            throw ConversationError.conflict
-        }
-        if let retained = events[event.sequence], retained != event {
             throw ConversationError.conflict
         }
         // Merge the turn only. Applying the whole historical fact could settle
@@ -954,19 +860,10 @@ struct ConversationState: Codable, Equatable {
                 facts: ConversationValidationFacts(sessionHandlePresent: !handle.rawValue.isEmpty))
         }
         if var thread = threads[binding.request] {
-            guard thread.sessionHandle == handle else { throw ConversationError.conflict }
-            if let old = thread.revisions[binding.revision] {
-                guard old == payload else { throw ConversationError.conflict }
-            } else {
-                guard thread.redactedRevisions?.contains(binding.revision) != true else {
-                    throw ConversationError.conflict
-                }
-                guard binding.revision > thread.currentRevision else {
-                    throw ConversationError.staleRevision(current: thread.currentRevision)
-                }
-                thread.revisions[binding.revision] = payload
-                thread.currentRevision = binding.revision
-            }
+            thread.sessionHandle = handle
+            thread.revisions[binding.revision] = payload
+            thread.redactedRevisions?.remove(binding.revision)
+            thread.currentRevision = max(thread.currentRevision, binding.revision)
             threads[binding.request] = thread
         } else {
             guard binding.revision == 1 else {
@@ -974,7 +871,6 @@ struct ConversationState: Codable, Equatable {
                     eventKind: event.fact.diagnosticKind,
                     facts: ConversationValidationFacts(revisionIsOne: binding.revision == 1))
             }
-            try validateUnloadedSessionHandle(handle, for: binding.request)
             var thread = ConversationThread(request: binding.request, sessionHandle: handle,
                 revision: binding.revision, payload: payload)
             try applyHeldEvents(to: &thread)
@@ -1004,31 +900,25 @@ struct ConversationState: Codable, Equatable {
             }
             incoming[position.request] = position.readThroughConversationSequence
         }
-        var merged = chatReadPositions ?? [:]
-        for (request, position) in incoming {
-            merged[request] = max(merged[request] ?? 0, position)
-        }
         var pending = pendingChatReadPositions ?? [:]
         for request in Array(pending.keys) {
-            // `chatReadPositions` also holds optimistic local cursors. Only the
-            // position from this server snapshot can confirm a pending write.
             let serverPosition = incoming[request] ?? 0
             if let pendingWrite = pending[request],
                pendingWrite.readThroughConversationSequence <= serverPosition {
                 pending.removeValue(forKey: request)
             }
         }
-        chatReadPositions = merged
+        chatReadPositions = incoming
         pendingChatReadPositions = pending
         chatReadPositionSupport = true
-        applySavedReadPositionSupport(reconcileLocalRead: true)
+        applySavedReadPositionSupport()
     }
 
     mutating func prepareReadPosition(for request: RequestKey,
                                       operationID: UUID,
                                       position: UInt64) -> PendingConversationReadPosition? {
         guard chatReadPositionSupport == true, position > 0 else { return nil }
-        var positions = chatReadPositions ?? [:]
+        let positions = chatReadPositions ?? [:]
         let current = positions[request] ?? 0
         if current >= position {
             if let pending = pendingChatReadPositions?[request],
@@ -1037,8 +927,6 @@ struct ConversationState: Codable, Equatable {
             }
             return nil
         }
-        positions[request] = position
-        chatReadPositions = positions
         var pending = pendingChatReadPositions ?? [:]
         if let previous = pending[request], previous.readThroughConversationSequence == position {
             return previous
@@ -1047,21 +935,13 @@ struct ConversationState: Codable, Equatable {
             readThroughConversationSequence: position)
         pending[request] = saved
         pendingChatReadPositions = pending
-        if var thread = threads[request] {
-            thread.accountReadThroughConversationSequence = position
-            synchronizeLocalReadThrough(in: &thread, position: position)
-            threads[request] = thread
-        }
         return saved
     }
 
     mutating func acceptReadPosition(_ pending: PendingConversationReadPosition,
                                      serverPosition: UInt64) throws {
-        guard serverPosition >= pending.readThroughConversationSequence else {
-            throw ConversationError.conflict
-        }
         var positions = chatReadPositions ?? [:]
-        positions[pending.request] = max(positions[pending.request] ?? 0, serverPosition)
+        positions[pending.request] = serverPosition
         chatReadPositions = positions
         chatReadPositionSupport = true
         var queued = pendingChatReadPositions ?? [:]
@@ -1071,87 +951,32 @@ struct ConversationState: Codable, Equatable {
         pendingChatReadPositions = queued
         if var thread = threads[pending.request] {
             thread.accountReadThroughConversationSequence = positions[pending.request]
-            synchronizeLocalReadThrough(in: &thread, position: positions[pending.request] ?? 0)
             threads[pending.request] = thread
         }
     }
 
     private mutating func mergeReadPosition(_ request: RequestKey, position: UInt64) {
         var positions = chatReadPositions ?? [:]
-        positions[request] = max(positions[request] ?? 0, position)
+        positions[request] = position
         chatReadPositions = positions
         if let pending = pendingChatReadPositions?[request],
            pending.readThroughConversationSequence <= position {
             pendingChatReadPositions?.removeValue(forKey: request)
         }
         chatReadPositionSupport = true
-        applySavedReadPositionSupport(reconcileLocalRead: true)
+        applySavedReadPositionSupport()
     }
 
-    private mutating func applySavedReadPositionSupport(reconcileLocalRead: Bool = false) {
-        guard chatReadPositionSupport == true else { return }
-        var positions = chatReadPositions ?? [:]
-        var pending = pendingChatReadPositions ?? [:]
+    private mutating func applySavedReadPositionSupport() {
         for key in Array(threads.keys) {
-            guard var thread = threads[key] else { continue }
-            let serverPosition = positions[key] ?? 0
-            if let locallyReadTurn = thread.readThroughTurn,
-               let localPosition = conversationSequence(for: locallyReadTurn, in: thread),
-               localPosition > serverPosition {
-                if reconcileLocalRead,
-                   (pending[key]?.readThroughConversationSequence ?? 0) < localPosition {
-                    pending[key] = PendingConversationReadPosition(request: key, operationID: UUID(),
-                        readThroughConversationSequence: localPosition)
-                }
-                if reconcileLocalRead { positions[key] = localPosition }
-            }
-            let position = positions[key] ?? 0
-            thread.accountReadThroughConversationSequence = position
-            synchronizeLocalReadThrough(in: &thread, position: position)
-            threads[key] = thread
+            threads[key]?.accountReadThroughConversationSequence = chatReadPositionSupport == true
+                ? (chatReadPositions?[key] ?? 0) : nil
         }
-        chatReadPositions = positions
-        pendingChatReadPositions = pending
-    }
-
-    private func conversationSequence(for turnID: ExactText,
-                                      in thread: ConversationThread) -> UInt64? {
-        if let sequence = thread.turns.first(where: { $0.id == turnID })?.conversationSequence {
-            return sequence
-        }
-        return events.values.compactMap { event -> UInt64? in
-            guard event.binding.request == thread.request else { return nil }
-            switch event.fact {
-            case let .turn(turn), let .revision(turn, _), let .redactedRevision(turn):
-                return turn.id == turnID ? event.sequence : nil
-            default:
-                return nil
-            }
-        }.min()
     }
 
     private func applySavedReadPosition(to thread: inout ConversationThread) {
-        guard chatReadPositionSupport == true else { return }
-        let position = chatReadPositions?[thread.request] ?? 0
-        thread.accountReadThroughConversationSequence = position
-        synchronizeLocalReadThrough(in: &thread, position: position)
-    }
-
-    private func synchronizeLocalReadThrough(in thread: inout ConversationThread, position: UInt64) {
-        guard position > 0,
-              let turn = thread.turns.last(where: {
-                  $0.kind == .reply && $0.author != .person &&
-                      ($0.conversationSequence ?? 0) <= position
-              }) else { return }
-        thread.readThroughTurn = turn.id
-    }
-
-    private func validateUnloadedSessionHandle(_ handle: ExactText, for request: RequestKey) throws {
-        for prior in events.values where prior.binding.request == request {
-            guard case let .attentionTier(_, _, _, priorSessionHandle) = prior.fact,
-                  let priorSessionHandle else { continue }
-            guard priorSessionHandle == handle else { throw ConversationError.conflict }
-        }
+        thread.accountReadThroughConversationSequence = chatReadPositionSupport == true
+            ? (chatReadPositions?[thread.request] ?? 0) : nil
     }
 
     private func applyThreadFact(_ event: ConversationEvent, to thread: inout ConversationThread) throws {
@@ -1163,21 +988,12 @@ struct ConversationState: Codable, Equatable {
                     eventKind: event.fact.diagnosticKind,
                     facts: ConversationValidationFacts(sessionHandlePresent: !turn.sessionHandle.rawValue.isEmpty))
             }
-            guard turn.sessionHandle == thread.sessionHandle else { throw ConversationError.conflict }
-            if let old = thread.revisions[binding.revision] {
-                guard old == payload else { throw ConversationError.conflict }
-            } else {
-                guard thread.redactedRevisions?.contains(binding.revision) != true else {
-                    throw ConversationError.conflict
-                }
-                guard binding.revision > thread.currentRevision else {
-                    throw ConversationError.staleRevision(current: thread.currentRevision)
-                }
-                thread.revisions[binding.revision] = payload
-                thread.currentRevision = binding.revision
-            }
+            thread.sessionHandle = turn.sessionHandle
+            thread.revisions[binding.revision] = payload
+            thread.redactedRevisions?.remove(binding.revision)
+            thread.currentRevision = max(thread.currentRevision, binding.revision)
         case let .redactedRevision(turn):
-            guard turn.contentRedacted == true, turn.sessionHandle == thread.sessionHandle,
+            guard turn.contentRedacted == true, !turn.sessionHandle.rawValue.isEmpty,
                   turn.author == .origin else {
                 throw conversationValidationRejection(.redactedRevisionBinding,
                     eventKind: event.fact.diagnosticKind,
@@ -1190,14 +1006,10 @@ struct ConversationState: Codable, Equatable {
                         revisionIsNext: thread.currentRevision < UInt64.max &&
                             binding.revision == thread.currentRevision + 1))
             }
-            guard thread.revisions[binding.revision] == nil else { throw ConversationError.conflict }
-            if thread.redactedRevisions?.contains(binding.revision) != true {
-                guard binding.revision > thread.currentRevision else {
-                    throw ConversationError.staleRevision(current: thread.currentRevision)
-                }
-                thread.redactedRevisions = (thread.redactedRevisions ?? []).union([binding.revision])
-                thread.currentRevision = binding.revision
-            }
+            thread.sessionHandle = turn.sessionHandle
+            thread.revisions.removeValue(forKey: binding.revision)
+            thread.redactedRevisions = (thread.redactedRevisions ?? []).union([binding.revision])
+            thread.currentRevision = max(thread.currentRevision, binding.revision)
         default:
             break
         }
@@ -1208,7 +1020,7 @@ struct ConversationState: Codable, Equatable {
             throw conversationValidationRejection(.loadedThreadFactNotAllowed,
                 eventKind: event.fact.diagnosticKind)
         case let .turn(turn), let .revision(turn, _), let .redactedRevision(turn):
-            guard turn.binding == binding, turn.sessionHandle == thread.sessionHandle,
+            guard turn.binding == binding, !turn.sessionHandle.rawValue.isEmpty,
                   !turn.id.rawValue.isEmpty else {
                 throw conversationValidationRejection(.turnBinding,
                     eventKind: event.fact.diagnosticKind,
@@ -1221,45 +1033,29 @@ struct ConversationState: Codable, Equatable {
             // Ordinary replay can close the request before its result turn
             // arrives. The exact matching identity enriches one retained row;
             // authoritative historical entries remain applicable.
+            thread.sessionHandle = turn.sessionHandle
             try thread.merge(turn, event: event)
             // Only an exact accepted operation clears its frozen draft.
             if let draft = thread.drafts[binding.revision], let operationID = turn.operationID,
                turn.kind != .result {
-                if case let .acceptedPendingReplay(savedID, savedTurn) = draft.disposition,
-                   savedID == operationID, savedTurn != turn.id { throw ConversationError.conflict }
                 switch draft.disposition {
                 case let .submitting(savedID) where savedID == operationID,
                      let .outcomeUnknown(savedID) where savedID == operationID,
                      let .acceptedPendingReplay(savedID, _) where savedID == operationID:
-                    guard turn.contentRedacted != true, draft.text == turn.text,
-                          Self.sameOriginalFiles(draft.files, turn.files) else { throw ConversationError.conflict }
                     thread.drafts.removeValue(forKey: binding.revision)
                 default: break
                 }
             }
         case let .availability(handle, availability):
-            guard handle == thread.sessionHandle else {
-                throw conversationValidationRejection(.availabilitySessionHandle,
-                    eventKind: event.fact.diagnosticKind,
-                    facts: ConversationValidationFacts(
-                        sessionHandlePresent: !handle.rawValue.isEmpty,
-                        sessionHandleMatchesThread: handle == thread.sessionHandle))
-            }
+            guard !handle.rawValue.isEmpty else { throw ConversationError.invalidBinding }
+            thread.sessionHandle = handle
             thread.recordAvailabilityUpdate(availability)
         case let .availabilityRecord(handle, availability, support):
-            guard handle == thread.sessionHandle else {
-                throw conversationValidationRejection(.availabilityRecordSessionHandle,
-                    eventKind: event.fact.diagnosticKind,
-                    facts: ConversationValidationFacts(
-                        sessionHandlePresent: !handle.rawValue.isEmpty,
-                        sessionHandleMatchesThread: handle == thread.sessionHandle))
-            }
+            guard !handle.rawValue.isEmpty else { throw ConversationError.invalidBinding }
+            thread.sessionHandle = handle
             thread.recordAvailabilityUpdate(availability)
             thread.listeningSupport = support
         case let .terminal(turn, author, state):
-            if let terminal = thread.terminal {
-                guard terminal == state, thread.terminalTurn == turn else { throw ConversationError.conflict }
-            }
             thread.terminal = state
             thread.terminalTurn = turn
             thread.terminalAuthor = author
@@ -1287,21 +1083,11 @@ struct ConversationState: Codable, Equatable {
             var facts = thread.facts[turn] ?? ConversationTurnFacts()
             switch acknowledgement {
             case .listenerReceived:
-                if let recorded = facts.deliveryAck1, recorded != acknowledgement {
-                    throw ConversationError.conflict
-                }
                 facts.deliveryAck1 = acknowledgement
             case .handed:
-                // The first handed outcome is final. It may replace a prior
-                // not_handed outcome, matching the Server's append-only facts.
-                if case .some(.handed) = facts.deliveryAck2 {
-                    break
-                }
                 facts.deliveryAck2 = acknowledgement
             case .notHanded:
-                if facts.deliveryAck2 == nil {
-                    facts.deliveryAck2 = acknowledgement
-                }
+                facts.deliveryAck2 = acknowledgement
             }
             thread.facts[turn] = facts
         case let .acted(turn, by):
@@ -1311,17 +1097,12 @@ struct ConversationState: Codable, Equatable {
                     eventKind: event.fact.diagnosticKind,
                     facts: ConversationValidationFacts(actorPresent: !by.rawValue.isEmpty))
             }
-            if let old = thread.facts[turn]?.actedBy, old != by { throw ConversationError.conflict }
             thread.facts[turn, default: ConversationTurnFacts()].actedBy = by
         case let .fileTransfer(turn, file, outcome):
             try requireFile(file, turn: turn, binding: binding, event: event, in: thread)
-            let old = thread.facts[turn]?.fileTransfers[file] ?? .unknown
-            guard old == .unknown || old == outcome else { throw ConversationError.conflict }
             thread.facts[turn, default: ConversationTurnFacts()].fileTransfers[file] = outcome
         case let .fileUse(turn, file, outcome):
             try requireFile(file, turn: turn, binding: binding, event: event, in: thread)
-            let old = thread.facts[turn]?.fileUses[file] ?? .unknown
-            guard old == .unknown || old == outcome else { throw ConversationError.conflict }
             thread.facts[turn, default: ConversationTurnFacts()].fileUses[file] = outcome
         }
     }
@@ -1337,13 +1118,7 @@ struct ConversationState: Codable, Equatable {
             $0.binding.request == thread.request && $0.requiresLoadedThread
         }.sorted { $0.sequence < $1.sequence }
         for event in held {
-            if let ignored = skipping[event.sequence] {
-                guard ignored == event else {
-                    onFailure?(event, nil)
-                    throw ConversationError.conflict
-                }
-                continue
-            }
+            if skipping[event.sequence] != nil { continue }
             // A rejected fact cannot leave half of its mutation in the page.
             var updated = thread
             do {

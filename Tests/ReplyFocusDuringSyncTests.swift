@@ -3,9 +3,9 @@ import XCTest
 @testable import Harklight
 import AttentionDomain
 
-private final class CountingAttentionStatePersistence: AttentionStatePersistence, @unchecked Sendable {
+private final class CountingPendingActionPersistence: PendingActionPersistence, @unchecked Sendable {
     private let lock = NSLock()
-    private let backing = MemoryAttentionStatePersistence()
+    private let backing = MemoryPendingActionPersistence()
     private var writes = 0
 
     var writeCount: Int {
@@ -36,7 +36,7 @@ final class ReplyFocusDuringSyncTests: XCTestCase {
     }
 
     @MainActor
-    private func deliverTextRequest(to store: AttentionDomainStore,
+    private func deliverTextRequest(to store: ClientRepository,
                                     context: ProfileContext) throws -> RequestKey {
         let payload = try JSONValue.parse(Data(#"{"sender_id":"app:test","message_id":"m1","created_at":1,"title":"Needs a reply","body":"Reply requested"}"#.utf8))
         let key = RequestKey(accountScope: context.identity.personID,
@@ -50,8 +50,8 @@ final class ReplyFocusDuringSyncTests: XCTestCase {
     @MainActor
     func testReplySelectionAndTextStayLocalUntilCheckmarkCommit() async throws {
         let context = makeContext()
-        let persistence = CountingAttentionStatePersistence()
-        let domain = try AttentionDomainStore(context: context,
+        let persistence = CountingPendingActionPersistence()
+        let domain = try ClientRepository(context: context,
                                               persistence: persistence)
         let key = try deliverTextRequest(to: domain, context: context)
         let visible = try LivePresentationStore(store: domain, context: context)
@@ -110,8 +110,8 @@ final class ReplyFocusDuringSyncTests: XCTestCase {
     @MainActor
     func testSenderReplyCommitsTextAndPointTogetherWithoutSavingDraft() throws {
         let context = makeContext()
-        let persistence = CountingAttentionStatePersistence()
-        let domain = try AttentionDomainStore(context: context, persistence: persistence)
+        let persistence = CountingPendingActionPersistence()
+        let domain = try ClientRepository(context: context, persistence: persistence)
         let fixtures = try FixtureSet.loadBundled(from: Bundle(for: HarklightTests.self))
         let fixture = try XCTUnwrap(fixtures.requests.first {
             $0.key.messageID == ExactText("facilities-01")
@@ -157,8 +157,8 @@ final class ReplyFocusDuringSyncTests: XCTestCase {
     @MainActor
     func testCheckmarkKeepsTheDisplayedRevisionAndRejectsAnUpdatedRequest() throws {
         let context = makeContext()
-        let persistence = CountingAttentionStatePersistence()
-        let domain = try AttentionDomainStore(context: context, persistence: persistence)
+        let persistence = CountingPendingActionPersistence()
+        let domain = try ClientRepository(context: context, persistence: persistence)
         let key = try deliverTextRequest(to: domain, context: context)
         let firstPayload = try JSONValue.parse(Data(#"{"title":"First wording","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"reply","label":"Reply","kind":"text"}]}}"#.utf8))
         let revisedPayload = try JSONValue.parse(Data(#"{"title":"Revised wording","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"reply","label":"Reply","kind":"text"}]}}"#.utf8))

@@ -75,15 +75,15 @@ final class AttentionTierClientTests: XCTestCase {
 
     func testPreviouslyStoredDeliveryCanGainItsFirstExplicitTierOnReplay() throws {
         let profile = context()
-        let persistence = MemoryAttentionStatePersistence()
-        let store = try AttentionDomainStore(context: profile, persistence: persistence)
+        let persistence = MemoryPendingActionPersistence()
+        let store = try ClientRepository(context: profile, persistence: persistence)
         let key = RequestKey(accountScope: profile.identity.personID,
             senderID: ExactText("sender"), messageID: ExactText("legacy"))
         let payload = try JSONValue.parse(data(#"{"title":"Legacy"}"#))
         try store.apply(RelayEvent(sequence: 1,
             body: .delivery(StoredRequest(key: key, originalPayload: payload), .message)), context: profile)
 
-        let restored = try AttentionDomainStore(context: profile, persistence: persistence)
+        let restored = try ClientRepository(context: profile, persistence: persistence)
         try restored.apply(RelayEvent(sequence: 1,
             body: .delivery(StoredRequest(key: key, originalPayload: payload), .message),
             origin: ExactText("source"), attentionTier: .top), context: profile)
@@ -241,7 +241,7 @@ final class AttentionTierClientTests: XCTestCase {
 
     func testRelayTierChangeUpdatesTheExistingRequestWithoutAnotherDelivery() throws {
         let profile = context()
-        let store = try AttentionDomainStore(context: profile, persistence: MemoryAttentionStatePersistence())
+        let store = try ClientRepository(context: profile, persistence: MemoryPendingActionPersistence())
         let key = RequestKey(accountScope: profile.identity.personID,
             senderID: ExactText("sender"), messageID: ExactText("request"))
         let payload = try JSONValue.parse(data(#"{"title":"Question"}"#))
@@ -283,7 +283,7 @@ final class AttentionTierClientTests: XCTestCase {
 
     func testInboxPlacementKeepsExistingRulesRegardlessOfTier() throws {
         let profile = context()
-        let store = try AttentionDomainStore(context: profile, persistence: MemoryAttentionStatePersistence())
+        let store = try ClientRepository(context: profile, persistence: MemoryPendingActionPersistence())
         let rows: [(String, AttentionTier)] = [
             ("first", .top), ("second", .top), ("third", .middle), ("fourth", .low)
         ]
@@ -305,8 +305,8 @@ final class AttentionTierClientTests: XCTestCase {
 
     func testLiveTierChangeRedrawsPagedRowWithoutMovingIt() throws {
         let profile = context()
-        let persistence = MemoryAttentionStatePersistence()
-        let store = try AttentionDomainStore(context: profile, persistence: persistence)
+        let persistence = MemoryPendingActionPersistence()
+        let store = try ClientRepository(context: profile, persistence: persistence)
         func item(_ messageID: String,
                   sequence: UInt64,
                   tier: AttentionTier) throws -> InboxSnapshotItem {
@@ -326,7 +326,7 @@ final class AttentionTierClientTests: XCTestCase {
         _ = try store.prepareInboxCheckpointAcknowledgement(context: profile)
         _ = try store.acceptInboxCheckpoint(snapshotID: "snapshot", highWater: 2, context: profile)
 
-        let restored = try AttentionDomainStore(context: profile, persistence: persistence)
+        let restored = try ClientRepository(context: profile, persistence: persistence)
         let port = AttentionDomainPort(store: restored)
         let initial = try port.observe(context: port.context)
         XCTAssertEqual(initial.requests.map { $0.key.messageID.rawValue }, ["first", "second"])
@@ -346,7 +346,7 @@ final class AttentionTierClientTests: XCTestCase {
 
     func testPendingInboxRefreshKeepsLastAcceptedRowsCurrentAndAnswerable() throws {
         let profile = context()
-        let store = try AttentionDomainStore(context: profile, persistence: MemoryAttentionStatePersistence())
+        let store = try ClientRepository(context: profile, persistence: MemoryPendingActionPersistence())
         let key = RequestKey(accountScope: profile.identity.personID,
             senderID: ExactText("sender"), messageID: ExactText("request"))
         let payload = try JSONValue.parse(data(#"{"title":"Prompt","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"yes","label":"Yes","kind":"value","value":true}]}}"#))

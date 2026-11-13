@@ -705,28 +705,6 @@ public struct RelayEvent: Equatable, Codable, Sendable {
         }
     }
 
-    public func hasSameSemanticContent(as other: RelayEvent) -> Bool {
-        guard sequence == other.sequence else { return false }
-        let sameOrigin = origin == nil || other.origin == nil || origin == other.origin
-        let sameTier = !attentionTierWasProvided || !other.attentionTierWasProvided ||
-            attentionTier == other.attentionTier
-        switch (body, other.body) {
-        case let (.delivery(left, _), .delivery(right, _)):
-            return sameOrigin && sameTier && left.key == right.key &&
-                left.originalPayload.semanticallyEquals(right.originalPayload)
-        case let (.originReference(left), .originReference(right)):
-            return sameOrigin && sameTier && left == right
-        case let (.attentionTierChange(left), .attentionTierChange(right)):
-            return sameOrigin && sameTier && left == right
-        case let (.terminal(leftKey, leftState, leftAnswer), .terminal(rightKey, rightState, rightAnswer)):
-            return leftKey == rightKey && leftState == rightState &&
-                optionalJSONEquals(leftAnswer, rightAnswer) &&
-                (accountAnswerOutcome == nil || other.accountAnswerOutcome == nil ||
-                    accountAnswerOutcome == other.accountAnswerOutcome)
-        default:
-            return false
-        }
-    }
 
     private func optionalJSONEquals(_ left: JSONValue?, _ right: JSONValue?) -> Bool {
         switch (left, right) {
@@ -914,14 +892,6 @@ public struct RelayConversationMetadata: Equatable, Codable, Sendable {
         self.files = files
     }
 
-    func canEnrich(_ old: RelayConversationMetadata) -> Bool {
-        revision == old.revision && (old.sessionHandle == nil || old.sessionHandle == sessionHandle) &&
-        (old.eventID == nil || old.eventID == eventID) && (old.availability == nil || old.availability == availability) &&
-        (old.listeningSupport == nil || old.listeningSupport == listeningSupport) &&
-        (old.author == nil || old.author == author) && (old.files == nil || old.files == files) &&
-        (old.terminalReason == nil || old.terminalReason == terminalReason) &&
-        (old.retractedAtMilliseconds == nil || old.retractedAtMilliseconds == retractedAtMilliseconds)
-    }
 }
 
 public enum StoreRepairIssue: Equatable, Codable, Sendable {
@@ -995,9 +965,9 @@ public struct AttentionStoreSnapshot: Sendable {
     }
 }
 
-/// Server projection restored from the launch cache. User drafts are merged
-/// from their separate local persistence by AttentionDomainStore.
+/// Disposable server projection restored from the launch cache.
 public struct CachedAttentionServerState: Sendable {
+    public let identity: ProfileIdentity
     public let requests: [RequestKey: StoredRequest]
     public let remoteStates: [RequestKey: RemoteRequestState]
     public let cursor: UInt64
@@ -1005,14 +975,17 @@ public struct CachedAttentionServerState: Sendable {
     public let conversations: [RequestKey: ConversationThread]
     public let inboxView: InboxView?
     public let currentRequestKeys: Set<RequestKey>?
+    public let chatReadPositions: [RequestKey: UInt64]?
 
-    public init(requests: [RequestKey: StoredRequest],
+    public init(identity: ProfileIdentity, requests: [RequestKey: StoredRequest],
                 remoteStates: [RequestKey: RemoteRequestState],
                 cursor: UInt64,
                 conversationCursor: UInt64,
                 conversations: [RequestKey: ConversationThread],
                 inboxView: InboxView?,
-                currentRequestKeys: Set<RequestKey>?) {
+                currentRequestKeys: Set<RequestKey>?,
+                chatReadPositions: [RequestKey: UInt64]? = nil) {
+        self.identity = identity
         self.requests = requests
         self.remoteStates = remoteStates
         self.cursor = cursor
@@ -1020,6 +993,7 @@ public struct CachedAttentionServerState: Sendable {
         self.conversations = conversations
         self.inboxView = inboxView
         self.currentRequestKeys = currentRequestKeys
+        self.chatReadPositions = chatReadPositions
     }
 }
 
@@ -1027,7 +1001,6 @@ public enum AttentionStoreError: Error, Equatable, LocalizedError, Sendable {
     case staleProfile
     case wrongAccount
     case requestMissing
-    case requestConflict
     case selectorExpired
     case invalidDraft
     case invalidSubmission
@@ -1058,7 +1031,6 @@ public enum AttentionStoreError: Error, Equatable, LocalizedError, Sendable {
         case .staleProfile: return "The profile session is stale; refresh the current account context."
         case .wrongAccount: return "The request is outside the current account and device profile."
         case .requestMissing: return "The request is not present in the current account snapshot."
-        case .requestConflict: return "The request key is already bound to different immutable content."
         case .selectorExpired: return "The request presentation selector is stale or belongs to another profile generation."
         case .invalidDraft: return "The draft contains missing, foreign, or malformed typed input state."
         case .invalidSubmission: return "The submission does not match every declared input and selected action."

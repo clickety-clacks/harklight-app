@@ -27,8 +27,8 @@ final class RetractionPresentationTests: XCTestCase {
     func testRetractionJoinsBothDurableOrdersWithoutRewritingQueuedBindingsOrReopening() async throws {
         for conversationFirst in [false, true] {
             let context = profile()
-            let persistence = MemoryAttentionStatePersistence()
-            let domain = try AttentionDomainStore(context: context, persistence: persistence)
+            let persistence = MemoryPendingActionPersistence()
+            let domain = try ClientRepository(context: context, persistence: persistence)
             let key = RequestKey(accountScope: context.identity.personID, senderID: ExactText("sender"), messageID: ExactText("request"))
             let payload = try JSONValue.parse(Data(#"{"title":"Original wording","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"keep","label":"Keep original choice","kind":"value","value":"keep"}]}}"#.utf8))
             try domain.apply(RelayEvent(sequence: 1, body: .delivery(StoredRequest(key: key, originalPayload: payload), .message),
@@ -52,7 +52,7 @@ final class RetractionPresentationTests: XCTestCase {
                 try domain.apply(lifecycle, context: context)
                 XCTAssertEqual(try domain.conversationSnapshot(context: context).cursor, 0)
             }
-            let midway = try AttentionDomainStore(context: context, persistence: persistence)
+            let midway = try ClientRepository(context: context, persistence: persistence)
             XCTAssertTrue(try midway.conversationSnapshot(context: context).threads[key]?.isRetracted == true)
             XCTAssertEqual(try midway.conversationSnapshot(context: context).threads[key]?.retraction?.retractedAtMilliseconds,
                            Self.retractedAt, "Either durable copy alone carries the retraction time")
@@ -107,7 +107,7 @@ final class RetractionPresentationTests: XCTestCase {
                 .draft.compatibility.selectedActionID, ExactText("keep"))
             XCTAssertEqual(try domain.lookupIntent(receipt.intentID, context: context), retained)
 
-            let relaunchedDomain = try AttentionDomainStore(context: context, persistence: persistence)
+            let relaunchedDomain = try ClientRepository(context: context, persistence: persistence)
             let relaunched = try LivePresentationStore(store: relaunchedDomain, context: context)
             XCTAssertFalse(relaunched.inboxRows.contains { $0.key == key }, "An expired timestamp stays hidden after relaunch")
             XCTAssertEqual(relaunched.expiredRetractionSearchRows.map(\.key), [key],
@@ -160,8 +160,8 @@ final class RetractionPresentationTests: XCTestCase {
 
     private func checkFreshInboxRetraction(terminal: Data, enriched: Bool) throws {
         let context = profile()
-        let persistence = MemoryAttentionStatePersistence()
-        let domain = try AttentionDomainStore(context: context, persistence: persistence)
+        let persistence = MemoryPendingActionPersistence()
+        let domain = try ClientRepository(context: context, persistence: persistence)
         let key = RequestKey(accountScope: context.identity.personID, senderID: ExactText("sender"), messageID: ExactText("request"))
         let delivery = #"{"v":1,"type":"delivery","seq":1,"sender_id":"sender","message_id":"request","origin":"origin","as":"message","message":{"title":"Retained question"},"request_revision":1,"session_handle":"handle","event_id":"1"}"#
         let frame = Data((#"{"v":1,"type":"ok","ref":"native-inbox","paging_version":1,"snapshot_id":"snapshot","high_water":2,"items":[{"acceptance":"#
@@ -172,7 +172,7 @@ final class RetractionPresentationTests: XCTestCase {
         _ = try domain.beginInboxCandidate(startupID: "startup", since: 0, batches: [], context: context)
         try domain.saveInboxInitialPage(snapshotID: page.snapshotID, highWater: page.highWater, items: page.items,
                                         nextCursor: page.nextCursor, receiptCursor: page.receiptCursor, context: context)
-        let restored = try AttentionDomainStore(context: context, persistence: persistence)
+        let restored = try ClientRepository(context: context, persistence: persistence)
         let thread = try XCTUnwrap(restored.conversationSnapshot(context: context).threads[key])
         XCTAssertTrue(thread.isRetracted)
         XCTAssertEqual(thread.terminal, .cleared)
@@ -205,8 +205,8 @@ final class RetractionPresentationTests: XCTestCase {
 
     func testDisconnectedStoreShowsNotAcceptedForRetainedRefusedAttempt() throws {
         let context = profile()
-        let domain = try AttentionDomainStore(context: context,
-            persistence: MemoryAttentionStatePersistence())
+        let domain = try ClientRepository(context: context,
+            persistence: MemoryPendingActionPersistence())
         let key = RequestKey(accountScope: context.identity.personID,
             senderID: ExactText("fixture-sender"), messageID: ExactText("not-accepted-retained"))
         let payload = try JSONValue.parse(Data(#"{"title":"Archive sketches","body":"Choose what to do with the earlier sketches.","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"keep","label":"Keep original choice","kind":"value","value":"keep"}]}}"#.utf8))
@@ -256,8 +256,8 @@ final class RetractionPresentationTests: XCTestCase {
 
     func testRefusedQueuedAnswerIsKeptAsRefusedAndShownRetracted() async throws {
         let context = profile()
-        let persistence = MemoryAttentionStatePersistence()
-        let domain = try AttentionDomainStore(context: context, persistence: persistence)
+        let persistence = MemoryPendingActionPersistence()
+        let domain = try ClientRepository(context: context, persistence: persistence)
         let key = RequestKey(accountScope: context.identity.personID, senderID: ExactText("sender"), messageID: ExactText("request"))
         let payload = try JSONValue.parse(Data(#"{"title":"Original wording","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"keep","label":"Keep original choice","kind":"value","value":"keep"}]}}"#.utf8))
         try domain.apply(RelayEvent(sequence: 1, body: .delivery(StoredRequest(key: key, originalPayload: payload), .message),
@@ -272,7 +272,7 @@ final class RetractionPresentationTests: XCTestCase {
         _ = try await core.resyncAndDrainOutbox()
         XCTAssertEqual(session.sentOperationIDs, [receipt.opID])
 
-        let restored = try AttentionDomainStore(context: context, persistence: persistence)
+        let restored = try ClientRepository(context: context, persistence: persistence)
         XCTAssertEqual(try restored.lookupIntent(receipt.intentID, context: context)?.disposition, refused)
         XCTAssertTrue(try restored.snapshot(context: context).outbox.isEmpty)
         let live = try LivePresentationStore(store: restored, context: context)
@@ -324,7 +324,7 @@ final class RetractionPresentationTests: XCTestCase {
         XCTAssertThrowsError(try wire.decodeEvent(edited(delivery, #","retracted_at":1760000000123"#, "")))
         for lifecycleAgrees in [true, false] {
             let context = profile()
-            let domain = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
+            let domain = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
             let key = RequestKey(accountScope: context.identity.personID, senderID: ExactText("sender"), messageID: ExactText("request"))
             try domain.apply(try RelayWire(profile: context).decodeEvent(delivery), context: context)
             let port = AttentionDomainPort(store: domain)
@@ -354,7 +354,7 @@ final class RetractionPresentationTests: XCTestCase {
         let defaults = try XCTUnwrap(UserDefaults(suiteName: namespace))
         defer { defaults.removePersistentDomain(forName: namespace) }
         let context = profile()
-        let domain = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
+        let domain = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
         let retractedKey = RequestKey(accountScope: context.identity.personID, senderID: ExactText("sender"), messageID: ExactText("request"))
         let staleKey = RequestKey(accountScope: context.identity.personID, senderID: ExactText("sender"), messageID: ExactText("stale"))
         let openKey = RequestKey(accountScope: context.identity.personID, senderID: ExactText("sender"), messageID: ExactText("open"))
@@ -398,8 +398,8 @@ final class RetractionPresentationTests: XCTestCase {
     func testEachCursorAcknowledgesOnlyItsDurableRetractionCopy() async throws {
         for failConversationCommit in [false, true] {
             let context = profile()
-            let persistence = MemoryAttentionStatePersistence()
-            let domain = try AttentionDomainStore(context: context, persistence: persistence)
+            let persistence = MemoryPendingActionPersistence()
+            let domain = try ClientRepository(context: context, persistence: persistence)
             let key = RequestKey(accountScope: context.identity.personID, senderID: ExactText("sender"), messageID: ExactText("request"))
             try domain.apply(RelayEvent(sequence: 1, body: .delivery(StoredRequest(key: key,
                 originalPayload: .object([JSONMember("title", .string(ExactText("Retained question")))])), .message),
@@ -413,7 +413,7 @@ final class RetractionPresentationTests: XCTestCase {
             } catch { XCTAssertTrue(failConversationCommit, "Unexpected replay failure: \(error)") }
             XCTAssertTrue(session.ordinaryAcknowledged)
             XCTAssertEqual(session.conversationAcknowledged, !failConversationCommit)
-            let restored = try AttentionDomainStore(context: context, persistence: persistence)
+            let restored = try ClientRepository(context: context, persistence: persistence)
             XCTAssertEqual(try restored.snapshot(context: context).cursor, 2)
             XCTAssertEqual(try restored.conversationSnapshot(context: context).cursor, failConversationCommit ? 0 : 1)
             XCTAssertTrue(try restored.conversationSnapshot(context: context).threads[key]?.isRetracted == true)
@@ -434,15 +434,15 @@ final class RetractionPresentationTests: XCTestCase {
 
 private final class RetractionSession: AuthenticatedInboxPagingSession, AuthenticatedConversationSession, @unchecked Sendable {
     let authenticatedIdentity: ProfileIdentity
-    let domain: AttentionDomainStore
+    let domain: ClientRepository
     let context: ProfileContext
-    let persistence: MemoryAttentionStatePersistence
+    let persistence: MemoryPendingActionPersistence
     let ordinary: Data
     let projected: Data
     let failConversationCommit: Bool
     private(set) var ordinaryAcknowledged = false
     private(set) var conversationAcknowledged = false
-    init(domain: AttentionDomainStore, context: ProfileContext, persistence: MemoryAttentionStatePersistence,
+    init(domain: ClientRepository, context: ProfileContext, persistence: MemoryPendingActionPersistence,
          ordinary: Data, projected: Data, failConversationCommit: Bool) {
         self.authenticatedIdentity = context.identity
         self.domain = domain; self.context = context; self.persistence = persistence
@@ -454,7 +454,7 @@ private final class RetractionSession: AuthenticatedInboxPagingSession, Authenti
         try await consume(Data(#"{"v":1,"type":"resynced","seq":2}"#.utf8))
     }
     func acknowledge(_ request: Data) async throws {
-        let restored = try AttentionDomainStore(context: context, persistence: persistence)
+        let restored = try ClientRepository(context: context, persistence: persistence)
         guard try restored.snapshot(context: context).cursor == 2,
               try restored.conversationSnapshot(context: context).threads.values.first?.isRetracted == true else {
             throw NativeRelayCoreError.eventRejected
@@ -468,7 +468,7 @@ private final class RetractionSession: AuthenticatedInboxPagingSession, Authenti
         try await consume(Data(#"{"v":1,"type":"conversation_resynced","conversation_seq":1}"#.utf8))
     }
     func acknowledgeConversation(_ request: Data) async throws {
-        let restored = try AttentionDomainStore(context: context, persistence: persistence)
+        let restored = try ClientRepository(context: context, persistence: persistence)
         guard try restored.conversationSnapshot(context: context).cursor == 1 else { throw NativeRelayCoreError.eventRejected }
         conversationAcknowledged = true
     }

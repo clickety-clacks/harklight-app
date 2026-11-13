@@ -72,7 +72,7 @@ final class PrototypeStore {
     private(set) var snapshot: AttentionStoreSnapshot?
     private(set) var presentationStore: LivePresentationStore?
 
-    @ObservationIgnored private let domainStore: AttentionDomainStore?
+    @ObservationIgnored private let domainStore: ClientRepository?
     @ObservationIgnored private let profileContext: ProfileContext
     @ObservationIgnored private let port: AttentionDomainPort?
     @ObservationIgnored private var selectors: [RequestKey: BoundDocumentSelector] = [:]
@@ -82,7 +82,7 @@ final class PrototypeStore {
     init(fixtures: FixtureSet,
          loadError: String? = nil,
          captureLimitBytes: Int = defaultCaptureLimit,
-         persistence: (any AttentionStatePersistence)? = nil,
+         persistence: (any PendingActionPersistence)? = nil,
          resetFixtureAtLaunch: Bool = false,
          serverRetractionFixture: NativeServerRetractionFixture? = nil,
          seedServerRetractionFixture: Bool = false,
@@ -100,15 +100,15 @@ final class PrototypeStore {
             transportMode: serverRetractionFixture == nil ? .fixture : .relay)
         self.profileContext = profile
 
-        var createdStore: AttentionDomainStore?
+        var createdStore: ClientRepository?
         var createdPort: AttentionDomainPort?
         var createdPresentation: LivePresentationStore?
         var initialSnapshot: AttentionStoreSnapshot?
         var initializationError: String?
         var serverRetractionTestStatus: String?
         do {
-            let store = try AttentionDomainStore(context: profile,
-                                                 persistence: persistence ?? MemoryAttentionStatePersistence(),
+            let store = try ClientRepository(context: profile,
+                                                 persistence: persistence ?? MemoryPendingActionPersistence(),
                                                  maximumWireFrameBytes: max(0, captureLimitBytes))
             let requests = fixtures.requests.map { StoredRequest(key: $0.key, originalPayload: $0.originalPayload) }
             if serverRetractionFixture == nil {
@@ -174,7 +174,7 @@ final class PrototypeStore {
 
 #if DEBUG
     private static func seedServerRetractionFixture(_ fixture: NativeServerRetractionFixture,
-                                                    in store: AttentionDomainStore,
+                                                    in store: ClientRepository,
                                                     context: ProfileContext) throws {
         let retraction = fixture.native_retraction
         let relayWire = try RelayWire(profile: context)
@@ -230,7 +230,7 @@ final class PrototypeStore {
     private static func recordServerRetractionReadback(
         _ fixture: NativeServerRetractionFixture,
         requestKey: RequestKey,
-        in store: AttentionDomainStore,
+        in store: ClientRepository,
         presentation: LivePresentationStore,
         context: ProfileContext,
         phase: String
@@ -268,7 +268,7 @@ final class PrototypeStore {
             "conversation_terminal": "cleared"
         ]
         let data = try JSONSerialization.data(withJSONObject: readback, options: [.sortedKeys])
-        let directory = try FileAttentionStatePersistence.applicationSupport().directoryURL
+        let directory = try FilePendingActionPersistence.applicationSupport().directoryURL
         try FileManager.default.createDirectory(at: directory,
                                                withIntermediateDirectories: true)
         try data.write(to: directory.appendingPathComponent("native-server-retraction-readback.json"),
@@ -276,7 +276,7 @@ final class PrototypeStore {
         return "Server retraction persisted: \(phase)"
     }
 
-    private static func seedRetractionExpiryRelaunchFixture(in store: AttentionDomainStore,
+    private static func seedRetractionExpiryRelaunchFixture(in store: ClientRepository,
                                                            fixtures: FixtureSet,
                                                            context: ProfileContext) throws {
         guard let request = fixtures.requests.first(where: {
@@ -329,7 +329,7 @@ final class PrototypeStore {
                     terminalContexts: [], additionalCases: [])
                 return PrototypeStore(
                     fixtures: emptyFixtures,
-                    persistence: try FileAttentionStatePersistence.applicationSupport(),
+                    persistence: try FilePendingActionPersistence.applicationSupport(),
                     resetFixtureAtLaunch: arguments.contains("--reset-attention-fixture"),
                     serverRetractionFixture: fixture,
                     seedServerRetractionFixture: arguments.contains("--harklight-test-server-retraction") &&
@@ -339,7 +339,7 @@ final class PrototypeStore {
             }
 #endif
             return PrototypeStore(fixtures: try FixtureSet.loadBundled(from: bundle),
-                                  persistence: try FileAttentionStatePersistence.applicationSupport(),
+                                  persistence: try FilePendingActionPersistence.applicationSupport(),
                                   resetFixtureAtLaunch: arguments.contains("--reset-attention-fixture"))
         } catch {
             let empty = FixtureSet(accountScope: ExactText("fictional-sample-account"),

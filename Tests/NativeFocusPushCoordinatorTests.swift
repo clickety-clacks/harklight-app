@@ -41,8 +41,8 @@ final class NativeFocusPushCoordinatorTests: XCTestCase {
                              senderID: ExactText("agent"), messageID: ExactText("request"))
         let binding = ConversationBinding(request: key, revision: 1)
         let handle = ExactText("session")
-        let store = try AttentionDomainStore(context: context,
-            persistence: MemoryAttentionStatePersistence())
+        let store = try ClientRepository(context: context,
+            persistence: MemoryPendingActionPersistence())
         let payload = try JSONValue.parse(Data(#"{"title":"Question"}"#.utf8))
         try store.apply(RelayEvent(sequence: 1,
             body: .delivery(StoredRequest(key: key, originalPayload: payload), .message),

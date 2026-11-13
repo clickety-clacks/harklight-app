@@ -13,8 +13,8 @@ final class SenderDisplayNameTests: XCTestCase {
 
     func testFeedProjectionPreservesArbitraryAndEmptyNamesWithoutChangingSenderIdentity() throws {
         let profile = context()
-        let store = try AttentionDomainStore(context: profile,
-            persistence: MemoryAttentionStatePersistence())
+        let store = try ClientRepository(context: profile,
+            persistence: MemoryPendingActionPersistence())
         let wire = try RelayWire(profile: profile)
         let senderID = ExactText("agent:workspace/actor-17")
         let cases: [(messageID: String, displayName: String?)] = [

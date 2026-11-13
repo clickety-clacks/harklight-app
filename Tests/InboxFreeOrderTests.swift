@@ -135,8 +135,8 @@ final class InboxFreeOrderTests: XCTestCase {
 
     @MainActor
     func testPartialFreeReferencesPreserveLoadedMessageAndHistoryAccessAfterRestart() throws {
-        let persistence = MemoryAttentionStatePersistence()
-        let store = try AttentionDomainStore(context: context, persistence: persistence)
+        let persistence = MemoryPendingActionPersistence()
+        let store = try ClientRepository(context: context, persistence: persistence)
         var loadedRows: [InboxItem] = []
         for (index, id) in ["valid", "omitted-open", "omitted-history"].enumerated() {
             let key = RequestKey(accountScope: context.identity.personID,
@@ -151,7 +151,7 @@ final class InboxFreeOrderTests: XCTestCase {
         malformedReply.removeValue(forKey: "open_at_conversation_seq")
         let view = try decode([reference("valid"), reference("omitted-open", kind: "future"), malformedReply])
         try store.setInboxView(view, context: context)
-        let restored = try AttentionDomainStore(context: context, persistence: persistence)
+        let restored = try ClientRepository(context: context, persistence: persistence)
         let port = AttentionDomainPort(store: restored)
         let presentation = try port.observe(context: port.context)
         XCTAssertEqual(presentation.requests.count, 3)
@@ -203,13 +203,13 @@ final class InboxFreeOrderTests: XCTestCase {
     }
 
     func testSectionTransitionReplacesPersistedViewAndReachesPresentationAtomically() throws {
-        let persistence = MemoryAttentionStatePersistence()
-        let store = try AttentionDomainStore(context: context, persistence: persistence)
+        let persistence = MemoryPendingActionPersistence()
+        let store = try ClientRepository(context: context, persistence: persistence)
         let active = try decode([reference("parent")])
         let history = try decode([reference("parent", state: "history")], revision: "view-2")
         try store.setInboxView(active, context: context)
         try store.setInboxView(history, context: context)
-        let restored = try AttentionDomainStore(context: context, persistence: persistence)
+        let restored = try ClientRepository(context: context, persistence: persistence)
         let port = AttentionDomainPort(store: restored)
         let presentation = try port.observe(context: port.context)
         XCTAssertEqual(presentation.inboxFreeOrderVersion, 1)

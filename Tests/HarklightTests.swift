@@ -198,8 +198,8 @@ final class HarklightTests: XCTestCase {
                                        personID: ExactText("field-reader"),
                                        deviceID: ExactText("field-device"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
-        let store = try AttentionDomainStore(context: context,
-                                             persistence: MemoryAttentionStatePersistence())
+        let store = try ClientRepository(context: context,
+                                             persistence: MemoryPendingActionPersistence())
         let key = RequestKey(accountScope: identity.personID,
                              senderID: ExactText("agent"), messageID: ExactText("fields"))
         let payload = try JSONValue.parse(Data(#"{"title":"Choose","urgency":"now","stake":"The review deadline slips.","by_when":1793300000000,"choice_styles":{"accept":"destructive","reply":"primary","ordinary":"loud","missing":"primary","later":"secondary"},"answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"accept","label":"Accept","kind":"value","value":true},{"id":"reply","label":"Reply","kind":"text"},{"id":"ordinary","label":"Ordinary","kind":"value","value":false},{"id":"later","label":"Later","kind":"value","value":false}]}}"#.utf8))
@@ -431,8 +431,8 @@ final class HarklightTests: XCTestCase {
                                        personID: ExactText("person-A"),
                                        deviceID: ExactText("device-A"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
-        let store = try AttentionDomainStore(context: context,
-                                             persistence: MemoryAttentionStatePersistence())
+        let store = try ClientRepository(context: context,
+                                             persistence: MemoryPendingActionPersistence())
         let visible = try LivePresentationStore(store: store, context: context)
         XCTAssertTrue(visible.presentation.requests.isEmpty)
 
@@ -471,8 +471,8 @@ final class HarklightTests: XCTestCase {
                                        personID: ExactText("inbox-replied-\(UUID().uuidString)"),
                                        deviceID: ExactText("device-A"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
-        let store = try AttentionDomainStore(context: context,
-                                             persistence: MemoryAttentionStatePersistence())
+        let store = try ClientRepository(context: context,
+                                             persistence: MemoryPendingActionPersistence())
         let existingKey = RequestKey(accountScope: identity.personID,
                                      senderID: ExactText("app:test"),
                                      messageID: ExactText("preexisting"))
@@ -536,8 +536,8 @@ final class HarklightTests: XCTestCase {
                                        personID: ExactText("person-A"),
                                        deviceID: ExactText("device-A"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
-        let store = try AttentionDomainStore(context: context,
-                                             persistence: MemoryAttentionStatePersistence())
+        let store = try ClientRepository(context: context,
+                                             persistence: MemoryPendingActionPersistence())
         let key = RequestKey(accountScope: identity.personID,
                              senderID: ExactText("app:test"), messageID: ExactText("unsupported"))
         let payload = try JSONValue.parse(Data(#"{"title":"Future answer","answer_ui":{"schema":"future.answer/9"}}"#.utf8))
@@ -559,8 +559,8 @@ final class HarklightTests: XCTestCase {
                                        personID: ExactText("refresh-answer-\(UUID().uuidString)"),
                                        deviceID: ExactText("device-A"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
-        let store = try AttentionDomainStore(context: context,
-                                             persistence: MemoryAttentionStatePersistence())
+        let store = try ClientRepository(context: context,
+                                             persistence: MemoryPendingActionPersistence())
         let key = RequestKey(accountScope: identity.personID,
                              senderID: ExactText("app:test"), messageID: ExactText("refresh-answer"))
         let payload = try JSONValue.parse(Data(#"{"sender_id":"app:test","message_id":"refresh-answer","title":"Refresh answer","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"reply","label":"Reply","kind":"text"}]}}"#.utf8))
@@ -595,8 +595,8 @@ final class HarklightTests: XCTestCase {
                                        personID: fixture.key.accountScope,
                                        deviceID: ExactText("enrolled-device"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
-        let persistence = MemoryAttentionStatePersistence()
-        let store = try AttentionDomainStore(context: context, persistence: persistence)
+        let persistence = MemoryPendingActionPersistence()
+        let store = try ClientRepository(context: context, persistence: persistence)
         _ = try store.apply(RelayEvent(sequence: 1,
                                        body: .delivery(StoredRequest(key: fixture.key,
                                                                      originalPayload: fixture.originalPayload), .message)),
@@ -617,7 +617,7 @@ final class HarklightTests: XCTestCase {
         XCTAssertEqual(try store.snapshot(context: context).outbox.first?.operationID, receipt.opID)
 
         let reopenedContext = ProfileContext(identity: identity, transportMode: .relay)
-        let reopened = try AttentionDomainStore(context: reopenedContext, persistence: persistence)
+        let reopened = try ClientRepository(context: reopenedContext, persistence: persistence)
         let reopenedLive = try LivePresentationStore(store: reopened, context: reopenedContext)
         XCTAssertEqual(reopenedLive.selectedRequest?.lifecycleStatus, .pending)
         XCTAssertEqual(reopenedLive.selectedRequest?.intentReceipt?.intentID, receipt.intentID)
@@ -654,7 +654,7 @@ final class HarklightTests: XCTestCase {
         let context = ProfileContext(identity: identity, transportMode: .fixture)
         let store = try makeStore(fixtures: fixtures,
                                   context: context,
-                                  persistence: MemoryAttentionStatePersistence())
+                                  persistence: MemoryPendingActionPersistence())
         let port = AttentionDomainPort(store: store)
         let snapshot = try port.observe(context: port.context)
 
@@ -701,8 +701,8 @@ final class HarklightTests: XCTestCase {
                                        personID: fixtures.accountScope,
                                        deviceID: ExactText("device-a"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
-        let persistence = MemoryAttentionStatePersistence()
-        let store = try AttentionDomainStore(context: context, persistence: persistence)
+        let persistence = MemoryPendingActionPersistence()
+        let store = try ClientRepository(context: context, persistence: persistence)
 
         XCTAssertNotEqual(acceptedOrder.map(\.key), lexicalOrder.map(\.key))
         XCTAssertEqual(try store.apply(RelayEvent(sequence: 1,
@@ -724,7 +724,7 @@ final class HarklightTests: XCTestCase {
         XCTAssertEqual(firstSnapshot.requests.map(\.acceptanceOrder), [UInt64(2), 1])
 
         let restartedContext = ProfileContext(identity: identity, transportMode: .relay)
-        let restartedStore = try AttentionDomainStore(context: restartedContext, persistence: persistence)
+        let restartedStore = try ClientRepository(context: restartedContext, persistence: persistence)
         let restartedPort = AttentionDomainPort(store: restartedStore)
         let restartedSnapshot = try restartedPort.observe(context: restartedPort.context)
         XCTAssertEqual(restartedSnapshot.requests.map(\.key), newestFirst.map(\.key))
@@ -738,7 +738,7 @@ final class HarklightTests: XCTestCase {
                                        personID: fixtures.accountScope,
                                        deviceID: ExactText("device-a"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
-        let store = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
+        let store = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
         let request = StoredRequest(key: fixture.key, originalPayload: fixture.originalPayload)
         _ = try store.apply(RelayEvent(sequence: 1, body: .delivery(request, .message)), context: context)
         let invalidAnswer = JSONValue.object([
@@ -1034,8 +1034,8 @@ final class HarklightTests: XCTestCase {
                                       personID: ExactText("person"),
                                       deviceID: ExactText("reader")),
             transportMode: .relay)
-        let store = try AttentionDomainStore(context: context,
-                                            persistence: MemoryAttentionStatePersistence())
+        let store = try ClientRepository(context: context,
+                                            persistence: MemoryPendingActionPersistence())
         let requestFile = ConversationFile(id: ExactText("request-file"),
                                            name: ExactText("cover-a.jpg"),
                                            byteCount: 8,
@@ -1421,7 +1421,7 @@ final class HarklightTests: XCTestCase {
 
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("attention-domain-restart-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: directory) }
-        let persistence = FileAttentionStatePersistence(directoryURL: directory)
+        let persistence = FilePendingActionPersistence(directoryURL: directory)
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("fixture-only:test"),
                                        personID: fixtures.accountScope,
                                        deviceID: ExactText("device-a"))
@@ -1516,7 +1516,7 @@ final class HarklightTests: XCTestCase {
         let note = try XCTUnwrap(document.inputs.first(where: { if case .text = $0.kind { return true }; return false }))
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("attention-fence-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: directory) }
-        let persistence = FileAttentionStatePersistence(directoryURL: directory)
+        let persistence = FilePendingActionPersistence(directoryURL: directory)
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("fixture-only:test"),
                                        personID: fixtures.accountScope, deviceID: ExactText("device-a"))
         let context = ProfileContext(identity: identity, transportMode: .fixture)
@@ -1562,7 +1562,7 @@ final class HarklightTests: XCTestCase {
         guard case let .sender(document) = fixture.interface else { return XCTFail("Expected the facilities sender document.") }
         let pointInput = try XCTUnwrap(document.inputs.first(where: { if case .point = $0.kind { return true }; return false }))
         let noteInput = try XCTUnwrap(document.inputs.first(where: { if case .text = $0.kind { return true }; return false }))
-        let persistence = MemoryAttentionStatePersistence()
+        let persistence = MemoryPendingActionPersistence()
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("fixture-only:test"),
                                        personID: fixtures.accountScope,
                                        deviceID: ExactText("device-precommit"))
@@ -1611,7 +1611,7 @@ final class HarklightTests: XCTestCase {
     func testAccountAndGenerationBindingHideCollidingRequests() throws {
         let fixtures = try loadFixtures()
         let source = try XCTUnwrap(fixtures.requests.first(where: { $0.key.messageID == ExactText("facilities-01") }))
-        let persistence = MemoryAttentionStatePersistence()
+        let persistence = MemoryPendingActionPersistence()
         let personA = ExactText("person-A")
         let personB = ExactText("person-B")
         let contextA = ProfileContext(identity: ProfileIdentity(trustedRelayAuthority: ExactText("relay-test"), personID: personA, deviceID: ExactText("device-a")), transportMode: .fixture)
@@ -1659,7 +1659,7 @@ final class HarklightTests: XCTestCase {
         let fixture = try XCTUnwrap(fixtures.requests.first(where: { $0.key.messageID == ExactText("facilities-01") }))
         guard case let .sender(document) = fixture.interface else { return XCTFail("Expected a sender document.") }
         let note = try XCTUnwrap(document.inputs.first(where: { if case .text = $0.kind { return true }; return false }))
-        let persistence = MemoryAttentionStatePersistence()
+        let persistence = MemoryPendingActionPersistence()
         let context = ProfileContext(identity: ProfileIdentity(trustedRelayAuthority: ExactText("fixture-only:test"),
                                                                personID: fixtures.accountScope,
                                                                deviceID: ExactText("device-a")),
@@ -1682,7 +1682,7 @@ final class HarklightTests: XCTestCase {
                                        personID: fixtures.accountScope,
                                        deviceID: ExactText("device-a"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
-        let store = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
+        let store = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
         let relayRequest = StoredRequest(key: fixture.key, originalPayload: fixture.originalPayload)
         try store.beginReplay(through: 2, context: context)
         XCTAssertEqual(try store.apply(RelayEvent(sequence: 1, body: .delivery(relayRequest, .message)), context: context), 1)
@@ -1712,7 +1712,7 @@ final class HarklightTests: XCTestCase {
                                        personID: fixtures.accountScope,
                                        deviceID: ExactText("device-a"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
-        let store = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
+        let store = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
         let request = StoredRequest(key: fixture.key, originalPayload: fixture.originalPayload)
         XCTAssertEqual(try store.apply(RelayEvent(sequence: 1, body: .delivery(request, .message)), context: context), 1)
         let port = AttentionDomainPort(store: store)
@@ -1771,7 +1771,7 @@ final class HarklightTests: XCTestCase {
         let context = ProfileContext(identity: identity, transportMode: .fixture)
 
         for outcome in [OwnOutcome.accepted, .unconfirmed] {
-            let persistence = MemoryAttentionStatePersistence()
+            let persistence = MemoryPendingActionPersistence()
             let store = try makeStore(fixtures: fixtures, context: context, persistence: persistence)
             let port = AttentionDomainPort(store: store)
             let selector = try XCTUnwrap(port.inspect(context: port.context, request: fixture.key).requests.first?.selector)
@@ -1830,9 +1830,9 @@ final class HarklightTests: XCTestCase {
 
     private func makeStore(fixtures: FixtureSet,
                            context: ProfileContext,
-                           persistence: any AttentionStatePersistence,
-                           replacing replacements: [RequestKey: RequestKey] = [:]) throws -> AttentionDomainStore {
-        let store = try AttentionDomainStore(context: context, persistence: persistence)
+                           persistence: any PendingActionPersistence,
+                           replacing replacements: [RequestKey: RequestKey] = [:]) throws -> ClientRepository {
+        let store = try ClientRepository(context: context, persistence: persistence)
         let requests = fixtures.requests.map { request in
             StoredRequest(key: replacements[request.key] ?? RequestKey(accountScope: context.identity.personID,
                                                                       senderID: request.key.senderID,

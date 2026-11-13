@@ -133,11 +133,11 @@ final class ConversationRelayTests: XCTestCase {
         func sendOriginalOperation(_ frame: Data, operationID: UUID) async throws -> OriginalOperationResult { .unresolved }
     }
     private func data(_ string: String) -> Data { Data(string.utf8) }
-    private func setup() throws -> (ProfileContext, MemoryAttentionStatePersistence, AttentionDomainStore, Session) {
+    private func setup() throws -> (ProfileContext, MemoryPendingActionPersistence, ClientRepository, Session) {
         let context = ProfileContext(identity: ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
             personID: ExactText("local-person"), deviceID: ExactText("reader")), transportMode: .relay)
-        let persistence = MemoryAttentionStatePersistence()
-        let store = try AttentionDomainStore(context: context, persistence: persistence)
+        let persistence = MemoryPendingActionPersistence()
+        let store = try ClientRepository(context: context, persistence: persistence)
         let session = Session(context.identity)
         session.ordinary = [data(#"{"v":1,"type":"ok","ref":"native-sync"}"#),
             data(#"{"v":1,"type":"delivery","seq":1,"sender_id":"author","message_id":"request","origin":"origin","as":"message","message":{"title":"Question"},"session_handle":"handle","request_revision":1,"availability":"not_listening","last_detached_at":123}"#),
@@ -304,8 +304,8 @@ final class ConversationRelayTests: XCTestCase {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
             personID: ExactText("local-person"), deviceID: ExactText("reader"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
-        let store = try AttentionDomainStore(context: context,
-            persistence: MemoryAttentionStatePersistence())
+        let store = try ClientRepository(context: context,
+            persistence: MemoryPendingActionPersistence())
         let key = RequestKey(accountScope: identity.personID,
             senderID: ExactText("author"), messageID: ExactText("request"))
         try store.applyConversation(ConversationEvent(sequence: 1,
@@ -434,7 +434,7 @@ final class ConversationRelayTests: XCTestCase {
 
         let pendingBeforeRelaunch = try XCTUnwrap(
             store.conversationSnapshot(context: context).pendingChatReadPositions.first)
-        let relaunchedStore = try AttentionDomainStore(context: context, persistence: persistence)
+        let relaunchedStore = try ClientRepository(context: context, persistence: persistence)
         let persistedPending = try XCTUnwrap(
             relaunchedStore.conversationSnapshot(context: context).pendingChatReadPositions.first)
         XCTAssertEqual(persistedPending.operationID, pendingBeforeRelaunch.operationID,
@@ -627,7 +627,7 @@ final class ConversationRelayTests: XCTestCase {
         XCTAssertEqual(session.ordinaryACKs.count, 1)
         await core.deactivate()
 
-        let restarted = try AttentionDomainStore(context: context, persistence: persistence)
+        let restarted = try ClientRepository(context: context, persistence: persistence)
         XCTAssertEqual(try restarted.conversationSnapshot(context: context)
             .threads.values.first?.facts[reply.id]?.localLiveArrivalAtMilliseconds,
             liveReceiptTime, "The genuinely live receipt time survives store restart.")
@@ -873,7 +873,7 @@ final class ConversationRelayTests: XCTestCase {
 
         // The held events survive a store restart, then apply when inbox paging
         // eventually loads their request.
-        let restored = try AttentionDomainStore(context: context, persistence: persistence)
+        let restored = try ClientRepository(context: context, persistence: persistence)
         let later = Session(context.identity)
         later.ordinary = [data(#"{"v":1,"type":"ok","ref":"native-sync"}"#),
             data(#"{"v":1,"type":"delivery","seq":2,"sender_id":"author","message_id":"earlier","origin":"origin","as":"message","message":{"title":"Earlier request"},"session_handle":"earlier-handle","request_revision":1,"availability":"not_listening","last_detached_at":null}"#),
@@ -914,7 +914,7 @@ final class ConversationRelayTests: XCTestCase {
             XCTAssertEqual(snapshot.inboxReferences[key]?.attentionTier, .low,
                            "The tier fact must be durable before the conversation cursor is acknowledged.")
             XCTAssertEqual(snapshot.inboxReferences[key]?.attentionTierFeed, .conversation)
-            let restored = try AttentionDomainStore(context: context, persistence: persistence)
+            let restored = try ClientRepository(context: context, persistence: persistence)
             XCTAssertEqual(try restored.snapshot(context: context).inboxReferences[key]?.attentionTier, .low)
         }
 
@@ -922,7 +922,7 @@ final class ConversationRelayTests: XCTestCase {
         _ = try await core.resyncAndDrainOutbox()
         XCTAssertEqual(session.conversationACKs.count, 1)
 
-        let restored = try AttentionDomainStore(context: context, persistence: persistence)
+        let restored = try ClientRepository(context: context, persistence: persistence)
         let payload = try JSONValue.parse(data(#"{"title":"Arrived later"}"#))
         try restored.apply(RelayEvent(sequence: 2,
             body: .delivery(StoredRequest(key: key, originalPayload: payload), .message),
@@ -1038,7 +1038,7 @@ final class ConversationRelayTests: XCTestCase {
     func testLegacyDeliveryNeedsNoConversationProjection() async throws {
         let context = ProfileContext(identity: ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
             personID: ExactText("local-person"), deviceID: ExactText("reader")), transportMode: .relay)
-        let store = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
+        let store = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
         // This legacy adapter intentionally has no conversation-session conformance.
         final class LegacySession: AuthenticatedInboxEventStreamSession, @unchecked Sendable {
             let authenticatedIdentity: ProfileIdentity

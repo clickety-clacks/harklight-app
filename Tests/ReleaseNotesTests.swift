@@ -931,37 +931,6 @@ final class ReleaseNotesTests: XCTestCase {
                        ["1", "2", "3"])
     }
 
-    @MainActor
-    func testSavedRequestFilesCountAsPriorAppStateButFixtureFilesDoNot() throws {
-        struct ProfileHeader: Encodable {
-            let profileIdentity: ProfileIdentity
-        }
-
-        let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("ReleaseNotesTests-\(UUID().uuidString)", isDirectory: true)
-        defer { try? FileManager.default.removeItem(at: directory) }
-
-        XCTAssertFalse(NativeInstallationHistory.hasPersistedAttentionState(in: directory))
-        try FileManager.default.createDirectory(at: directory,
-                                                withIntermediateDirectories: true)
-        XCTAssertFalse(NativeInstallationHistory.hasPersistedAttentionState(in: directory))
-
-        let fixtureIdentity = ProfileIdentity(
-            trustedRelayAuthority: ExactText("fixture-only:attention-client-m2"),
-            personID: ExactText("sample-account"),
-            deviceID: ExactText("fictional-sample-device"))
-        let stateURL = directory.appendingPathComponent("profile.plist")
-        try PropertyListEncoder().encode(ProfileHeader(profileIdentity: fixtureIdentity)).write(to: stateURL)
-        XCTAssertFalse(NativeInstallationHistory.hasPersistedAttentionState(in: directory))
-
-        let savedAccountIdentity = ProfileIdentity(
-            trustedRelayAuthority: ExactText("relay.example"),
-            personID: ExactText("person-1"),
-            deviceID: ExactText("device-1"))
-        try PropertyListEncoder().encode(ProfileHeader(profileIdentity: savedAccountIdentity)).write(to: stateURL)
-        XCTAssertTrue(NativeInstallationHistory.hasPersistedAttentionState(in: directory))
-    }
-
     private func releaseNote(_ buildIdentifier: Int) -> HarklightReleaseNote {
         HarklightReleaseNote(
             buildIdentifier: buildIdentifier,

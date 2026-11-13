@@ -145,8 +145,8 @@ final class NativeGuidedTLSTests: XCTestCase {
             messageID: ExactText(fixture.messageID))
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
-        let persistence = FileAttentionStatePersistence(directoryURL: directory)
-        var store = try AttentionDomainStore(context: context, persistence: persistence)
+        let persistence = FilePendingActionPersistence(directoryURL: directory)
+        var store = try ClientRepository(context: context, persistence: persistence)
         let runID = UUID()
         let sessionHandle = ExactText("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
 
@@ -156,7 +156,7 @@ final class NativeGuidedTLSTests: XCTestCase {
                 // Restore the same identity and committed state. A capable server
                 // supplied the thread on the first replay. Only the older server
                 // needs synthetic saved history to reproduce its unsupported open.
-                store = try AttentionDomainStore(context: context, persistence: persistence)
+                store = try ClientRepository(context: context, persistence: persistence)
                 let saved = try store.snapshot(context: context)
                 let message = try XCTUnwrap(saved.requests[request])
                 if !fixture.conversationsSupported {
@@ -340,7 +340,7 @@ final class NativeGuidedTLSTests: XCTestCase {
                                        personID: ExactText("person-A"),
                                        deviceID: ExactText("installation-A"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
-        let store = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
+        let store = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
         XCTAssertEqual(try store.relayCursor(context: context), 0)
 
         let otherIdentity = ProfileIdentity(trustedRelayAuthority: context.identity.trustedRelayAuthority,
@@ -516,7 +516,7 @@ final class NativeGuidedTLSTests: XCTestCase {
         let record = notificationRecord()
         let context = ProfileContext(identity: try XCTUnwrap(NativeNotificationProfile(record)).identity,
                                      transportMode: .relay)
-        let domain = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
+        let domain = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
         let presentation = try LivePresentationStore(store: domain, context: context)
         var checks: [Bool] = []
         let app = NativeAppLaunch(arguments: [], enrollmentStore: NativeEnrollmentStore(service: namespace),
@@ -589,8 +589,8 @@ final class NativeGuidedTLSTests: XCTestCase {
         let record = notificationRecord()
         try saveEnrollmentRecord(record, service: namespace)
         let context = ProfileContext(identity: try XCTUnwrap(NativeNotificationProfile(record)).identity, transportMode: .relay)
-        let persistence = MemoryAttentionStatePersistence()
-        let domain = try AttentionDomainStore(context: context, persistence: persistence)
+        let persistence = MemoryPendingActionPersistence()
+        let domain = try ClientRepository(context: context, persistence: persistence)
         let key = RequestKey(accountScope: context.identity.personID, senderID: ExactText("sender"), messageID: ExactText("target"))
         let pendingKey = RequestKey(accountScope: context.identity.personID, senderID: ExactText("sender"), messageID: ExactText("pending"))
         let payload = try JSONValue.parse(Data(#"{"title":"Same title"}"#.utf8))
@@ -640,8 +640,8 @@ final class NativeGuidedTLSTests: XCTestCase {
                                        personID: ExactText("person-message-links"),
                                        deviceID: ExactText("device-message-links"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
-        let domain = try AttentionDomainStore(context: context,
-                                              persistence: MemoryAttentionStatePersistence())
+        let domain = try ClientRepository(context: context,
+                                              persistence: MemoryPendingActionPersistence())
         let otherKey = RequestKey(accountScope: identity.personID, senderID: ExactText("app:one"),
                                   messageID: ExactText("other"))
         let targetKey = RequestKey(accountScope: identity.personID, senderID: ExactText("app:one"),
@@ -749,7 +749,7 @@ final class NativeGuidedTLSTests: XCTestCase {
         defer { defaults.removePersistentDomain(forName: namespace) }
         let record = notificationRecord()
         let context = ProfileContext(identity: try XCTUnwrap(NativeNotificationProfile(record)).identity, transportMode: .relay)
-        let domain = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
+        let domain = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
         let payload = try JSONValue.parse(Data(#"{"title":"Same title"}"#.utf8))
         let key = try XCTUnwrap(NativeNotificationLocator(notificationPayload())).request
         let first = NativeNotificationRouter(defaults: defaults)
@@ -789,8 +789,8 @@ final class NativeGuidedTLSTests: XCTestCase {
         try saveEnrollmentRecord(record, service: namespace)
         let context = ProfileContext(identity: try XCTUnwrap(NativeNotificationProfile(record)).identity,
                                      transportMode: .relay)
-        let domain = try AttentionDomainStore(context: context,
-                                              persistence: MemoryAttentionStatePersistence())
+        let domain = try ClientRepository(context: context,
+                                              persistence: MemoryPendingActionPersistence())
         func key(_ messageID: String) -> RequestKey {
             RequestKey(accountScope: context.identity.personID, senderID: ExactText("sender"),
                        messageID: ExactText(messageID))
@@ -888,8 +888,8 @@ final class NativeGuidedTLSTests: XCTestCase {
         try saveEnrollmentRecord(record, service: namespace)
         let context = ProfileContext(identity: try XCTUnwrap(NativeNotificationProfile(record)).identity,
                                      transportMode: .relay)
-        let persistence = MemoryAttentionStatePersistence()
-        let domain = try AttentionDomainStore(context: context, persistence: persistence)
+        let persistence = MemoryPendingActionPersistence()
+        let domain = try ClientRepository(context: context, persistence: persistence)
         let key = try XCTUnwrap(NativeNotificationLocator(notificationPayload())).request
         let informationalPayload = try JSONValue.parse(Data(#"{"title":"Build complete","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"seen","label":"Seen","kind":"value","value":{"acknowledgment":"seen"}}]}}"#.utf8))
         try domain.apply(RelayEvent(sequence: 1,
@@ -947,8 +947,8 @@ final class NativeGuidedTLSTests: XCTestCase {
         let record = notificationRecord()
         try saveEnrollmentRecord(record, service: namespace)
         let context = ProfileContext(identity: try XCTUnwrap(NativeNotificationProfile(record)).identity, transportMode: .relay)
-        let persistence = MemoryAttentionStatePersistence()
-        let domain = try AttentionDomainStore(context: context, persistence: persistence)
+        let persistence = MemoryPendingActionPersistence()
+        let domain = try ClientRepository(context: context, persistence: persistence)
         let key = try XCTUnwrap(NativeNotificationLocator(notificationPayload())).request
         try domain.apply(RelayEvent(sequence: 1, body: .delivery(StoredRequest(key: key,
             originalPayload: try JSONValue.parse(Data(#"{"title":"Duplicated title"}"#.utf8))), .message)), context: context)
@@ -980,7 +980,7 @@ final class NativeGuidedTLSTests: XCTestCase {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
                                        personID: ExactText("person-order"), deviceID: ExactText("device-order"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
-        let store = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
+        let store = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
         let olderResolved = RequestKey(accountScope: identity.personID, senderID: ExactText("sender"), messageID: ExactText("older-resolved"))
         let newerResolved = RequestKey(accountScope: identity.personID, senderID: ExactText("sender"), messageID: ExactText("newer-resolved"))
         let unresolved = RequestKey(accountScope: identity.personID, senderID: ExactText("sender"), messageID: ExactText("unresolved"))
@@ -1003,7 +1003,7 @@ final class NativeGuidedTLSTests: XCTestCase {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
                                        personID: ExactText("person-seen"), deviceID: ExactText("device-seen"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
-        let store = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
+        let store = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
         let seenKey = RequestKey(accountScope: identity.personID, senderID: ExactText("sender"), messageID: ExactText("notice"))
         let remotelySeenKey = RequestKey(accountScope: identity.personID, senderID: ExactText("sender"), messageID: ExactText("remote-seen"))
         let competingSeenKey = RequestKey(accountScope: identity.personID, senderID: ExactText("sender"), messageID: ExactText("competing-seen"))
@@ -1071,7 +1071,7 @@ final class NativeGuidedTLSTests: XCTestCase {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
                                        personID: ExactText("person-wire-order"), deviceID: ExactText("device-wire-order"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
-        let store = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
+        let store = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
         let seenKey = RequestKey(accountScope: identity.personID, senderID: ExactText("sender"), messageID: ExactText("notice"))
         let structuredKey = RequestKey(accountScope: identity.personID, senderID: ExactText("sender"), messageID: ExactText("structured"))
         let legacyKey = RequestKey(accountScope: identity.personID, senderID: ExactText("sender"), messageID: ExactText("legacy"))
@@ -1347,8 +1347,8 @@ final class NativeGuidedTLSTests: XCTestCase {
                                        personID: ExactText("private-person-marker"),
                                        deviceID: ExactText("device"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
-        let store = try AttentionDomainStore(context: context,
-                                             persistence: MemoryAttentionStatePersistence())
+        let store = try ClientRepository(context: context,
+                                             persistence: MemoryPendingActionPersistence())
         let request = RequestKey(accountScope: identity.personID,
                                  senderID: ExactText("private-sender-marker"),
                                  messageID: ExactText("private-request-marker"))
@@ -1433,8 +1433,8 @@ final class NativeGuidedTLSTests: XCTestCase {
         let context = ProfileContext(identity: ProfileIdentity(
             trustedRelayAuthority: ExactText("localhost"), personID: ExactText("test-person"),
             deviceID: ExactText(identity.deviceID)), transportMode: .relay)
-        let store = try AttentionDomainStore(context: context,
-            persistence: MemoryAttentionStatePersistence())
+        let store = try ClientRepository(context: context,
+            persistence: MemoryPendingActionPersistence())
         let key = RequestKey(accountScope: context.identity.personID,
             senderID: ExactText("sender"), messageID: ExactText("conversation"))
         let first = JSONValue.object([JSONMember("title", .string(ExactText("First wording")))])
@@ -1515,7 +1515,7 @@ final class NativeGuidedTLSTests: XCTestCase {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
             personID: ExactText("person"), deviceID: ExactText("device"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
-        let domain = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
+        let domain = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
         let availability = NativeConversationAvailability()
         let presentation = try LivePresentationStore(store: domain, context: context,
                                                      conversationAvailability: availability)
@@ -1538,7 +1538,7 @@ final class NativeGuidedTLSTests: XCTestCase {
         let otherContext = ProfileContext(identity: ProfileIdentity(
             trustedRelayAuthority: ExactText("other-relay.example"),
             personID: ExactText("person"), deviceID: ExactText("device")), transportMode: .relay)
-        let domain = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
+        let domain = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
         let presentation = try LivePresentationStore(store: domain, context: context)
         let failure = NSError(domain: "RelayConnection", code: 7,
                               userInfo: [NSLocalizedDescriptionKey: "approved server could not be reached"])
@@ -1621,8 +1621,8 @@ final class NativeGuidedTLSTests: XCTestCase {
         let port = try await relay.start()
         let context = ProfileContext(identity: ProfileIdentity(trustedRelayAuthority: ExactText("localhost"),
             personID: ExactText("refresh-timeout-person"), deviceID: ExactText(identity.deviceID)), transportMode: .relay)
-        let store = try AttentionDomainStore(context: context,
-            persistence: MemoryAttentionStatePersistence(), persistsOnlyLocalState: true)
+        let store = try ClientRepository(context: context,
+            persistence: MemoryPendingActionPersistence())
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -1630,7 +1630,7 @@ final class NativeGuidedTLSTests: XCTestCase {
         try await lifecycle.activate(store: store, context: context,
             relayURL: XCTUnwrap(URL(string: "wss://localhost:\(port)/relay")),
             clientIdentity: identity.value, trustedRootDER: relay.rootDER,
-            serverStateCache: FileServerStateCache(fileURL: directory.appendingPathComponent("cache.json")))
+            serverStateCache: FileServerStateCache(identity: context.identity, fileURL: directory.appendingPathComponent("cache.json")))
         let result = await lifecycle.refreshResultFromTrustedRelay()
         XCTAssertTrue(requests.types.contains("inbox_checkpoint_ack"), "Establish that inbox setup reached its ACK.")
         XCTAssertTrue(requests.types.contains("conversation_open"), "Establish the exact stalled protocol phase.")
@@ -1729,8 +1729,8 @@ final class NativeGuidedTLSTests: XCTestCase {
         }
         let context = ProfileContext(identity: ProfileIdentity(trustedRelayAuthority: ExactText("localhost"),
             personID: ExactText("history-person"), deviceID: ExactText(identity.deviceID)), transportMode: .relay)
-        let persistence = MemoryAttentionStatePersistence()
-        let store = try AttentionDomainStore(context: context, persistence: persistence)
+        let persistence = MemoryPendingActionPersistence()
+        let store = try ClientRepository(context: context, persistence: persistence)
         // Synthetic saved-state precondition: the cursor passed a discussion
         // whose local dependency is absent. No current-client loss is asserted.
         _ = try store.advanceConversationCursor(overIgnoredUpdateAt: 1, context: context)
@@ -1805,7 +1805,7 @@ final class NativeGuidedTLSTests: XCTestCase {
         }
         await core.deactivate()
         await session.close()
-        let restored = try AttentionDomainStore(context: context, persistence: persistence)
+        let restored = try ClientRepository(context: context, persistence: persistence)
         let snapshot = try restored.conversationSnapshot(context: context)
         let answered = RequestKey(accountScope: context.identity.personID,
             senderID: ExactText("author"), messageID: ExactText("answered"))
@@ -2081,8 +2081,8 @@ final class NativeGuidedTLSTests: XCTestCase {
             trustedRelayAuthority: ExactText(original.profileAuthority),
             personID: ExactText(original.personID!), deviceID: ExactText(original.deviceID)),
             transportMode: .relay)
-        let domain = try AttentionDomainStore(context: context,
-                                             persistence: MemoryAttentionStatePersistence())
+        let domain = try ClientRepository(context: context,
+                                             persistence: MemoryPendingActionPersistence())
         let presentation = try LivePresentationStore(store: domain, context: context)
         let app = NativeAppLaunch(arguments: ["Harklight"], enrollmentStore: enrollment,
                                   joinStore: join, initialState: .live(presentation),
@@ -2163,8 +2163,8 @@ final class NativeGuidedTLSTests: XCTestCase {
             byteCount: 6, sha256: ExactText(String(repeating: "a", count: 64)),
             content: .uploaded(ExactText(UUID().uuidString.lowercased())))
 
-        let persistence = MemoryAttentionStatePersistence()
-        let domain = try AttentionDomainStore(context: context, persistence: persistence,
+        let persistence = MemoryPendingActionPersistence()
+        let domain = try ClientRepository(context: context, persistence: persistence,
             conversationFileReferences: storage)
         let key = RequestKey(accountScope: identity.personID, senderID: ExactText("sender"),
                              messageID: ExactText("archived-request"))
@@ -2327,7 +2327,7 @@ final class NativeGuidedTLSTests: XCTestCase {
                 trustedRelayAuthority: ExactText(record.profileAuthority),
                 personID: ExactText(record.personID!), deviceID: ExactText(record.deviceID)),
                 transportMode: .relay)
-            let domain = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
+            let domain = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
             return try LivePresentationStore(store: domain, context: context)
         }
 
@@ -2409,8 +2409,8 @@ final class NativeGuidedTLSTests: XCTestCase {
                 trustedRelayAuthority: ExactText(record.profileAuthority),
                 personID: ExactText(record.personID!), deviceID: ExactText(record.deviceID)),
                 transportMode: .relay)
-            let domain = try AttentionDomainStore(context: context,
-                persistence: MemoryAttentionStatePersistence())
+            let domain = try ClientRepository(context: context,
+                persistence: MemoryPendingActionPersistence())
             return try LivePresentationStore(store: domain, context: context)
         }
 
@@ -2579,8 +2579,8 @@ final class NativeGuidedTLSTests: XCTestCase {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
                                        personID: ExactText("person-A"), deviceID: ExactText("device-A"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
-        let persistence = MemoryAttentionStatePersistence()
-        let store = try AttentionDomainStore(context: context, persistence: persistence)
+        let persistence = MemoryPendingActionPersistence()
+        let store = try ClientRepository(context: context, persistence: persistence)
         let key = RequestKey(accountScope: identity.personID, senderID: ExactText("sender"), messageID: ExactText("saved"))
         let payload = try JSONValue.parse(Data(#"{"title":"Saved request","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"got-it","label":"Got it","kind":"value","value":"got-it"}]}}"#.utf8))
         _ = try store.apply(RelayEvent(sequence: 1, body: .delivery(
@@ -2941,7 +2941,7 @@ final class NativeGuidedTLSTests: XCTestCase {
         let context = ProfileContext(identity: identity, transportMode: .fixture)
         let request = RequestKey(accountScope: identity.personID,
             senderID: ExactText("private-sender-marker"), messageID: ExactText("private-message-marker"))
-        let store = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
+        let store = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
         for revision in 1...2 {
             try store.applyConversation(ConversationEvent(sequence: UInt64(revision),
                 binding: ConversationBinding(request: request, revision: UInt64(revision)),
@@ -3001,7 +3001,7 @@ final class NativeGuidedTLSTests: XCTestCase {
         let context = ProfileContext(identity: identity, transportMode: .fixture)
         let request = RequestKey(accountScope: identity.personID,
             senderID: ExactText("sender"), messageID: ExactText("message"))
-        let store = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
+        let store = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
         let position = AccountConversationReadPosition(request: request,
             readThroughConversationSequence: 1)
         var rejection: ConversationValidationRejection?
@@ -3068,7 +3068,7 @@ final class NativeGuidedTLSTests: XCTestCase {
                                        personID: ExactText("private-person-marker"),
                                        deviceID: ExactText("diagnostic-draft-read-device"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
-        let domain = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
+        let domain = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
         let journalURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("HarklightCaughtPreview-\(UUID().uuidString).json")
         defer { try? FileManager.default.removeItem(at: journalURL) }
@@ -3113,7 +3113,7 @@ final class NativeGuidedTLSTests: XCTestCase {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
                                        personID: ExactText("person-A"), deviceID: ExactText("device-A"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
-        let store = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
+        let store = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
         let key = RequestKey(accountScope: identity.personID, senderID: ExactText("sender-original"),
                              messageID: ExactText("message-original"))
         let payload = try JSONValue.parse(Data(#"{"title":"Saved request","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"approve","label":"Approve","kind":"value","value":"approve"}]}}"#.utf8))
@@ -3170,7 +3170,7 @@ final class NativeGuidedTLSTests: XCTestCase {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
                                        personID: ExactText("person-A"), deviceID: ExactText("device-A"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
-        let store = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
+        let store = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
         let session = ForegroundProgressRelaySession(identity: identity, store: store, context: context)
         let events = RelayProgressRecorder()
         let core = try NativeRelayCore(store: store, context: context, session: session,
@@ -3240,8 +3240,8 @@ final class NativeGuidedTLSTests: XCTestCase {
                                        personID: ExactText("person-A"), deviceID: ExactText("device-A"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
         let transportAttemptID = UUID()
-        let persistence = MemoryAttentionStatePersistence()
-        let store = try AttentionDomainStore(context: context, persistence: persistence)
+        let persistence = MemoryPendingActionPersistence()
+        let store = try ClientRepository(context: context, persistence: persistence)
         let session = ForegroundProgressRelaySession(identity: identity, store: store, context: context)
         let core = try NativeRelayCore(store: store, context: context, session: session)
         let (firstStarted, firstStartedSignal) = AsyncStream<Void>.makeStream()
@@ -3737,8 +3737,8 @@ final class NativeGuidedTLSTests: XCTestCase {
                                        personID: ExactText("local-test-person"),
                                        deviceID: ExactText(installation.deviceID))
         let context = ProfileContext(identity: identity, transportMode: .relay)
-        let persistence = MemoryAttentionStatePersistence()
-        let store = try AttentionDomainStore(context: context, persistence: persistence)
+        let persistence = MemoryPendingActionPersistence()
+        let store = try ClientRepository(context: context, persistence: persistence)
         let requestKey = RequestKey(accountScope: identity.personID, senderID: ExactText("local-agent"),
                                     messageID: ExactText("saved-before-stall"))
         let payload = try JSONValue.parse(Data(#"{"title":"Saved request","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"got-it","label":"Got it","kind":"value","value":"got-it"}]}}"#.utf8))
@@ -3784,7 +3784,7 @@ final class NativeGuidedTLSTests: XCTestCase {
         let connectionClosed = await eventually { server.clientClosed }
         XCTAssertTrue(connectionClosed, "The timed-out matching relay session must close its local TLS connection.")
         XCTAssertFalse(progressUpdates.contains(where: { $0.outcome == .confirmed }))
-        let restoredAfterTimeout = try AttentionDomainStore(context: context, persistence: persistence)
+        let restoredAfterTimeout = try ClientRepository(context: context, persistence: persistence)
         let restoredSnapshot = try restoredAfterTimeout.snapshot(context: context)
         XCTAssertEqual(restoredSnapshot.cursor, 1,
                        "The stalled connection must preserve the approved profile's replay cursor.")
@@ -3954,13 +3954,13 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertFalse(restored.shareText.contains("answer="))
     }
 
-    private func makeU2ReplayFixture() throws -> (ProfileContext, AttentionDomainStore, U2ReplaySession) {
+    private func makeU2ReplayFixture() throws -> (ProfileContext, ClientRepository, U2ReplaySession) {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
                                        personID: ExactText("person-A"),
                                        deviceID: ExactText("installation-A"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
         return (context,
-                try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence()),
+                try ClientRepository(context: context, persistence: MemoryPendingActionPersistence()),
                 U2ReplaySession(identity))
     }
 
@@ -4338,12 +4338,12 @@ private final class RelayProgressRecorder: @unchecked Sendable {
 
 private final class ForegroundProgressRelaySession: AuthenticatedInboxPagingSession, @unchecked Sendable {
     let authenticatedIdentity: ProfileIdentity
-    private let store: AttentionDomainStore
+    private let store: ClientRepository
     private let context: ProfileContext
     private(set) var cursorAtAcknowledgement: UInt64?
     let originalOperationRecorder = OriginalOperationRecorder()
 
-    init(identity: ProfileIdentity, store: AttentionDomainStore, context: ProfileContext) {
+    init(identity: ProfileIdentity, store: ClientRepository, context: ProfileContext) {
         authenticatedIdentity = identity
         self.store = store
         self.context = context

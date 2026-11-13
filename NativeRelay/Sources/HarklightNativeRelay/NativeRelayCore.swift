@@ -133,10 +133,10 @@ public actor NativeRelayCore {
         let continuation: CheckedContinuation<Void, any Error>
     }
 
-    private let store: AttentionDomainStore
+    private let store: ClientRepository
     private let context: ProfileContext
     private let session: any AuthenticatedInstallationSession
-    private let serverStateCache: (any ServerStateCaching)?
+    private let serverStateCache: any ServerStateCaching
     private let wire: RelayWire
     private let inboxWire: InboxPagingWire
     private let onProgress: @Sendable (NativeRelayProgressEvent) -> Void
@@ -384,7 +384,7 @@ public actor NativeRelayCore {
         var high: UInt64?
     }
 
-    public init(store: AttentionDomainStore,
+    public init(store: ClientRepository,
                 context: ProfileContext,
                 session: any AuthenticatedInstallationSession,
                 attemptID: UUID? = nil,
@@ -399,7 +399,7 @@ public actor NativeRelayCore {
         self.store = store
         self.context = context
         self.session = session
-        self.serverStateCache = serverStateCache
+        self.serverStateCache = serverStateCache ?? FileServerStateCache(identity: context.identity)
         self.onProgress = onProgress
         self.attemptID = attemptID
         self.onDiagnostic = onDiagnostic
@@ -464,78 +464,16 @@ public actor NativeRelayCore {
             inboxBootstrapped = true
         }
         onProgress(.postAckDrainBegan)
-        var failedStep = serverStateCache == nil
-            ? NativeDiagnosticPostAckStep.readAcceptedOperationsBeforeDrain
-            : NativeDiagnosticPostAckStep.replayConversationsAndAcknowledge
+        var failedStep = NativeDiagnosticPostAckStep.replayConversationsAndAcknowledge
         do {
             inspectedConversationMetadata = true
-            if serverStateCache == nil {
-                let acceptedBeforeDrain = Set(try store.acceptedOperationsAwaitingTerminalReplay(context: context)
-                    .map(\.operationID))
-                failedStep = .readOutboxBeforeDrain
-                let pendingBeforeDrain = try store.snapshot(context: context).outbox
-                let attempted: Int
-                do {
-                    failedStep = .drainPendingOperations
-                    attempted = try await drainPending()
-                } catch {
-                    // A later operation may fail after an earlier operation was
-                    // accepted. Record that the accepted operation's terminal replay
-                    // was not reached, without attributing the later operation's
-                    // transport error to it.
-                    let acceptedAfterInterruptedDrain = (try? store.acceptedOperationsAwaitingTerminalReplay(context: context)) ?? []
-                    for submission in acceptedAfterInterruptedDrain where !acceptedBeforeDrain.contains(submission.operationID) {
-                        diagnoseOperationReplay(.unresolved,
-                                 causeCode: "follow_on_replay_not_reached",
-                                 submission: submission, receipt: .acceptedAwaitingReplay)
-                    }
-                    throw error
-                }
-                if attempted > 0 {
-                    failedStep = .readOutboxAfterDrain
-                    let afterDrain = try store.snapshot(context: context)
-                    let newlyAccepted = pendingBeforeDrain.compactMap { pending -> Submission? in
-                        guard let recorded = afterDrain.intents[pending.intentID],
-                              case .accepted = recorded.disposition else { return nil }
-                        return recorded
-                    }
-                    for submission in newlyAccepted {
-                        acceptedReplaySubmissions[submission.operationID] = submission
-                        if operationReplayDiagnosticStates[submission.operationID] == nil {
-                            diagnoseOperationReplay(.began, submission: submission,
-                                                    receipt: .acceptedAwaitingReplay)
-                        }
-                    }
-                    failedStep = .readAcceptedOperationsAfterDrain
-                    let acceptedAfterDrain = try store.acceptedOperationsAwaitingTerminalReplay(context: context)
-                    let trackingSubmissions = Array(acceptedReplaySubmissions.values)
-                    if let eventStream = pagingSession as? any AuthenticatedInboxEventStreamSession,
-                       eventStream.supportsPostCheckpointInboxEvents {
-                        let terminalSequence = (acceptedAfterDrain + newlyAccepted)
-                            .compactMap(Self.acceptedTerminalSequence).max()
-                        if let terminalSequence {
-                            failedStep = .waitForAcceptedOperationAcknowledgement
-                            try await waitForPostCheckpointAcknowledgement(through: terminalSequence)
-                        }
-                        completeAcceptedOperationReplayDiagnostics(trackingSubmissions)
-                        failedStep = .readInboxCursorAfterAcknowledgement
-                        high = try store.snapshot(context: context).cursor
-                    } else {
-                        failedStep = .replayInboxAfterDrain
-                        high = try await replayInboxAndAcknowledge(
-                            since: high,
-                            trackingAcceptedOperations: acceptedAfterDrain + newlyAccepted,
-                            using: pagingSession)
-                    }
-                }
-            }
             // An empty local projection does not mean the server has no history.
             // It can also have a durable cursor after accounting for an unusable
             // message, and that progress still needs its conversation ACK.
             if let conversationSession = session as? any AuthenticatedConversationSession {
                 failedStep = .replayConversationsAndAcknowledge
                 try await replayConversationAndAcknowledge(
-                    using: conversationSession, drainReadPositions: serverStateCache == nil)
+                    using: conversationSession, drainReadPositions: false)
             }
             if !inboxViewRequestedOnConnection {
                 inboxViewRequestedOnConnection = true
@@ -546,9 +484,6 @@ public actor NativeRelayCore {
             failedStep = .validateRelayState
             try validate()
             onProgress(.postAckDrainFinished(.completed))
-            if serverStateCache == nil {
-                _ = await drainPendingMessageOpens(using: pagingSession)
-            }
             return max(high, durableCursor)
         } catch {
             let errorCode = NativeDiagnosticCauseCode.forPostAckError(error)
@@ -2000,16 +1935,6 @@ public actor NativeRelayCore {
             submissions.map { ($0.operationID, $0) })
     }
 
-    /// An uncertain result leaves the exact original C operation in the outbox.
-    @discardableResult
-    public func sendPendingOriginalOperations() async throws -> Int {
-        guard serverStateCache == nil else { return 0 }
-        guard !busy else { throw NativeRelayCoreError.inactive }
-        busy = true
-        defer { releaseBusy() }
-        return try await drainPending()
-    }
-
     /// Sends one exact answer operation after an explicit user tap. Refresh
     /// never calls this method; retries keep the stored operation id and payload.
     public func sendOriginalOperationForUserTap(
@@ -2271,7 +2196,7 @@ public actor NativeRelayCore {
                          request: submission.requestKey, revision: submission.requestRevision,
                          receipt: .terminal)
             case .unresolved:
-                if serverStateCache != nil {
+                do {
                     do {
                         try store.recordUnresolvedOperation(submission.intentID,
                             operationID: submission.operationID, context: context)
@@ -2426,10 +2351,9 @@ public actor NativeRelayCore {
     }
 
     private func saveServerStateCache(cursorOverride: UInt64? = nil) async throws {
-        guard let serverStateCache else { return }
         let inbox = try store.snapshot(context: context)
         let conversations = try store.conversationSnapshot(context: context)
-        let snapshot = ServerStateCacheSnapshot.make(from: inbox,
+        let snapshot = ServerStateCacheSnapshot.make(identity: context.identity, from: inbox,
                                                       conversations: conversations,
                                                       cursorOverride: cursorOverride)
         try await serverStateCache.save(snapshot)

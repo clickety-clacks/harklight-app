@@ -429,7 +429,6 @@ final class NativeClientDiagnosticJournal {
             case .staleProfile: return "store_stale_profile"
             case .wrongAccount: return "store_wrong_account"
             case .requestMissing: return "store_request_missing"
-            case .requestConflict: return "store_request_conflict"
             case .selectorExpired: return "store_selector_expired"
             case .invalidDraft: return "store_invalid_draft"
             case .invalidSubmission: return "store_invalid_submission"

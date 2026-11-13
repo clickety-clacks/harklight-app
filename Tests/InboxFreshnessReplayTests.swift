@@ -124,8 +124,8 @@ final class InboxFreshnessReplayTests: XCTestCase {
             let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
                 personID: ExactText("receipt-person"), deviceID: ExactText("reader"))
             let context = ProfileContext(identity: identity, transportMode: .relay)
-            let persistence = MemoryAttentionStatePersistence()
-            let store = try AttentionDomainStore(context: context, persistence: persistence)
+            let persistence = MemoryPendingActionPersistence()
+            let store = try ClientRepository(context: context, persistence: persistence)
             let session = InboxFreshnessRelaySession(identity: identity)
             session.inboxStartHighWater = 3
             let terminalIdentity = terminalIdentityIncluded
@@ -163,7 +163,7 @@ final class InboxFreshnessReplayTests: XCTestCase {
                 XCTAssertEqual(diagnostics.events.last { $0.conversationValidationRejection != nil }?
                     .conversationValidationRejection?.guardID, .referencedTurnExists)
             }
-            let restored = try AttentionDomainStore(context: context, persistence: persistence)
+            let restored = try ClientRepository(context: context, persistence: persistence)
             XCTAssertEqual(try restored.snapshot(context: context).cursor, 4)
             let presentation = try LivePresentationStore(store: restored, context: context)
             func key(_ message: String) -> RequestKey {
@@ -187,8 +187,8 @@ final class InboxFreshnessReplayTests: XCTestCase {
             let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
                 personID: ExactText("discussion-recovery"), deviceID: ExactText("reader"))
             let context = ProfileContext(identity: identity, transportMode: .relay)
-            let persistence = MemoryAttentionStatePersistence()
-            let store = try AttentionDomainStore(context: context, persistence: persistence)
+            let persistence = MemoryPendingActionPersistence()
+            let store = try ClientRepository(context: context, persistence: persistence)
             // Explicit synthetic missing-local-history precondition. The Server
             // sequence below produces a discussion followed by its origin ACK.
             _ = try store.advanceConversationCursor(overIgnoredUpdateAt: 1, context: context)
@@ -245,7 +245,7 @@ final class InboxFreshnessReplayTests: XCTestCase {
                 XCTAssertEqual(skipped.requestTag, expectedTag)
                 XCTAssertEqual(skipped.requestRevision, 1)
             }
-            let reloaded = try AttentionDomainStore(context: context, persistence: persistence)
+            let reloaded = try ClientRepository(context: context, persistence: persistence)
             let snapshot = try reloaded.conversationSnapshot(context: context)
             func key(_ message: String) -> RequestKey {
                 RequestKey(accountScope: identity.personID, senderID: ExactText("author"),
@@ -276,8 +276,8 @@ final class InboxFreshnessReplayTests: XCTestCase {
             let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
                 personID: ExactText("continue-person"), deviceID: ExactText("reader"))
             let context = ProfileContext(identity: identity, transportMode: .relay)
-            let persistence = MemoryAttentionStatePersistence()
-            let store = try AttentionDomainStore(context: context, persistence: persistence)
+            let persistence = MemoryPendingActionPersistence()
+            let store = try ClientRepository(context: context, persistence: persistence)
             let key = RequestKey(accountScope: identity.personID,
                 senderID: ExactText("author"), messageID: ExactText("request"))
             let session = InboxFreshnessRelaySession(identity: identity)
@@ -301,7 +301,7 @@ final class InboxFreshnessReplayTests: XCTestCase {
             let core = try NativeRelayCore(store: store, context: context, session: session,
                 onDiagnostic: { diagnostics.append($0) })
             _ = try await core.resyncAndDrainOutbox()
-            let reloaded = try AttentionDomainStore(context: context, persistence: persistence)
+            let reloaded = try ClientRepository(context: context, persistence: persistence)
             XCTAssertEqual(try reloaded.conversationSnapshot(context: context).cursor, 2)
             let presentation = try LivePresentationStore(store: reloaded, context: context)
             XCTAssertEqual(presentation.request(for: key)?.title, ExactText("Current wording"))
@@ -324,8 +324,8 @@ final class InboxFreshnessReplayTests: XCTestCase {
             let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
                 personID: ExactText("barrier-person"), deviceID: ExactText("reader"))
             let context = ProfileContext(identity: identity, transportMode: .relay)
-            let persistence = MemoryAttentionStatePersistence()
-            let store = try AttentionDomainStore(context: context, persistence: persistence)
+            let persistence = MemoryPendingActionPersistence()
+            let store = try ClientRepository(context: context, persistence: persistence)
             let session = InboxFreshnessRelaySession(identity: identity)
             session.ordinaryFrames = [data(#"{"v":1,"type":"resynced","seq":0}"#)]
             let sequence = failure == "gap" ? 2 : 1
@@ -365,7 +365,7 @@ final class InboxFreshnessReplayTests: XCTestCase {
             XCTAssertTrue(session.conversationACKs.isEmpty)
             XCTAssertFalse(diagnostics.events.contains { $0.causeCode == "conversation_message_skipped" },
                 "Do not report a completed skip before its cursor is durable")
-            let reloaded = try AttentionDomainStore(context: context, persistence: persistence)
+            let reloaded = try ClientRepository(context: context, persistence: persistence)
             XCTAssertEqual(try reloaded.conversationSnapshot(context: context).cursor, 0)
             XCTAssertTrue(try reloaded.conversationSnapshot(context: context).threads.isEmpty)
             await core.deactivate()
@@ -378,8 +378,8 @@ final class InboxFreshnessReplayTests: XCTestCase {
             let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
                 personID: ExactText("page-held-person"), deviceID: ExactText("reader"))
             let context = ProfileContext(identity: identity, transportMode: .relay)
-            let persistence = MemoryAttentionStatePersistence()
-            let store = try AttentionDomainStore(context: context, persistence: persistence)
+            let persistence = MemoryPendingActionPersistence()
+            let store = try ClientRepository(context: context, persistence: persistence)
             let answered = RequestKey(accountScope: identity.personID,
                 senderID: ExactText("author"), messageID: ExactText("answered"))
             let open = RequestKey(accountScope: identity.personID,
@@ -440,7 +440,7 @@ final class InboxFreshnessReplayTests: XCTestCase {
                     "A failed page write must not consume restoration or erase the held receipt")
             } else {
                 _ = try await core.resyncAndDrainOutbox()
-                let reloaded = try AttentionDomainStore(context: context, persistence: persistence)
+                let reloaded = try ClientRepository(context: context, persistence: persistence)
                 let snapshot = try reloaded.conversationSnapshot(context: context)
                 XCTAssertEqual(snapshot.cursor, 3)
                 XCTAssertEqual(snapshot.threads[answered]?.facts[ExactText("2")]?.delivered,
@@ -464,8 +464,8 @@ final class InboxFreshnessReplayTests: XCTestCase {
             let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
                 personID: ExactText("ordered-recovery"), deviceID: ExactText("reader"))
             let context = ProfileContext(identity: identity, transportMode: .relay)
-            let persistence = MemoryAttentionStatePersistence()
-            let store = try AttentionDomainStore(context: context, persistence: persistence)
+            let persistence = MemoryPendingActionPersistence()
+            let store = try ClientRepository(context: context, persistence: persistence)
             let key = RequestKey(accountScope: identity.personID,
                 senderID: ExactText("author"), messageID: ExactText("request"))
             let binding = ConversationBinding(request: key, revision: 1)
@@ -488,7 +488,7 @@ final class InboxFreshnessReplayTests: XCTestCase {
             try store.restoreReferencedConversationTurn(target, for: receipt,
                 origin: ExactText("origin"), context: context)
             try store.applyConversation(receipt, context: context)
-            let reloaded = try AttentionDomainStore(context: context, persistence: persistence)
+            let reloaded = try ClientRepository(context: context, persistence: persistence)
             let thread = try XCTUnwrap(reloaded.conversationSnapshot(context: context).threads[key])
             XCTAssertEqual(thread.turns.map(\.id), targetID == "2"
                 ? [ExactText("1"), ExactText("2"), ExactText("3")]
@@ -503,7 +503,7 @@ final class InboxFreshnessReplayTests: XCTestCase {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
             personID: ExactText("redacted-recovery"), deviceID: ExactText("origin"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
-        let store = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
+        let store = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
         let key = RequestKey(accountScope: identity.personID,
             senderID: ExactText("author"), messageID: ExactText("request"))
         let binding = ConversationBinding(request: key, revision: 1)
@@ -536,8 +536,8 @@ final class InboxFreshnessReplayTests: XCTestCase {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
             personID: ExactText("recovery-person"), deviceID: ExactText("reader"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
-        let persistence = MemoryAttentionStatePersistence()
-        let store = try AttentionDomainStore(context: context, persistence: persistence)
+        let persistence = MemoryPendingActionPersistence()
+        let store = try ClientRepository(context: context, persistence: persistence)
         let key = RequestKey(accountScope: identity.personID,
             senderID: ExactText("author"), messageID: ExactText("answered-request"))
         let binding = ConversationBinding(request: key, revision: 1)
@@ -594,13 +594,13 @@ final class InboxFreshnessReplayTests: XCTestCase {
         XCTAssertFalse(try XCTUnwrap(store.conversationSnapshot(context: context).threads[key])
             .turns.contains { $0.id == discussion.id })
         try store.restoreReferencedConversationTurn(historical, for: receipt, context: context)
-        let repaired = try AttentionDomainStore(context: context, persistence: persistence)
+        let repaired = try ClientRepository(context: context, persistence: persistence)
         XCTAssertEqual(try repaired.conversationSnapshot(context: context).cursor, 1)
         // An exact repeat compares to the restored turn without adding history
         // or advancing its already-durable cursor.
         XCTAssertEqual(try repaired.applyConversation(historical, context: context), 1)
         try repaired.applyConversation(receipt, context: context)
-        let reloaded = try AttentionDomainStore(context: context, persistence: persistence)
+        let reloaded = try ClientRepository(context: context, persistence: persistence)
         let snapshot = try reloaded.conversationSnapshot(context: context)
         let thread = try XCTUnwrap(snapshot.threads[key])
         XCTAssertEqual(snapshot.cursor, 2)
@@ -620,8 +620,8 @@ final class InboxFreshnessReplayTests: XCTestCase {
             let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
                 personID: ExactText("receipt-person"), deviceID: ExactText("reader"))
             let context = ProfileContext(identity: identity, transportMode: .relay)
-            let persistence = MemoryAttentionStatePersistence()
-            let store = try AttentionDomainStore(context: context, persistence: persistence)
+            let persistence = MemoryPendingActionPersistence()
+            let store = try ClientRepository(context: context, persistence: persistence)
             let key = RequestKey(accountScope: identity.personID,
                 senderID: ExactText("author"), messageID: ExactText("answered-request"))
             let handle = ExactText("session")
@@ -659,7 +659,7 @@ final class InboxFreshnessReplayTests: XCTestCase {
             persistence.failNextCommit()
             XCTAssertThrowsError(try store.saveInboxInitialPage(snapshotID: "snapshot", highWater: 2,
                 items: [item], nextCursor: nil, receiptCursor: nil, context: context))
-            let restored = try AttentionDomainStore(context: context, persistence: persistence)
+            let restored = try ClientRepository(context: context, persistence: persistence)
             XCTAssertNil(try restored.conversationSnapshot(context: context).threads[key])
             XCTAssertEqual(try restored.conversationSnapshot(context: context).cursor, receiptHeld ? 4 : 3)
             XCTAssertNil(try restored.snapshot(context: context).requests[key])
@@ -670,7 +670,7 @@ final class InboxFreshnessReplayTests: XCTestCase {
             _ = try restored.prepareInboxCheckpointAcknowledgement(context: context)
             _ = try restored.acceptInboxCheckpoint(snapshotID: "snapshot", highWater: 2, context: context)
             if !receiptHeld { try restored.applyConversation(receipt, context: context) }
-            let reloaded = try AttentionDomainStore(context: context, persistence: persistence)
+            let reloaded = try ClientRepository(context: context, persistence: persistence)
             let thread = try XCTUnwrap(reloaded.conversationSnapshot(context: context).threads[key])
             XCTAssertEqual(thread.terminalTurn, terminalID)
             XCTAssertEqual(thread.facts[terminalID]?.delivered, true)
@@ -698,7 +698,7 @@ final class InboxFreshnessReplayTests: XCTestCase {
             let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
                 personID: ExactText("receipt-person"), deviceID: ExactText("reader"))
             let context = ProfileContext(identity: identity, transportMode: .relay)
-            let store = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
+            let store = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
             let key = RequestKey(accountScope: identity.personID,
                 senderID: ExactText("author"), messageID: ExactText("answered-request"))
             try store.applyConversation(ConversationEvent(sequence: 1,
@@ -729,8 +729,8 @@ final class InboxFreshnessReplayTests: XCTestCase {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
             personID: ExactText("freshness-person"), deviceID: ExactText("reader"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
-        let persistence = MemoryAttentionStatePersistence()
-        let store = try AttentionDomainStore(context: context, persistence: persistence)
+        let persistence = MemoryPendingActionPersistence()
+        let store = try ClientRepository(context: context, persistence: persistence)
         let key = RequestKey(accountScope: identity.personID,
             senderID: ExactText("author"), messageID: ExactText("request"))
 
@@ -814,7 +814,7 @@ final class InboxFreshnessReplayTests: XCTestCase {
         }
         XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, 2)
 
-        let restoredStore = try AttentionDomainStore(context: context, persistence: persistence)
+        let restoredStore = try ClientRepository(context: context, persistence: persistence)
         let restored = try restoredStore.conversationSnapshot(context: context)
         XCTAssertEqual(restored.cursor, 2)
         XCTAssertEqual(restored.threads[key]?.currentRevision, 3,
@@ -827,7 +827,7 @@ final class InboxFreshnessReplayTests: XCTestCase {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
             personID: ExactText("freshness-person"), deviceID: ExactText("reader"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
-        let store = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
+        let store = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
         _ = try store.advanceConversationCursor(overIgnoredUpdateAt: 1, context: context)
 
         let session = InboxFreshnessRelaySession(identity: identity)
@@ -861,7 +861,7 @@ final class InboxFreshnessReplayTests: XCTestCase {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
             personID: ExactText("freshness-missing-redaction"), deviceID: ExactText("reader"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
-        let store = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
+        let store = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
         let key = RequestKey(accountScope: identity.personID,
             senderID: ExactText("author"), messageID: ExactText("request"))
         let firstPayload = try JSONValue.parse(data(#"{"title":"First wording"}"#))
@@ -902,7 +902,7 @@ final class InboxFreshnessReplayTests: XCTestCase {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
             personID: ExactText("freshness-handle-mismatch"), deviceID: ExactText("reader"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
-        let store = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
+        let store = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
         let key = RequestKey(accountScope: identity.personID,
             senderID: ExactText("author"), messageID: ExactText("request"))
 
@@ -944,7 +944,7 @@ final class InboxFreshnessReplayTests: XCTestCase {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
             personID: ExactText("freshness-advance"), deviceID: ExactText("reader"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
-        let store = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
+        let store = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
         let key = RequestKey(accountScope: identity.personID,
             senderID: ExactText("author"), messageID: ExactText("request"))
         let first = try JSONValue.parse(data(#"{"title":"First wording"}"#))
@@ -988,8 +988,8 @@ final class InboxFreshnessReplayTests: XCTestCase {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
             personID: ExactText("freshness-\(UUID().uuidString)"), deviceID: ExactText("reader"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
-        let store = try AttentionDomainStore(context: context,
-            persistence: MemoryAttentionStatePersistence())
+        let store = try ClientRepository(context: context,
+            persistence: MemoryPendingActionPersistence())
         let key = RequestKey(accountScope: identity.personID,
             senderID: ExactText("author"), messageID: ExactText("request"))
         let firstPayload = try JSONValue.parse(data(#"{"title":"First wording"}"#))

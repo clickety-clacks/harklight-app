@@ -511,9 +511,9 @@ public struct PresentationSnapshot: Equatable, Sendable {
 public final class AttentionDomainPort: @unchecked Sendable {
     public let context: PortContext
     private let profileContext: ProfileContext
-    private let store: AttentionDomainStore
+    private let store: ClientRepository
 
-    public init(store: AttentionDomainStore) {
+    public init(store: ClientRepository) {
         self.store = store
         self.profileContext = store.profileContext
         self.context = PortContext(
@@ -1192,13 +1192,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
                                                     ownOutcome: terminal.ownOutcome,
                                                     originalOperationUncertainty: terminal.ownOutcome == .unconfirmed)
         case .some(.open), .none:
-            if let submission, case .refusedByRetraction = submission.disposition {
-                status = .cleared
-                receiptFacts = ReceiptPresentationFacts(
-                    evidenceLabel: "The relay refused this answer after the sender retracted the request. The answer was not accepted.",
-                    ownOutcome: .refused,
-                    originalOperationUncertainty: false)
-            } else if let terminal = remote?.state {
+            if let terminal = remote?.state {
                 status = AppLifecycleStatus(rawValue: terminal.rawValue) ?? .open
                 let hasAcceptedIntent = submission.map { value in
                     if case .accepted = value.disposition { return true }
@@ -1241,11 +1235,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
             let scene: SceneNode
             let terminalState: TerminalState?
             let authorizedAnswer: JSONValue?
-            if let submission, case .refusedByRetraction = submission.disposition {
-                terminalState = .cleared
-                authorizedAnswer = nil
-                scene = document.terminalScene(state: .cleared, authorizedAnswer: nil)
-            } else if let terminal = session?.lifecycle.terminalValue {
+            if let terminal = session?.lifecycle.terminalValue {
                 terminalState = terminal.state
                 authorizedAnswer = terminal.authorizedAnswer
                 scene = document.terminalScene(state: terminal.state, authorizedAnswer: terminal.authorizedAnswer)
@@ -1324,7 +1314,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
                                 deliveredFiles: deliveredFiles,
                                 selector: selector,
                                 draft: draft,
-                                submittedAnswer: submittedAnswer(for: submission,
+                                submittedAnswer: hasAccountTerminal ? nil : submittedAnswer(for: submission,
                                                                  interface: interface),
                                 ownAnswerWasRefusedByRetraction: ownAnswerWasRefusedByRetraction,
                                 lifecycleStatus: status,
@@ -1404,8 +1394,8 @@ public final class AttentionDomainPort: @unchecked Sendable {
         let seenValue = JSONValue.object([
             JSONMember("acknowledgment", .string(ExactText("seen")))
         ])
-        if Self.isConfirmedSeenOutcome(status: status, remote: remote, requestKey: request.key,
-                                       submission: submission, seenValue: seenValue) {
+        if remote?.state == .answered,
+           remote?.authorizedOriginAnswer?.semanticallyEquals(seenValue) == true {
             return .confirmed
         }
         if submission?.isNoComment == true { return .resolvedWithoutSeen }
@@ -1413,28 +1403,6 @@ public final class AttentionDomainPort: @unchecked Sendable {
             return submission?.answer.semanticallyEquals(seenValue) == true ? .pending : .available
         }
         return .resolvedWithoutSeen
-    }
-
-    private static func isConfirmedSeenOutcome(status: AppLifecycleStatus,
-                                               remote: RemoteRequestState?,
-                                               requestKey: RequestKey,
-                                               submission: Submission?,
-                                               seenValue: JSONValue) -> Bool {
-        guard status == .answered,
-              remote?.state == .answered,
-              let terminalSequence = remote?.eventSequence else { return false }
-        if let authorizedOriginAnswer = remote?.authorizedOriginAnswer {
-            return authorizedOriginAnswer.semanticallyEquals(seenValue)
-        }
-        // Receiving devices get an answer-free lifecycle. Their local original
-        // operation is authoritative only when its accepted terminal sequence
-        // is the exact terminal now projected for this same request and answer.
-        guard let submission,
-              submission.requestKey == requestKey,
-              submission.answer.semanticallyEquals(seenValue),
-              case let .accepted(acceptedSequence) = submission.disposition,
-              let acceptedSequence else { return false }
-        return acceptedSequence == terminalSequence
     }
 
     private func projectScene(from node: SceneNode,

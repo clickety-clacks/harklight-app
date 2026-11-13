@@ -12,8 +12,8 @@ final class NativeDomainRoutesTests: XCTestCase {
                                        personID: ExactText("fictional-sample-account"),
                                        deviceID: ExactText("fixture-device"))
         let context = ProfileContext(identity: identity, transportMode: .fixture)
-        let store = try AttentionDomainStore(context: context,
-                                             persistence: MemoryAttentionStatePersistence())
+        let store = try ClientRepository(context: context,
+                                             persistence: MemoryPendingActionPersistence())
         let original = try fixtureRequest(account: identity.personID)
         try store.registerFixtureRequests([original], context: context)
         let routes = try NativeDomainRoutes(port: AttentionDomainPort(store: store),
@@ -72,13 +72,13 @@ final class NativeDomainRoutesTests: XCTestCase {
     }
 
     func testDroppedSubmitResponseRecoversOneNativeReceiptAfterRestart() throws {
-        let persistence = MemoryAttentionStatePersistence()
+        let persistence = MemoryPendingActionPersistence()
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("fixture-only:test"),
                                        personID: ExactText("fictional-sample-account"),
                                        deviceID: ExactText("fixture-device"))
         let original = try fixtureRequest(account: identity.personID)
         let context1 = ProfileContext(identity: identity, transportMode: .fixture)
-        let store1 = try AttentionDomainStore(context: context1, persistence: persistence)
+        let store1 = try ClientRepository(context: context1, persistence: persistence)
         try store1.registerFixtureRequests([original], context: context1)
         let port1 = AttentionDomainPort(store: store1)
         let first = try NativeDomainRoutes(port: port1, gate: HostSessionGate())
@@ -107,7 +107,7 @@ final class NativeDomainRoutesTests: XCTestCase {
         store1.invalidate()
 
         let context2 = ProfileContext(identity: identity, transportMode: .fixture)
-        let store2 = try AttentionDomainStore(context: context2, persistence: persistence)
+        let store2 = try ClientRepository(context: context2, persistence: persistence)
         let port2 = AttentionDomainPort(store: store2)
         let restarted = try NativeDomainRoutes(port: port2, gate: HostSessionGate())
         let token2 = try pair(restarted)
@@ -163,12 +163,12 @@ final class NativeDomainRoutesTests: XCTestCase {
     }
 
     func testFenceRouteOrdersAbsentLookupBeforeLateSubmit() throws {
-        let persistence = MemoryAttentionStatePersistence()
+        let persistence = MemoryPendingActionPersistence()
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("fixture-only:test"),
                                        personID: ExactText("fictional-sample-account"),
                                        deviceID: ExactText("fixture-device"))
         let context = ProfileContext(identity: identity, transportMode: .fixture)
-        let store = try AttentionDomainStore(context: context, persistence: persistence)
+        let store = try ClientRepository(context: context, persistence: persistence)
         let original = try fixtureRequest(account: identity.personID)
         try store.registerFixtureRequests([original], context: context)
         let routes = try NativeDomainRoutes(port: AttentionDomainPort(store: store),
@@ -209,12 +209,12 @@ final class NativeDomainRoutesTests: XCTestCase {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("attention-host-fence-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: directory) }
-        let persistence = FileAttentionStatePersistence(directoryURL: directory)
+        let persistence = FilePendingActionPersistence(directoryURL: directory)
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("fixture-only:test"),
                                        personID: ExactText("fictional-sample-account"),
                                        deviceID: ExactText("fixture-device"))
         let context = ProfileContext(identity: identity, transportMode: .fixture)
-        let store = try AttentionDomainStore(context: context, persistence: persistence)
+        let store = try ClientRepository(context: context, persistence: persistence)
         let original = try fixtureRequest(account: identity.personID)
         try store.registerFixtureRequests([original], context: context)
         let routes = try NativeDomainRoutes(port: AttentionDomainPort(store: store),
@@ -319,7 +319,7 @@ final class NativeDomainRoutesTests: XCTestCase {
         store.invalidate()
 
         let reopenedContext = ProfileContext(identity: identity, transportMode: .fixture)
-        let reopenedStore = try AttentionDomainStore(context: reopenedContext,
+        let reopenedStore = try ClientRepository(context: reopenedContext,
                                                       persistence: persistence)
         let reopenedPort = AttentionDomainPort(store: reopenedStore)
         let reopenedRoutes = try NativeDomainRoutes(port: reopenedPort, gate: HostSessionGate())
@@ -357,11 +357,11 @@ final class NativeDomainRoutesTests: XCTestCase {
     }
 
     func testTokenAndOriginFenceBeforeNativeRead() throws {
-        let persistence = MemoryAttentionStatePersistence()
+        let persistence = MemoryPendingActionPersistence()
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("fixture-only:test"),
                                        personID: ExactText("A"), deviceID: ExactText("device"))
         let context = ProfileContext(identity: identity, transportMode: .fixture)
-        let store = try AttentionDomainStore(context: context, persistence: persistence)
+        let store = try ClientRepository(context: context, persistence: persistence)
         try store.registerFixtureRequests([fixtureRequest(account: identity.personID)], context: context)
         let port = AttentionDomainPort(store: store)
         let routes = try NativeDomainRoutes(port: port, gate: HostSessionGate())
@@ -385,15 +385,15 @@ final class NativeDomainRoutesTests: XCTestCase {
     }
 
     func testProfileSwitchHidesOriginalIntentUntilNewAuthorizedPairing() throws {
-        let persistence = MemoryAttentionStatePersistence()
+        let persistence = MemoryPendingActionPersistence()
         let identityA = ProfileIdentity(trustedRelayAuthority: ExactText("fixture-only:test"),
                                         personID: ExactText("A"), deviceID: ExactText("device-a"))
         let identityB = ProfileIdentity(trustedRelayAuthority: ExactText("fixture-only:test"),
                                         personID: ExactText("B"), deviceID: ExactText("device-b"))
         let contextA = ProfileContext(identity: identityA, transportMode: .fixture)
         let contextB = ProfileContext(identity: identityB, transportMode: .fixture)
-        let storeA = try AttentionDomainStore(context: contextA, persistence: persistence)
-        let storeB = try AttentionDomainStore(context: contextB, persistence: persistence)
+        let storeA = try ClientRepository(context: contextA, persistence: persistence)
+        let storeB = try ClientRepository(context: contextB, persistence: persistence)
         let requestA = try fixtureRequest(account: identityA.personID)
         let requestB = try fixtureRequest(account: identityB.personID)
         try storeA.registerFixtureRequests([requestA], context: contextA)
@@ -455,8 +455,8 @@ final class NativeDomainRoutesTests: XCTestCase {
                                        personID: ExactText("fictional-sample-account"),
                                        deviceID: ExactText("fixture-device"))
         let context = ProfileContext(identity: identity, transportMode: .fixture)
-        let store = try AttentionDomainStore(context: context,
-                                             persistence: MemoryAttentionStatePersistence())
+        let store = try ClientRepository(context: context,
+                                             persistence: MemoryPendingActionPersistence())
         try store.registerFixtureRequests([fixtureRequest(account: identity.personID)], context: context)
         let routes = try NativeDomainRoutes(port: AttentionDomainPort(store: store),
                                             gate: HostSessionGate())
@@ -490,8 +490,8 @@ final class NativeDomainRoutesTests: XCTestCase {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("fixture-only:test"),
                                        personID: ExactText("A"), deviceID: ExactText("device"))
         let context = ProfileContext(identity: identity, transportMode: .fixture)
-        let store = try AttentionDomainStore(context: context,
-                                             persistence: MemoryAttentionStatePersistence())
+        let store = try ClientRepository(context: context,
+                                             persistence: MemoryPendingActionPersistence())
         try store.registerFixtureRequests([fixtureRequest(account: identity.personID)], context: context)
         let routes = try NativeDomainRoutes(port: AttentionDomainPort(store: store),
                                             gate: HostSessionGate())
@@ -530,8 +530,8 @@ final class NativeDomainRoutesTests: XCTestCase {
                                            personID: ExactText("fictional-sample-account"),
                                            deviceID: ExactText(confirmed ? "known" : "unknown"))
             let context = ProfileContext(identity: identity, transportMode: .fixture)
-            let store = try AttentionDomainStore(context: context,
-                                                 persistence: MemoryAttentionStatePersistence())
+            let store = try ClientRepository(context: context,
+                                                 persistence: MemoryPendingActionPersistence())
             let original = try fixtureRequest(account: identity.personID)
             try store.registerFixtureRequests([original], context: context)
             let port = AttentionDomainPort(store: store)

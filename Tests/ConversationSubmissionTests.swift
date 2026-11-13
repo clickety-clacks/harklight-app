@@ -66,11 +66,11 @@ final class ConversationSubmissionTests: XCTestCase {
             ]).jsonString.utf8)
         }
     }
-    private func setup(files: [ConversationFile] = []) async throws -> (ProfileContext, MemoryAttentionStatePersistence, AttentionDomainStore, ConversationBinding, Session, NativeRelayCore) {
+    private func setup(files: [ConversationFile] = []) async throws -> (ProfileContext, MemoryPendingActionPersistence, ClientRepository, ConversationBinding, Session, NativeRelayCore) {
         let context = ProfileContext(identity: ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
             personID: ExactText("person"), deviceID: ExactText("device")), transportMode: .relay)
-        let persistence = MemoryAttentionStatePersistence(), session = Session(context.identity)
-        let domain = try AttentionDomainStore(context: context, persistence: persistence)
+        let persistence = MemoryPendingActionPersistence(), session = Session(context.identity)
+        let domain = try ClientRepository(context: context, persistence: persistence)
         let binding = ConversationBinding(request: RequestKey(accountScope: context.identity.personID,
             senderID: ExactText("sender"), messageID: ExactText("request")), revision: 1)
         let core = try NativeRelayCore(store: domain, context: context, session: session)
@@ -138,7 +138,7 @@ final class ConversationSubmissionTests: XCTestCase {
         XCTAssertEqual(try domain.conversationSnapshot(context: context)
             .threads[binding.request]?.facts[ExactText("2")]?.acceptedAtMilliseconds, acceptedAt,
             "A repeated acceptance readback must not reset the age of the unpicked message.")
-        let restored = try AttentionDomainStore(context: context, persistence: persistence)
+        let restored = try ClientRepository(context: context, persistence: persistence)
         XCTAssertEqual(try restored.conversationSnapshot(context: context)
             .threads[binding.request]?.facts[ExactText("2")]?.acceptedAtMilliseconds, acceptedAt)
         XCTAssertEqual(try restored.conversationSnapshot(context: context).threads[binding.request]?.drafts[1]?.disposition,
@@ -196,7 +196,7 @@ final class ConversationSubmissionTests: XCTestCase {
         catch { XCTAssertEqual(error as? ConversationError, .pendingSubmission) }
         XCTAssertTrue(session.sent.isEmpty)
         XCTAssertEqual(session.cleanupRequests.count, 1)
-        let restored = try AttentionDomainStore(context: context, persistence: persistence)
+        let restored = try ClientRepository(context: context, persistence: persistence)
         let thread = try XCTUnwrap(restored.conversationSnapshot(context: context).threads[binding.request])
         XCTAssertEqual(thread.drafts[1]?.text, ExactText("Exact original text"))
         XCTAssertTrue(thread.drafts[1]?.files.isEmpty == true, "Late preparation rejection must settle already acknowledged cleanup")
@@ -214,7 +214,7 @@ final class ConversationSubmissionTests: XCTestCase {
         let cleanup = try XCTUnwrap(domain.abandonConversationUploads(for: binding.request, context: context).first)
         session.failCleanup = true
         do { try await core.discardAbandonedUploads(for: binding.request); XCTFail("Unknown cleanup must remain unknown") } catch {}
-        let restored = try AttentionDomainStore(context: context, persistence: persistence)
+        let restored = try ClientRepository(context: context, persistence: persistence)
         guard case .unknown = try XCTUnwrap(restored.conversationSnapshot(context: context).threads[binding.request]?.uploadCleanups?[cleanup.id]?.outcome) else {
             return XCTFail("Offline response cannot acknowledge deletion")
         }

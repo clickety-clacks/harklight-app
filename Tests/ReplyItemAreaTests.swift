@@ -268,8 +268,8 @@ final class ReplyItemAreaTests: XCTestCase {
                                        personID: key.accountScope,
                                        deviceID: ExactText("device"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
-        let store = try AttentionDomainStore(context: context,
-                                             persistence: MemoryAttentionStatePersistence())
+        let store = try ClientRepository(context: context,
+                                             persistence: MemoryPendingActionPersistence())
         let binding = ConversationBinding(request: key, revision: 1)
         let session = ExactText("session")
         try store.applyConversation(ConversationEvent(sequence: 1, binding: binding,
@@ -330,8 +330,8 @@ final class ReplyItemAreaTests: XCTestCase {
                                        personID: ExactText("person"),
                                        deviceID: ExactText("device"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
-        let persistence = MemoryAttentionStatePersistence()
-        let store = try AttentionDomainStore(context: context, persistence: persistence)
+        let persistence = MemoryPendingActionPersistence()
+        let store = try ClientRepository(context: context, persistence: persistence)
         let key = RequestKey(accountScope: identity.personID,
                              senderID: ExactText("sender"),
                              messageID: ExactText("receipt-time"))
@@ -370,7 +370,7 @@ final class ReplyItemAreaTests: XCTestCase {
         try store.applyConversation(ConversationEvent(sequence: 5, binding: binding,
             fact: .turn(personTurn)), context: context,
             locallyReceivedAtMilliseconds: 1_800_000_789_000)
-        let restored = try AttentionDomainStore(context: context, persistence: persistence)
+        let restored = try ClientRepository(context: context, persistence: persistence)
         let snapshot = try restored.conversationSnapshot(context: context)
         XCTAssertEqual(snapshot.threads[key]?.facts[liveReply.id]?.localLiveArrivalAtMilliseconds,
                        1_800_000_123_000,
@@ -432,8 +432,8 @@ final class ReplyItemAreaTests: XCTestCase {
                                        personID: ExactText("person"),
                                        deviceID: ExactText("device"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
-        let store = try AttentionDomainStore(context: context,
-                                             persistence: MemoryAttentionStatePersistence())
+        let store = try ClientRepository(context: context,
+                                             persistence: MemoryPendingActionPersistence())
         let key = RequestKey(accountScope: identity.personID,
                              senderID: ExactText("agent"), messageID: ExactText("parent"))
         let other = RequestKey(accountScope: identity.personID,

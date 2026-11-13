@@ -11,7 +11,7 @@ final class SupersedesPresentationTests: XCTestCase {
 
     func testDeliveryIDsAreOrderedDeduplicatedAndUnaffectedByLaterRevisionPayloads() throws {
         let context = profile()
-        let domain = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
+        let domain = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
         let key = RequestKey(accountScope: context.identity.personID,
             senderID: ExactText("agent"), messageID: ExactText("new"))
         let original = try JSONValue.parse(Data(#"{"title":"New message","supersedes":["old",7,"older","old"]}"#.utf8))
@@ -40,7 +40,7 @@ final class SupersedesPresentationTests: XCTestCase {
 
     func testSupersededTargetIsHiddenFromListProjectionsButRemainsReadableByKey() throws {
         let context = profile()
-        let domain = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
+        let domain = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
         let target = RequestKey(accountScope: context.identity.personID,
             senderID: ExactText("agent"), messageID: ExactText("old"))
         let replacement = RequestKey(accountScope: context.identity.personID,
@@ -64,8 +64,8 @@ final class SupersedesPresentationTests: XCTestCase {
 
     func testSupersededTargetKeepsEveryReplacementIdentity() throws {
         let context = profile()
-        let store = try AttentionDomainStore(context: context,
-                                             persistence: MemoryAttentionStatePersistence())
+        let store = try ClientRepository(context: context,
+                                             persistence: MemoryPendingActionPersistence())
         func key(_ message: String) -> RequestKey {
             RequestKey(accountScope: context.identity.personID,
                        senderID: ExactText("agent"), messageID: ExactText(message))
@@ -134,8 +134,8 @@ final class SupersedesPresentationTests: XCTestCase {
             RelayEvent(sequence: 5, body: .terminal(secondTarget, .superseded, nil))
         ]
 
-        let liveStore = try AttentionDomainStore(context: context,
-                                                 persistence: MemoryAttentionStatePersistence())
+        let liveStore = try ClientRepository(context: context,
+                                                 persistence: MemoryPendingActionPersistence())
         for event in events { try liveStore.apply(event, context: context) }
         let liveSnapshot = try liveStore.snapshot(context: context)
         XCTAssertEqual(liveSnapshot.cursor, 5, "Both live terminals must commit so sync can continue.")
@@ -144,8 +144,8 @@ final class SupersedesPresentationTests: XCTestCase {
         XCTAssertEqual(liveSnapshot.remoteStates[replacement]?.supersedesOriginTarget, firstTarget,
                        "The forward keeps the first target as its inbox origin.")
 
-        let replayStore = try AttentionDomainStore(context: context,
-                                                   persistence: MemoryAttentionStatePersistence())
+        let replayStore = try ClientRepository(context: context,
+                                                   persistence: MemoryPendingActionPersistence())
         try replayStore.beginReplay(through: 5, context: context)
         for event in events { try replayStore.apply(event, context: context) }
         try replayStore.finishReplay(at: 5, context: context)
@@ -159,8 +159,8 @@ final class SupersedesPresentationTests: XCTestCase {
 
     func testReplacementIdentityRemainsNavigableBeforeItsContentLoads() throws {
         let context = profile()
-        let store = try AttentionDomainStore(context: context,
-                                             persistence: MemoryAttentionStatePersistence())
+        let store = try ClientRepository(context: context,
+                                             persistence: MemoryPendingActionPersistence())
         let target = RequestKey(accountScope: context.identity.personID,
             senderID: ExactText("agent"), messageID: ExactText("old"))
         let replacement = RequestKey(accountScope: context.identity.personID,
@@ -182,8 +182,8 @@ final class SupersedesPresentationTests: XCTestCase {
 
     func testLoadingOlderAccountStateBackfillsReplacementIdentity() throws {
         let context = profile()
-        let persistence = MemoryAttentionStatePersistence()
-        let store = try AttentionDomainStore(context: context, persistence: persistence)
+        let persistence = MemoryPendingActionPersistence()
+        let store = try ClientRepository(context: context, persistence: persistence)
         let target = RequestKey(accountScope: context.identity.personID,
             senderID: ExactText("agent"), messageID: ExactText("old"))
         let replacement = RequestKey(accountScope: context.identity.personID,
@@ -217,15 +217,15 @@ final class SupersedesPresentationTests: XCTestCase {
             format: .binary, options: 0)
         try persistence.commit(olderEncoding, identity: context.identity)
 
-        let restoredStore = try AttentionDomainStore(context: context, persistence: persistence)
+        let restoredStore = try ClientRepository(context: context, persistence: persistence)
         let restored = try LivePresentationStore(store: restoredStore, context: context)
         XCTAssertEqual(restored.request(for: target)?.supersededByMessageKeys, [replacement])
     }
 
     func testCrossIDSupersedesKeepsTheTargetSlotAndThreadAcrossAChain() throws {
         let context = profile()
-        let store = try AttentionDomainStore(context: context,
-                                             persistence: MemoryAttentionStatePersistence())
+        let store = try ClientRepository(context: context,
+                                             persistence: MemoryPendingActionPersistence())
         func key(_ sender: String, _ message: String) -> RequestKey {
             RequestKey(accountScope: context.identity.personID,
                        senderID: ExactText(sender), messageID: ExactText(message))
@@ -315,8 +315,8 @@ final class SupersedesPresentationTests: XCTestCase {
 
     func testSupersedesOriginTargetDoesNotCrossSenderIdentity() throws {
         let context = profile()
-        let store = try AttentionDomainStore(context: context,
-                                             persistence: MemoryAttentionStatePersistence())
+        let store = try ClientRepository(context: context,
+                                             persistence: MemoryPendingActionPersistence())
         func key(_ sender: String, _ message: String) -> RequestKey {
             RequestKey(accountScope: context.identity.personID,
                        senderID: ExactText(sender), messageID: ExactText(message))
@@ -352,8 +352,8 @@ final class SupersedesPresentationTests: XCTestCase {
 
     func testCrossIDSupersedesOriginTargetCanBeRecoveredFromSnapshotSequences() throws {
         let context = profile()
-        let store = try AttentionDomainStore(context: context,
-                                             persistence: MemoryAttentionStatePersistence())
+        let store = try ClientRepository(context: context,
+                                             persistence: MemoryPendingActionPersistence())
         func key(_ message: String) -> RequestKey {
             RequestKey(accountScope: context.identity.personID,
                        senderID: ExactText("agent"), messageID: ExactText(message))
@@ -394,8 +394,8 @@ final class SupersedesPresentationTests: XCTestCase {
 
     func testPageBackfillsEveryReplacementLoadedAfterTargetTerminal() throws {
         let context = profile()
-        let store = try AttentionDomainStore(context: context,
-                                             persistence: MemoryAttentionStatePersistence())
+        let store = try ClientRepository(context: context,
+                                             persistence: MemoryPendingActionPersistence())
         func key(_ message: String) -> RequestKey {
             RequestKey(accountScope: context.identity.personID,
                        senderID: ExactText("agent"), messageID: ExactText(message))
@@ -433,8 +433,8 @@ final class SupersedesPresentationTests: XCTestCase {
 
     func testInboxPageAppliesOneForwardForSeveralTargetsInFirstTerminalOrder() throws {
         let context = profile()
-        let store = try AttentionDomainStore(context: context,
-                                             persistence: MemoryAttentionStatePersistence())
+        let store = try ClientRepository(context: context,
+                                             persistence: MemoryPendingActionPersistence())
         func key(_ message: String) -> RequestKey {
             RequestKey(accountScope: context.identity.personID,
                        senderID: ExactText("agent"), messageID: ExactText(message))

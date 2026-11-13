@@ -16,8 +16,8 @@ private func fixturePort(jsonURL: URL, stateDirectoryURL: URL) throws -> Attenti
                                    personID: ExactText("fictional-sample-account"),
                                    deviceID: ExactText("foreground-host-fixture"))
     let context = ProfileContext(identity: identity, transportMode: .fixture)
-    let persistence = FileAttentionStatePersistence(directoryURL: stateDirectoryURL)
-    let store = try AttentionDomainStore(context: context, persistence: persistence)
+    let persistence = FilePendingActionPersistence(directoryURL: stateDirectoryURL)
+    let store = try ClientRepository(context: context, persistence: persistence)
     let requests = try payloads.map { payload -> StoredRequest in
         guard payload.hasUniqueObjectKeys,
               let sender = payload.uniqueValue(named: "sender_id")?.stringValue,

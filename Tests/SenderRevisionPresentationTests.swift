@@ -7,8 +7,8 @@ final class SenderRevisionPresentationTests: XCTestCase {
     func testAcceptedSenderUpdateRetainsEarlierChoicesTurnsAndQueuedAnswerBinding() throws {
         let context = ProfileContext(identity: ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
             personID: ExactText("person"), deviceID: ExactText("reader")), transportMode: .relay)
-        let persistence = MemoryAttentionStatePersistence()
-        let domain = try AttentionDomainStore(context: context, persistence: persistence)
+        let persistence = MemoryPendingActionPersistence()
+        let domain = try ClientRepository(context: context, persistence: persistence)
         let key = RequestKey(accountScope: context.identity.personID, senderID: ExactText("sender"), messageID: ExactText("same-item"))
         let oldPayload = try JSONValue.parse(Data(#"{"title":"Earlier wording","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"old","label":"Earlier choice","kind":"value","value":"old"}]}}"#.utf8))
         let newPayload = try JSONValue.parse(Data(#"{"title":"Current wording","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"new","label":"Current choice","kind":"value","value":"new"}]}}"#.utf8))
@@ -56,7 +56,7 @@ final class SenderRevisionPresentationTests: XCTestCase {
         XCTAssertEqual(retained.disposition, .lost)
         XCTAssertTrue(try domain.snapshot(context: context).outbox.isEmpty)
         XCTAssertThrowsError(try domain.saveDraft(oldDraft, selector: selector, context: context))
-        let restored = try AttentionDomainStore(context: context, persistence: persistence)
+        let restored = try ClientRepository(context: context, persistence: persistence)
         XCTAssertEqual(try restored.conversationSnapshot(context: context).threads[key]?.acceptedUpdates,
                        [expectedUpdate])
         XCTAssertEqual(try restored.lookupIntent(receipt.intentID, context: context)?.operation, original.operation)

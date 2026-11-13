@@ -987,7 +987,7 @@ final class NativeRelayLifecycle {
     private var foregroundDiagnosticSnapshotAvailable = false
     private var foregroundDiagnosticAttemptID = UUID()
     private var foregroundDiagnosticOperations = NativeForegroundOperationSnapshot.unavailable
-    private var configuration: (store: AttentionDomainStore,
+    private var configuration: (store: ClientRepository,
                                 context: ProfileContext,
                                 relayURL: URL,
                                 identity: SecIdentity,
@@ -1051,7 +1051,7 @@ final class NativeRelayLifecycle {
         }
     }
 
-    func activate(store: AttentionDomainStore,
+    func activate(store: ClientRepository,
                   context: ProfileContext,
                   relayURL: URL,
                   clientIdentity: SecIdentity,
@@ -1708,7 +1708,7 @@ final class NativeRelayLifecycle {
 #if DEBUG
     /// Test-target entry into the same replay and confirmation path, without TLS
     /// enrollment or notification registration. It never forces send permission.
-    func confirmInProcessSessionForTesting(store: AttentionDomainStore, context: ProfileContext,
+    func confirmInProcessSessionForTesting(store: ClientRepository, context: ProfileContext,
                                           session: any AuthenticatedInstallationSession,
                                           serverStateCache: any ServerStateCaching) async throws -> NativeRelayRefreshResult {
         await deactivate()

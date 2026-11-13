@@ -47,8 +47,8 @@ final class ConversationFileWireTests: XCTestCase {
         XCTAssertThrowsError(try wire.decodeUpload(Data(String(decoding: response, as: UTF8.self).replacingOccurrences(of: "\"size\":4", with: "\"size\":3").utf8), status: 200, original: original))
     }
     func testFrozenUnknownDiscussionRetriesItsExactOperationAndMixedFileFrame() throws {
-        let context = context(), persistence = MemoryAttentionStatePersistence()
-        let store = try AttentionDomainStore(context: context, persistence: persistence)
+        let context = context(), persistence = MemoryPendingActionPersistence()
+        let store = try ClientRepository(context: context, persistence: persistence)
         let binding = ConversationBinding(request: RequestKey(accountScope: context.identity.personID,
             senderID: ExactText("author"), messageID: ExactText("request")), revision: 1)
         try store.applyConversation(ConversationEvent(sequence: 1, binding: binding,
@@ -64,7 +64,7 @@ final class ConversationFileWireTests: XCTestCase {
         let wire = try ConversationWire(profile: context), limits = ConversationFileLimits(inlineDecodedBytes: 262_144, uploadCap: nil)
         let originalFrame = try wire.discussion(frozen, operationID: operation, preparedFiles: [inline, uploaded], limits: limits)
         try store.markDiscussionOutcome(binding, operation: operation, rejection: nil, context: context)
-        let restored = try AttentionDomainStore(context: context, persistence: persistence)
+        let restored = try ClientRepository(context: context, persistence: persistence)
         XCTAssertEqual(try restored.prepareDiscussion(binding, context: context), operation)
         let retained = try XCTUnwrap(restored.conversationSnapshot(context: context).threads[binding.request]?.drafts[1])
         XCTAssertEqual(try wire.discussion(retained, operationID: operation, preparedFiles: [inline, uploaded], limits: limits), originalFrame)

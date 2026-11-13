@@ -113,7 +113,7 @@ final class InboxViewLiveProgressTests: XCTestCase {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
             personID: ExactText("person"), deviceID: ExactText("reader"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
-        let store = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
+        let store = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
         let acknowledged = expectation(description: "The live delivery is durably applied and acknowledged")
         let viewReturned = expectation(description: "The pending view response completes")
         let session = InboxViewProgressSession(identity: identity, acknowledged: acknowledged,

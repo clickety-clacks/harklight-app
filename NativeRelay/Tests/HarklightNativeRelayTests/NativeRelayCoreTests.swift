@@ -407,13 +407,13 @@ final class NativeRelayCoreTests: XCTestCase {
 
     private func data(_ text: String) -> Data { Data((text + "\n").utf8) }
 
-    private func setup() throws -> (ProfileContext, AttentionDomainStore, Session) {
+    private func setup() throws -> (ProfileContext, ClientRepository, Session) {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
                                        personID: ExactText("person-A"),
                                        deviceID: ExactText("installation-A"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
         return (context,
-                try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence()),
+                try ClientRepository(context: context, persistence: MemoryPendingActionPersistence()),
                 Session(identity))
     }
 
@@ -552,7 +552,6 @@ final class NativeRelayCoreTests: XCTestCase {
             .staleProfile,
             .wrongAccount,
             .requestMissing,
-            .requestConflict,
             .selectorExpired,
             .invalidDraft,
             .invalidSubmission,
@@ -1130,8 +1129,8 @@ final class NativeRelayCoreTests: XCTestCase {
                                        personID: ExactText("person-A"),
                                        deviceID: ExactText("installation-A"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
-        let persistence = MemoryAttentionStatePersistence()
-        let firstStore = try AttentionDomainStore(context: context, persistence: persistence)
+        let persistence = MemoryPendingActionPersistence()
+        let firstStore = try ClientRepository(context: context, persistence: persistence)
         let payload = try JSONValue.parse(Data(#"{"title":"Request","answer_ui":null}"#.utf8))
         func key(_ sequence: Int) -> RequestKey {
             RequestKey(accountScope: identity.personID,
@@ -1161,7 +1160,7 @@ final class NativeRelayCoreTests: XCTestCase {
         XCTAssertNil(deferred.requests[key(21)])
 
         let restartedContext = ProfileContext(identity: identity, transportMode: .relay)
-        let restarted = try AttentionDomainStore(context: restartedContext, persistence: persistence)
+        let restarted = try ClientRepository(context: restartedContext, persistence: persistence)
         let secondSession = Session(identity)
         secondSession.snapshotHighWater = 22
         secondSession.nextItemCursor = "cursor-20"
@@ -1206,8 +1205,8 @@ final class NativeRelayCoreTests: XCTestCase {
                                        personID: ExactText("person-A"),
                                        deviceID: ExactText("installation-A"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
-        let persistence = MemoryAttentionStatePersistence()
-        let store = try AttentionDomainStore(context: context, persistence: persistence)
+        let persistence = MemoryPendingActionPersistence()
+        let store = try ClientRepository(context: context, persistence: persistence)
         let body = String(repeating: "x", count: 1_048_600)
         let events = (1...9).map { sequence in
             data(#"{"v":1,"type":"delivery","seq":\#(sequence),"sender_id":"sender","message_id":"m\#(sequence)","origin":"other-installation","as":"message","message":{"title":"Long request \#(sequence)","body":"\#(body)"}}"#)
@@ -1230,7 +1229,7 @@ final class NativeRelayCoreTests: XCTestCase {
                       "A partial replay must stay out of the visible inbox.")
 
         let restartedContext = ProfileContext(identity: identity, transportMode: .relay)
-        let restarted = try AttentionDomainStore(context: restartedContext, persistence: persistence)
+        let restarted = try ClientRepository(context: restartedContext, persistence: persistence)
         let secondSession = Session(identity)
         secondSession.frames = [start] + Array(events.dropFirst(5)) + [end]
         let secondCore = try NativeRelayCore(store: restarted,
@@ -1342,8 +1341,8 @@ final class NativeRelayCoreTests: XCTestCase {
                                        personID: ExactText("person-C"),
                                        deviceID: ExactText("installation-C"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
-        let persistence = MemoryAttentionStatePersistence()
-        let store = try AttentionDomainStore(context: context, persistence: persistence)
+        let persistence = MemoryPendingActionPersistence()
+        let store = try ClientRepository(context: context, persistence: persistence)
         let key = RequestKey(accountScope: identity.personID,
                              senderID: ExactText("sender"), messageID: ExactText("m2"))
         let payload = try JSONValue.parse(Data(#"{"answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"yes","label":"Yes","kind":"value","value":{"ok":true}}]}}"#.utf8))
@@ -1363,7 +1362,7 @@ final class NativeRelayCoreTests: XCTestCase {
         XCTAssertEqual(try store.snapshot(context: context).outbox.count, 1)
 
         let restartedContext = ProfileContext(identity: identity, transportMode: .relay)
-        let restarted = try AttentionDomainStore(context: restartedContext, persistence: persistence)
+        let restarted = try ClientRepository(context: restartedContext, persistence: persistence)
         let secondSession = Session(identity)
         secondSession.result = .accepted(operationID: receipt.opID, terminalSequence: 9)
         let secondCore = try NativeRelayCore(store: restarted,
@@ -1382,10 +1381,9 @@ final class NativeRelayCoreTests: XCTestCase {
                                        personID: ExactText("person-cache"),
                                        deviceID: ExactText("installation-cache"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
-        let persistence = MemoryAttentionStatePersistence()
-        let store = try AttentionDomainStore(context: context,
-                                             persistence: persistence,
-                                             persistsOnlyLocalState: true)
+        let persistence = MemoryPendingActionPersistence()
+        let store = try ClientRepository(context: context,
+                                             persistence: persistence)
         let key = RequestKey(accountScope: identity.personID,
                              senderID: ExactText("sender"),
                              messageID: ExactText("cached-request"))
@@ -1394,14 +1392,14 @@ final class NativeRelayCoreTests: XCTestCase {
         _ = try store.apply(RelayEvent(sequence: 1, body: .delivery(seedRequest, .message)),
                             context: context)
         let request = try XCTUnwrap(store.snapshot(context: context).requests[key])
-        let cachedState = CachedAttentionServerState(
+        let cachedState = CachedAttentionServerState(identity: context.identity,
             requests: [key: request], remoteStates: [:], cursor: 1, conversationCursor: 0,
             conversations: [:], inboxView: nil, currentRequestKeys: [key])
         let port = AttentionDomainPort(store: store)
         let selector = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first?.selector)
         let receipt = try port.submit(SubmitIntent(context: port.context, selector: selector,
             intentID: UUID(), inputs: [.compatibilityValue(action: ExactText("yes"))]))
-        try store.prepareForServerCache(context: context)
+
         XCTAssertEqual(try store.snapshot(context: context).cursor, 0,
                        "The old relay cursor is discarded before the cache snapshot is restored.")
         XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty,
@@ -1415,7 +1413,7 @@ final class NativeRelayCoreTests: XCTestCase {
         let acceptance = try JSONValue.parse(data(#"{"v":1,"type":"delivery","seq":1,"sender_id":"sender","message_id":"cached-request","origin":"source","as":"message","message":{"title":"Question","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"yes","label":"Yes","kind":"value","value":{"ok":true}}]}}}"#))
         session.initialItems = [.object([JSONMember("acceptance", acceptance)])]
         session.frames = [data(#"{"v":1,"type":"resynced","seq":1}"#)]
-        let cache = try FileServerStateCache()
+        let cache = try FileServerStateCache(identity: context.identity)
         session.onCheckpointACK = {
             session.snapshotAtCheckpointACK = try? await cache.load()
         }
@@ -1468,9 +1466,8 @@ final class NativeRelayCoreTests: XCTestCase {
                                        personID: ExactText("person-accepted-cache"),
                                        deviceID: ExactText("installation-accepted-cache"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
-        let store = try AttentionDomainStore(context: context,
-                                             persistence: MemoryAttentionStatePersistence(),
-                                             persistsOnlyLocalState: true)
+        let store = try ClientRepository(context: context,
+                                             persistence: MemoryPendingActionPersistence())
         let key = RequestKey(accountScope: identity.personID,
                              senderID: ExactText("sender"),
                              messageID: ExactText("accepted-cache"))
@@ -1485,7 +1482,6 @@ final class NativeRelayCoreTests: XCTestCase {
         try store.recordAcceptedOperation(receipt.intentID, operationID: receipt.opID,
                                           terminalSequence: 2, context: context)
 
-        try store.prepareForServerCache(context: context)
 
         let migrated = try store.snapshot(context: context)
         XCTAssertNotNil(migrated.intents[receipt.intentID],
@@ -1500,8 +1496,8 @@ final class NativeRelayCoreTests: XCTestCase {
                                        personID: ExactText("person-A"),
                                        deviceID: ExactText("installation-A"))
         let originalContext = ProfileContext(identity: identity, transportMode: .relay)
-        let persistence = MemoryAttentionStatePersistence()
-        let originalStore = try AttentionDomainStore(context: originalContext, persistence: persistence)
+        let persistence = MemoryPendingActionPersistence()
+        let originalStore = try ClientRepository(context: originalContext, persistence: persistence)
         let key = RequestKey(accountScope: identity.personID,
                              senderID: ExactText("sender"), messageID: ExactText("accepted-awaiting"))
         let payload = try JSONValue.parse(Data(#"{"title":"Prompt","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"yes","label":"Yes","kind":"value","value":{"ok":true}}]}}"#.utf8))
@@ -1516,7 +1512,7 @@ final class NativeRelayCoreTests: XCTestCase {
         let exactOriginal = try XCTUnwrap(originalStore.lookupIntent(receipt.intentID, context: originalContext))
 
         let restartedContext = ProfileContext(identity: identity, transportMode: .relay)
-        let restarted = try AttentionDomainStore(context: restartedContext, persistence: persistence)
+        let restarted = try ClientRepository(context: restartedContext, persistence: persistence)
         XCTAssertEqual(try restarted.acceptedOperationsAwaitingTerminalReplay(context: restartedContext)
             .map(\.operationID), [receipt.opID])
         let session = Session(identity)
@@ -1560,7 +1556,7 @@ final class NativeRelayCoreTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(settled.inboxCheckpoint?.batches.first?.results?.first?.terminal?.sequence), 2)
 
         let recoveredContext = ProfileContext(identity: identity, transportMode: .relay)
-        let recovered = try AttentionDomainStore(context: recoveredContext, persistence: persistence)
+        let recovered = try ClientRepository(context: recoveredContext, persistence: persistence)
         XCTAssertEqual(try recovered.acceptedOperationsAwaitingTerminalReplay(context: recoveredContext).count, 0)
         XCTAssertEqual(try recovered.snapshot(context: recoveredContext).remoteStates[key]?.eventSequence, 2)
     }

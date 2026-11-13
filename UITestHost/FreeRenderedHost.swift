@@ -26,8 +26,8 @@ struct FreeRenderedHost: View {
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier("free-rendered-provenance")
             .accessibilityValue(fixture.phase)
-            .onChange(of: fixture.viewModel.conversation(for: fixture.olderKey)?.readThroughTurn) { _, turn in
-                guard turn != nil else { return }
+            .onChange(of: fixture.viewModel.conversation(for: fixture.olderKey)?.accountReadThroughConversationSequence) { _, turn in
+                guard let turn, turn > 0 else { return }
                 do { try fixture.replayHistoryAfterObservedRead() }
                 catch { preconditionFailure("Free read replay failed: \(error)") }
             }
@@ -38,7 +38,7 @@ struct FreeRenderedHost: View {
 @Observable
 private final class FreeRenderedFixture {
     let context: ProfileContext
-    let domain: AttentionDomainStore
+    let domain: ClientRepository
     let viewModel: LivePresentationStore
     let olderKey: RequestKey
     var phase: String
@@ -49,7 +49,7 @@ private final class FreeRenderedFixture {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("fixture-only:free-rendered"),
             personID: ExactText("person-a"), deviceID: ExactText("device-b"))
         context = ProfileContext(identity: identity, transportMode: .fixture)
-        domain = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
+        domain = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
         olderKey = RequestKey(accountScope: identity.personID,
             senderID: ExactText("app:test"), messageID: ExactText("older"))
         self.legacy = legacy
