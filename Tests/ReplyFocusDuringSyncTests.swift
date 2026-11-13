@@ -244,15 +244,24 @@ final class ReplyCheckpointSession: AuthenticatedInboxPagingSession, @unchecked 
             return try await emptyInboxReply(request, ref: ref)
         }
         let startup = value.uniqueValue(named: "startup_id")?.stringValue?.rawValue ?? ""
-        return try JSONSerialization.data(withJSONObject: [
-            "v": 1, "type": "ok", "ref": ref, "paging_version": 1,
-            "snapshot_id": "test-\(startup)-h1", "high_water": 1,
-            "items": [["acceptance": [
-                "v": 1, "type": "delivery", "seq": 1, "origin": "source", "as": "message",
-                "sender_id": key.senderID.rawValue, "message_id": key.messageID.rawValue,
-                "message": try JSONSerialization.jsonObject(with: Data(payload.canonicalJSON.utf8))]]],
-            "next_cursor": NSNull(), "receipt_cursor": NSNull()
+        // Sender values may contain exact numbers outside Foundation's numeric range.
+        let one = JSONValue.number(JSONNumber(lexeme: "1"))
+        let response = JSONValue.object([
+            JSONMember("v", one), JSONMember("type", .string(ExactText("ok"))),
+            JSONMember("ref", .string(ExactText(ref))), JSONMember("paging_version", one),
+            JSONMember("snapshot_id", .string(ExactText("test-\(startup)-h1"))),
+            JSONMember("high_water", one),
+            JSONMember("items", .array([.object([JSONMember("acceptance", .object([
+                JSONMember("v", one), JSONMember("type", .string(ExactText("delivery"))),
+                JSONMember("seq", one), JSONMember("origin", .string(ExactText("source"))),
+                JSONMember("as", .string(ExactText("message"))),
+                JSONMember("sender_id", .string(key.senderID)),
+                JSONMember("message_id", .string(key.messageID)),
+                JSONMember("message", payload)
+            ]))])])),
+            JSONMember("next_cursor", .null), JSONMember("receipt_cursor", .null)
         ])
+        return Data(response.canonicalJSON.utf8)
     }
 
     func resync(_ request: Data, consume: @Sendable (Data) async throws -> Void) async throws {
