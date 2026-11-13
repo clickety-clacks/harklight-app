@@ -1319,6 +1319,44 @@ final class NativeGuidedTLSTests: XCTestCase {
         do { try await heldAck.value; XCTFail("The withheld cursor was never confirmed") } catch {}
     }
 
+    func testUploadEndpointDiscoveryDoesNotWaitForConversationHistoryOrAcknowledgeIt() async throws {
+        let namespace = "Harklight.upload-origin-test." + UUID().uuidString
+        let identity = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
+        defer {
+            SecItemDelete([kSecClass as String: kSecClassCertificate,
+                           kSecAttrLabel as String: identity.label] as CFDictionary)
+            SecItemDelete([kSecClass as String: kSecClassKey,
+                           kSecAttrApplicationTag as String: Data(namespace.utf8)] as CFDictionary)
+        }
+        let requests = ConversationFrameCollector()
+        let relay = try LocalRelayWebSocket(expectedDevice: identity.deviceID) { text in
+            requests.append(Data(text.utf8))
+            guard text.contains("\"conversation_open\"") else { return [] }
+            // The server supplies metadata but deliberately withholds the
+            // conversation replay barrier. Upload preparation must still proceed.
+            return ["{\"v\":1,\"type\":\"ok\",\"ref\":\"native-conversation-sync\",\"origin_https_port\":9443}\n"]
+        }
+        defer { relay.close() }
+        let port = try await relay.start()
+        let context = ProfileContext(identity: ProfileIdentity(
+            trustedRelayAuthority: ExactText("localhost"), personID: ExactText("test-person"),
+            deviceID: ExactText(identity.deviceID)), transportMode: .relay)
+        let session = try URLSessionInstallationSession(profile: context,
+            relayURL: XCTUnwrap(URL(string: "wss://localhost:\(port)/relay")),
+            clientIdentity: TrustedKeychainIdentity(identity.value), trustedRootDER: relay.rootDER)
+        let completed = expectation(description: "Origin metadata available before history completes")
+        let discovery = Task {
+            defer { completed.fulfill() }
+            return try await session.discoverConversationOrigin(since: 41)
+        }
+        await fulfillment(of: [completed], timeout: 5)
+        await session.close()
+        let endpoint = try await discovery.value
+        XCTAssertEqual(endpoint?.absoluteString, "https://localhost:9443/origin/v1")
+        XCTAssertEqual(requests.types, ["conversation_open"])
+        XCTAssertEqual(try JSONValue.parse(XCTUnwrap(requests.snapshot().first)).uniqueValue(named: "since")?.integerValue, 41)
+    }
+
     func testOlderRelayUnsupportedVersionResponseMarksNoCommentUnsupported() async throws {
         let namespace = "Harklight.no-comment-compatibility-test." + UUID().uuidString
         let identity = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()

@@ -138,6 +138,7 @@ public actor NativeRelayCore {
     private let session: any AuthenticatedInstallationSession
     private let automaticallySendsPendingOperations: Bool
     private var sendingIntentIDs: Set<UUID> = []
+    private var sendingDiscussions: Set<ConversationBinding> = []
     private let serverStateCache: any ServerStateCaching
     private let wire: RelayWire
     private let inboxWire: InboxPagingWire
@@ -278,20 +279,30 @@ public actor NativeRelayCore {
     }
 
     public func submitDiscussion(_ binding: ConversationBinding,
+        using operationSession: (any AuthenticatedConversationFileSession)? = nil,
+        originURL: URL? = nil,
         retainedFile: @Sendable (ConversationFile) async throws -> URL) async throws -> DiscussionOperationResult {
         diagnose(.conversation, .discussionSubmission, .began, request: binding.request,
                  revision: binding.revision)
-        guard !busy else { throw NativeRelayCoreError.inactive }
-        busy = true
-        defer { releaseBusy() }
+        if let operationSession {
+            guard operationSession.authenticatedIdentity == context.identity else {
+                throw NativeRelayCoreError.wrongInstallation
+            }
+        } else {
+            guard !busy else { throw NativeRelayCoreError.inactive }
+            busy = true
+        }
+        defer { if operationSession == nil { releaseBusy() } }
+        guard sendingDiscussions.insert(binding).inserted else { return .unresolved }
+        defer { sendingDiscussions.remove(binding) }
         try validate()
         guard !conversationsUnavailable else { throw InstallationTransportError.conversationsUnavailable }
-        guard let transport = session as? any AuthenticatedConversationFileSession,
+        guard let transport = operationSession ?? (session as? any AuthenticatedConversationFileSession),
               let draft = try store.conversationSnapshot(context: context).threads[binding.request]?.drafts[binding.revision] else {
             throw ConversationError.missingRequest
         }
         if case let .acceptedPendingReplay(_, turn) = draft.disposition {
-            try await replayConversationAndAcknowledge(using: transport)
+            if operationSession == nil { try await replayConversationAndAcknowledge(using: transport) }
             return .accepted(turnID: turn)
         }
         guard !draft.text.rawValue.isEmpty else { throw ConversationError.emptyDraft }
@@ -307,7 +318,7 @@ public actor NativeRelayCore {
                 var prepared: [ConversationFile] = []
                 var limits: ConversationFileLimits?
                 if !frozen.files.isEmpty {
-                    guard let endpoint = discoveredOriginURL else {
+                    guard let endpoint = originURL ?? discoveredOriginURL else {
                         throw ConversationError.uploadRequired(frozen.files[0].name)
                     }
                     let published = try await transport.conversationFileLimits(originURL: endpoint)
@@ -365,7 +376,7 @@ public actor NativeRelayCore {
                      receipt: definitiveFailure ? .pendingUnconfirmed : .unknown)
             do {
                 try store.markDiscussionOutcome(binding, operation: operation,
-                    rejection: definitiveFailure ? ExactText("Not delivered: " + (names.isEmpty ? "the discussion" : names) + " could not be prepared (\(error)). Draft retained.") : nil,
+                    rejection: definitiveFailure ? ExactText("Not delivered: " + (names.isEmpty ? "the discussion" : names) + " could not be prepared. Check the files and try again; your draft is saved.") : nil,
                     context: context)
             } catch {
                 diagnose(.localStore, .discussionPreparation, .failed, error: error,
@@ -387,7 +398,7 @@ public actor NativeRelayCore {
                      receipt: .acceptedAwaitingReplay)
             // The accepted turn is durable even if replay temporarily fails. A later
             // refresh joins it; the send response cannot move a replay cursor.
-            do { try await replayConversationAndAcknowledge(using: transport) }
+            do { if operationSession == nil { try await replayConversationAndAcknowledge(using: transport) } }
             catch {
                 diagnose(.conversation, .conversationReplay,
                          NativeDiagnosticCauseCode.failureTransition(for: error), error: error,

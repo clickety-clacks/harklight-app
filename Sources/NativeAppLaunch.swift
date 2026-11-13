@@ -2063,7 +2063,7 @@ final class LivePresentationStore {
                             conversationError = "Not delivered: " + reason.rawValue + ". Draft and files retained."
                             onResult?(false)
                         case .unresolved:
-                            conversationError = "Submission unconfirmed. Retry uses the same saved operation."
+                            conversationError = "Sending… Your text and files are saved."
                             onResult?(false)
                         }
                     } catch {
@@ -2079,7 +2079,7 @@ final class LivePresentationStore {
                         } else if (error as? ConversationError) == .emptyDraft {
                             conversationError = "Add a message before sending these files. Your draft is retained."
                         } else {
-                            conversationError = "Discussion could not be confirmed (\(error)). Your saved text and files are retained."
+                            conversationError = "Can't reach the server. Your text and files are saved and will resume when connected."
                         }
                     }
                 }

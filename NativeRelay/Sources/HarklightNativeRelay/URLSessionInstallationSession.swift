@@ -14,6 +14,10 @@ public enum InstallationTransportError: Error, Sendable {
     case acknowledgementBehind
 }
 
+public enum ConversationOriginDiscoveryError: Error, Sendable {
+    case rejected(ExactText)
+}
+
 /// Observable transport facts for a foreground connection attempt. Offering a
 /// client identity is deliberately distinct from evidence that the peer
 /// accepted it; a successful WebSocket open is the next observable boundary.
@@ -266,6 +270,26 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
         // every live entry signalled before it.
         liveConversationSignalled = false
         try await replay(request, ref: "native-conversation-sync", event: "conversation", end: "conversation_resynced", consume: consume)
+    }
+
+    /// Read only the authenticated origin metadata from the existing open reply.
+    /// This dedicated metadata connection is retired without consuming or ACKing
+    /// history; the ordinary replay connection owns that history independently.
+    public func discoverConversationOrigin(since cursor: UInt64) async throws -> URL? {
+        await socketExchangeGate.enter()
+        defer { close(); socketExchangeGate.leave() }
+        let wire = try ConversationWire(profile: profileContext, endpointHost: relayEndpointHost)
+        try await send(wire.open(since: cursor))
+        while true {
+            let frame = try await receive()
+            let type = try JSONValue.parse(frame).uniqueValue(named: "type")?.stringValue?.rawValue
+            if type == "delivery" || type == "lifecycle" || type == "conversation" { continue }
+            if type == "error", let reason = try JSONValue.parse(frame).uniqueValue(named: "reason")?.stringValue {
+                throw ConversationOriginDiscoveryError.rejected(reason)
+            }
+            guard try wire.isOpenAccepted(frame) else { throw InstallationTransportError.serverRejected }
+            return try wire.originEndpoint(frame)
+        }
     }
 
     /// Confirms the candidate TLS/WebSocket endpoint without sending an app

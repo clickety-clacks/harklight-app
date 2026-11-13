@@ -1004,6 +1004,8 @@ final class NativeRelayLifecycle {
                                 serverStateCache: (any ServerStateCaching)?)?
     private var answerFlights: [UUID: (token: UUID, task: Task<Void, Error>)] = [:]
     private var answerTransports: [UUID: URLSessionInstallationSession] = [:]
+    private var discussionFlights: [UUID: (token: UUID, task: Task<DiscussionOperationResult, Error>)] = [:]
+    private var discussionTransports: [UUID: URLSessionInstallationSession] = [:]
     private var refreshGeneration = UUID()
     private lazy var refreshFlights = RelayRefreshFlights(inactive: NativeRelayRefreshResult.unavailable) { [weak self] in
         guard let self else { return .unavailable }
@@ -1125,6 +1127,7 @@ final class NativeRelayLifecycle {
         core = nil
         transport = nil
         self.context = nil
+        await stopMutationFlights()
         snapshotState.failureContext = nil
         snapshotState.failureMessage = nil
         confirmedRelayContext = nil
@@ -1144,6 +1147,7 @@ final class NativeRelayLifecycle {
         installFocusReportHandler(for: nextTransport, transportID: transportAttemptID)
         configuration = (store, context, relayURL, clientIdentity, trustedRootDER, serverStateCache)
         resumeSavedAnswers()
+        resumeSavedDiscussions()
     }
 
     /// Validates a fixed, approved endpoint with the same client identity and
@@ -1209,12 +1213,18 @@ final class NativeRelayLifecycle {
         }
     }
 
-    func deactivate() async {
+    private func stopMutationFlights() async {
         for flight in answerFlights.values { flight.task.cancel() }
-        let sendSessions = Array(answerTransports.values)
+        for flight in discussionFlights.values { flight.task.cancel() }
+        let sessions = Array(answerTransports.values) + Array(discussionTransports.values)
         answerFlights.removeAll()
         answerTransports.removeAll()
-        for session in sendSessions { await session.close() }
+        discussionFlights.removeAll()
+        discussionTransports.removeAll()
+        for session in sessions { await session.close() }
+    }
+
+    func deactivate() async {
         refreshGeneration = UUID()
         refreshFlights.reset()
         let priorCore = core
@@ -1223,6 +1233,7 @@ final class NativeRelayLifecycle {
         core = nil
         transport = nil
         context = nil
+        await stopMutationFlights()
         snapshotState.failureContext = nil
         snapshotState.failureMessage = nil
         confirmedRelayContext = nil
@@ -1557,6 +1568,9 @@ final class NativeRelayLifecycle {
         }
         let token = UUID()
         let flight = Task { @MainActor [self] in
+            guard context == expected, core === activeCore, !Task.isCancelled else {
+                throw NativeRelayCoreError.inactive
+            }
             let session = try URLSessionInstallationSession(profile: expected,
                 relayURL: configuration.relayURL,
                 clientIdentity: TrustedKeychainIdentity(configuration.identity),
@@ -1632,31 +1646,107 @@ final class NativeRelayLifecycle {
     }
 
     func submitDiscussion(_ binding: ConversationBinding, expected: ProfileContext,
-                          retainedFile: @Sendable (ConversationFile) async throws -> URL) async throws -> DiscussionOperationResult {
-        guard context == expected, let configuration else { throw NativeRelayCoreError.inactive }
-        let pending = try configuration.store.conversationSnapshot(context: expected).threads[binding.request]?.drafts[binding.revision]
-        let operation: UUID?
-        switch pending?.disposition {
-        case let .acceptedPendingReplay(id, _): operation = id
-        default: operation = try configuration.store.prepareDiscussion(binding, context: expected)
+                          retainedFile: @escaping @Sendable (ConversationFile) async throws -> URL) async throws -> DiscussionOperationResult {
+        guard context == expected, let configuration, let activeCore = core else {
+            throw NativeRelayCoreError.inactive
         }
-        _ = await refreshFlights.coalesced()
-        guard context == expected, let core else { throw NativeRelayCoreError.inactive }
-        // Refresh may already have joined the uncertain operation. Do not turn
-        // that successful reconciliation into a new send or a missing-draft error.
-        if let operation, let accepted = try configuration.store.conversationSnapshot(context: expected)
-            .threads[binding.request]?.turns.first(where: { $0.operationID == operation }) {
-            return .accepted(turnID: accepted.id)
-        }
-        // The coalesced refresh owns this attempt, including initial Send.
-        // Do not immediately resubmit an unresolved or newly rejected result.
-        let afterRefresh = try configuration.store.conversationSnapshot(context: expected)
+        let pending = try configuration.store.conversationSnapshot(context: expected)
             .threads[binding.request]?.drafts[binding.revision]
-        if case let .acceptedPendingReplay(_, turn) = afterRefresh?.disposition {
-            return .accepted(turnID: turn)
+        if case let .acceptedPendingReplay(_, turn) = pending?.disposition { return .accepted(turnID: turn) }
+        let operation = try configuration.store.prepareDiscussion(binding, context: expected)
+        if let existing = discussionFlights[operation] { return try await existing.task.value }
+        let token = UUID()
+        let flight = Task { @MainActor [self] in
+            guard context == expected, core === activeCore, !Task.isCancelled else {
+                throw NativeRelayCoreError.inactive
+            }
+            var endpoint: URL?
+            if pending?.wireFrame == nil, pending?.files.isEmpty == false {
+                let cursor = try configuration.store.conversationSnapshot(context: expected).cursor
+                let metadata = try URLSessionInstallationSession(profile: expected,
+                    relayURL: configuration.relayURL,
+                    clientIdentity: TrustedKeychainIdentity(configuration.identity),
+                    trustedRootDER: configuration.rootDER, attemptID: token,
+                    onDiagnostic: diagnosticSink())
+                discussionTransports[operation] = metadata
+                // This exchange reads only the open reply and then closes. It
+                // neither drains history nor waits for replay acknowledgement.
+                do {
+                    endpoint = try await metadata.discoverConversationOrigin(since: cursor)
+                } catch let ConversationOriginDiscoveryError.rejected(reason) {
+                    if reason.rawValue == "storage_unavailable" {
+                        try configuration.store.markDiscussionOutcome(binding, operation: operation,
+                            rejection: nil, context: expected)
+                        return DiscussionOperationResult.unresolved
+                    }
+                    recordDiagnostic(.upload, .discussionPreparation, .rejected,
+                        causeCode: NativeDiagnosticCauseCode.serverReason(reason.rawValue))
+                    let explanation = ExactText("The server could not prepare these files. Your text and files are saved; try again.")
+                    try configuration.store.markDiscussionOutcome(binding, operation: operation,
+                        rejection: explanation, context: expected)
+                    return DiscussionOperationResult.rejected(reason: explanation)
+                }
+            }
+            guard context == expected, core === activeCore else { throw NativeRelayCoreError.inactive }
+            let sending = try URLSessionInstallationSession(profile: expected,
+                relayURL: configuration.relayURL,
+                clientIdentity: TrustedKeychainIdentity(configuration.identity),
+                trustedRootDER: configuration.rootDER, attemptID: token,
+                onDiagnostic: diagnosticSink())
+            discussionTransports[operation] = sending
+            do {
+                let result = try await activeCore.submitDiscussion(binding, using: sending,
+                    originURL: endpoint, retainedFile: retainedFile)
+                await sending.close()
+                return result
+            } catch {
+                await sending.close()
+                throw error
+            }
         }
-        if case let .rejected(reason) = afterRefresh?.disposition { return .rejected(reason) }
-        return .unresolved
+        discussionFlights[operation] = (token, flight)
+        defer {
+            if discussionFlights[operation]?.token == token {
+                discussionFlights.removeValue(forKey: operation)
+                discussionTransports.removeValue(forKey: operation)
+            }
+        }
+        let result = try await flight.value
+        if case .accepted = result {
+            Task { [weak self] in _ = await self?.refreshResultFromTrustedRelay() }
+        }
+        return result
+    }
+
+    private func resumeSavedDiscussions() {
+        guard let expected = context, let configuration else { return }
+        do {
+            let files = try ConversationFileStorage(identity: expected.identity)
+            let threads = try configuration.store.conversationSnapshot(context: expected).threads
+            for thread in threads.values {
+                for draft in thread.drafts.values {
+                    let operation: UUID
+                    switch draft.disposition {
+                    case let .submitting(id), let .outcomeUnknown(id): operation = id
+                    case .saved, .rejected, .acceptedPendingReplay: continue
+                    }
+                    guard discussionFlights[operation] == nil,
+                          thread.uploadGroups?[operation]?.cleanupID == nil else { continue }
+                    Task { [weak self] in
+                        guard let self else { return }
+                        do {
+                            _ = try await self.submitDiscussion(draft.binding, expected: expected) {
+                                try files.fileURL(for: $0)
+                            }
+                        } catch {
+                            self.recordDiagnostic(.conversation, .discussionSubmission, .unresolved, error: error)
+                        }
+                    }
+                }
+            }
+        } catch {
+            recordDiagnostic(.localStore, .discussionSubmission, .failed, error: error)
+        }
     }
 
     func sendPendingConversationReadPositions(expected: ProfileContext) async {
@@ -1803,8 +1893,8 @@ final class NativeRelayLifecycle {
         guard refreshGeneration == generation else { throw NativeRelayCoreError.inactive }
         guard let core, let transport, let context else { throw NativeRelayCoreError.inactive }
         resumeSavedAnswers()
+        resumeSavedDiscussions()
         try await refreshConfirmedProjection(core: core, context: context, generation: generation)
-        try await resumeConfirmedDiscussions(core: core, context: context, generation: generation)
         if let configuration {
             let threads = try configuration.store.conversationSnapshot(context: context).threads
             for (request, thread) in threads where (thread.uploadCleanups ?? [:]).values.contains(where: {
