@@ -4,8 +4,7 @@ import XCTest
 @testable import Harklight
 
 /// The ruled behavior for the Answered confirmation: a pending or refused send must
-/// never present as Answered; only an answered request or an accepted
-/// submission completes the state.
+/// never present as Answered; only the Server's answered terminal completes it.
 @MainActor
 final class AnswerStatusPresentationTests: XCTestCase {
     func testPendingUnconfirmedSendIsNeverAnswered() {
@@ -62,8 +61,8 @@ final class AnswerStatusPresentationTests: XCTestCase {
         }
     }
 
-    func testAcceptedSendShowsAnswered() {
-        XCTAssertTrue(LiveRequestDetail.answerStatusIsComplete(
+    func testAcceptedSendStaysPendingUntilAnsweredTerminal() {
+        XCTAssertFalse(LiveRequestDetail.answerStatusIsComplete(
             lifecycleStatus: .pending, ownOutcome: .accepted, answerNotDelivered: false))
         XCTAssertTrue(LiveRequestDetail.answerStatusIsComplete(
             lifecycleStatus: .answered, ownOutcome: .accepted, answerNotDelivered: false))

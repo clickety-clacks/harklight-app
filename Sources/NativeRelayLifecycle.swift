@@ -952,6 +952,7 @@ final class NativeRelayLifecycle {
     private var answerTransports: [UUID: URLSessionInstallationSession] = [:]
     private var discussionFlights: [UUID: (token: UUID, task: Task<DiscussionOperationResult, Error>)] = [:]
     private var discussionTransports: [UUID: URLSessionInstallationSession] = [:]
+    private var fileTransports: [UUID: URLSessionInstallationSession] = [:]
     private var refreshGeneration = UUID()
     private lazy var refreshFlights = RelayRefreshFlights(inactive: NativeRelayRefreshResult.unavailable) { [weak self] in
         guard let self else { return .unavailable }
@@ -1160,11 +1161,12 @@ final class NativeRelayLifecycle {
     private func stopMutationFlights() async {
         for flight in answerFlights.values { flight.task.cancel() }
         for flight in discussionFlights.values { flight.task.cancel() }
-        let sessions = Array(answerTransports.values) + Array(discussionTransports.values)
+        let sessions = Array(answerTransports.values) + Array(discussionTransports.values) + Array(fileTransports.values)
         answerFlights.removeAll()
         answerTransports.removeAll()
         discussionFlights.removeAll()
         discussionTransports.removeAll()
+        fileTransports.removeAll()
         for session in sessions { await session.close() }
     }
 
@@ -1697,13 +1699,36 @@ final class NativeRelayLifecycle {
     }
 
     func fetchConversationFile(_ file: ConversationFile, to destination: URL, expected: ProfileContext) async throws {
-        guard context == expected else { throw NativeRelayCoreError.inactive }
-        _ = await refreshFlights.coalesced()
-        guard context == expected, let core, let transport,
-              let endpoint = try await core.conversationOriginURL() else {
-            throw ConversationError.uploadRequired(file.name)
+        guard context == expected, let configuration else { throw NativeRelayCoreError.inactive }
+        let token = UUID()
+        defer { fileTransports.removeValue(forKey: token) }
+        var endpoint = try await core?.conversationOriginURL()
+        guard context == expected, !Task.isCancelled else { throw NativeRelayCoreError.inactive }
+        if endpoint == nil {
+            let metadata = try URLSessionInstallationSession(profile: expected,
+                relayURL: configuration.relayURL,
+                clientIdentity: TrustedKeychainIdentity(configuration.identity),
+                trustedRootDER: configuration.rootDER, attemptID: token,
+                onDiagnostic: diagnosticSink())
+            fileTransports[token] = metadata
+            endpoint = try await metadata.discoverConversationOrigin(
+                since: configuration.store.conversationSnapshot(context: expected).cursor)
         }
-        try await transport.fetchConversationFile(file, to: destination, originURL: endpoint)
+        guard context == expected, !Task.isCancelled else { throw NativeRelayCoreError.inactive }
+        guard let endpoint else { throw ConversationError.uploadRequired(file.name) }
+        let download = try URLSessionInstallationSession(profile: expected,
+            relayURL: configuration.relayURL,
+            clientIdentity: TrustedKeychainIdentity(configuration.identity),
+            trustedRootDER: configuration.rootDER, attemptID: token,
+            onDiagnostic: diagnosticSink())
+        fileTransports[token] = download
+        do {
+            try await download.fetchConversationFile(file, to: destination, originURL: endpoint)
+            await download.close()
+        } catch {
+            await download.close()
+            throw error
+        }
         guard context == expected else { throw NativeRelayCoreError.inactive }
     }
 

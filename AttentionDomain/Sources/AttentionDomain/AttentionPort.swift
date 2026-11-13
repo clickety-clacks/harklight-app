@@ -1315,7 +1315,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
                                 deliveredFiles: deliveredFiles,
                                 selector: selector,
                                 draft: draft,
-                                submittedAnswer: session == nil || hasAccountTerminal ? nil :
+                                submittedAnswer: hasAccountTerminal || (session == nil && status != .pending) ? nil :
                                     submittedAnswer(for: submission, interface: interface),
                                 ownAnswerWasRefusedByRetraction: ownAnswerWasRefusedByRetraction,
                                 lifecycleStatus: status,

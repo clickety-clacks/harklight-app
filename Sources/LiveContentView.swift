@@ -592,6 +592,10 @@ struct LiveContentView: View {
                 userOpenedMessage: { launch?.userOpenedMessage() },
                 testNotificationRouter: testNotificationRouter,
                 testOpenForegroundChatIndicator: testOpenForegroundChatIndicator)
+            .uiDiagnostics("inbox-catch-up-diagnostics",
+                "source=\(launch != nil && !store.isLocalExample ? "live" : "fixture") " +
+                "post_ack_drain=\(progress?.outcome == .connecting && progress?.postAckDrainTransition == .began ? "running" : "not_running") " +
+                "transport=\(progress?.transportAttemptID?.uuidString ?? "none")")
             .alert("Connection needs attention", isPresented: failureAlertPresented,
                    presenting: diagnostic) { diagnostic in
                 Button("Copy details") {
@@ -1364,10 +1368,9 @@ struct LiveRequestDetail: View {
         lifecycleStatus == .noComment && !isSupersedesReadOnly
     }
 
-    private var showsPendingAnswerConfirmation: Bool {
-        request.inboxStateIsCurrent &&
-            !isSupersedesReadOnly && !storePresentationSnapshot.isRetracted &&
-            request.lifecycleStatus == .pending && request.receiptFacts?.ownOutcome == .unconfirmed
+    var showsPendingAnswerConfirmation: Bool {
+        !isSupersedesReadOnly && !storePresentationSnapshot.isRetracted &&
+            request.lifecycleStatus == .pending && request.intentReceipt != nil && !request.answerNotDelivered
     }
 
     private var showsNotAcceptedConfirmation: Bool {
@@ -1402,7 +1405,7 @@ struct LiveRequestDetail: View {
             defaultAnswerAction: request.defaultAnswerAction)
     }
 
-    private var pendingAnswerText: String? { nil }
+    var pendingAnswerText: String? { attemptedAnswerText }
 
     private var attemptedAnswerText: String? {
         AnswerConfirmationText.formatted(accountAnswerOutcome: nil,
@@ -1410,14 +1413,13 @@ struct LiveRequestDetail: View {
             projection: request.projection)
     }
 
-    /// A pending or refused send never counts as Answered; only a request the
-    /// relay reports answered, or an accepted submission, completes the state.
+    /// A send acknowledgement is not the final request state. Keep its saved
+    /// answer pending until the Server reports an answered terminal.
     static func answerStatusIsComplete(lifecycleStatus: AppLifecycleStatus,
                                        ownOutcome: OwnOutcome?,
                                        answerNotDelivered: Bool) -> Bool {
         guard !answerNotDelivered else { return false }
-        if lifecycleStatus == .answered { return true }
-        return ownOutcome == .accepted && lifecycleStatus != .noComment
+        return lifecycleStatus == .answered
     }
 
     private func returnToListIfSinglePane() {
@@ -1835,7 +1837,6 @@ struct LiveRequestDetail: View {
                     }
                 }
                 if !isSupersedesReadOnly, localExample == nil, fixtureStore == nil,
-                   request.inboxStateIsCurrent,
                    let receipt = request.intentReceipt,
                    [.terminalUnconfirmed, .notDelivered, .unsupported].contains(receipt.localState) {
                     Button("Retry") { _ = store.retryUnconfirmedAnswerFromUser(request.key) }
