@@ -645,8 +645,8 @@ final class NativeAppLaunch {
             trustedRelayAuthority: ExactText(departure.record.profileAuthority),
             personID: ExactText(personID),
             deviceID: ExactText(departure.record.deviceID)), transportMode: .relay)
-        let persistence = try FileAttentionStatePersistence.applicationSupport()
-        let store = try AttentionDomainStore(context: context, persistence: persistence)
+        let persistence = try FilePendingActionPersistence.applicationSupport()
+        let store = try ClientRepository(context: context, persistence: persistence)
         return try LivePresentationStore(disconnectedStore: store, context: context,
                                         newMessageAreaDefaults: .standard)
     }
@@ -836,38 +836,24 @@ final class NativeAppLaunch {
         guard activationGeneration == generation else { return }
         let context = installation.context
         let (store, fileStorage, serverStateCache) = try await Task.detached(priority: .userInitiated) {
-            let persistence = try FileAttentionStatePersistence.applicationSupport()
+            let persistence = try FilePendingActionPersistence.applicationSupport()
             let fileStorage = try ConversationFileStorage(identity: context.identity)
-            let store = try AttentionDomainStore(context: context, persistence: persistence,
-                                                 conversationFileReferences: fileStorage,
-                                                 persistsOnlyLocalState: true)
+            let store = try ClientRepository(context: context, persistence: persistence,
+                                                 conversationFileReferences: fileStorage)
             let cache: FileServerStateCache
             if let persistent = try? FileServerStateCache.applicationCache(for: context.identity) {
                 cache = persistent
             } else {
-                cache = try FileServerStateCache()
+                cache = FileServerStateCache(identity: context.identity)
             }
             var cachedState: CachedAttentionServerState?
             if let saved = try? await cache.load() {
-                if let projection = try? saved.attentionDomainState() {
+                if let projection = try? saved.attentionDomainState(for: context.identity) {
                     cachedState = projection
                 } else {
                     try? await cache.discard()
                 }
             }
-            if cachedState == nil,
-               (try? store.hasLegacyServerProjection(context: context)) == true {
-                let inbox = try store.snapshot(context: context)
-                let conversations = try store.conversationSnapshot(context: context)
-                let legacyCache = ServerStateCacheSnapshot.make(from: inbox, conversations: conversations)
-                do {
-                    try await cache.save(legacyCache)
-                    cachedState = try? legacyCache.attentionDomainState()
-                } catch {
-                    // Without a durable snapshot, launch from the server instead.
-                }
-            }
-            try store.prepareForServerCache(context: context)
             if let cachedState {
                 do {
                     try store.restoreCachedServerState(cachedState, context: context)
@@ -1407,7 +1393,7 @@ final class LivePresentationStore {
     }
 
     @ObservationIgnored private let port: AttentionDomainPort
-    @ObservationIgnored private let attentionStore: AttentionDomainStore
+    @ObservationIgnored private let attentionStore: ClientRepository
     private let permitsDelivery: Bool
     @ObservationIgnored private let conversationFiles: ConversationFileStorage?
     @ObservationIgnored private let profileContext: ProfileContext
@@ -1485,7 +1471,7 @@ final class LivePresentationStore {
     private static let retractedRowVisibilityDuration: TimeInterval = 24 * 60 * 60
     @ObservationIgnored private var presentedStaleAnswerOperationIDs = Set<UUID>()
 
-    convenience init(store: AttentionDomainStore, context: ProfileContext,
+    convenience init(store: ClientRepository, context: ProfileContext,
                      conversationAvailability: NativeConversationAvailability = NativeRelayLifecycle.shared.conversationAvailability,
                      diagnostics: NativeClientDiagnosticJournal? = nil,
                      clearedRetractionDefaults: UserDefaults = .standard,
@@ -1498,14 +1484,14 @@ final class LivePresentationStore {
     }
 
     /// Uses the ordinary projection/edit path, but cannot mint an intent or retry transport.
-    convenience init(localFixtureStore store: AttentionDomainStore, context: ProfileContext,
+    convenience init(localFixtureStore store: ClientRepository, context: ProfileContext,
                      newMessageAreaDefaults: UserDefaults? = nil) throws {
         guard context.transportMode == .fixture else { throw AttentionStoreError.fixtureOnlyOperation }
         try self.init(store: store, context: context, permitsDelivery: false, isReadOnly: false,
                       diagnostics: nil, newMessageAreaDefaults: newMessageAreaDefaults)
     }
 
-    convenience init(disconnectedStore store: AttentionDomainStore, context: ProfileContext,
+    convenience init(disconnectedStore store: ClientRepository, context: ProfileContext,
                      newMessageAreaDefaults: UserDefaults? = nil) throws {
         guard context.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
         try self.init(store: store, context: context, permitsDelivery: false, isReadOnly: true,
@@ -1513,7 +1499,7 @@ final class LivePresentationStore {
     }
 
     static func makeForActivation(
-        store: AttentionDomainStore,
+        store: ClientRepository,
         context: ProfileContext,
         conversationAvailability: NativeConversationAvailability = NativeRelayLifecycle.shared.conversationAvailability,
         diagnostics: NativeClientDiagnosticJournal? = nil,
@@ -1585,7 +1571,7 @@ final class LivePresentationStore {
                 Double(activationPreparationNanoseconds) / 1_000_000)
     }
 
-    private init(store: AttentionDomainStore, context: ProfileContext,
+    private init(store: ClientRepository, context: ProfileContext,
                  permitsDelivery: Bool, isReadOnly: Bool = false,
                  diagnostics: NativeClientDiagnosticJournal? = nil,
                  conversationAvailability: NativeConversationAvailability = NativeRelayLifecycle.shared.conversationAvailability,
@@ -1761,21 +1747,8 @@ final class LivePresentationStore {
         }
     }
 
-    // Project a visible reply as read while its durable update runs off the
-    // main actor. Removing the pending key on failure restores the saved state.
     func conversation(for key: RequestKey) -> ConversationThread? {
-        guard var thread = conversationThreads[key] else { return nil }
-        let pendingTurnIDs = Set(pendingConversationReadUpdates
-            .lazy.filter { $0.request == key }.map(\.turnID))
-        guard let pendingReadThrough = thread.turns.last(where: { pendingTurnIDs.contains($0.id) }) else {
-            return thread
-        }
-        thread.readThroughTurn = pendingReadThrough.id
-        if let sequence = pendingReadThrough.conversationSequence {
-            thread.accountReadThroughConversationSequence = max(
-                thread.accountReadThroughConversationSequence ?? 0, sequence)
-        }
-        return thread
+        conversationThreads[key]
     }
 
     func hasUnreadAgentReply(_ key: RequestKey) -> Bool {
@@ -2222,17 +2195,11 @@ final class LivePresentationStore {
         }
         var observations: [ReplyItemObservation] = []
         for (key, thread) in conversationThreads where scopedRequest == nil || key == scopedRequest {
-            let legacyReadIndex = thread.readThroughTurn.flatMap { readTurn in
-                thread.turns.firstIndex { $0.id == readTurn }
-            }
-            for (index, turn) in thread.turns.enumerated()
-                where turn.kind == .reply && turn.author == .origin {
+            for turn in thread.turns where turn.kind == .reply && turn.author == .origin {
                 let isSeen: Bool
                 if let cursor = thread.accountReadThroughConversationSequence,
                    let sequence = turn.conversationSequence {
                     isSeen = sequence <= cursor
-                } else if let legacyReadIndex {
-                    isSeen = index <= legacyReadIndex
                 } else {
                     isSeen = false
                 }
@@ -2923,7 +2890,7 @@ final class LivePresentationStore {
                 current = nil
             }
             if let current, current.intentReceipt != nil ||
-                (current.lifecycleStatus == .answered && current.submittedAnswer != nil) {
+                current.lifecycleStatus == .answered || current.lifecycleStatus == .noComment {
                 clearActionError()
                 return true
             } else {

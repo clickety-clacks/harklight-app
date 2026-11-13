@@ -1,16 +1,17 @@
 import AttentionDomain
 import Foundation
+import HarklightNativeRelay
 import XCTest
 
 /// Controls the persistence seam while still exercising the production file adapter.
-private final class PageFilePersistence: AttentionStatePersistence, @unchecked Sendable {
-    enum Failure { case beforeReplacement, afterReplacement }
-    let file: FileAttentionStatePersistence
+private final class PageFilePersistence: PendingActionPersistence, @unchecked Sendable {
+    enum Failure { case beforeReplacement }
+    let file: FilePendingActionPersistence
     private let lock = NSLock()
     private var nextAction: (@Sendable () throws -> Void)?
     private var failure: Failure?
 
-    init(directory: URL) { file = FileAttentionStatePersistence(directoryURL: directory) }
+    init(directory: URL) { file = FilePendingActionPersistence(directoryURL: directory) }
 
     func onNextCommit(_ action: @escaping @Sendable () throws -> Void) {
         lock.withLock { nextAction = action }
@@ -29,9 +30,6 @@ private final class PageFilePersistence: AttentionStatePersistence, @unchecked S
         try action?()
         if phase == .beforeReplacement { throw AttentionStoreError.persistence("Before replacement") }
         try file.commit(data, identity: identity)
-        // Model an adapter reporting failure with the replacement already readable.
-        // This does not simulate a power failure or prove directory-fsync durability.
-        if phase == .afterReplacement { throw AttentionStoreError.persistence("After replacement") }
     }
 }
 
@@ -56,7 +54,7 @@ private struct PageFixture: Sendable {
     let directory: URL
     let persistence: PageFilePersistence
     let context: ProfileContext
-    let store: AttentionDomainStore
+    let store: ClientRepository
     static let highWater: UInt64 = 10_000
 
     init() throws {
@@ -64,7 +62,7 @@ private struct PageFixture: Sendable {
         persistence = PageFilePersistence(directory: directory)
         context = ProfileContext(identity: ProfileIdentity(trustedRelayAuthority: ExactText("page-test"),
             personID: ExactText("person"), deviceID: ExactText("device")), transportMode: .relay)
-        store = try AttentionDomainStore(context: context, persistence: persistence)
+        store = try ClientRepository(context: context, persistence: persistence)
         _ = try store.beginInboxCandidate(startupID: "startup", since: 0, batches: [], context: context)
         try store.saveInboxInitialPage(snapshotID: "snapshot", highWater: Self.highWater,
             items: [item(1)], nextCursor: "older", receiptCursor: nil, context: context)
@@ -89,14 +87,14 @@ private struct PageFixture: Sendable {
         try store.saveInboxOlderPage(snapshotID: "snapshot", highWater: Self.highWater,
             cursor: cursor, items: items ?? [item(2)], nextCursor: next, context: context)
     }
-    func reopen() throws -> AttentionStoreSnapshot {
-        try AttentionDomainStore(context: context, persistence: persistence).snapshot(context: context)
+    func current() throws -> AttentionStoreSnapshot {
+        try store.snapshot(context: context)
     }
     func remove() { try? FileManager.default.removeItem(at: directory) }
 }
 
-final class InboxPagePersistenceTests: XCTestCase {
-    func testPageAndCheckpointRecoverTogetherInServerOrderWithDeferredOverlay() throws {
+final class InboxPageUpdateTests: XCTestCase {
+    func testPagedRowsUseServerOrderAndApplyDeferredTerminal() throws {
         let f = try PageFixture()
         defer { f.remove() }
         let terminal = RelayEvent(sequence: PageFixture.highWater + 1,
@@ -105,7 +103,7 @@ final class InboxPagePersistenceTests: XCTestCase {
             return XCTFail("The terminal for an unloaded page must be retained")
         }
         try f.save([f.item(3), f.item(2)])
-        let saved = try f.reopen()
+        let saved = try f.current()
         XCTAssertEqual(saved.inboxSourceOrder, [f.key(1), f.key(3), f.key(2)])
         XCTAssertEqual(saved.inboxCheckpoint?.loadedKeys, Set([f.key(1), f.key(2), f.key(3)]))
         XCTAssertEqual(saved.inboxCheckpoint?.nextCursor, "last")
@@ -118,10 +116,10 @@ final class InboxPagePersistenceTests: XCTestCase {
         XCTAssertThrowsError(try f.save([f.item(3), f.item(2)]))
         XCTAssertEqual(try f.persistence.load(identity: f.context.identity), bytes)
         try f.save([], cursor: "last", next: nil)
-        XCTAssertNil(try f.reopen().inboxCheckpoint?.nextCursor)
+        XCTAssertNil(try f.current().inboxCheckpoint?.nextCursor)
     }
 
-    func testPageConflictChecksLeaveDurableCheckpointUnchanged() throws {
+    func testInvalidPageLeavesAcceptedProjectionUnchanged() throws {
         let f = try PageFixture()
         defer { f.remove() }
         let bytes = try f.persistence.load(identity: f.context.identity)
@@ -141,22 +139,6 @@ final class InboxPagePersistenceTests: XCTestCase {
         XCTAssertEqual(try f.persistence.load(identity: f.context.identity), bytes)
     }
 
-    func testLegacyCheckpointOrderIsRecoveredBeforeAppendingTheNextPage() throws {
-        let f = try PageFixture()
-        defer { f.remove() }
-        try f.save([f.item(3)])
-        let data = try XCTUnwrap(f.persistence.load(identity: f.context.identity))
-        var plist = try XCTUnwrap(PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Any])
-        var checkpoint = try XCTUnwrap(plist["inboxCheckpoint"] as? [String: Any])
-        checkpoint.removeValue(forKey: "sourceOrder")
-        plist["inboxCheckpoint"] = checkpoint
-        try f.persistence.file.commit(PropertyListSerialization.data(fromPropertyList: plist, format: .binary, options: 0),
-                                      identity: f.context.identity)
-        let restored = try AttentionDomainStore(context: f.context, persistence: f.persistence)
-        try restored.saveInboxOlderPage(snapshotID: "snapshot", highWater: PageFixture.highWater,
-            cursor: "last", items: [f.item(2)], nextCursor: nil, context: f.context)
-        XCTAssertEqual(try f.reopen().inboxSourceOrder, [f.key(3), f.key(1), f.key(2)])
-    }
 
     func testFailureBeforeReplacementKeepsOldCheckpointAndRetryCommitsOnce() throws {
         let f = try PageFixture()
@@ -164,32 +146,16 @@ final class InboxPagePersistenceTests: XCTestCase {
         let before = try f.store.snapshot(context: f.context)
         f.persistence.failNextCommit(.beforeReplacement)
         XCTAssertThrowsError(try f.save())
-        for snapshot in [try f.store.snapshot(context: f.context), try f.reopen()] {
+        for snapshot in [try f.store.snapshot(context: f.context), try f.current()] {
             XCTAssertEqual(snapshot.revision, before.revision)
             XCTAssertEqual(snapshot.inboxCheckpoint, before.inboxCheckpoint)
             XCTAssertNil(snapshot.requests[f.key(2)])
         }
         try f.save()
-        XCTAssertEqual(try f.reopen().inboxSourceOrder, [f.key(1), f.key(2)])
+        XCTAssertEqual(try f.current().inboxSourceOrder, [f.key(1), f.key(2)])
         XCTAssertThrowsError(try f.save())
     }
 
-    func testErrorAfterReplacementReloadsWholePageAndPreservesLaterWrite() throws {
-        let f = try PageFixture()
-        defer { f.remove() }
-        f.persistence.failNextCommit(.afterReplacement)
-        XCTAssertThrowsError(try f.save())
-        for snapshot in [try f.store.snapshot(context: f.context), try f.reopen()] {
-            XCTAssertEqual(snapshot.inboxSourceOrder, [f.key(1), f.key(2)])
-            XCTAssertEqual(snapshot.inboxCheckpoint?.nextCursor, "last")
-            XCTAssertNotNil(snapshot.requests[f.key(2)])
-        }
-        XCTAssertThrowsError(try f.save())
-        _ = try f.store.updateConversationDraftText(ExactText("after uncertain save"), for: f.binding, context: f.context)
-        let reopened = try f.reopen()
-        XCTAssertEqual(reopened.conversationThreads[f.key(1)]?.drafts[1]?.text, ExactText("after uncertain save"))
-        XCTAssertEqual(reopened.inboxSourceOrder, [f.key(1), f.key(2)])
-    }
 
     func testCommittedReadersProceedWhilePagePersistenceAndAnotherWriterWait() throws {
         let f = try PageFixture()
@@ -225,13 +191,13 @@ final class InboxPagePersistenceTests: XCTestCase {
         XCTAssertEqual(old.inboxCheckpoint?.nextCursor, "older")
         try page.value()
         try draft.value()
-        let saved = try f.reopen()
+        let saved = try f.current()
         XCTAssertNotNil(saved.requests[f.key(2)])
         XCTAssertEqual(saved.conversationThreads[f.key(1)]?.drafts[1]?.text, ExactText("concurrent draft"))
         XCTAssertEqual(saved.inboxCheckpoint?.nextCursor, "last")
     }
 
-    func testInterleavedPageDraftOutboxAndRelayWritesSurviveBothOrders() throws {
+    func testInterleavedPageDraftOutboxAndRelayUpdatesPreserveBothChanges() throws {
         for pageFirst in [true, false] {
             for mutation in 0..<3 {
                 let f = try PageFixture()
@@ -271,13 +237,17 @@ final class InboxPagePersistenceTests: XCTestCase {
                 release.signal()
                 try first.value()
                 try second.value()
-                let saved = try f.reopen()
+                let saved = try f.current()
                 XCTAssertEqual(saved.inboxSourceOrder, [f.key(1), f.key(2)])
                 XCTAssertEqual(saved.inboxCheckpoint?.nextCursor, "last")
                 XCTAssertEqual(saved.cursor, PageFixture.highWater + (mutation == 2 ? 1 : 0))
                 XCTAssertEqual(try f.store.conversationSnapshot(context: f.context).cursor, 0)
                 if mutation == 0 { XCTAssertEqual(saved.conversationThreads[f.key(1)]?.drafts[1]?.text, ExactText("kept")) }
-                if mutation == 1 { XCTAssertEqual(saved.outbox.map(\.intentID), [operationID]) }
+                if mutation == 1 {
+                    XCTAssertEqual(Set(saved.intents.keys), [operationID])
+                    XCTAssertEqual(saved.intents[operationID]?.answerKind, .noComment)
+                    XCTAssertTrue(saved.outbox.isEmpty, "Concurrent page work must not authorize a queued operation to send.")
+                }
                 if mutation == 2 {
                     XCTAssertEqual(saved.remoteStates[f.key(2)]?.state, .answered)
                     XCTAssertTrue(saved.pendingRelayOverlays.isEmpty)
@@ -286,54 +256,49 @@ final class InboxPagePersistenceTests: XCTestCase {
         }
     }
 
-    /// Paired-source evidence: no artificial disk delay, no speed threshold.
-    /// The persistence-entry handshake starts a read at the actual file-save phase.
-    func testMeasureReaderIntervalDuringRealPageFileCommit() throws {
-        let seed = try PageFixture()
-        defer { seed.remove() }
-        var cursor = "older"
-        for start in stride(from: 2, through: 382, by: 20) {
-            let next = "page-\(start)"
-            try seed.save((start..<(start + 20)).map { seed.item($0, payloadBytes: 4096) }, cursor: cursor, next: next)
-            cursor = next
+
+    func testServerCacheRestoresLoadedBodiesAndTerminalWithoutRestoringCheckpointAuthority() async throws {
+        let f = try PageFixture()
+        defer { f.remove() }
+        let terminal = RelayEvent(sequence: PageFixture.highWater + 1,
+            body: .terminal(f.key(2), .answered, nil), accountAnswerOutcome: .reply(ExactText("Server reply")))
+        guard case .deferred = f.store.applyRelayEvent(terminal, context: f.context) else {
+            return XCTFail("The unloaded request's terminal must wait for its server body.")
         }
-        let bytes = try XCTUnwrap(seed.persistence.load(identity: seed.context.identity))
-        for sample in 0..<8 {
-            let f = try PageFixture()
-            defer { f.remove() }
-            try f.persistence.file.commit(bytes, identity: f.context.identity)
-            let store = try AttentionDomainStore(context: f.context, persistence: f.persistence)
-            let entered = DispatchSemaphore(value: 0), readStarted = DispatchSemaphore(value: 0)
-            f.persistence.onNextCommit {
-                entered.signal()
-                guard readStarted.wait(timeout: .now() + 10) == .success else {
-                    throw AttentionStoreError.persistence("Measurement reader did not start")
-                }
-            }
-            let writer = PageResult<Void>(), reader = PageResult<Double>()
-            let pageCursor = cursor
-            DispatchQueue.global().async {
-                writer.run {
-                    try store.saveInboxOlderPage(snapshotID: "snapshot", highWater: PageFixture.highWater,
-                        cursor: pageCursor, items: (402..<422).map { f.item($0, payloadBytes: 4096) }, nextCursor: nil, context: f.context)
-                }
-            }
-            XCTAssertEqual(entered.wait(timeout: .now() + 10), .success)
-            DispatchQueue.global().async {
-                reader.run {
-                    let start = DispatchTime.now().uptimeNanoseconds
-                    readStarted.signal()
-                    let cursor = try store.relayCursor(context: f.context)
-                    let elapsed = DispatchTime.now().uptimeNanoseconds - start
-                    XCTAssertEqual(cursor, PageFixture.highWater)
-                    return Double(elapsed) / 1_000_000
-                }
-            }
-            let milliseconds = try reader.value()
-            try writer.value()
-            XCTAssertEqual(try AttentionDomainStore(context: f.context, persistence: f.persistence)
-                .snapshot(context: f.context).requests.count, 421)
-            print("PAGE_READER_INTERVAL sample=\(sample) seed_bytes=\(bytes.count) retained=401 page=20 cursor_read_ms=\(milliseconds)")
-        }
+        try f.save([f.item(3), f.item(2)], next: nil)
+        let snapshot = try ServerStateCacheSnapshot.make(identity: f.context.identity,
+            from: f.store.snapshot(context: f.context), conversations: f.store.conversationSnapshot(context: f.context))
+        let file = f.directory.appendingPathComponent("server-cache.json")
+        let cache = FileServerStateCache(identity: f.context.identity, fileURL: file)
+        try await cache.save(snapshot)
+        let reader = FileServerStateCache(identity: f.context.identity, fileURL: file)
+        let loadedValue = try await reader.load()
+        let loaded = try XCTUnwrap(loadedValue)
+        let restarted = try ClientRepository(context: f.context, persistence: f.persistence)
+        XCTAssertTrue(try restarted.snapshot(context: f.context).requests.isEmpty)
+        try restarted.restoreCachedServerState(loaded.attentionDomainState(for: f.context.identity), context: f.context)
+        let restored = try restarted.snapshot(context: f.context)
+        XCTAssertEqual(Set(restored.requests.keys), Set([f.key(1), f.key(2), f.key(3)]))
+        XCTAssertEqual(restored.remoteStates[f.key(2)]?.accountAnswerOutcome, .reply(ExactText("Server reply")))
+        XCTAssertEqual(restored.inboxCurrentKeys, Set([f.key(1), f.key(2), f.key(3)]))
+        XCTAssertNil(restored.inboxCheckpoint, "Restored content does not confirm a new connection.")
+        XCTAssertEqual(restored.cursor, terminal.sequence)
     }
+
+    func testDiscardedServerCacheCannotBeRebuiltFromThePendingActionFile() async throws {
+        let f = try PageFixture()
+        defer { f.remove() }
+        let cache = FileServerStateCache(identity: f.context.identity,
+            fileURL: f.directory.appendingPathComponent("server-cache.json"))
+        let snapshot = try ServerStateCacheSnapshot.make(identity: f.context.identity,
+            from: f.store.snapshot(context: f.context), conversations: f.store.conversationSnapshot(context: f.context))
+        try await cache.save(snapshot)
+        try await cache.discard()
+        let cached = try await cache.load()
+        XCTAssertNil(cached)
+        let restarted = try ClientRepository(context: f.context, persistence: f.persistence)
+        XCTAssertTrue(try restarted.snapshot(context: f.context).requests.isEmpty)
+        XCTAssertNil(try restarted.snapshot(context: f.context).inboxCheckpoint)
+    }
+
 }

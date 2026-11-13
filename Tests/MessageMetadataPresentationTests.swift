@@ -49,8 +49,8 @@ final class MessageMetadataPresentationTests: XCTestCase {
             trustedRelayAuthority: ExactText("relay.example"),
             personID: ExactText("metadata-reader"),
             deviceID: ExactText("metadata-device")), transportMode: .relay)
-        let store = try AttentionDomainStore(context: context,
-                                             persistence: MemoryAttentionStatePersistence())
+        let store = try ClientRepository(context: context,
+                                             persistence: MemoryPendingActionPersistence())
         let seenKey = RequestKey(accountScope: context.identity.personID,
                                  senderID: ExactText("agent"),
                                  messageID: ExactText("typed-fyi"))

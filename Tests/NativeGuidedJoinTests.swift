@@ -811,8 +811,8 @@ final class NativeGuidedJoinTests: XCTestCase {
             trustedRelayAuthority: ExactText(record.profileAuthority),
             personID: ExactText(try XCTUnwrap(record.personID)),
             deviceID: ExactText(record.deviceID)), transportMode: .relay)
-        let oldDomain = try AttentionDomainStore(context: oldContext,
-                                                 persistence: MemoryAttentionStatePersistence())
+        let oldDomain = try ClientRepository(context: oldContext,
+                                                 persistence: MemoryPendingActionPersistence())
         let oldPresentation = try LivePresentationStore(store: oldDomain, context: oldContext)
         let launch = NativeAppLaunch(arguments: [],
             enrollmentStore: enrollmentStore,
@@ -1014,12 +1014,12 @@ final class NativeGuidedJoinTests: XCTestCase {
         XCTAssertEqual(try reopened.departure()?.record.deviceID, original.deviceID,
                        "The removal retry remains attached to the old account")
 
-        let persistence = MemoryAttentionStatePersistence()
+        let persistence = MemoryPendingActionPersistence()
         let oldContext = ProfileContext(identity: ProfileIdentity(
             trustedRelayAuthority: ExactText(record.profileAuthority),
             personID: ExactText(record.personID!), deviceID: ExactText(record.deviceID)),
             transportMode: .relay)
-        let oldDomain = try AttentionDomainStore(context: oldContext, persistence: persistence)
+        let oldDomain = try ClientRepository(context: oldContext, persistence: persistence)
         let oldKey = RequestKey(accountScope: oldContext.identity.personID,
                                 senderID: ExactText("previous-server"), messageID: ExactText("saved-message"))
         let oldPayload = try JSONValue.parse(Data(#"{"sender_id":"previous-server","message_id":"saved-message","title":"Old account message","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"reply","label":"Reply","kind":"text"}]}}"#.utf8))
@@ -1042,7 +1042,7 @@ final class NativeGuidedJoinTests: XCTestCase {
             trustedRelayAuthority: ExactText(nextRecord.profileAuthority),
             personID: ExactText(nextRecord.personID!), deviceID: ExactText(nextRecord.deviceID)),
             transportMode: .relay)
-        let newDomain = try AttentionDomainStore(context: newContext, persistence: persistence)
+        let newDomain = try ClientRepository(context: newContext, persistence: persistence)
         let newPresentation = try LivePresentationStore(store: newDomain, context: newContext)
         XCTAssertTrue(newPresentation.presentation.requests.isEmpty,
                       "The new account cannot see messages stored under the prior device identity")

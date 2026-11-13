@@ -7,14 +7,14 @@ import CryptoKit
 @MainActor
 final class SampleFixtureDomain {
     let context: ProfileContext
-    let domain: AttentionDomainStore
+    let domain: ClientRepository
     let viewModel: LivePresentationStore
 
     init() throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("fixture-only:harklight-examples"),
             personID: ExactText("local-examples"), deviceID: ExactText("local-example-device"))
         context = ProfileContext(identity: identity, transportMode: .fixture)
-        domain = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
+        domain = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
         viewModel = try LivePresentationStore(localFixtureStore: domain, context: context,
                                               newMessageAreaDefaults: Self.replyItemAreaTestDefaults())
     }

@@ -2,10 +2,11 @@ import Foundation
 import XCTest
 @testable import Harklight
 import AttentionDomain
+import HarklightNativeRelay
 
-private final class CountingAttentionStatePersistence: AttentionStatePersistence, @unchecked Sendable {
+private final class CountingPendingActionPersistence: PendingActionPersistence, @unchecked Sendable {
     private let lock = NSLock()
-    private let backing = MemoryAttentionStatePersistence()
+    private let backing = MemoryPendingActionPersistence()
     private var writes = 0
 
     var writeCount: Int {
@@ -36,7 +37,7 @@ final class ReplyFocusDuringSyncTests: XCTestCase {
     }
 
     @MainActor
-    private func deliverTextRequest(to store: AttentionDomainStore,
+    private func deliverTextRequest(to store: ClientRepository,
                                     context: ProfileContext) throws -> RequestKey {
         let payload = try JSONValue.parse(Data(#"{"sender_id":"app:test","message_id":"m1","created_at":1,"title":"Needs a reply","body":"Reply requested"}"#.utf8))
         let key = RequestKey(accountScope: context.identity.personID,
@@ -48,12 +49,31 @@ final class ReplyFocusDuringSyncTests: XCTestCase {
     }
 
     @MainActor
+    private func confirm(_ domain: ClientRepository, context: ProfileContext,
+                         key: RequestKey) async throws {
+        let payload = try XCTUnwrap(domain.snapshot(context: context).requests[key]).originalPayload
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        addTeardownBlock {
+            await NativeRelayLifecycle.shared.deactivate()
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let result = try await NativeRelayLifecycle.shared.confirmInProcessSessionForTesting(
+            store: domain, context: context,
+            session: ReplyCheckpointSession(identity: context.identity, key: key, payload: payload),
+            serverStateCache: FileServerStateCache(identity: context.identity,
+                fileURL: directory.appendingPathComponent("server-cache.json")))
+        XCTAssertTrue(result.relayConfirmed)
+        XCTAssertTrue(try domain.snapshot(context: context).inboxCheckpoint?.checkpointAccepted == true)
+    }
+
+    @MainActor
     func testReplySelectionAndTextStayLocalUntilCheckmarkCommit() async throws {
         let context = makeContext()
-        let persistence = CountingAttentionStatePersistence()
-        let domain = try AttentionDomainStore(context: context,
+        let persistence = CountingPendingActionPersistence()
+        let domain = try ClientRepository(context: context,
                                               persistence: persistence)
         let key = try deliverTextRequest(to: domain, context: context)
+        try await confirm(domain, context: context, key: key)
         let visible = try LivePresentationStore(store: domain, context: context)
         let writesBeforeEditing = persistence.writeCount
         let draftBeforeEditing = try XCTUnwrap(domain.snapshot(context: context).drafts[key])
@@ -95,23 +115,22 @@ final class ReplyFocusDuringSyncTests: XCTestCase {
                                             requestRevision: reopenedSession.requestRevision))
         let committed = try domain.snapshot(context: context)
         XCTAssertNil(committed.drafts[key], "Submitting does not create a resumable draft.")
-        let submission = try XCTUnwrap(committed.outbox.first)
+        let submission = try XCTUnwrap(committed.intents.values.first { $0.requestKey == key })
         XCTAssertEqual(submission.requestRevision, request.requestRevision)
         XCTAssertEqual(submission.typedInputs,
                        [.compatibilityText(action: reply.id, text: ExactText("Typed locally"))],
                        "The checkmark commits the selected action and complete Reply text together.")
-        XCTAssertEqual(visible.request(for: key)?.submittedAnswer?.compatibility
-            .textByActionID[reply.id], ExactText("Typed locally"),
-                       "The committed answer remains visible from its submission record.")
+        XCTAssertNil(visible.request(for: key)?.submittedAnswer,
+                     "A queued user action is not a server-confirmed answer.")
         XCTAssertGreaterThan(persistence.writeCount, writesBeforeEditing,
                              "The checkmark is the first durable write for this Reply.")
     }
 
     @MainActor
-    func testSenderReplyCommitsTextAndPointTogetherWithoutSavingDraft() throws {
+    func testSenderReplyCommitsTextAndPointTogetherWithoutSavingDraft() async throws {
         let context = makeContext()
-        let persistence = CountingAttentionStatePersistence()
-        let domain = try AttentionDomainStore(context: context, persistence: persistence)
+        let persistence = CountingPendingActionPersistence()
+        let domain = try ClientRepository(context: context, persistence: persistence)
         let fixtures = try FixtureSet.loadBundled(from: Bundle(for: HarklightTests.self))
         let fixture = try XCTUnwrap(fixtures.requests.first {
             $0.key.messageID == ExactText("facilities-01")
@@ -122,6 +141,7 @@ final class ReplyFocusDuringSyncTests: XCTestCase {
         _ = try domain.apply(RelayEvent(sequence: 1,
             body: .delivery(StoredRequest(key: key, originalPayload: fixture.originalPayload), .message)),
             context: context)
+        try await confirm(domain, context: context, key: key)
         let visible = try LivePresentationStore(store: domain, context: context)
         let writesBeforeEditing = persistence.writeCount
         let request = try XCTUnwrap(visible.request(for: key))
@@ -141,25 +161,24 @@ final class ReplyFocusDuringSyncTests: XCTestCase {
                                              answerDraft: session.draft,
                                              requestRevision: session.requestRevision))
 
-        let submission = try XCTUnwrap(domain.snapshot(context: context).outbox.first)
+        let submission = try XCTUnwrap(domain.snapshot(context: context).intents.values.first { $0.requestKey == key })
         XCTAssertEqual(submission.typedInputs,
                        [.point(input: ExactText("location"), point: point),
                         .text(input: ExactText("note"), text: ExactText("Please check the partition."))],
                        "The checkmark commits every edited sender field together.")
-        let submittedAnswer = try XCTUnwrap(visible.request(for: key)?.submittedAnswer)
-        XCTAssertEqual(submittedAnswer.inputs[ExactText("location")]?.effectivePoint, point)
-        XCTAssertEqual(submittedAnswer.inputs[ExactText("note")]?.text,
-                       ExactText("Please check the partition."))
+        XCTAssertNil(visible.request(for: key)?.submittedAnswer,
+                     "The queue retains both fields without inventing server answer state.")
         XCTAssertNil(try domain.snapshot(context: context).drafts[key],
                      "Submitting does not leave a resumable Reply draft.")
     }
 
     @MainActor
-    func testCheckmarkKeepsTheDisplayedRevisionAndRejectsAnUpdatedRequest() throws {
+    func testCheckmarkKeepsTheDisplayedRevisionAndRejectsAnUpdatedRequest() async throws {
         let context = makeContext()
-        let persistence = CountingAttentionStatePersistence()
-        let domain = try AttentionDomainStore(context: context, persistence: persistence)
+        let persistence = CountingPendingActionPersistence()
+        let domain = try ClientRepository(context: context, persistence: persistence)
         let key = try deliverTextRequest(to: domain, context: context)
+        try await confirm(domain, context: context, key: key)
         let firstPayload = try JSONValue.parse(Data(#"{"title":"First wording","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"reply","label":"Reply","kind":"text"}]}}"#.utf8))
         let revisedPayload = try JSONValue.parse(Data(#"{"title":"Revised wording","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"reply","label":"Reply","kind":"text"}]}}"#.utf8))
         let binding = ConversationBinding(request: key, revision: 1)
@@ -203,5 +222,56 @@ final class ReplyFocusDuringSyncTests: XCTestCase {
         XCTAssertNil(updatedSession.draft.compatibility.textByActionID[ExactText("reply")])
         XCTAssertEqual(live.actionError,
                        "This message changed. Review the latest version before answering.")
+    }
+}
+
+/// Supplies a real-shaped checkpoint and ordinary replay through the normal
+/// confirmation path. No method directly grants action eligibility.
+final class ReplyCheckpointSession: AuthenticatedInboxPagingSession, @unchecked Sendable {
+    let authenticatedIdentity: ProfileIdentity
+    let key: RequestKey
+    let payload: JSONValue
+
+    init(identity: ProfileIdentity, key: RequestKey, payload: JSONValue) {
+        authenticatedIdentity = identity
+        self.key = key
+        self.payload = payload
+    }
+
+    func inboxRequest(_ request: Data, ref: String) async throws -> Data {
+        let value = try JSONValue.parse(request)
+        guard value.uniqueValue(named: "type")?.stringValue?.rawValue == "inbox_start" else {
+            return try await emptyInboxReply(request, ref: ref)
+        }
+        let startup = value.uniqueValue(named: "startup_id")?.stringValue?.rawValue ?? ""
+        // Sender values may contain exact numbers outside Foundation's numeric range.
+        let one = JSONValue.number(JSONNumber(lexeme: "1"))
+        let response = JSONValue.object([
+            JSONMember("v", one), JSONMember("type", .string(ExactText("ok"))),
+            JSONMember("ref", .string(ExactText(ref))), JSONMember("paging_version", one),
+            JSONMember("snapshot_id", .string(ExactText("test-\(startup)-h1"))),
+            JSONMember("high_water", one),
+            JSONMember("items", .array([.object([JSONMember("acceptance", .object([
+                JSONMember("v", one), JSONMember("type", .string(ExactText("delivery"))),
+                JSONMember("seq", one), JSONMember("origin", .string(ExactText("source"))),
+                JSONMember("as", .string(ExactText("message"))),
+                JSONMember("sender_id", .string(key.senderID)),
+                JSONMember("message_id", .string(key.messageID)),
+                JSONMember("message", payload)
+            ]))])])),
+            JSONMember("next_cursor", .null), JSONMember("receipt_cursor", .null)
+        ])
+        return Data(response.canonicalJSON.utf8)
+    }
+
+    func resync(_ request: Data, consume: @Sendable (Data) async throws -> Void) async throws {
+        try await consume(Data(#"{"v":1,"type":"ok","ref":"native-sync"}"#.utf8))
+        try await consume(Data(#"{"v":1,"type":"resynced","seq":1}"#.utf8))
+    }
+
+    func acknowledge(_ request: Data) async throws {}
+
+    func sendOriginalOperation(_ frame: Data, operationID: UUID) async throws -> OriginalOperationResult {
+        .unresolved
     }
 }

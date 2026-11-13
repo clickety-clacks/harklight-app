@@ -5,6 +5,21 @@ import XCTest
 @testable import Harklight
 
 final class InboxFreeOrderTests: XCTestCase {
+    private static func reopenWithServerCache(_ domain: ClientRepository, context: ProfileContext,
+                                       persistence: MemoryPendingActionPersistence) async throws -> ClientRepository {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("server-cache.json")
+        let cache = FileServerStateCache(identity: context.identity, fileURL: url)
+        try await cache.save(ServerStateCacheSnapshot.make(identity: context.identity,
+            from: domain.snapshot(context: context), conversations: domain.conversationSnapshot(context: context)))
+        let cached = try await FileServerStateCache(identity: context.identity, fileURL: url).load()
+        let restored = try ClientRepository(context: context, persistence: persistence)
+        XCTAssertTrue(try restored.conversationSnapshot(context: context).threads.isEmpty)
+        try restored.restoreCachedServerState(try XCTUnwrap(cached).attentionDomainState(for: context.identity),
+                                              context: context)
+        return restored
+    }
     private let context = ProfileContext(identity: ProfileIdentity(
         trustedRelayAuthority: ExactText("relay.example"),
         personID: ExactText("reader"), deviceID: ExactText("device")), transportMode: .relay)
@@ -134,9 +149,9 @@ final class InboxFreeOrderTests: XCTestCase {
     }
 
     @MainActor
-    func testPartialFreeReferencesPreserveLoadedMessageAndHistoryAccessAfterRestart() throws {
-        let persistence = MemoryAttentionStatePersistence()
-        let store = try AttentionDomainStore(context: context, persistence: persistence)
+    func testPartialFreeReferencesPreserveLoadedMessageAndHistoryAccessAfterRestart() async throws {
+        let persistence = MemoryPendingActionPersistence()
+        let store = try ClientRepository(context: context, persistence: persistence)
         var loadedRows: [InboxItem] = []
         for (index, id) in ["valid", "omitted-open", "omitted-history"].enumerated() {
             let key = RequestKey(accountScope: context.identity.personID,
@@ -151,7 +166,7 @@ final class InboxFreeOrderTests: XCTestCase {
         malformedReply.removeValue(forKey: "open_at_conversation_seq")
         let view = try decode([reference("valid"), reference("omitted-open", kind: "future"), malformedReply])
         try store.setInboxView(view, context: context)
-        let restored = try AttentionDomainStore(context: context, persistence: persistence)
+        let restored = try await Self.reopenWithServerCache(store, context: context, persistence: persistence)
         let port = AttentionDomainPort(store: restored)
         let presentation = try port.observe(context: port.context)
         XCTAssertEqual(presentation.requests.count, 3)
@@ -202,14 +217,14 @@ final class InboxFreeOrderTests: XCTestCase {
             knownRevision: views[0].revision), .unchanged(views[0].revision))
     }
 
-    func testSectionTransitionReplacesPersistedViewAndReachesPresentationAtomically() throws {
-        let persistence = MemoryAttentionStatePersistence()
-        let store = try AttentionDomainStore(context: context, persistence: persistence)
+    func testSectionTransitionReplacesPersistedViewAndReachesPresentationAtomically() async throws {
+        let persistence = MemoryPendingActionPersistence()
+        let store = try ClientRepository(context: context, persistence: persistence)
         let active = try decode([reference("parent")])
         let history = try decode([reference("parent", state: "history")], revision: "view-2")
         try store.setInboxView(active, context: context)
         try store.setInboxView(history, context: context)
-        let restored = try AttentionDomainStore(context: context, persistence: persistence)
+        let restored = try await Self.reopenWithServerCache(store, context: context, persistence: persistence)
         let port = AttentionDomainPort(store: restored)
         let presentation = try port.observe(context: port.context)
         XCTAssertEqual(presentation.inboxFreeOrderVersion, 1)

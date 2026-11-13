@@ -4,12 +4,14 @@ import XCTest
 @testable import HarklightNativeRelay
 
 final class ServerStateCacheTests: XCTestCase {
+    private let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+        personID: ExactText("person"), deviceID: ExactText("device"))
     func testFileCacheRoundTripsServerRowsAndCursors() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("harklight-server-cache-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: directory) }
         let cacheURL = directory.appendingPathComponent("cache.json")
-        let cache = FileServerStateCache(fileURL: cacheURL)
+        let cache = FileServerStateCache(identity: identity, fileURL: cacheURL)
         let key = RequestKey(accountScope: ExactText("person"),
                              senderID: ExactText("sender"),
                              messageID: ExactText("message"))
@@ -28,7 +30,7 @@ final class ServerStateCacheTests: XCTestCase {
             repairIssues: [],
             inboxCurrentKeys: [key])
         let conversations = ConversationSnapshot(cursor: 9, threads: [:])
-        let snapshot = ServerStateCacheSnapshot.make(from: inbox, conversations: conversations)
+        let snapshot = ServerStateCacheSnapshot.make(identity: identity, from: inbox, conversations: conversations)
 
         try await cache.save(snapshot)
         let loaded = try await cache.load()
@@ -45,12 +47,12 @@ final class ServerStateCacheTests: XCTestCase {
             .appendingPathComponent("harklight-server-cache-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: directory) }
         let cacheURL = directory.appendingPathComponent("cache.json")
-        let cache = FileServerStateCache(fileURL: cacheURL)
+        let cache = FileServerStateCache(identity: identity, fileURL: cacheURL)
         let key = RequestKey(accountScope: ExactText("person"),
                              senderID: ExactText("sender"),
                              messageID: ExactText("message"))
         let request = StoredRequest(key: key, originalPayload: .object([]))
-        let snapshot = ServerStateCacheSnapshot(cursor: 4, conversationCursor: 2,
+        let snapshot = ServerStateCacheSnapshot(identity: identity, cursor: 4, conversationCursor: 2,
             requests: [CachedServerRequest(request: request, remoteState: nil)],
             conversations: [], inboxView: nil, currentRequestKeys: [key])
         try await cache.save(snapshot)
@@ -70,19 +72,19 @@ final class ServerStateCacheTests: XCTestCase {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("harklight-server-cache-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: directory) }
-        let cache = FileServerStateCache(fileURL: directory.appendingPathComponent("cache.json"))
+        let cache = FileServerStateCache(identity: identity, fileURL: directory.appendingPathComponent("cache.json"))
         let key = RequestKey(accountScope: ExactText("person"),
                              senderID: ExactText("sender"),
                              messageID: ExactText("old"))
         let request = StoredRequest(key: key, originalPayload: .object([]))
-        let old = ServerStateCacheSnapshot(cursor: 1,
+        let old = ServerStateCacheSnapshot(identity: identity, cursor: 1,
                                            conversationCursor: 0,
                                            requests: [CachedServerRequest(request: request,
                                                                           remoteState: nil)],
                                            conversations: [],
                                            inboxView: nil,
                                            currentRequestKeys: [key])
-        let replacement = ServerStateCacheSnapshot(cursor: 2,
+        let replacement = ServerStateCacheSnapshot(identity: identity, cursor: 2,
                                                    conversationCursor: 0,
                                                    requests: [],
                                                    conversations: [],
@@ -117,8 +119,8 @@ final class ServerStateCacheTests: XCTestCase {
         let context = ProfileContext(identity: ProfileIdentity(
             trustedRelayAuthority: ExactText("relay.example"),
             personID: key.accountScope, deviceID: ExactText("device")), transportMode: .relay)
-        let domain = try AttentionDomainStore(context: context,
-            persistence: MemoryAttentionStatePersistence())
+        let domain = try ClientRepository(context: context,
+            persistence: MemoryPendingActionPersistence())
         _ = try domain.apply(RelayEvent(sequence: 1,
             body: .delivery(request, .message),
             conversation: RelayConversationMetadata(revision: 1, sessionHandle: ExactText("session"))),
@@ -128,12 +130,11 @@ final class ServerStateCacheTests: XCTestCase {
         thread.drafts[1] = ConversationDraft(binding: binding, text: ExactText("chat draft"))
         thread.answerDrafts = [1: RequestDraft(inputs: [:],
             compatibility: CompatibilityDraft(selectedActionID: ExactText("yes")))]
-        thread.readThroughTurn = ExactText("turn-1")
         thread.accountReadThroughConversationSequence = 7
         let conversations = ConversationSnapshot(cursor: 9, threads: [key: thread],
             chatReadPositions: [key: 7], chatReadPositionSupport: true)
 
-        let cached = ServerStateCacheSnapshot.make(from: inbox, conversations: conversations)
+        let cached = ServerStateCacheSnapshot.make(identity: identity, from: inbox, conversations: conversations)
 
         XCTAssertEqual(cached.requests.map { $0.request.key }, [key])
         XCTAssertNil(cached.currentRequestKeys)
@@ -141,7 +142,7 @@ final class ServerStateCacheTests: XCTestCase {
         let cachedThread = try XCTUnwrap(cached.conversations.first?.thread)
         XCTAssertTrue(cachedThread.drafts.isEmpty)
         XCTAssertNil(cachedThread.answerDrafts)
-        XCTAssertNil(cachedThread.readThroughTurn)
-        XCTAssertNil(cachedThread.accountReadThroughConversationSequence)
+        XCTAssertEqual(cachedThread.accountReadThroughConversationSequence, 7)
+        XCTAssertEqual(cached.chatReadPositions?[key], 7)
     }
 }

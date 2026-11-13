@@ -23,23 +23,27 @@ public struct CachedServerConversation: Codable, Equatable, Sendable {
 /// Server data used for a fast first paint. Drafts, local read positions,
 /// send attempts and relay event journals are deliberately excluded.
 public struct ServerStateCacheSnapshot: Codable, Equatable, Sendable {
-    public static let currentVersion = 1
+    public static let currentVersion = 2
 
     public let version: Int
+    public let identity: ProfileIdentity
     public let cursor: UInt64
     public let conversationCursor: UInt64
     public let requests: [CachedServerRequest]
     public let conversations: [CachedServerConversation]
     public let inboxView: InboxView?
     public let currentRequestKeys: Set<RequestKey>?
+    public let chatReadPositions: [RequestKey: UInt64]?
 
-    public init(cursor: UInt64,
+    public init(identity: ProfileIdentity, cursor: UInt64,
                 conversationCursor: UInt64,
                 requests: [CachedServerRequest],
                 conversations: [CachedServerConversation],
                 inboxView: InboxView?,
-                currentRequestKeys: Set<RequestKey>?) {
+                currentRequestKeys: Set<RequestKey>?,
+                chatReadPositions: [RequestKey: UInt64]? = nil) {
         version = Self.currentVersion
+        self.identity = identity
         self.cursor = cursor
         self.conversationCursor = conversationCursor
         self.requests = requests.sorted {
@@ -51,9 +55,10 @@ public struct ServerStateCacheSnapshot: Codable, Equatable, Sendable {
         self.conversations = conversations
         self.inboxView = inboxView
         self.currentRequestKeys = currentRequestKeys
+        self.chatReadPositions = chatReadPositions
     }
 
-    public static func make(from inbox: AttentionStoreSnapshot,
+    public static func make(identity: ProfileIdentity, from inbox: AttentionStoreSnapshot,
                             conversations: ConversationSnapshot,
                             cursorOverride: UInt64? = nil) -> ServerStateCacheSnapshot {
         let currentKeys = inbox.inboxCandidate?.currentKeys ?? inbox.inboxCurrentKeys
@@ -74,19 +79,19 @@ public struct ServerStateCacheSnapshot: Codable, Equatable, Sendable {
                 thread.answerDrafts = nil
                 thread.uploadGroups = nil
                 thread.uploadCleanups = nil
-                thread.readThroughTurn = nil
-                thread.accountReadThroughConversationSequence = nil
                 return CachedServerConversation(thread: thread)
             }
-        return ServerStateCacheSnapshot(cursor: cursorOverride ?? inbox.cursor,
+        return ServerStateCacheSnapshot(identity: identity, cursor: cursorOverride ?? inbox.cursor,
                                         conversationCursor: conversations.cursor,
                                         requests: requests,
                                         conversations: Array(recentThreads),
                                         inboxView: inbox.inboxView,
-                                        currentRequestKeys: currentKeys)
+                                        currentRequestKeys: currentKeys,
+                                        chatReadPositions: conversations.chatReadPositions)
     }
 
-    public func attentionDomainState() throws -> CachedAttentionServerState {
+    public func attentionDomainState(for identity: ProfileIdentity) throws -> CachedAttentionServerState {
+        guard self.identity == identity else { throw ServerStateCacheError.identityMismatch }
         var requests: [RequestKey: StoredRequest] = [:]
         var remoteStates: [RequestKey: RemoteRequestState] = [:]
         for row in self.requests {
@@ -105,13 +110,14 @@ public struct ServerStateCacheSnapshot: Codable, Equatable, Sendable {
             }
             conversations[row.thread.request] = row.thread
         }
-        return CachedAttentionServerState(requests: requests,
+        return CachedAttentionServerState(identity: identity, requests: requests,
                                           remoteStates: remoteStates,
                                           cursor: cursor,
                                           conversationCursor: conversationCursor,
                                           conversations: conversations,
                                           inboxView: inboxView,
-                                          currentRequestKeys: currentRequestKeys)
+                                          currentRequestKeys: currentRequestKeys,
+                                          chatReadPositions: chatReadPositions)
     }
 
     private static func key(_ value: RequestKey) -> String {
@@ -123,11 +129,14 @@ public struct ServerStateCacheSnapshot: Codable, Equatable, Sendable {
 
 public enum ServerStateCacheError: Error, LocalizedError {
     case unavailable
+    case identityMismatch
     case storage(String)
     case unsupportedVersion(Int)
 
     public var errorDescription: String? {
         switch self {
+        case .identityMismatch:
+            return "The cache belongs to a different server, account or device."
         case .unavailable:
             return "The Harklight cache is unavailable."
         case let .storage(message):
@@ -148,11 +157,13 @@ public protocol ServerStateCaching: Sendable {
 /// encoding and I/O stay off the main actor.
 public actor FileServerStateCache: ServerStateCaching {
     private let fileURL: URL?
+    private let identity: ProfileIdentity
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
     private var memorySnapshot: ServerStateCacheSnapshot?
 
-    public init(fileURL: URL? = nil) {
+    public init(identity: ProfileIdentity, fileURL: URL? = nil) {
+        self.identity = identity
         self.fileURL = fileURL
         encoder.outputFormatting = [.sortedKeys]
     }
@@ -172,7 +183,7 @@ public actor FileServerStateCache: ServerStateCaching {
         let directory = cacheRoot.appendingPathComponent("HarklightCache", isDirectory: true)
         try FileManager.default.createDirectory(at: directory,
                                                 withIntermediateDirectories: true)
-        return FileServerStateCache(
+        return FileServerStateCache(identity: identity,
             fileURL: directory.appendingPathComponent("\(digest).json", isDirectory: false))
     }
 
@@ -182,7 +193,8 @@ public actor FileServerStateCache: ServerStateCaching {
         do {
             let data = try Data(contentsOf: fileURL, options: .mappedIfSafe)
             let snapshot = try decoder.decode(ServerStateCacheSnapshot.self, from: data)
-            guard snapshot.version == ServerStateCacheSnapshot.currentVersion else {
+            guard snapshot.version == ServerStateCacheSnapshot.currentVersion,
+                  snapshot.identity == identity else {
                 try discard()
                 return nil
             }
@@ -194,6 +206,7 @@ public actor FileServerStateCache: ServerStateCaching {
     }
 
     public func save(_ snapshot: ServerStateCacheSnapshot) throws {
+        guard snapshot.identity == identity else { throw ServerStateCacheError.identityMismatch }
         guard snapshot.version == ServerStateCacheSnapshot.currentVersion else {
             throw ServerStateCacheError.unsupportedVersion(snapshot.version)
         }

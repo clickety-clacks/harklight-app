@@ -5,12 +5,12 @@ import Foundation
 import Darwin
 #endif
 
-public protocol AttentionStatePersistence: AnyObject, Sendable {
+public protocol PendingActionPersistence: AnyObject, Sendable {
     func load(identity: ProfileIdentity) throws -> Data?
     func commit(_ data: Data, identity: ProfileIdentity) throws
 }
 
-public final class MemoryAttentionStatePersistence: AttentionStatePersistence, @unchecked Sendable {
+public final class MemoryPendingActionPersistence: PendingActionPersistence, @unchecked Sendable {
     private let lock = NSLock()
     private var files: [String: Data] = [:]
     private var failNextWrite = false
@@ -40,7 +40,7 @@ public final class MemoryAttentionStatePersistence: AttentionStatePersistence, @
     }
 }
 
-public final class FileAttentionStatePersistence: AttentionStatePersistence, @unchecked Sendable {
+public final class FilePendingActionPersistence: PendingActionPersistence, @unchecked Sendable {
     public let directoryURL: URL
     private let fileManager: FileManager
 
@@ -49,16 +49,38 @@ public final class FileAttentionStatePersistence: AttentionStatePersistence, @un
         self.fileManager = fileManager
     }
 
-    public static func applicationSupport() throws -> FileAttentionStatePersistence {
+    public static func applicationSupport() throws -> FilePendingActionPersistence {
         guard let supportURL = FileManager.default.urls(for: .applicationSupportDirectory,
                                                         in: .userDomainMask).first else {
             throw AttentionStoreError.persistence("Application Support is unavailable.")
         }
-        return FileAttentionStatePersistence(directoryURL: supportURL.appendingPathComponent("Attention", isDirectory: true))
+        return FilePendingActionPersistence(directoryURL: supportURL.appendingPathComponent("Attention", isDirectory: true))
     }
 
     public func load(identity: ProfileIdentity) throws -> Data? {
+        let retired = directoryURL.appendingPathComponent("\(identity.storageKey).plist")
         let url = fileURL(for: identity)
+        if fileManager.fileExists(atPath: retired.path) {
+            if !fileManager.fileExists(atPath: url.path) {
+                // One-time transfer of user input only. The decoder has no
+                // server-record fields and cannot restore the retired cache.
+                let input = try PropertyListDecoder().decode(RetiredUnsentInput.self,
+                    from: Data(contentsOf: retired))
+                if input.profileIdentity == identity {
+                    var pending = ClientSessionState(profileIdentity: identity)
+                    pending.intents = input.intents ?? [:]
+                    pending.intentByRequest = input.intentByRequest ?? [:]
+                    pending.drafts = input.drafts ?? [:]
+                    pending.pendingConversations = input.conversation?.threads ?? [:]
+                    let encoder = PropertyListEncoder()
+                    encoder.outputFormat = .binary
+                    try commit(encoder.encode(PersistedPendingActions(state: pending)), identity: identity)
+                }
+            }
+            // Delete only after the separate queue was committed. A restart
+            // after that commit uses the new queue and never imports twice.
+            try fileManager.removeItem(at: retired)
+        }
         guard fileManager.fileExists(atPath: url.path) else { return nil }
         do {
             let data = try Data(contentsOf: url, options: .mappedIfSafe)
@@ -119,7 +141,7 @@ public final class FileAttentionStatePersistence: AttentionStatePersistence, @un
     }
 
     private func fileURL(for identity: ProfileIdentity) -> URL {
-        directoryURL.appendingPathComponent("\(identity.storageKey).plist", isDirectory: false)
+        directoryURL.appendingPathComponent("\(identity.storageKey).pending-actions.plist", isDirectory: false)
     }
 
     private func setPrivateAttributes(at url: URL) throws {
@@ -131,18 +153,16 @@ public final class FileAttentionStatePersistence: AttentionStatePersistence, @un
     }
 }
 
-public final class AttentionDomainStore: @unchecked Sendable {
+public final class ClientRepository: @unchecked Sendable {
     // Serialize writers while presentation readers can keep using the last
     // committed state during a durable write.
     private let writerLock = NSRecursiveLock()
     private let lock = NSRecursiveLock()
     private let context: ProfileContext
-    private let persistence: any AttentionStatePersistence
-    private let persistsOnlyLocalState: Bool
-    private var needsServerCacheMigration = false
+    private let persistence: any PendingActionPersistence
     private let conversationFileReferences: (any ConversationFileReferenceStore)?
     private let maximumWireFrameBytes: Int
-    private var state: PersistedAttentionState
+    private var state: ClientSessionState
     // Accepted answers leave the outbox but remain unresolved until their exact
     // terminal sequence has been replayed. Keep only those operations in a
     // request-keyed in-memory index so reconnects do not rescan settled history.
@@ -152,164 +172,34 @@ public final class AttentionDomainStore: @unchecked Sendable {
     private var isInvalidated = false
 
     var profileContext: ProfileContext { context }
-    public var requiresConfirmedServerProjection: Bool { persistsOnlyLocalState }
+    public var requiresConfirmedServerProjection: Bool { context.transportMode == .relay }
 
     public init(context: ProfileContext,
-                persistence: any AttentionStatePersistence,
+                persistence: any PendingActionPersistence,
                 maximumWireFrameBytes: Int = 65_536,
-                conversationFileReferences: (any ConversationFileReferenceStore)? = nil,
-                persistsOnlyLocalState: Bool = false) throws {
+                conversationFileReferences: (any ConversationFileReferenceStore)? = nil) throws {
         self.context = context
         self.persistence = persistence
-        self.persistsOnlyLocalState = persistsOnlyLocalState
         self.conversationFileReferences = conversationFileReferences
         self.maximumWireFrameBytes = max(0, maximumWireFrameBytes)
-        if let data = try persistence.load(identity: context.identity) {
-            var loaded = try PropertyListDecoder().decode(PersistedAttentionState.self, from: data)
-            guard loaded.profileIdentity == context.identity else { throw AttentionStoreError.wrongAccount }
-            guard loaded.schemaVersion == PersistedAttentionState.currentSchemaVersion else {
-                throw AttentionStoreError.persistence("Unsupported local state schema \(loaded.schemaVersion).")
+        state = ClientSessionState(profileIdentity: context.identity)
+        if let bytes = try persistence.load(identity: context.identity) {
+            let queue = try PropertyListDecoder().decode(PersistedPendingActions.self, from: bytes)
+            guard queue.version == 1, queue.profileIdentity == context.identity else {
+                throw AttentionStoreError.persistence("The pending actions do not belong to this account.")
             }
-            let isLocalDraftState = persistsOnlyLocalState && loaded.localDraftsOnly == true
-            needsServerCacheMigration = persistsOnlyLocalState && !isLocalDraftState
-            let requestKeys = Set(loaded.requests.keys)
-            let validRequestScope = isLocalDraftState
-                ? loaded.requests.isEmpty
-                : requestKeys.allSatisfy { $0.accountScope == context.identity.personID }
-            let validDrafts = loaded.drafts.keys.allSatisfy {
-                $0.accountScope == context.identity.personID && (isLocalDraftState || requestKeys.contains($0))
-            }
-            let validSessions = isLocalDraftState
-                ? loaded.fixtureSessions.isEmpty
-                : loaded.fixtureSessions.keys.allSatisfy { requestKeys.contains($0) }
-            let validRemoteStates = isLocalDraftState
-                ? loaded.remoteStates.isEmpty
-                : loaded.remoteStates.keys.allSatisfy { requestKeys.contains($0) }
-            let validInboxReferences = isLocalDraftState
-                ? (loaded.inboxReferences?.isEmpty ?? true)
-                : (loaded.inboxReferences?.keys.allSatisfy {
-                    $0.accountScope == context.identity.personID && !requestKeys.contains($0)
-                } ?? true)
-            let validInboxOverlays = isLocalDraftState
-                ? (loaded.pendingRelayOverlays?.isEmpty ?? true)
-                : (loaded.pendingRelayOverlays?.allSatisfy { entry in
-                    entry.key == entry.value.sequence &&
-                        Self.requestKey(in: entry.value)?.accountScope == context.identity.personID
-                } ?? true)
-            let validInboxCheckpoints = (isLocalDraftState
-                ? loaded.inboxCheckpoint == nil && loaded.inboxCandidate == nil
-                : true) && [loaded.inboxCheckpoint, loaded.inboxCandidate].compactMap { $0 }.allSatisfy { checkpoint in
-                checkpoint.loadedKeys.allSatisfy { $0.accountScope == context.identity.personID } &&
-                (checkpoint.sourceOrder.map { order in
-                    Set(order).count == order.count &&
-                    order.allSatisfy { $0.accountScope == context.identity.personID } &&
-                    Set(order).isSubset(of: checkpoint.loadedKeys)
-                } ?? true) &&
-                (checkpoint.freshKeys ?? []).allSatisfy { $0.accountScope == context.identity.personID } &&
-                (checkpoint.receiptLastSequence.map { last in
-                    last >= checkpoint.since && (checkpoint.highWater.map { $0 >= last } ?? true)
-                } ?? true) &&
-                Set(checkpoint.batches.flatMap(\.operationIDs)).count == checkpoint.batches.flatMap(\.operationIDs).count
-            } &&
-            (loaded.replayPublishedInboxCurrentKeys ?? []).allSatisfy { $0.accountScope == context.identity.personID }
-            let loadedMessageOpens = loaded.pendingMessageOpens ?? []
-            let validPendingMessageOpens = isLocalDraftState
-                ? loadedMessageOpens.isEmpty
-                : Set(loadedMessageOpens.map(\.operationID)).count == loadedMessageOpens.count &&
-                    loadedMessageOpens.allSatisfy {
-                        $0.requestKey.accountScope == context.identity.personID && $0.requestRevision > 0
-                    }
-            var validIntents = true
-            var acceptedAwaitingReplay: [RequestKey: Submission] = [:]
-            for entry in loaded.intents {
-                let submission = entry.value
-                guard entry.key == submission.intentID,
-                      (isLocalDraftState || requestKeys.contains(submission.requestKey)),
-                      submission.requestKey.accountScope == context.identity.personID else {
-                    validIntents = false
-                    break
-                }
-                if Self.isAcceptedAwaitingTerminalReplay(submission, appliedEvents: loaded.appliedEvents) {
-                    acceptedAwaitingReplay[submission.requestKey] = submission
-                }
-            }
-            let validIntentIndex = loaded.intentByRequest.allSatisfy { entry in
-                loaded.intents[entry.value]?.requestKey == entry.key
-            } && Set(loaded.intentByRequest.values).count == loaded.intentByRequest.count
-            let validFences = (loaded.fencedIntents ?? [:]).allSatisfy { entry in
-                entry.value.accountScope == context.identity.personID && loaded.intents[entry.key] == nil
-            }
-            let validOutbox = isLocalDraftState
-                ? loaded.outboxOrder.isEmpty
-                : Set(loaded.outboxOrder).count == loaded.outboxOrder.count &&
-                    loaded.outboxOrder.allSatisfy { loaded.intents[$0] != nil }
-            guard validRequestScope, validDrafts, validSessions, validRemoteStates,
-                  validInboxReferences, validInboxOverlays, validInboxCheckpoints,
-                  validIntents, validIntentIndex, validFences, validOutbox else {
-                throw AttentionStoreError.persistence("The profile store contains cross-account or inconsistent request state.")
-            }
-            let validConversationThreads = loaded.conversation?.threads.keys.allSatisfy {
-                $0.accountScope == context.identity.personID
-            } ?? true
-            let validConversationEvents = isLocalDraftState
-                ? (loaded.conversation?.events.isEmpty ?? true)
-                : (loaded.conversation?.events.values.allSatisfy {
-                    $0.binding.request.accountScope == context.identity.personID
-                } ?? true)
-            let validConversationReadPositions = isLocalDraftState
-                ? (loaded.conversation?.chatReadPositions?.isEmpty ?? true) &&
-                    loaded.conversation?.chatReadPositionSupport == nil
-                : (loaded.conversation?.chatReadPositions?.keys.allSatisfy {
-                    $0.accountScope == context.identity.personID
-                } ?? true)
-            let validPendingConversationReadPositions = isLocalDraftState
-                ? (loaded.conversation?.pendingChatReadPositions?.isEmpty ?? true)
-                : (loaded.conversation?.pendingChatReadPositions?.allSatisfy {
-                    $0.key.accountScope == context.identity.personID && $0.key == $0.value.request &&
-                        $0.value.readThroughConversationSequence > 0
-                } ?? true)
-            guard validConversationThreads, validConversationEvents,
-                  validConversationReadPositions, validPendingConversationReadPositions,
-                  validPendingMessageOpens else {
-                throw AttentionStoreError.persistence("The conversation store contains a different account's requests.")
-            }
-            loaded.conversation?.orderTurnsFromProjectionEvents()
-            Self.backfillSupersededByMessageKeys(in: &loaded)
-            self.state = try Self.externalizingConversationFiles(in: loaded,
-                using: conversationFileReferences,
-                allowInlinePersistence: persistence is MemoryAttentionStatePersistence)
-            self.acceptedAwaitingTerminalReplay = acceptedAwaitingReplay
-        } else {
-            needsServerCacheMigration = false
-            self.state = PersistedAttentionState(profileIdentity: context.identity)
+            state.intents = queue.operations
+            state.intentByRequest = queue.activeOperations
+            state.fencedIntents = queue.cancelledOperations
+            state.drafts = queue.answerDrafts
+            state.pendingMessageOpens = queue.messageOpens
+            state.pendingConversations = queue.conversations
+            state.pendingReadPositions = queue.readPositions
         }
     }
 
-    /// True when this installation still has the pre-cache server projection
-    /// that should be copied into the launch cache once.
-    public func hasLegacyServerProjection(context suppliedContext: ProfileContext) throws -> Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        try validate(suppliedContext)
-        return needsServerCacheMigration
-    }
-
-    /// Removes answer sends from the relay outbox while preserving any exact
-    /// operation that can be retried only after a new user tap.
-    public func prepareForServerCache(context suppliedContext: ProfileContext) throws {
-        writerLock.lock()
-        defer { writerLock.unlock() }
-        lock.lock()
-        defer { lock.unlock() }
-        try validate(suppliedContext)
-        guard persistsOnlyLocalState else { throw AttentionStoreError.persistence("Cache-backed persistence is not enabled.") }
-        let next = localDraftProjection(from: state)
-        try commit(next)
-        needsServerCacheMigration = false
-    }
-
-    /// Replaces only the in-memory server projection with the saved cache.
-    /// Drafts from the local profile store are merged back by request and revision.
+    /// Replaces the disposable server cache. Pending user requests stay in the
+    /// separate queue and cannot supply a missing server request or revision.
     public func restoreCachedServerState(_ cached: CachedAttentionServerState,
                                          context suppliedContext: ProfileContext) throws {
         writerLock.lock()
@@ -317,9 +207,10 @@ public final class AttentionDomainStore: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         try validate(suppliedContext)
-        guard persistsOnlyLocalState, suppliedContext.transportMode == .relay else {
+        guard suppliedContext.transportMode == .relay else {
             throw AttentionStoreError.fixtureOnlyOperation
         }
+        guard cached.identity == context.identity else { throw AttentionStoreError.wrongAccount }
         let keys = Set(cached.requests.keys)
             .union(cached.remoteStates.keys)
             .union(cached.conversations.keys)
@@ -346,39 +237,11 @@ public final class AttentionDomainStore: @unchecked Sendable {
         var conversation = ConversationState()
         conversation.cursor = cached.conversationCursor
         conversation.threads = cached.conversations
-        for (key, localThread) in state.conversation?.threads ?? [:] {
-            if var serverThread = conversation.threads[key] {
-                serverThread.drafts = localThread.drafts
-                serverThread.answerDrafts = localThread.answerDrafts
-                serverThread.readThroughTurn = nil
-                serverThread.accountReadThroughConversationSequence = nil
-                conversation.threads[key] = serverThread
-            } else if !localThread.drafts.isEmpty || !(localThread.answerDrafts ?? [:]).isEmpty {
-                var shell = Self.localDraftThread(localThread)
-                shell.readThroughTurn = nil
-                shell.accountReadThroughConversationSequence = nil
-                conversation.threads[key] = shell
-            }
-        }
-        next.conversation = conversation
+        conversation.chatReadPositions = cached.chatReadPositions
+        conversation.chatReadPositionSupport = cached.chatReadPositions != nil
+        next.server.conversation = conversation
         try commit(next)
         acceptedAwaitingTerminalReplay = Self.acceptedAwaitingTerminalReplay(in: state)
-    }
-
-    private static func localDraftThread(_ original: ConversationThread) -> ConversationThread {
-        var thread = ConversationThread(request: original.request,
-                                        sessionHandle: ExactText(""),
-                                        revision: 0,
-                                        payload: .object([]))
-        thread.drafts = original.drafts.mapValues { originalDraft in
-            var draft = originalDraft
-            if case let .submitting(operation) = draft.disposition {
-                draft.disposition = .outcomeUnknown(operation)
-            }
-            return draft
-        }
-        thread.answerDrafts = original.answerDrafts
-        return thread
     }
 
     public func invalidate() {
@@ -402,15 +265,9 @@ public final class AttentionDomainStore: @unchecked Sendable {
         var acceptanceOrder = next.requests.values.compactMap(\.acceptanceOrder).max() ?? 0
         for request in requests {
             try validate(request.key, in: context.identity)
-            if let existing = next.requests[request.key] {
-                guard existing.originalPayload.semanticallyEquals(request.originalPayload) else {
-                    throw AttentionStoreError.requestConflict
-                }
-                if existing.acceptanceOrder == nil {
-                    acceptanceOrder += 1
-                    next.requests[request.key] = existing.assigningAcceptanceOrder(acceptanceOrder)
-                    changed = true
-                }
+            if let existing = next.requests[request.key], let order = existing.acceptanceOrder {
+                next.requests[request.key] = request.assigningAcceptanceOrder(order)
+                changed = true
                 continue
             }
             acceptanceOrder += 1
@@ -431,7 +288,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
         defer { lock.unlock() }
         try validate(suppliedContext)
         guard context.transportMode == .fixture else { throw AttentionStoreError.fixtureOnlyOperation }
-        var next = PersistedAttentionState(profileIdentity: context.identity)
+        var next = ClientSessionState(profileIdentity: context.identity)
         for (index, request) in requests.enumerated() {
             try validate(request.key, in: context.identity)
             next.requests[request.key] = request.assigningAcceptanceOrder(UInt64(index) + 1)
@@ -598,7 +455,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
         }
         next.intents[intentID] = submission
         next.intentByRequest[request.key] = intentID
-        if !(persistsOnlyLocalState && suppliedContext.transportMode == .relay) {
+        if suppliedContext.transportMode == .fixture {
             next.outboxOrder.append(intentID)
         }
         if suppliedContext.transportMode == .fixture {
@@ -680,7 +537,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
         var next = state
         next.intents[intentID] = submission
         next.intentByRequest[request.key] = intentID
-        if !(persistsOnlyLocalState && suppliedContext.transportMode == .relay) {
+        if suppliedContext.transportMode == .fixture {
             next.outboxOrder.append(intentID)
         }
         if discardDraft {
@@ -809,11 +666,14 @@ public final class AttentionDomainStore: @unchecked Sendable {
             throw AttentionStoreError.intentMissing
         }
         let currentKeys = state.inboxCheckpoint.flatMap { $0.checkpointAccepted ? $0.currentKeys : nil }
-            ?? state.cachedInboxCurrentKeys
         guard state.requests[submission.requestKey] != nil,
               currentKeys?.contains(submission.requestKey) == true,
               state.remoteStates[submission.requestKey]?.isTerminal != true else {
             throw AttentionStoreError.requestClosed
+        }
+        let currentRevision = state.conversation?.threads[submission.requestKey]?.currentRevision ?? 1
+        guard (submission.requestRevision ?? 1) == currentRevision else {
+            throw AttentionStoreError.intentConflict
         }
         switch submission.disposition {
         case .pending, .lost:
@@ -1024,27 +884,19 @@ public final class AttentionDomainStore: @unchecked Sendable {
               state.intentByRequest[intent.requestKey] == intentID else {
             throw AttentionStoreError.intentConflict
         }
-        if let remote = state.remoteStates[intent.requestKey]?.state, remote != .cleared {
-            throw AttentionStoreError.intentConflict
-        }
-        let thread = state.conversation?.threads[intent.requestKey]
-        if let prior = thread?.retraction?.retractedAtMilliseconds ?? thread?.reportedRetractedAtMilliseconds,
-           prior != retractedAtMilliseconds {
-            throw AttentionStoreError.intentConflict
-        }
-        switch intent.disposition {
-        case .accepted:
-            throw AttentionStoreError.intentConflict
-        case let .refusedByRetraction(prior) where prior != retractedAtMilliseconds:
-            throw AttentionStoreError.intentConflict
-        case .refusedByRetraction:
-            break
-        default:
-            intent.disposition = .refusedByRetraction(retractedAtMilliseconds: retractedAtMilliseconds)
-        }
+        intent.disposition = .refusedByRetraction(retractedAtMilliseconds: retractedAtMilliseconds)
         var next = state
         next.intents[intentID] = intent
         next.outboxOrder.removeAll(where: { $0 == intentID })
+        var remote = next.remoteStates[intent.requestKey] ?? RemoteRequestState()
+        remote.state = .cleared
+        next.remoteStates[intent.requestKey] = remote
+        if var conversation = next.conversation, var thread = conversation.threads[intent.requestKey] {
+            try thread.recordReportedRetraction(at: retractedAtMilliseconds)
+            conversation.threads[intent.requestKey] = thread
+            next.conversation = conversation
+        }
+
         if var published = next.replayPublishedIntents {
             published[intentID] = intent
             next.replayPublishedIntents = published
@@ -1067,22 +919,10 @@ public final class AttentionDomainStore: @unchecked Sendable {
         guard suppliedContext.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
         guard var intent = state.intents[intentID] else { throw AttentionStoreError.intentMissing }
         guard intent.operationID == operationID else { throw AttentionStoreError.intentConflict }
-        if let old = state.remoteStates[intent.requestKey]?.state, old != terminalState {
-            throw AttentionStoreError.eventConflict(sequence)
-        }
-        if case .refusedByRetraction = intent.disposition, terminalState != .cleared {
-            throw AttentionStoreError.eventConflict(sequence)
-        }
-        let effectiveAuthorizedAnswer = authorizedOriginAnswer ?? state.remoteStates[intent.requestKey]?.authorizedOriginAnswer
-        if case .accepted = intent.disposition {
-            // A later closed response cannot erase confirmed success for this exact operation.
-        } else if case .refusedByRetraction = intent.disposition {
-            // Keep the exact server refusal when the matching terminal arrives later.
-        } else {
-            intent.disposition = .terminal(state: terminalState,
-                                           sequence: sequence,
-                                           authorizedAnswer: effectiveAuthorizedAnswer)
-        }
+        let effectiveAuthorizedAnswer = authorizedOriginAnswer
+        intent.disposition = .terminal(state: terminalState,
+                                       sequence: sequence,
+                                       authorizedAnswer: effectiveAuthorizedAnswer)
         var next = state
         next.intents[intentID] = intent
         next.outboxOrder.removeAll(where: { $0 == intentID })
@@ -1129,122 +969,29 @@ public final class AttentionDomainStore: @unchecked Sendable {
         guard suppliedContext.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
         let event = try Self.externalizingConversationFiles(in: event,
             using: conversationFileReferences,
-            allowInlinePersistence: persistence is MemoryAttentionStatePersistence)
+            allowInlinePersistence: persistence is MemoryPendingActionPersistence)
 
-        if event.sequence <= state.cursor {
-            if let deferred = state.pendingRelayOverlays?[event.sequence] {
-                guard deferred.hasSameSemanticContent(as: event) else {
-                    try recordRepair(.conflictingEvent(sequence: event.sequence))
-                    throw AttentionStoreError.eventConflict(event.sequence)
-                }
-                return state.cursor
+        if event.sequence > state.cursor {
+            let expected = state.cursor + 1
+            guard event.sequence == expected else {
+                try recordRepair(.eventGap(expected: expected, received: event.sequence))
+                throw AttentionStoreError.eventGap(expected: expected, received: event.sequence)
             }
-            guard let previous = state.appliedEvents[event.sequence],
-                  previous.hasSameSemanticContent(as: event) else {
-                try recordRepair(.conflictingEvent(sequence: event.sequence))
-                throw AttentionStoreError.eventConflict(event.sequence)
+            if let barrier = state.replayBarrier, event.sequence > barrier {
+                try recordRepair(.eventGap(expected: barrier, received: event.sequence))
+                throw AttentionStoreError.eventGap(expected: barrier, received: event.sequence)
             }
-            if previous.accountAnswerOutcome == nil,
-               event.accountAnswerOutcome != nil,
-               case .terminal = event.body {
-                var next = state
-                try applyInboxProjection(event, to: &next)
-                next.appliedEvents[event.sequence] = event
-                try commit(next)
-                return state.cursor
-            }
-            if let metadata = event.conversation {
-                if let previous = state.appliedEvents[event.sequence]?.conversation, !metadata.canEnrich(previous) {
-                    throw ConversationError.conflict
-                }
-                var next = state
-                try applyOrdinaryConversationMetadata(event, to: &next)
-                if state.appliedEvents[event.sequence]?.conversation != metadata {
-                    next.appliedEvents[event.sequence] = event
-                    try commit(next)
-                }
-            }
-            if case let .delivery(request, classification) = event.body,
-               state.remoteStates[request.key]?.classification != classification {
-                var next = state
-                next.appliedEvents[event.sequence] = event
-                if let old = next.remoteStates[request.key] {
-                    var updated = old
-                    updated.classification = classification
-                    next.remoteStates[request.key] = updated
-                }
-                try commit(next)
-            }
-            if previous.attentionTierWasProvided || event.attentionTierWasProvided {
-                let key: RequestKey?
-                switch event.body {
-                case let .delivery(request, _): key = request.key
-                case let .originReference(requestKey): key = requestKey
-                case .terminal, .attentionTierChange: key = nil
-                }
-                if let key {
-                    var next = state
-                    let previousState = next.remoteStates[key]
-                    var updated = previousState ?? RemoteRequestState()
-                    try updateAttentionTier(event.attentionTier, sequence: event.sequence, feed: .relay,
-                        origin: event.origin,
-                        allowSameSequenceReplacement: previous.attentionTierWasProvided !=
-                            event.attentionTierWasProvided,
-                        in: &updated)
-                    let eventTierPresenceChanged = previous.attentionTierWasProvided !=
-                        event.attentionTierWasProvided
-                    let eventAddsOrigin = previous.origin == nil && event.origin != nil
-                    if previousState != updated || eventTierPresenceChanged || eventAddsOrigin {
-                        next.remoteStates[key] = updated
-                        next.appliedEvents[event.sequence] = event
-                        try commit(next)
-                    }
-                }
-            }
-            return state.cursor
-        }
-
-        let expected = state.cursor + 1
-        guard event.sequence == expected else {
-            try recordRepair(.eventGap(expected: expected, received: event.sequence))
-            throw AttentionStoreError.eventGap(expected: expected, received: event.sequence)
-        }
-        if let barrier = state.replayBarrier, event.sequence > barrier {
-            try recordRepair(.eventGap(expected: barrier, received: event.sequence))
-            throw AttentionStoreError.eventGap(expected: barrier, received: event.sequence)
         }
 
         var next = state
         switch event.body {
         case let .delivery(request, classification):
             try validate(request.key, in: context.identity)
-            if let existing = next.requests[request.key] {
-                guard existing.originalPayload.semanticallyEquals(request.originalPayload) else {
-                    try recordRepair(.conflictingEvent(sequence: event.sequence))
-                    throw AttentionStoreError.eventConflict(event.sequence)
-                }
-                if existing.acceptanceOrder == nil {
-                    let priorOrder = firstDeliverySequence(for: request.key, in: next.appliedEvents)
-                    next.requests[request.key] = existing.assigningAcceptanceOrder(priorOrder ?? event.sequence)
-                }
-            } else {
-                next.requests[request.key] = request.assigningAcceptanceOrder(event.sequence)
-                let thread = next.conversation?.threads[request.key]
-                let currentPayload = thread?.currentQuestionPayload ?? request.originalPayload
-                let deliveredNames = Self.deliveredFileNames(for: request.key, in: next.conversation)
-                    .union(event.conversation?.files?.map(\.name) ?? [])
-                let currentRequest = StoredRequest(key: request.key, originalPayload: currentPayload)
-                next.drafts[request.key] = RequestDraft(interface: currentRequest.interface(deliveredFileNames: deliveredNames))
-            }
+            next.requests[request.key] = request.assigningAcceptanceOrder(event.sequence)
             let reference = next.inboxReferences?.removeValue(forKey: request.key)
             let previous = next.remoteStates[request.key] ?? reference
             var remoteState = previous?.state ?? next.conversation?.threads[request.key]?.terminal
             if event.conversation?.retractedAtMilliseconds != nil {
-                // Retraction keeps the legacy cleared state until its lifecycle terminal arrives.
-                guard remoteState == nil || remoteState == .cleared else {
-                    try recordRepair(.conflictingEvent(sequence: event.sequence))
-                    throw AttentionStoreError.eventConflict(event.sequence)
-                }
                 remoteState = .cleared
             }
             var updated = previous ?? RemoteRequestState()
@@ -1274,10 +1021,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
                 throw AttentionStoreError.missingOriginContent(requestKey)
             }
             let previous = next.remoteStates[requestKey] ?? RemoteRequestState()
-            if let oldState = previous.state, oldState != terminalState {
-                try recordRepair(.conflictingEvent(sequence: event.sequence))
-                throw AttentionStoreError.eventConflict(event.sequence)
-            }
             let effectiveAuthorizedAnswer = authorizedOriginAnswer ?? previous.authorizedOriginAnswer
             var updated = previous
             updated.state = terminalState
@@ -1289,13 +1032,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
                 try recordSupersedesOriginTarget(for: requestKey, terminalEvent: event, in: &next)
             }
             if let intentID = next.intentByRequest[requestKey], var intent = next.intents[intentID] {
-                if case let .refusedByRetraction(retractedAt) = intent.disposition {
-                    guard terminalState == .cleared,
-                          event.conversation?.terminalReason == ExactText("retracted"),
-                          event.conversation?.retractedAtMilliseconds == retractedAt else {
-                        throw ConversationError.conflict
-                    }
-                }
                 if preservesOperationResult(intent.disposition) {
                     // A later lifecycle event does not erase evidence that this exact operation won.
                 } else {
@@ -1327,16 +1063,21 @@ public final class AttentionDomainStore: @unchecked Sendable {
             }
         }
         try applyOrdinaryConversationMetadata(event, to: &next)
+        if case let .delivery(request, _) = event.body {
+            refreshEditableDraft(for: request.key, additionalFiles: Set(event.conversation?.files?.map(\.name) ?? []), in: &next)
+        }
+        if case let .terminal(key, _, _) = event.body {
+            dropUnsentAnswer(for: key, in: &next)
+        }
         if let requestKey = Self.requestKey(in: event) {
             Self.markInboxCurrent(requestKey, at: event.sequence, in: &next)
         }
         next.appliedEvents[event.sequence] = event
-        next.cursor = event.sequence
+        next.cursor = max(next.cursor, event.sequence)
         next.repairIssues.removeAll { issue in
             switch issue {
             case let .eventGap(_, received): return received <= event.sequence + 1
             case let .missingOriginContent(sequence, _): return sequence == event.sequence
-            case let .conflictingEvent(sequence): return sequence == event.sequence
             }
         }
         try commit(next)
@@ -1373,7 +1114,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
             switch issue {
             case let .eventGap(_, received): return sequence == UInt64.max || received <= sequence + 1
             case let .missingOriginContent(received, _): return received == sequence
-            case let .conflictingEvent(received): return received == sequence
             }
         }
         try commit(next)
@@ -1385,7 +1125,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
                                                    restoredTurns: [UInt64: ConversationEvent] = [:],
                                                    skippingHeldEvents: [UInt64: ConversationEvent] = [:],
                                                    onHeldEventFailure: ((ConversationEvent, ConversationValidationRejection?) -> Void)? = nil,
-                                                   to next: inout PersistedAttentionState) throws {
+                                                   to next: inout ClientSessionState) throws {
         var conversation = next.conversation ?? ConversationState()
         switch event.body {
         case .delivery, .originReference:
@@ -1404,17 +1144,11 @@ public final class AttentionDomainStore: @unchecked Sendable {
             }
             var thread: ConversationThread
             if let prior = conversation.threads[request.key] {
-                guard prior.sessionHandle == handle,
-                      prior.revisions[1]?.semanticallyEquals(request.originalPayload) == true else {
-                    throw ConversationError.conflict
-                }
                 thread = prior
+                thread.sessionHandle = handle
+                thread.revisions[1] = request.originalPayload
+                thread.redactedRevisions?.remove(1)
             } else {
-                for prior in conversation.events.values where prior.binding.request == request.key {
-                    guard case let .attentionTier(_, _, _, priorSessionHandle) = prior.fact,
-                          let priorSessionHandle else { continue }
-                    guard priorSessionHandle == handle else { throw ConversationError.conflict }
-                }
                 thread = ConversationThread(request: request.key, sessionHandle: handle,
                     revision: 1, payload: request.originalPayload)
                 if let availability = metadata.availability {
@@ -1430,7 +1164,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
                 for (sequence, target) in restoredTurns where target.binding.request == request.key {
                     let prepared = try Self.externalizingConversationFiles(in: target,
                         using: conversationFileReferences,
-                        allowInlinePersistence: persistence is MemoryAttentionStatePersistence)
+                        allowInlinePersistence: persistence is MemoryPendingActionPersistence)
                     if case let .turn(turn) = prepared.fact { try validateConversationFiles(turn.files) }
                     preparedTurns[sequence] = prepared
                 }
@@ -1438,11 +1172,13 @@ public final class AttentionDomainStore: @unchecked Sendable {
                     skipping: skippingHeldEvents, onFailure: onHeldEventFailure)
                 for (sequence, ignored) in skippingHeldEvents
                     where ignored.binding.request == request.key {
-                    guard conversation.events[sequence] == ignored else { throw ConversationError.conflict }
                     conversation.events.removeValue(forKey: sequence)
                 }
             }
-            if thread.listeningSupport == nil { thread.listeningSupport = metadata.listeningSupport }
+            thread.listeningSupport = metadata.listeningSupport
+            // Delivery hydrates the original request; it is not a new terminal
+            // fact. Held server conversation events applied above may already
+            // retract it. Fresh inbox snapshots rebuild this cache separately.
             if let reported = metadata.retractedAtMilliseconds { try thread.recordReportedRetraction(at: reported) }
             if let id = metadata.eventID, !thread.turns.contains(where: { $0.id == id }) {
                 try validateConversationFiles(metadata.files ?? [])
@@ -1453,11 +1189,9 @@ public final class AttentionDomainStore: @unchecked Sendable {
             conversation.threads[request.key] = thread
         case let .terminal(key, terminal, _):
             guard var thread = conversation.threads[key] else { return }
-            guard thread.terminal == nil || thread.terminal == terminal else { throw ConversationError.conflict }
             thread.terminal = terminal
             if let author = event.conversation?.author { thread.terminalAuthor = author }
             if let eventID = event.conversation?.eventID {
-                guard thread.terminalTurn == nil || thread.terminalTurn == eventID else { throw ConversationError.conflict }
                 thread.terminalTurn = eventID
                 if let author = event.conversation?.author, let revision = event.conversation?.revision,
                    !thread.turns.contains(where: { $0.id == eventID }) {
@@ -1471,11 +1205,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
                 guard terminal == .cleared,
                       let retractedAtMilliseconds = event.conversation?.retractedAtMilliseconds else {
                     throw ConversationError.invalidBinding
-                }
-                if let intentID = next.intentByRequest[key],
-                   case let .refusedByRetraction(refusedAt)? = next.intents[intentID]?.disposition,
-                   refusedAt != retractedAtMilliseconds {
-                    throw ConversationError.conflict
                 }
                 if event.conversation?.revision == nil {
                     // An inbox snapshot terminal carries the time; the conversation stream carries the retraction turn.
@@ -1514,7 +1243,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
                                         restoredTurns: [UInt64: ConversationEvent] = [:],
                                         skippingHeldEvents: [UInt64: ConversationEvent] = [:],
                                         onHeldEventFailure: ((ConversationEvent, ConversationValidationRejection?) -> Void)? = nil,
-                                        to next: inout PersistedAttentionState) throws {
+                                        to next: inout ClientSessionState) throws {
         let acceptance = item.acceptance
         let key = item.key
         guard acceptance.sequence > 0, acceptance.sequence <= highWater,
@@ -1527,35 +1256,14 @@ public final class AttentionDomainStore: @unchecked Sendable {
             guard request.key == key else { throw AttentionStoreError.inboxPageConflict }
             try validate(request.key, in: context.identity)
             classification = value
-            if let existing = next.requests[key] {
-                guard existing.originalPayload.semanticallyEquals(request.originalPayload),
-                      existing.acceptanceOrder == nil || existing.acceptanceOrder == acceptance.sequence else {
-                    throw AttentionStoreError.requestConflict
-                }
-                if existing.acceptanceOrder == nil {
-                    next.requests[key] = existing.assigningAcceptanceOrder(acceptance.sequence)
-                }
-            } else {
-                next.requests[key] = request.assigningAcceptanceOrder(acceptance.sequence)
-                let thread = next.conversation?.threads[key]
-                let payload = thread?.currentQuestionPayload ?? request.originalPayload
-                let deliveredNames = Self.deliveredFileNames(for: key, in: next.conversation)
-                    .union(acceptance.conversation?.files?.map(\.name) ?? [])
-                let acceptedRequest = StoredRequest(key: key, originalPayload: payload)
-                next.drafts[key] = RequestDraft(interface: acceptedRequest.interface(deliveredFileNames: deliveredNames))
-            }
+            next.requests[key] = request.assigningAcceptanceOrder(acceptance.sequence)
             if let reference = next.inboxReferences?.removeValue(forKey: key), next.remoteStates[key] == nil {
                 next.remoteStates[key] = reference
             }
         case .originReference:
             classification = nil
             if let existing = next.requests[key] {
-                guard existing.acceptanceOrder == nil || existing.acceptanceOrder == acceptance.sequence else {
-                    throw AttentionStoreError.requestConflict
-                }
-                if existing.acceptanceOrder == nil {
-                    next.requests[key] = existing.assigningAcceptanceOrder(acceptance.sequence)
-                }
+                next.requests[key] = existing.assigningAcceptanceOrder(acceptance.sequence)
             }
         case .terminal:
             throw AttentionStoreError.inboxPageConflict
@@ -1571,9 +1279,9 @@ public final class AttentionDomainStore: @unchecked Sendable {
                   terminal.sequence <= highWater else { throw AttentionStoreError.inboxPageConflict }
             if (previous?.eventSequence ?? 0) <= highWater {
                 let current = RemoteRequestState(state: terminalState,
-                    authorizedOriginAnswer: answer ?? previous?.authorizedOriginAnswer,
-                    accountAnswerOutcome: terminal.accountAnswerOutcome ?? previous?.accountAnswerOutcome,
-                    classification: classification ?? previous?.classification,
+                    authorizedOriginAnswer: answer,
+                    accountAnswerOutcome: terminal.accountAnswerOutcome,
+                    classification: classification,
                     eventSequence: terminal.sequence,
                     attentionTier: previous?.attentionTier,
                     attentionTierSequence: previous?.attentionTierSequence,
@@ -1596,11 +1304,10 @@ public final class AttentionDomainStore: @unchecked Sendable {
             }
         } else {
             if (previous?.eventSequence ?? 0) <= highWater {
-                guard previous?.state == nil else { throw AttentionStoreError.inboxPageConflict }
                 let current = RemoteRequestState(state: nil,
-                    authorizedOriginAnswer: previous?.authorizedOriginAnswer,
-                    accountAnswerOutcome: previous?.accountAnswerOutcome,
-                    classification: classification ?? previous?.classification,
+                    authorizedOriginAnswer: nil,
+                    accountAnswerOutcome: nil,
+                    classification: classification,
                     eventSequence: acceptance.sequence,
                     attentionTier: previous?.attentionTier,
                     attentionTierSequence: previous?.attentionTierSequence,
@@ -1635,6 +1342,10 @@ public final class AttentionDomainStore: @unchecked Sendable {
                 skippingHeldEvents: skippingHeldEvents, onHeldEventFailure: onHeldEventFailure, to: &next)
         }
 
+        if hasContent {
+            refreshEditableDraft(for: key, additionalFiles: Set(acceptance.conversation?.files?.map(\.name) ?? []), in: &next)
+        }
+
         let pending = (next.pendingRelayOverlays ?? [:]).values
             .filter { Self.requestKey(in: $0) == key }
             .sorted { $0.sequence < $1.sequence }
@@ -1648,65 +1359,29 @@ public final class AttentionDomainStore: @unchecked Sendable {
     /// Applies a terminal/reference fact without claiming that its sequence was contiguous.
     /// Missing message content is kept as exact pending work until a later page hydrates G.
     private func recordInboxTerminalProjection(_ event: RelayEvent,
-                                               into next: inout PersistedAttentionState) throws {
+                                               into next: inout ClientSessionState) throws {
         guard let key = Self.requestKey(in: event),
               key.accountScope == context.identity.personID,
               event.sequence > 0 else { throw AttentionStoreError.inboxPageConflict }
         switch event.body {
-        case .originReference, .attentionTierChange:
-            try validate(key, in: context.identity)
-            if let prior = next.appliedEvents[event.sequence] {
-                guard prior.hasSameSemanticContent(as: event) else { throw AttentionStoreError.eventConflict(event.sequence) }
-                return
-            }
-            if let prior = next.pendingRelayOverlays?[event.sequence] {
-                guard prior.hasSameSemanticContent(as: event) else { throw AttentionStoreError.eventConflict(event.sequence) }
-                return
-            }
-            guard next.requests[key] != nil || next.inboxReferences?[key] != nil else {
-                var overlays = next.pendingRelayOverlays ?? [:]
-                overlays[event.sequence] = event
-                next.pendingRelayOverlays = overlays
-                return
-            }
-            try applyInboxProjection(event, to: &next)
-            next.appliedEvents[event.sequence] = event
-            return
         case .delivery:
             throw AttentionStoreError.inboxPageConflict
-        case .terminal:
+        case .originReference, .attentionTierChange, .terminal:
             break
         }
         try validate(key, in: context.identity)
-        if let prior = next.appliedEvents[event.sequence] {
-            guard prior.hasSameSemanticContent(as: event) else { throw AttentionStoreError.eventConflict(event.sequence) }
-            guard prior.accountAnswerOutcome == nil, event.accountAnswerOutcome != nil else { return }
-        }
-        if let prior = next.pendingRelayOverlays?[event.sequence] {
-            guard prior.hasSameSemanticContent(as: event) else { throw AttentionStoreError.eventConflict(event.sequence) }
-            if prior.accountAnswerOutcome == nil, event.accountAnswerOutcome != nil {
-                if next.requests[key] != nil || next.inboxReferences?[key] != nil {
-                    try applyInboxProjection(event, to: &next)
-                    next.appliedEvents[event.sequence] = event
-                    next.pendingRelayOverlays?.removeValue(forKey: event.sequence)
-                } else {
-                    next.pendingRelayOverlays?[event.sequence] = event
-                }
-            }
-            return
-        }
         guard next.requests[key] != nil || next.inboxReferences?[key] != nil else {
-            var overlays = next.pendingRelayOverlays ?? [:]
-            overlays[event.sequence] = event
-            next.pendingRelayOverlays = overlays
+            next.pendingRelayOverlays = next.pendingRelayOverlays ?? [:]
+            next.pendingRelayOverlays?[event.sequence] = event
             return
         }
         try applyInboxProjection(event, to: &next)
         next.appliedEvents[event.sequence] = event
+        next.pendingRelayOverlays?.removeValue(forKey: event.sequence)
     }
 
     private func applyInboxProjection(_ event: RelayEvent,
-                                      to next: inout PersistedAttentionState) throws {
+                                      to next: inout ClientSessionState) throws {
         guard let key = Self.requestKey(in: event),
               next.requests[key] != nil || next.inboxReferences?[key] != nil else {
             throw AttentionStoreError.inboxPageConflict
@@ -1717,10 +1392,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
         switch event.body {
         case let .terminal(_, terminalState, answer):
             if event.sequence < (currentPrevious.eventSequence ?? 0) { return }
-            if event.sequence == (currentPrevious.eventSequence ?? 0),
-               let oldState = currentPrevious.state, oldState != terminalState {
-                throw AttentionStoreError.eventConflict(event.sequence)
-            }
             var updated = RemoteRequestState(state: terminalState,
                 authorizedOriginAnswer: answer ?? currentPrevious.authorizedOriginAnswer,
                 accountAnswerOutcome: event.accountAnswerOutcome ?? currentPrevious.accountAnswerOutcome,
@@ -1779,7 +1450,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
     /// that event's adjacent superseded terminals when resolving later targets.
     private func recordSupersedesOriginTarget(for target: RequestKey,
                                               terminalEvent: RelayEvent,
-                                              in next: inout PersistedAttentionState) throws {
+                                              in next: inout ClientSessionState) throws {
         guard let replacementKey = Self.supersedingReplacementKey(
             for: target, before: terminalEvent.sequence,
             requests: next.requests, appliedEvents: next.appliedEvents,
@@ -1819,7 +1490,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
     /// relationship field. Reconstruct it from retained terminal and accepted
     /// request identities so older messages can show their forward link.
     private static func backfillSupersededByMessageKeys(
-        in state: inout PersistedAttentionState,
+        in state: inout ClientSessionState,
         affectedTargets: Set<RequestKey>? = nil,
         additionalEvents: [UInt64: RelayEvent] = [:]
     ) {
@@ -1934,7 +1605,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
     private static func firstSupersededOriginTarget(
         for replacement: StoredRequest,
         after acceptanceSequence: UInt64? = nil,
-        in state: PersistedAttentionState
+        in state: ClientSessionState
     ) -> RequestKey? {
         let acceptance = acceptanceSequence ?? replacement.acceptanceOrder
         var first: (sequence: UInt64, root: RequestKey)?
@@ -2041,12 +1712,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
                                      origin: ExactText?,
                                      allowSameSequenceReplacement: Bool = false,
                                      in state: inout RemoteRequestState) throws {
-        if let previousOrigin = state.attentionTierOrigin,
-           let origin,
-           previousOrigin != origin {
-            throw ConversationError.conflict
-        }
-
         switch (state.attentionTierFeed, feed) {
         case (.some(.conversation), .relay):
             // Conversation changes may arrive before the ordinary delivery.
@@ -2058,12 +1723,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
             if let previousSequence = state.attentionTierSequence {
                 if sequence < previousSequence { return }
                 if sequence == previousSequence {
-                    guard state.attentionTier == tier || allowSameSequenceReplacement else {
-                        throw ConversationError.conflict
-                    }
-                    if state.attentionTier != tier {
-                        state.attentionTier = tier
-                    }
+                    state.attentionTier = tier
                     if let origin { state.attentionTierOrigin = origin }
                     return
                 }
@@ -2091,7 +1751,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
 
     private static func markInboxCurrent(_ key: RequestKey,
                                          at sequence: UInt64,
-                                         in next: inout PersistedAttentionState) {
+                                         in next: inout ClientSessionState) {
         guard var checkpoint = next.inboxCheckpoint,
               checkpoint.checkpointAccepted,
               let highWater = checkpoint.highWater,
@@ -2119,7 +1779,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
     }
 
     private static func recordInboxOperationFailure(_ submission: Submission,
-                                                    in state: inout PersistedAttentionState) {
+                                                    in state: inout ClientSessionState) {
         var failed = submission
         failed.disposition = .failed
         state.intents[submission.intentID] = failed
@@ -2168,8 +1828,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
             switch error {
             case let .eventGap(expected, _):
                 return .gap(expected: expected)
-            case .eventConflict:
-                return .conflict
             default:
                 return .repairRequired
             }
@@ -2198,18 +1856,14 @@ public final class AttentionDomainStore: @unchecked Sendable {
             if let barrier = state.replayBarrier, event.sequence > barrier { return .gap(expected: barrier) }
             var next = state
             var overlays = next.pendingRelayOverlays ?? [:]
-            if let prior = overlays[event.sequence], !prior.hasSameSemanticContent(as: event) {
-                return .conflict
-            }
             overlays[event.sequence] = event
             next.pendingRelayOverlays = overlays
             Self.markInboxCurrent(key, at: event.sequence, in: &next)
-            next.cursor = event.sequence
+            next.cursor = max(next.cursor, event.sequence)
             try commit(next)
             return .deferred(contiguousCursor: state.cursor)
         } catch let error as AttentionStoreError {
             if case let .eventGap(expected, _) = error { return .gap(expected: expected) }
-            if case .eventConflict = error { return .conflict }
             return .repairRequired
         } catch {
             return .repairRequired
@@ -2286,12 +1940,8 @@ public final class AttentionDomainStore: @unchecked Sendable {
             throw AttentionStoreError.missingOriginContent(request.key)
         }
         var next = state
-        if let existing = next.requests[request.key] {
-            guard existing.originalPayload.semanticallyEquals(request.originalPayload) else {
-                throw AttentionStoreError.requestConflict
-            }
-        } else {
-            next.requests[request.key] = request
+        next.requests[request.key] = request.assigningAcceptanceOrder(sequence)
+        if next.drafts[request.key] == nil {
             next.drafts[request.key] = RequestDraft(interface: requestInterface(for: request))
         }
         next.appliedEvents[sequence] = RelayEvent(sequence: sequence, body: .originReference(request.key))
@@ -2317,17 +1967,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
         for id in state.outboxOrder {
             guard let submission = state.intents[id], seen.insert(submission.operationID).inserted else { continue }
             inventory.append(submission)
-        }
-        if !persistsOnlyLocalState {
-            let accepted = acceptedAwaitingTerminalReplay.values.sorted { left, right in
-                let l = Self.acceptedSequence(left)
-                let r = Self.acceptedSequence(right)
-                if l != r { return l < r }
-                return left.operationID.uuidString < right.operationID.uuidString
-            }
-            for submission in accepted where seen.insert(submission.operationID).inserted {
-                inventory.append(submission)
-            }
         }
         return inventory
     }
@@ -2360,6 +1999,8 @@ public final class AttentionDomainStore: @unchecked Sendable {
         }
         let candidate = InboxPagingCheckpoint(startupID: startupID, since: since, batches: batches)
         var next = state
+        // Starting a request is not a server update. Keep the last accepted
+        // cache available if the transport fails before returning a snapshot.
         next.inboxCandidate = candidate
         try commit(next)
         return candidate
@@ -2453,6 +2094,10 @@ public final class AttentionDomainStore: @unchecked Sendable {
             return
         }
         var next = state
+        // The actual server response replaces the disposable projection,
+        // including an empty snapshot. User intents remain in their own queue.
+        next.server = ServerProjectionCache()
+        next.cursor = candidate.since
         do {
             for item in items {
                 try applyInboxSnapshotItem(item, highWater: highWater, restoredTurns: restoredTurns,
@@ -2493,7 +2138,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
     /// Relay profiles must use `setInboxView` with the fetched Server result.
     public func setFixtureInboxView(_ view: InboxView?,
                                     context suppliedContext: ProfileContext) throws {
-        guard persistence is MemoryAttentionStatePersistence else {
+        guard persistence is MemoryPendingActionPersistence else {
             throw AttentionStoreError.fixtureOnlyOperation
         }
         try replaceInboxView(view, context: suppliedContext, fixture: true)
@@ -2601,6 +2246,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
         checkpoint.freshKeys = checkpoint.currentKeys.union(keys)
         checkpoint.nextCursor = nextCursor
         next.inboxCheckpoint = checkpoint
+        dropAnswersInvalidatedBySnapshot(checkpoint, in: &next)
         try commit(next, allowingCommittedReads: true)
         refreshAcceptedReplayIndexes(for: keys)
     }
@@ -2859,6 +2505,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
         candidate.checkpointAccepted = true
         var next = state
         next.inboxCheckpoint = candidate
+        dropAnswersInvalidatedBySnapshot(candidate, in: &next)
         next.inboxCandidate = nil
         next.cachedInboxCurrentKeys = nil
         next.cursor = highWater
@@ -3022,14 +2669,13 @@ public final class AttentionDomainStore: @unchecked Sendable {
         try validate(receipt.binding.request, in: context.identity)
         let event = try Self.externalizingConversationFiles(in: event,
             using: conversationFileReferences,
-            allowInlinePersistence: persistence is MemoryAttentionStatePersistence)
+            allowInlinePersistence: persistence is MemoryPendingActionPersistence)
         guard case let .turn(turn) = event.fact else { throw ConversationError.conflict }
         try validateConversationFiles(turn.files)
         var next = state
         var conversation = next.conversation ?? ConversationState()
         let savedOrigin = next.remoteStates[event.binding.request]?.attentionTierOrigin ??
             next.inboxReferences?[event.binding.request]?.attentionTierOrigin
-        if let savedOrigin, let origin, savedOrigin != origin { throw ConversationError.conflict }
         do {
             try conversation.restoreReferencedTurn(event, for: receipt,
                 sameOriginFeed: origin != nil && origin == savedOrigin)
@@ -3068,7 +2714,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
         try validate(suppliedContext)
         let event = try Self.externalizingConversationFiles(in: event,
             using: conversationFileReferences,
-            allowInlinePersistence: persistence is MemoryAttentionStatePersistence)
+            allowInlinePersistence: persistence is MemoryPendingActionPersistence)
         try validate(event.binding.request, in: context.identity)
         switch event.fact {
         case let .turn(turn), let .revision(turn, _), let .redactedRevision(turn): try validateConversationFiles(turn.files)
@@ -3081,9 +2727,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
         } catch let error as ConversationValidationRejectionError {
             validationRejection = error.rejection
             throw ConversationError.invalidBinding
-        }
-        if conversation.cursor == state.conversation?.cursor {
-            return conversation.cursor
         }
         if let locallyReceivedAtMilliseconds,
            case let .turn(turn) = event.fact,
@@ -3098,9 +2741,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
         }
         let key = event.binding.request
         if case let .attentionTier(_, origin, tier, sessionHandle) = event.fact {
-            if let thread = conversation.threads[key], sessionHandle != thread.sessionHandle {
-                throw ConversationError.conflict
-            }
+            if let sessionHandle { conversation.threads[key]?.sessionHandle = sessionHandle }
             let hasRequest = next.requests[key] != nil
             var remote: RemoteRequestState
             if hasRequest {
@@ -3136,9 +2777,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
                 }
             }
             if current.terminal == nil, let id = next.intentByRequest[key], var intent = next.intents[id] {
-                if preservesOperationResult(intent.disposition) {
-                    throw ConversationError.conflict
-                }
                 // An authoritative newer open question proves an earlier final answer did not close it.
                 intent.disposition = .lost
                 next.intents[id] = intent
@@ -3148,7 +2786,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
         }
         if case let .terminal(_, _, terminal) = event.fact, next.requests[key] != nil {
             let previous = next.remoteStates[key] ?? RemoteRequestState()
-            guard previous.state == nil || previous.state == terminal else { throw ConversationError.conflict }
             var updated = previous
             updated.state = terminal
             next.remoteStates[key] = updated
@@ -3158,7 +2795,6 @@ public final class AttentionDomainStore: @unchecked Sendable {
             // This projection references the one ordinary terminal. It closes
             // action locally without advancing or fabricating its ordinary cursor.
             let previous = next.remoteStates[key] ?? RemoteRequestState()
-            guard previous.state == nil || previous.state == .cleared else { throw ConversationError.conflict }
             var updated = previous
             updated.state = .cleared
             updated.eventSequence = sequence
@@ -3180,6 +2816,11 @@ public final class AttentionDomainStore: @unchecked Sendable {
             next.outboxOrder.removeAll { next.intents[$0]?.requestKey == key }
         }
         next.conversation = conversation
+        if next.remoteStates[key]?.isTerminal == true {
+            dropUnsentAnswer(for: key, in: &next)
+        } else {
+            refreshEditableDraft(for: key, in: &next)
+        }
         try commit(next, allowingCommittedReads: true)
         return conversation.cursor
     }
@@ -3302,12 +2943,14 @@ public final class AttentionDomainStore: @unchecked Sendable {
         try validate(suppliedContext)
         let draft = try Self.externalizingConversationFiles(in: draft,
             using: conversationFileReferences,
-            allowInlinePersistence: persistence is MemoryAttentionStatePersistence)
+            allowInlinePersistence: persistence is MemoryPendingActionPersistence)
         try validate(draft.binding.request, in: context.identity)
         var next = state
         guard var conversation = next.conversation, var thread = conversation.threads[draft.binding.request],
               thread.revisions[draft.binding.revision] != nil else { throw ConversationError.missingRequest }
-        guard thread.allowsDiscussion || persistsOnlyLocalState else { throw ConversationError.closed }
+        // Saving user input does not send it or make cached closure authoritative.
+        // Delivery still validates the current server projection separately.
+        guard context.transportMode == .relay || thread.allowsDiscussion else { throw ConversationError.closed }
         if let previous = thread.drafts[draft.binding.revision] {
             switch previous.disposition {
             case .submitting, .outcomeUnknown, .acceptedPendingReplay: throw ConversationError.pendingSubmission
@@ -3337,7 +2980,9 @@ public final class AttentionDomainStore: @unchecked Sendable {
         guard var conversation = next.conversation,
               var thread = conversation.threads[binding.request],
               thread.revisions[binding.revision] != nil else { throw ConversationError.missingRequest }
-        guard thread.allowsDiscussion || persistsOnlyLocalState else { throw ConversationError.closed }
+        // Saving user input does not send it or make cached closure authoritative.
+        // Delivery still validates the current server projection separately.
+        guard context.transportMode == .relay || thread.allowsDiscussion else { throw ConversationError.closed }
         var draft = thread.drafts[binding.revision] ?? ConversationDraft(binding: binding)
         guard draft.binding == binding else { throw ConversationError.invalidBinding }
         switch draft.disposition {
@@ -3390,7 +3035,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
         let previousRevision = state.revision
         var next = state
         guard var conversation = next.conversation,
-              var thread = conversation.threads[request] else { throw ConversationError.missingRequest }
+              let thread = conversation.threads[request] else { throw ConversationError.missingRequest }
         let turn: ConversationTurn?
         if let requestedTurnID {
             turn = thread.turns.first {
@@ -3404,28 +3049,8 @@ public final class AttentionDomainStore: @unchecked Sendable {
                 previousRevision: previousRevision, revision: state.revision, didCommit: false)
         }
 
-        let targetIndex = thread.turns.firstIndex { $0.id == turn.id }
-        let currentIndex = thread.readThroughTurn.flatMap { readID in
-            thread.turns.firstIndex { $0.id == readID }
-        }
-        let currentPosition = conversation.chatReadPositions?[request] ?? 0
-        let localReadSequence = thread.readThroughTurn.flatMap { readID in
-            thread.turns.first { $0.id == readID }?.conversationSequence
-        } ?? 0
-        let currentReadSequence = max(currentPosition, localReadSequence)
-        let advancesLocalRead: Bool
-        if let sequence = turn.conversationSequence {
-            advancesLocalRead = sequence > currentReadSequence &&
-                targetIndex.map { target in currentIndex.map { target > $0 } ?? true } == true
-        } else {
-            advancesLocalRead = targetIndex.map { target in
-                currentIndex.map { target > $0 } ?? (thread.readThroughTurn != turn.id)
-            } ?? (thread.readThroughTurn != turn.id)
-        }
-        if advancesLocalRead { thread.readThroughTurn = turn.id }
-        conversation.threads[request] = thread
         let pending = conversation.prepareReadPosition(for: request, operationID: UUID(),
-            position: max(turn.conversationSequence ?? 0, currentReadSequence))
+            position: turn.conversationSequence ?? 0)
         if conversation == (state.conversation ?? ConversationState()) {
             return ConversationReadUpdate(pendingPosition: pending,
                 thread: conversation.threads[request], previousRevision: previousRevision,
@@ -3494,7 +3119,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
         guard context.transportMode == .fixture else { throw AttentionStoreError.fixtureOnlyOperation }
         let file = try Self.externalizingConversationFiles(in: file,
             using: conversationFileReferences,
-            allowInlinePersistence: persistence is MemoryAttentionStatePersistence)
+            allowInlinePersistence: persistence is MemoryPendingActionPersistence)
         var next = state
         guard var conversation = next.conversation, var thread = conversation.threads[binding.request],
               thread.revisions[binding.revision] != nil else { throw ConversationError.missingRequest }
@@ -3772,7 +3397,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
     private func storeAnswerDraft(_ draft: RequestDraft,
                                   for request: RequestKey,
                                   revision: UInt64,
-                                  in proposedState: inout PersistedAttentionState) {
+                                  in proposedState: inout ClientSessionState) {
         guard var conversation = proposedState.conversation,
               var thread = conversation.threads[request] else {
             proposedState.drafts[request] = draft
@@ -3791,7 +3416,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
 
     private func discardAnswerDraft(for request: RequestKey,
                                      revision: UInt64,
-                                     in proposedState: inout PersistedAttentionState) {
+                                     in proposedState: inout ClientSessionState) {
         guard var conversation = proposedState.conversation,
               var thread = conversation.threads[request] else {
             proposedState.drafts.removeValue(forKey: request)
@@ -3897,103 +3522,24 @@ public final class AttentionDomainStore: @unchecked Sendable {
         guard requestKey.accountScope == identity.personID else { throw AttentionStoreError.wrongAccount }
     }
 
-    private func localDraftProjection(from original: PersistedAttentionState) -> PersistedAttentionState {
-        var local = original
-        local.localDraftsOnly = true
-        local.requests = [:]
-        local.fixtureSessions = [:]
-        local.outboxOrder = []
-        local.remoteStates = [:]
-        local.appliedEvents = [:]
-        local.cursor = 0
-        local.replayBarrier = nil
-        local.replayPublishedRequests = nil
-        local.replayPublishedStates = nil
-        local.replayPublishedIntents = nil
-        local.replayPublishedInboxCurrentKeys = nil
-        local.repairIssues = []
-        local.inboxCheckpoint = nil
-        local.inboxCandidate = nil
-        local.inboxView = nil
-        local.cachedInboxCurrentKeys = nil
-        local.pendingRelayOverlays = nil
-        local.inboxReferences = nil
-        local.fencedIntents = [:]
-        local.pendingMessageOpens = []
-
-        for id in Array(local.intents.keys) {
-            guard var submission = local.intents[id], submission.disposition == .pending else { continue }
-            submission.disposition = .lost
-            local.intents[id] = submission
-        }
-
-        if let originalConversation = original.conversation {
-            var conversation = ConversationState()
-            for (key, originalThread) in originalConversation.threads {
-                let thread = Self.localDraftThread(originalThread)
-                if !thread.drafts.isEmpty || !(thread.answerDrafts ?? [:]).isEmpty {
-                    conversation.threads[key] = thread
-                }
-            }
-            local.conversation = conversation
-        } else {
-            local.conversation = nil
-        }
-        return local
-    }
-
-    private func commit(_ proposed: PersistedAttentionState,
+    private func commit(_ proposed: ClientSessionState,
                         allowingCommittedReads: Bool = true) throws {
-        // File payloads are normalized when events and drafts enter the state,
-        // and loaded state is normalized during initialization. Rewalking every
-        // retained conversation value here makes an unrelated text edit grow
-        // with conversation history.
         var next = proposed
         next.revision = state.revision &+ 1
-        // Readers may use the last committed snapshot while the next revision is
-        // encoded and persisted. The writer gate stays held through persistence,
-        // recovery, publication and the caller's index updates, so no writer can
-        // derive a new revision from the pending one.
-        var stateLockReleased = allowingCommittedReads
-        if stateLockReleased { lock.unlock() }
-        defer { if stateLockReleased { lock.lock() } }
+        let queue = PersistedPendingActions(state: next)
+        let encoder = PropertyListEncoder()
+        encoder.outputFormat = .binary
+        let bytes = try encoder.encode(queue)
+        if allowingCommittedReads { lock.unlock() }
         do {
-            let encoder = PropertyListEncoder()
-            encoder.outputFormat = .binary
-            let persisted = persistsOnlyLocalState ? localDraftProjection(from: next) : next
-            let bytes = try encoder.encode(persisted)
             try persistence.commit(bytes, identity: context.identity)
-            if stateLockReleased {
-                lock.lock()
-                stateLockReleased = false
-            }
-            state = next
-            for observer in Array(changeObservers.values) {
-                observer.yield(state.revision)
-            }
         } catch {
-            if !persistsOnlyLocalState,
-               let bytes = try? persistence.load(identity: context.identity),
-               let recovered = try? PropertyListDecoder().decode(PersistedAttentionState.self, from: bytes),
-               recovered.profileIdentity == context.identity,
-               let normalized = try? Self.externalizingConversationFiles(in: recovered,
-                    using: conversationFileReferences,
-                    allowInlinePersistence: persistence is MemoryAttentionStatePersistence) {
-                // A failed write may leave the prior on-disk plist in its legacy
-                // inline form. Keep the in-memory invariant used by text-only
-                // edits when recovering that older durable snapshot. This scan
-                // runs only after a failed commit, never on the normal edit path.
-                let recoveredIndex = Self.acceptedAwaitingTerminalReplay(in: normalized)
-                if stateLockReleased {
-                    lock.lock()
-                    stateLockReleased = false
-                }
-                state = normalized
-                acceptedAwaitingTerminalReplay = recoveredIndex
-            }
-            if let storeError = error as? AttentionStoreError { throw storeError }
-            throw AttentionStoreError.persistence(error.localizedDescription)
+            if allowingCommittedReads { lock.lock() }
+            throw error
         }
+        if allowingCommittedReads { lock.lock() }
+        state = next
+        for observer in Array(changeObservers.values) { observer.yield(state.revision) }
     }
 
     private func refreshAcceptedReplayIndex(for requestKey: RequestKey) {
@@ -4006,7 +3552,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
         acceptedAwaitingTerminalReplay[requestKey] = submission
     }
 
-    private static func acceptedAwaitingTerminalReplay(in state: PersistedAttentionState) -> [RequestKey: Submission] {
+    private static func acceptedAwaitingTerminalReplay(in state: ClientSessionState) -> [RequestKey: Submission] {
         var result: [RequestKey: Submission] = [:]
         for submission in state.intents.values where
             isAcceptedAwaitingTerminalReplay(submission, appliedEvents: state.appliedEvents) {
@@ -4128,39 +3674,52 @@ public final class AttentionDomainStore: @unchecked Sendable {
         return next
     }
 
-    private static func externalizingConversationFiles(in state: PersistedAttentionState,
-        using references: (any ConversationFileReferenceStore)?, allowInlinePersistence: Bool) throws -> PersistedAttentionState {
-        var next = state
-        next.appliedEvents = try state.appliedEvents.mapValues {
-            try externalizingConversationFiles(in: $0, using: references, allowInlinePersistence: allowInlinePersistence)
-        }
-        next.pendingRelayOverlays = try state.pendingRelayOverlays?.mapValues {
-            try externalizingConversationFiles(in: $0, using: references, allowInlinePersistence: allowInlinePersistence)
-        }
-        next.inboxCheckpoint = try state.inboxCheckpoint.map {
-            try externalizingConversationFiles(in: $0, using: references, allowInlinePersistence: allowInlinePersistence)
-        }
-        next.inboxCandidate = try state.inboxCandidate.map {
-            try externalizingConversationFiles(in: $0, using: references, allowInlinePersistence: allowInlinePersistence)
-        }
-        if let oldConversation = state.conversation {
-            var conversation = oldConversation
-            conversation.events = try oldConversation.events.mapValues {
-                try externalizingConversationFiles(in: $0, using: references, allowInlinePersistence: allowInlinePersistence)
-            }
-            conversation.threads = try oldConversation.threads.mapValues {
-                try externalizingConversationFiles(in: $0, using: references, allowInlinePersistence: allowInlinePersistence)
-            }
-            next.conversation = conversation
-        }
-        return next
-    }
 
     private func recordRepair(_ issue: StoreRepairIssue) throws {
         guard !state.repairIssues.contains(issue) else { return }
         var next = state
         next.repairIssues.append(issue)
         try commit(next)
+    }
+
+    private func dropUnsentAnswer(for key: RequestKey, in next: inout ClientSessionState) {
+        let ids = next.intents.compactMap { id, operation -> UUID? in
+            guard operation.requestKey == key else { return nil }
+            switch operation.disposition {
+            case .pending, .lost: return id
+            default: return nil
+            }
+        }
+        for id in ids { next.intents.removeValue(forKey: id) }
+        next.intentByRequest.removeValue(forKey: key)
+        next.outboxOrder.removeAll { ids.contains($0) }
+        next.drafts.removeValue(forKey: key)
+        next.pendingConversations[key]?.answerDrafts = nil
+    }
+
+    private func dropAnswersInvalidatedBySnapshot(_ checkpoint: InboxPagingCheckpoint,
+                                                       in next: inout ClientSessionState) {
+        guard checkpoint.checkpointAccepted else { return }
+        let queuedKeys = Set(next.drafts.keys).union(next.intentByRequest.keys)
+        for key in queuedKeys {
+            let terminal = next.remoteStates[key]?.isTerminal == true || next.inboxReferences?[key]?.isTerminal == true
+            let absent = checkpoint.nextCursor == nil && !checkpoint.currentKeys.contains(key)
+            if terminal || absent { dropUnsentAnswer(for: key, in: &next) }
+        }
+    }
+
+    /// Editor input is local work, never a constraint on an incoming server
+    /// projection. Recreate an incompatible editor from the current question;
+    /// already queued operations retain their exact bytes for the send check.
+    private func refreshEditableDraft(for key: RequestKey, additionalFiles: Set<ExactText> = [],
+                                      in next: inout ClientSessionState) {
+        guard let original = next.requests[key] else { return }
+        let payload = next.conversation?.threads[key]?.currentQuestionPayload ?? original.originalPayload
+        let request = StoredRequest(key: key, originalPayload: payload)
+        let files = Self.deliveredFileNames(for: key, in: next.conversation).union(additionalFiles)
+        let interface = request.interface(deliveredFileNames: files)
+        if let draft = next.drafts[key], validateDraft(draft, for: interface) { return }
+        next.drafts[key] = RequestDraft(interface: interface)
     }
 
     private func validateDraft(_ draft: RequestDraft, for interface: RequestInterface) -> Bool {
@@ -4386,45 +3945,202 @@ private struct SelectorBinding {
     let opaqueSubmissionID: ExactText
 }
 
-private struct PersistedAttentionState: Codable {
-    static let currentSchemaVersion = 2
-
-    let schemaVersion: Int
+private struct ClientSessionState {
     let profileIdentity: ProfileIdentity
+    var server = ServerProjectionCache()
     var revision: UInt64 = 0
-    var requests: [RequestKey: StoredRequest] = [:]
     var drafts: [RequestKey: RequestDraft] = [:]
     var fixtureSessions: [RequestKey: RequestSession] = [:]
     var intents: [UUID: Submission] = [:]
-    // Optional permits decoding older schema-2 profile files unchanged.
     var fencedIntents: [UUID: RequestKey]? = nil
     var intentByRequest: [RequestKey: UUID] = [:]
     var outboxOrder: [UUID] = []
-    var remoteStates: [RequestKey: RemoteRequestState] = [:]
-    var appliedEvents: [UInt64: RelayEvent] = [:]
-    var cursor: UInt64 = 0
-    var replayBarrier: UInt64?
-    var replayPublishedRequests: [RequestKey: StoredRequest]?
-    var replayPublishedStates: [RequestKey: RemoteRequestState]?
     var replayPublishedIntents: [UUID: Submission]?
-    var replayPublishedInboxCurrentKeys: Set<RequestKey>?
-    var repairIssues: [StoreRepairIssue] = []
-    // Optional fields preserve readability of existing schema-2 profile files.
-    var inboxCheckpoint: InboxPagingCheckpoint?
-    var inboxCandidate: InboxPagingCheckpoint?
-    var inboxView: InboxView?
-    var cachedInboxCurrentKeys: Set<RequestKey>?
-    var localDraftsOnly: Bool? = nil
-    var pendingRelayOverlays: [UInt64: RelayEvent]?
-    var inboxReferences: [RequestKey: RemoteRequestState]?
-    // Optional keeps existing schema-2 account files readable without resetting their data.
-    var conversation: ConversationState?
-    // Optional preserves schema-2 files created before deliberate-open reporting.
     var pendingMessageOpens: [PendingMessageOpen]?
+    var pendingConversations: [RequestKey: PendingConversationActions] = [:]
+    var pendingReadPositions: [RequestKey: PendingConversationReadPosition] = [:]
+    var requests: [RequestKey: StoredRequest] {
+        get { server.requests }
+        set { server.requests = newValue }
+    }
+    var remoteStates: [RequestKey: RemoteRequestState] {
+        get { server.remoteStates }
+        set { server.remoteStates = newValue }
+    }
+    var appliedEvents: [UInt64: RelayEvent] {
+        get { server.appliedEvents }
+        set { server.appliedEvents = newValue }
+    }
+    var cursor: UInt64 {
+        get { server.cursor }
+        set { server.cursor = newValue }
+    }
+    var replayBarrier: UInt64? {
+        get { server.replayBarrier }
+        set { server.replayBarrier = newValue }
+    }
+    var replayPublishedRequests: [RequestKey: StoredRequest]? {
+        get { server.replayPublishedRequests }
+        set { server.replayPublishedRequests = newValue }
+    }
+    var replayPublishedStates: [RequestKey: RemoteRequestState]? {
+        get { server.replayPublishedStates }
+        set { server.replayPublishedStates = newValue }
+    }
+    var replayPublishedInboxCurrentKeys: Set<RequestKey>? {
+        get { server.replayPublishedInboxCurrentKeys }
+        set { server.replayPublishedInboxCurrentKeys = newValue }
+    }
+    var repairIssues: [StoreRepairIssue] {
+        get { server.repairIssues }
+        set { server.repairIssues = newValue }
+    }
+    var inboxCheckpoint: InboxPagingCheckpoint? {
+        get { server.inboxCheckpoint }
+        set { server.inboxCheckpoint = newValue }
+    }
+    var inboxCandidate: InboxPagingCheckpoint? {
+        get { server.inboxCandidate }
+        set { server.inboxCandidate = newValue }
+    }
+    var inboxView: InboxView? {
+        get { server.inboxView }
+        set { server.inboxView = newValue }
+    }
+    var cachedInboxCurrentKeys: Set<RequestKey>? {
+        get { server.cachedInboxCurrentKeys }
+        set { server.cachedInboxCurrentKeys = newValue }
+    }
+    var pendingRelayOverlays: [UInt64: RelayEvent]? {
+        get { server.pendingRelayOverlays }
+        set { server.pendingRelayOverlays = newValue }
+    }
+    var inboxReferences: [RequestKey: RemoteRequestState]? {
+        get { server.inboxReferences }
+        set { server.inboxReferences = newValue }
+    }
+    var conversation: ConversationState? {
+        get {
+            guard var value = server.conversation else { return nil }
+            value.pendingChatReadPositions = pendingReadPositions
+            for key in Array(value.threads.keys) {
+                guard let queued = pendingConversations[key] else { continue }
+                value.threads[key]?.drafts = queued.drafts
+                value.threads[key]?.answerDrafts = queued.answerDrafts
+                value.threads[key]?.uploadGroups = queued.uploadGroups
+                value.threads[key]?.uploadCleanups = queued.uploadCleanups
+            }
+            return value
+        }
+        set {
+            guard var value = newValue else {
+                server.conversation = nil
+                return
+            }
+            pendingReadPositions = value.pendingChatReadPositions ?? [:]
+            value.pendingChatReadPositions = nil
+            for key in Array(value.threads.keys) {
+                guard var thread = value.threads[key] else { continue }
+                if server.conversation?.threads[key] == nil,
+                   let queued = pendingConversations[key] {
+                    // Input can precede the first server thread after upgrade
+                    // or restart. Hydrating that thread must not empty its queue.
+                    thread.drafts = queued.drafts
+                    thread.answerDrafts = queued.answerDrafts
+                    thread.uploadGroups = queued.uploadGroups
+                    thread.uploadCleanups = queued.uploadCleanups
+                    // Held server history may already prove an exact operation
+                    // accepted before the thread's original delivery arrives.
+                    for turn in thread.turns where turn.kind != .result {
+                        guard let operation = turn.operationID,
+                              let draft = thread.drafts[turn.binding.revision] else { continue }
+                        switch draft.disposition {
+                        case let .submitting(id) where id == operation,
+                             let .outcomeUnknown(id) where id == operation,
+                             let .acceptedPendingReplay(id, _) where id == operation:
+                            thread.drafts.removeValue(forKey: turn.binding.revision)
+                        default: break
+                        }
+                    }
+                }
+                pendingConversations[key] = PendingConversationActions(thread: thread)
+                thread.drafts = [:]
+                thread.answerDrafts = nil
+                thread.uploadGroups = nil
+                thread.uploadCleanups = nil
+                value.threads[key] = thread
+            }
+            server.conversation = value
+        }
+    }
+    init(profileIdentity: ProfileIdentity) { self.profileIdentity = profileIdentity }
+}
 
-    init(profileIdentity: ProfileIdentity) {
-        self.schemaVersion = Self.currentSchemaVersion
-        self.profileIdentity = profileIdentity
+/// Read once during upgrade, then delete the source file. Deliberately omits
+/// every server-owned field from the retired store's schema.
+private struct RetiredUnsentInput: Decodable {
+    let profileIdentity: ProfileIdentity
+    let drafts: [RequestKey: RequestDraft]?
+    let intents: [UUID: Submission]?
+    let intentByRequest: [RequestKey: UUID]?
+    let conversation: ConversationInput?
+
+    struct ConversationInput: Decodable {
+        // Decode only user input from each historical thread. Request content,
+        // accepted turns, read positions and the conversation cursor are ignored.
+        let threads: [RequestKey: PendingConversationActions]
+    }
+}
+
+/// Only unsent/uncertain local requests cross a process restart. No Server
+/// question, terminal, revision, read position or replay cursor is encoded here.
+private struct PersistedPendingActions: Codable {
+    let version: Int
+    let profileIdentity: ProfileIdentity
+    let operations: [UUID: Submission]
+    let activeOperations: [RequestKey: UUID]
+    // Local cancellation of an unsent operation belongs to the send queue.
+    // It must survive restart so a late submit cannot recreate that operation.
+    let cancelledOperations: [UUID: RequestKey]?
+    let answerDrafts: [RequestKey: RequestDraft]
+    let messageOpens: [PendingMessageOpen]?
+    let conversations: [RequestKey: PendingConversationActions]
+    let readPositions: [RequestKey: PendingConversationReadPosition]
+
+    init(state: ClientSessionState) {
+        version = 1
+        profileIdentity = state.profileIdentity
+        let pending = state.intents.filter { id, operation in
+            guard state.intentByRequest[operation.requestKey] == id else { return false }
+            switch operation.disposition {
+            case .pending, .lost: return true
+            default: return false
+            }
+        }
+        operations = pending
+        activeOperations = state.intentByRequest.filter { pending[$0.value] != nil }
+        cancelledOperations = state.fencedIntents
+        let keys = Set(pending.values.map(\.requestKey))
+        answerDrafts = state.drafts.filter { $0.value.hasEdits || keys.contains($0.key) }
+        messageOpens = state.pendingMessageOpens
+        conversations = state.pendingConversations
+        readPositions = state.pendingReadPositions
+    }
+}
+
+/// User-authored work awaiting transport. No request content, server revisions,
+/// accepted turns, terminal state or read cursor is stored with this queue.
+private struct PendingConversationActions: Codable {
+    var drafts: [UInt64: ConversationDraft]
+    var answerDrafts: [UInt64: RequestDraft]?
+    var uploadGroups: [UUID: ConversationUploadGroup]?
+    var uploadCleanups: [UUID: ConversationUploadCleanup]?
+
+    init(thread: ConversationThread) {
+        drafts = thread.drafts
+        answerDrafts = thread.answerDrafts
+        uploadGroups = thread.uploadGroups
+        uploadCleanups = thread.uploadCleanups
     }
 }
 

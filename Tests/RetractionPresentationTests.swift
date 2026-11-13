@@ -27,10 +27,18 @@ final class RetractionPresentationTests: XCTestCase {
     func testRetractionJoinsBothDurableOrdersWithoutRewritingQueuedBindingsOrReopening() async throws {
         for conversationFirst in [false, true] {
             let context = profile()
-            let persistence = MemoryAttentionStatePersistence()
-            let domain = try AttentionDomainStore(context: context, persistence: persistence)
+            let persistence = MemoryPendingActionPersistence()
+            let domain = try ClientRepository(context: context, persistence: persistence)
             let key = RequestKey(accountScope: context.identity.personID, senderID: ExactText("sender"), messageID: ExactText("request"))
             let payload = try JSONValue.parse(Data(#"{"title":"Original wording","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"keep","label":"Keep original choice","kind":"value","value":"keep"}]}}"#.utf8))
+            let confirmationDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: confirmationDirectory) }
+            let confirmation = try await NativeRelayLifecycle.shared.confirmInProcessSessionForTesting(
+                store: domain, context: context,
+                session: ReplyCheckpointSession(identity: context.identity, key: key, payload: payload),
+                serverStateCache: FileServerStateCache(identity: context.identity,
+                    fileURL: confirmationDirectory.appendingPathComponent("server-cache.json")))
+            XCTAssertTrue(confirmation.relayConfirmed)
             try domain.apply(RelayEvent(sequence: 1, body: .delivery(StoredRequest(key: key, originalPayload: payload), .message),
                 conversation: RelayConversationMetadata(revision: 1, sessionHandle: ExactText("handle"), eventID: ExactText("1"))), context: context)
             let port = AttentionDomainPort(store: domain)
@@ -52,7 +60,7 @@ final class RetractionPresentationTests: XCTestCase {
                 try domain.apply(lifecycle, context: context)
                 XCTAssertEqual(try domain.conversationSnapshot(context: context).cursor, 0)
             }
-            let midway = try AttentionDomainStore(context: context, persistence: persistence)
+            let midway = try await reopenWithServerCache(domain, context: context, persistence: persistence)
             XCTAssertTrue(try midway.conversationSnapshot(context: context).threads[key]?.isRetracted == true)
             XCTAssertEqual(try midway.conversationSnapshot(context: context).threads[key]?.retraction?.retractedAtMilliseconds,
                            Self.retractedAt, "Either durable copy alone carries the retraction time")
@@ -65,10 +73,9 @@ final class RetractionPresentationTests: XCTestCase {
             try domain.apply(lifecycle, context: context)
             try domain.applyConversation(fact, context: context)
             let thread = try XCTUnwrap(domain.conversationSnapshot(context: context).threads[key])
-            let savedAnswer = try XCTUnwrap(port.inspectAnswerDraft(context: port.context, request: key, revision: 1))
-            XCTAssertEqual(savedAnswer.title, ExactText("Original wording"))
-            XCTAssertEqual(savedAnswer.draft.compatibility.selectedActionID, ExactText("keep"))
-            XCTAssertNil(savedAnswer.selector)
+            XCTAssertNil(try port.inspectAnswerDraft(context: port.context, request: key, revision: 1),
+                         "A terminal server state drops the stale unsent answer draft.")
+            XCTAssertEqual(thread.currentQuestionPayload.value(named: "title")?.stringValue, ExactText("Original wording"))
             XCTAssertEqual(thread.turns.filter { $0.kind == .terminal }.count, 1)
             XCTAssertEqual(thread.terminalTurn, ExactText("3"))
             XCTAssertEqual(thread.retraction?.terminalSequence, 2)
@@ -103,11 +110,10 @@ final class RetractionPresentationTests: XCTestCase {
             XCTAssertTrue(model.isRetracted(key))
             XCTAssertTrue(model.conversation(for: key)?.isRetracted == true)
             XCTAssertEqual(try domain.snapshot(context: context).requests.count, 1)
-            XCTAssertEqual(try XCTUnwrap(port.inspectAnswerDraft(context: port.context, request: key, revision: 1))
-                .draft.compatibility.selectedActionID, ExactText("keep"))
+            XCTAssertNil(try port.inspectAnswerDraft(context: port.context, request: key, revision: 1))
             XCTAssertEqual(try domain.lookupIntent(receipt.intentID, context: context), retained)
 
-            let relaunchedDomain = try AttentionDomainStore(context: context, persistence: persistence)
+            let relaunchedDomain = try await reopenWithServerCache(domain, context: context, persistence: persistence)
             let relaunched = try LivePresentationStore(store: relaunchedDomain, context: context)
             XCTAssertFalse(relaunched.inboxRows.contains { $0.key == key }, "An expired timestamp stays hidden after relaunch")
             XCTAssertEqual(relaunched.expiredRetractionSearchRows.map(\.key), [key],
@@ -148,20 +154,20 @@ final class RetractionPresentationTests: XCTestCase {
                      "A plain legacy terminal still carries no conversation meaning")
     }
 
-    func testFreshInboxPageKeepsTheRetractionTimeOfItsTerminal() throws {
-        try checkFreshInboxRetraction(terminal: snapshotTerminal, enriched: false)
+    func testFreshInboxPageKeepsTheRetractionTimeOfItsTerminal() async throws {
+        try await checkFreshInboxRetraction(terminal: snapshotTerminal, enriched: false)
     }
 
-    func testFreshInboxPageWithAuthoritativeRetractionIdentityJoinsConversationReplay() throws {
+    func testFreshInboxPageWithAuthoritativeRetractionIdentityJoinsConversationReplay() async throws {
         // Paging enrichment copies these existing lifecycle identity fields;
         // it does not add a session handle or a new retraction event.
-        try checkFreshInboxRetraction(terminal: ordinary, enriched: true)
+        try await checkFreshInboxRetraction(terminal: ordinary, enriched: true)
     }
 
-    private func checkFreshInboxRetraction(terminal: Data, enriched: Bool) throws {
+    private func checkFreshInboxRetraction(terminal: Data, enriched: Bool) async throws {
         let context = profile()
-        let persistence = MemoryAttentionStatePersistence()
-        let domain = try AttentionDomainStore(context: context, persistence: persistence)
+        let persistence = MemoryPendingActionPersistence()
+        let domain = try ClientRepository(context: context, persistence: persistence)
         let key = RequestKey(accountScope: context.identity.personID, senderID: ExactText("sender"), messageID: ExactText("request"))
         let delivery = #"{"v":1,"type":"delivery","seq":1,"sender_id":"sender","message_id":"request","origin":"origin","as":"message","message":{"title":"Retained question"},"request_revision":1,"session_handle":"handle","event_id":"1"}"#
         let frame = Data((#"{"v":1,"type":"ok","ref":"native-inbox","paging_version":1,"snapshot_id":"snapshot","high_water":2,"items":[{"acceptance":"#
@@ -172,7 +178,7 @@ final class RetractionPresentationTests: XCTestCase {
         _ = try domain.beginInboxCandidate(startupID: "startup", since: 0, batches: [], context: context)
         try domain.saveInboxInitialPage(snapshotID: page.snapshotID, highWater: page.highWater, items: page.items,
                                         nextCursor: page.nextCursor, receiptCursor: page.receiptCursor, context: context)
-        let restored = try AttentionDomainStore(context: context, persistence: persistence)
+        let restored = try await reopenWithServerCache(domain, context: context, persistence: persistence)
         let thread = try XCTUnwrap(restored.conversationSnapshot(context: context).threads[key])
         XCTAssertTrue(thread.isRetracted)
         XCTAssertEqual(thread.terminal, .cleared)
@@ -203,10 +209,10 @@ final class RetractionPresentationTests: XCTestCase {
                                                           operationID: operationID))
     }
 
-    func testDisconnectedStoreShowsNotAcceptedForRetainedRefusedAttempt() throws {
+    func testDisconnectedRetractionDoesNotPresentLocalAttemptAsServerAnswer() throws {
         let context = profile()
-        let domain = try AttentionDomainStore(context: context,
-            persistence: MemoryAttentionStatePersistence())
+        let domain = try ClientRepository(context: context,
+            persistence: MemoryPendingActionPersistence())
         let key = RequestKey(accountScope: context.identity.personID,
             senderID: ExactText("fixture-sender"), messageID: ExactText("not-accepted-retained"))
         let payload = try JSONValue.parse(Data(#"{"title":"Archive sketches","body":"Choose what to do with the earlier sketches.","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"keep","label":"Keep original choice","kind":"value","value":"keep"}]}}"#.utf8))
@@ -230,11 +236,11 @@ final class RetractionPresentationTests: XCTestCase {
         let selector = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first?.selector)
         let receipt = try port.submit(SubmitIntent(context: port.context, selector: selector,
             intentID: UUID(), inputs: [.compatibilityValue(action: ExactText("keep"))]))
+        try domain.recordAnswerRefusedByRetraction(receipt.intentID, operationID: receipt.opID,
+            retractedAtMilliseconds: Self.retractedAt, context: context)
         try domain.applyConversation(ConversationEvent(sequence: 3, binding: binding,
             fact: .retraction(turn: ExactText("not-accepted-retracted"), terminalSequence: 1),
             retractedAtMilliseconds: Self.retractedAt), context: context)
-        try domain.recordAnswerRefusedByRetraction(receipt.intentID, operationID: receipt.opID,
-            retractedAtMilliseconds: Self.retractedAt, context: context)
 
         let disconnected = try LivePresentationStore(disconnectedStore: domain, context: context)
         let shown = try XCTUnwrap(disconnected.request(for: key))
@@ -245,8 +251,9 @@ final class RetractionPresentationTests: XCTestCase {
 
         let attemptedAnswer = AnswerConfirmationText.formatted(accountAnswerOutcome: nil,
             submittedAnswer: shown.submittedAnswer, projection: shown.projection)
-        XCTAssertEqual(attemptedAnswer, "Keep original choice")
-        XCTAssertTrue(LiveRequestDetail.shouldShowNotAcceptedConfirmation(
+        XCTAssertNil(attemptedAnswer, "A locally attempted choice is not a server answer.")
+        XCTAssertEqual(try domain.lookupIntent(receipt.intentID, context: context)?.operationID, receipt.opID)
+        XCTAssertFalse(LiveRequestDetail.shouldShowNotAcceptedConfirmation(
             isRetracted: disconnected.isRetracted(key), isSupersedesReadOnly: false,
             ownOutcome: shown.receiptFacts?.ownOutcome,
             relayOutcome: shown.intentReceipt?.relayOutcome,
@@ -256,8 +263,8 @@ final class RetractionPresentationTests: XCTestCase {
 
     func testRefusedQueuedAnswerIsKeptAsRefusedAndShownRetracted() async throws {
         let context = profile()
-        let persistence = MemoryAttentionStatePersistence()
-        let domain = try AttentionDomainStore(context: context, persistence: persistence)
+        let persistence = MemoryPendingActionPersistence()
+        let domain = try ClientRepository(context: context, persistence: persistence)
         let key = RequestKey(accountScope: context.identity.personID, senderID: ExactText("sender"), messageID: ExactText("request"))
         let payload = try JSONValue.parse(Data(#"{"title":"Original wording","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"keep","label":"Keep original choice","kind":"value","value":"keep"}]}}"#.utf8))
         try domain.apply(RelayEvent(sequence: 1, body: .delivery(StoredRequest(key: key, originalPayload: payload), .message),
@@ -267,30 +274,32 @@ final class RetractionPresentationTests: XCTestCase {
         let receipt = try port.submit(SubmitIntent(context: port.context, selector: selector, intentID: UUID(),
             inputs: [.compatibilityValue(action: ExactText("keep"))]))
         let refused = IntentDisposition.refusedByRetraction(retractedAtMilliseconds: Self.retractedAt)
-        let session = RefusalSession(context.identity, refusal: refusal, profile: context)
+        let session = RefusalSession(context.identity, refusal: refusal, profile: context,
+                                     payload: payload, terminal: ordinary)
         let core = try NativeRelayCore(store: domain, context: context, session: session)
         _ = try await core.resyncAndDrainOutbox()
+        XCTAssertTrue(session.sentOperationIDs.isEmpty, "Refresh never sends the queued answer.")
+        try await core.sendOriginalOperationForUserTap(receipt.intentID)
         XCTAssertEqual(session.sentOperationIDs, [receipt.opID])
+        XCTAssertEqual(try domain.lookupIntent(receipt.intentID, context: context)?.disposition, refused)
 
-        let restored = try AttentionDomainStore(context: context, persistence: persistence)
-        XCTAssertEqual(try restored.lookupIntent(receipt.intentID, context: context)?.disposition, refused)
+        let restored = try await reopenWithServerCache(domain, context: context, persistence: persistence)
+        XCTAssertNil(try restored.lookupIntent(receipt.intentID, context: context),
+                     "A definitively refused operation is no longer an unsent queue entry.")
         XCTAssertTrue(try restored.snapshot(context: context).outbox.isEmpty)
         let live = try LivePresentationStore(store: restored, context: context)
         let shown = try XCTUnwrap(live.request(for: key))
         XCTAssertEqual(shown.lifecycleStatus, .cleared)
-        XCTAssertEqual(shown.receiptFacts?.ownOutcome, .refused)
-        XCTAssertEqual(shown.intentReceipt?.relayOutcome,
-                       .refusedByRetraction(retractedAtMilliseconds: Self.retractedAt))
+        XCTAssertNil(shown.intentReceipt, "A queue receipt cannot override the restored server state.")
         let attemptedAnswerText = AnswerConfirmationText.formatted(
             accountAnswerOutcome: nil, submittedAnswer: shown.submittedAnswer,
             projection: shown.projection)
-        XCTAssertEqual(attemptedAnswerText, "Keep original choice",
-                       "Only the durable submitted answer supplies the Not accepted card text.")
-        XCTAssertTrue(LiveRequestDetail.shouldShowNotAcceptedConfirmation(
+        XCTAssertNil(attemptedAnswerText, "The refused local input is not a server answer.")
+        XCTAssertFalse(LiveRequestDetail.shouldShowNotAcceptedConfirmation(
             isRetracted: live.isRetracted(key), isSupersedesReadOnly: false,
             ownOutcome: nil, relayOutcome: shown.intentReceipt?.relayOutcome,
             attemptedAnswerText: attemptedAnswerText),
-            "The actual refused receipt remains visible even without receiptFacts.")
+            "The restored detail shows the server retraction without inventing an answer.")
         XCTAssertTrue(live.isRetracted(key))
         XCTAssertEqual(live.retractionDate(key)?.timeIntervalSince1970 ?? 0, Self.retractedAtSeconds, accuracy: 0.000_5)
         XCTAssertFalse(live.openRequests.contains { $0.key == key }, "A refused answer no longer needs attention")
@@ -301,7 +310,9 @@ final class RetractionPresentationTests: XCTestCase {
         XCTAssertEqual(session.sentOperationIDs, [receipt.opID], "A definite refusal is never resent")
 
         let otherTime = try RelayWire(profile: context).decodeEvent(edited(ordinary, "1760000000123", "1760000000999"))
-        XCTAssertThrowsError(try domain.apply(otherTime, context: context))
+        try domain.apply(otherTime, context: context)
+        XCTAssertEqual(try domain.conversationSnapshot(context: context).threads[key]?.retraction?.retractedAtMilliseconds,
+                       1_760_000_000_999, "An incoming server time replaces the cached one.")
         XCTAssertEqual(try domain.lookupIntent(receipt.intentID, context: context)?.disposition, refused)
 
         try domain.apply(RelayWire(profile: context).decodeEvent(ordinary), context: context)
@@ -324,7 +335,7 @@ final class RetractionPresentationTests: XCTestCase {
         XCTAssertThrowsError(try wire.decodeEvent(edited(delivery, #","retracted_at":1760000000123"#, "")))
         for lifecycleAgrees in [true, false] {
             let context = profile()
-            let domain = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
+            let domain = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
             let key = RequestKey(accountScope: context.identity.personID, senderID: ExactText("sender"), messageID: ExactText("request"))
             try domain.apply(try RelayWire(profile: context).decodeEvent(delivery), context: context)
             let port = AttentionDomainPort(store: domain)
@@ -344,7 +355,9 @@ final class RetractionPresentationTests: XCTestCase {
                 XCTAssertEqual(try domain.conversationSnapshot(context: context).threads[key]?.retraction?.retractedAtMilliseconds,
                                Self.retractedAt)
             } else {
-                XCTAssertThrowsError(try domain.apply(lifecycle, context: context), "One retraction has one time")
+                try domain.apply(lifecycle, context: context)
+                XCTAssertEqual(try domain.conversationSnapshot(context: context).threads[key]?.retraction?.retractedAtMilliseconds,
+                               Self.retractedAt + 1, "The new server projection replaces a cached retraction time.")
             }
         }
     }
@@ -354,7 +367,7 @@ final class RetractionPresentationTests: XCTestCase {
         let defaults = try XCTUnwrap(UserDefaults(suiteName: namespace))
         defer { defaults.removePersistentDomain(forName: namespace) }
         let context = profile()
-        let domain = try AttentionDomainStore(context: context, persistence: MemoryAttentionStatePersistence())
+        let domain = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
         let retractedKey = RequestKey(accountScope: context.identity.personID, senderID: ExactText("sender"), messageID: ExactText("request"))
         let staleKey = RequestKey(accountScope: context.identity.personID, senderID: ExactText("sender"), messageID: ExactText("stale"))
         let openKey = RequestKey(accountScope: context.identity.personID, senderID: ExactText("sender"), messageID: ExactText("open"))
@@ -398,28 +411,51 @@ final class RetractionPresentationTests: XCTestCase {
     func testEachCursorAcknowledgesOnlyItsDurableRetractionCopy() async throws {
         for failConversationCommit in [false, true] {
             let context = profile()
-            let persistence = MemoryAttentionStatePersistence()
-            let domain = try AttentionDomainStore(context: context, persistence: persistence)
+            let persistence = MemoryPendingActionPersistence()
+            let domain = try ClientRepository(context: context, persistence: persistence)
             let key = RequestKey(accountScope: context.identity.personID, senderID: ExactText("sender"), messageID: ExactText("request"))
             try domain.apply(RelayEvent(sequence: 1, body: .delivery(StoredRequest(key: key,
                 originalPayload: .object([JSONMember("title", .string(ExactText("Retained question")))])), .message),
                 conversation: RelayConversationMetadata(revision: 1, sessionHandle: ExactText("handle"), eventID: ExactText("1"))), context: context)
-            let session = RetractionSession(domain: domain, context: context, persistence: persistence,
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let cache = RetractionTestCache(identity: context.identity,
+                url: directory.appendingPathComponent("server-cache.json"))
+            let session = RetractionSession(context: context, cache: cache,
                 ordinary: ordinary, projected: projected, failConversationCommit: failConversationCommit)
-            let core = try NativeRelayCore(store: domain, context: context, session: session)
+            let core = try NativeRelayCore(store: domain, context: context, session: session,
+                                          serverStateCache: cache)
             do {
                 _ = try await core.resyncAndDrainOutbox()
                 XCTAssertFalse(failConversationCommit)
             } catch { XCTAssertTrue(failConversationCommit, "Unexpected replay failure: \(error)") }
             XCTAssertTrue(session.ordinaryAcknowledged)
             XCTAssertEqual(session.conversationAcknowledged, !failConversationCommit)
-            let restored = try AttentionDomainStore(context: context, persistence: persistence)
+            let cached = try await cache.load()
+            let restored = try ClientRepository(context: context, persistence: persistence)
+            try restored.restoreCachedServerState(try XCTUnwrap(cached).attentionDomainState(for: context.identity),
+                                                  context: context)
             XCTAssertEqual(try restored.snapshot(context: context).cursor, 2)
             XCTAssertEqual(try restored.conversationSnapshot(context: context).cursor, failConversationCommit ? 0 : 1)
             XCTAssertTrue(try restored.conversationSnapshot(context: context).threads[key]?.isRetracted == true)
         }
     }
 
+    private func reopenWithServerCache(_ domain: ClientRepository, context: ProfileContext,
+                                       persistence: MemoryPendingActionPersistence) async throws -> ClientRepository {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("server-cache.json")
+        let cache = FileServerStateCache(identity: context.identity, fileURL: url)
+        try await cache.save(ServerStateCacheSnapshot.make(identity: context.identity,
+            from: domain.snapshot(context: context), conversations: domain.conversationSnapshot(context: context)))
+        let cached = try await FileServerStateCache(identity: context.identity, fileURL: url).load()
+        let restored = try ClientRepository(context: context, persistence: persistence)
+        XCTAssertTrue(try restored.conversationSnapshot(context: context).threads.isEmpty)
+        try restored.restoreCachedServerState(try XCTUnwrap(cached).attentionDomainState(for: context.identity),
+                                              context: context)
+        return restored
+    }
     private func edited(_ frame: Data, _ target: String, _ replacement: String) -> Data {
         let text = String(decoding: frame, as: UTF8.self)
         precondition(text.contains(target))
@@ -434,19 +470,33 @@ final class RetractionPresentationTests: XCTestCase {
 
 private final class RetractionSession: AuthenticatedInboxPagingSession, AuthenticatedConversationSession, @unchecked Sendable {
     let authenticatedIdentity: ProfileIdentity
-    let domain: AttentionDomainStore
     let context: ProfileContext
-    let persistence: MemoryAttentionStatePersistence
+    let cache: RetractionTestCache
     let ordinary: Data
     let projected: Data
     let failConversationCommit: Bool
     private(set) var ordinaryAcknowledged = false
     private(set) var conversationAcknowledged = false
-    init(domain: AttentionDomainStore, context: ProfileContext, persistence: MemoryAttentionStatePersistence,
+    init(context: ProfileContext, cache: RetractionTestCache,
          ordinary: Data, projected: Data, failConversationCommit: Bool) {
         self.authenticatedIdentity = context.identity
-        self.domain = domain; self.context = context; self.persistence = persistence
+        self.context = context; self.cache = cache
         self.ordinary = ordinary; self.projected = projected; self.failConversationCommit = failConversationCommit
+    }
+    func inboxRequest(_ request: Data, ref: String) async throws -> Data {
+        let parsed = try JSONValue.parse(request)
+        guard parsed.uniqueValue(named: "type")?.stringValue?.rawValue == "inbox_start" else {
+            return try await emptyInboxReply(request, ref: ref)
+        }
+        return try JSONSerialization.data(withJSONObject: [
+            "v": 1, "type": "ok", "ref": ref, "paging_version": 1,
+            "snapshot_id": "retraction-start", "high_water": 1,
+            "items": [["acceptance": ["v": 1, "type": "delivery", "seq": 1,
+                "sender_id": "sender", "message_id": "request", "origin": "origin", "as": "message",
+                "message": ["title": "Retained question"], "request_revision": 1,
+                "session_handle": "handle", "event_id": "1"]]],
+            "next_cursor": NSNull(), "receipt_cursor": NSNull()
+        ])
     }
     func resync(_ request: Data, consume: @Sendable (Data) async throws -> Void) async throws {
         try await consume(Data(#"{"v":1,"type":"ok","ref":"native-sync"}"#.utf8))
@@ -454,22 +504,22 @@ private final class RetractionSession: AuthenticatedInboxPagingSession, Authenti
         try await consume(Data(#"{"v":1,"type":"resynced","seq":2}"#.utf8))
     }
     func acknowledge(_ request: Data) async throws {
-        let restored = try AttentionDomainStore(context: context, persistence: persistence)
-        guard try restored.snapshot(context: context).cursor == 2,
-              try restored.conversationSnapshot(context: context).threads.values.first?.isRetracted == true else {
+        let persisted = try await cache.load()
+        guard persisted?.cursor == 2,
+              persisted?.conversations.first?.thread.isRetracted == true else {
             throw NativeRelayCoreError.eventRejected
         }
         ordinaryAcknowledged = true
     }
     func openConversation(_ request: Data, consume: @Sendable (Data) async throws -> Void) async throws {
         try await consume(Data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#.utf8))
-        if failConversationCommit { persistence.failNextCommit() }
+        if failConversationCommit { await cache.failNextSave() }
         try await consume(projected)
         try await consume(Data(#"{"v":1,"type":"conversation_resynced","conversation_seq":1}"#.utf8))
     }
     func acknowledgeConversation(_ request: Data) async throws {
-        let restored = try AttentionDomainStore(context: context, persistence: persistence)
-        guard try restored.conversationSnapshot(context: context).cursor == 1 else { throw NativeRelayCoreError.eventRejected }
+        let persisted = try await cache.load()
+        guard persisted?.conversationCursor == 1 else { throw NativeRelayCoreError.eventRejected }
         conversationAcknowledged = true
     }
     func sendOriginalOperation(_ frame: Data, operationID: UUID) async throws -> OriginalOperationResult { .unresolved }
@@ -479,17 +529,59 @@ private final class RefusalSession: AuthenticatedInboxPagingSession, @unchecked 
     let authenticatedIdentity: ProfileIdentity
     let refusal: Data
     let profile: ProfileContext
+    let payload: JSONValue
+    let terminal: Data
     private(set) var sentOperationIDs: [UUID] = []
-    init(_ identity: ProfileIdentity, refusal: Data, profile: ProfileContext) {
+    init(_ identity: ProfileIdentity, refusal: Data, profile: ProfileContext,
+         payload: JSONValue, terminal: Data) {
         authenticatedIdentity = identity; self.refusal = refusal; self.profile = profile
+        self.payload = payload; self.terminal = terminal
+    }
+    func inboxRequest(_ request: Data, ref: String) async throws -> Data {
+        let parsed = try JSONValue.parse(request)
+        guard parsed.uniqueValue(named: "type")?.stringValue?.rawValue == "inbox_start" else {
+            return try await emptyInboxReply(request, ref: ref)
+        }
+        var item: [String: Any] = ["acceptance": ["v": 1, "type": "delivery", "seq": 1,
+            "sender_id": "sender", "message_id": "request", "origin": "origin", "as": "message",
+            "message": try JSONSerialization.jsonObject(with: Data(payload.canonicalJSON.utf8)),
+            "request_revision": 1, "session_handle": "handle", "event_id": "1"]]
+        if !sentOperationIDs.isEmpty { item["terminal"] = try JSONSerialization.jsonObject(with: terminal) }
+        return try JSONSerialization.data(withJSONObject: [
+            "v": 1, "type": "ok", "ref": ref, "paging_version": 1,
+            "snapshot_id": "refusal-start", "high_water": sentOperationIDs.isEmpty ? 1 : 2,
+            "items": [item], "next_cursor": NSNull(), "receipt_cursor": NSNull()
+        ])
     }
     func resync(_ request: Data, consume: @Sendable (Data) async throws -> Void) async throws {
         try await consume(Data(#"{"v":1,"type":"ok","ref":"native-sync"}"#.utf8))
-        try await consume(Data(#"{"v":1,"type":"resynced","seq":1}"#.utf8))
+        let high = sentOperationIDs.isEmpty ? 1 : 2
+        let frame = try JSONSerialization.jsonObject(with: request) as? [String: Any]
+        let since = (frame?["since"] as? NSNumber)?.uint64Value ?? 0
+        if high == 2 && since < 2 { try await consume(terminal) }
+        try await consume(Data("{\"v\":1,\"type\":\"resynced\",\"seq\":\(high)}".utf8))
     }
     func acknowledge(_ request: Data) async throws {}
     func sendOriginalOperation(_ frame: Data, operationID: UUID) async throws -> OriginalOperationResult {
         sentOperationIDs.append(operationID)
         return try RelayWire(profile: profile).decodeAnswerRefusal(refusal, operationID: operationID) ?? .unresolved
     }
+}
+
+private actor RetractionTestCache: ServerStateCaching {
+    private let file: FileServerStateCache
+    private var failSave = false
+    init(identity: ProfileIdentity, url: URL) {
+        file = FileServerStateCache(identity: identity, fileURL: url)
+    }
+    func failNextSave() { failSave = true }
+    func load() async throws -> ServerStateCacheSnapshot? { try await file.load() }
+    func save(_ snapshot: ServerStateCacheSnapshot) async throws {
+        if failSave {
+            failSave = false
+            throw ServerStateCacheError.storage("Injected cache write failure")
+        }
+        try await file.save(snapshot)
+    }
+    func discard() async throws { try await file.discard() }
 }
