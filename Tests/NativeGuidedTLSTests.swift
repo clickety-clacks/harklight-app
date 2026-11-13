@@ -1139,6 +1139,11 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertEqual(queuedHigh, 3)
         XCTAssertNil(session.sentOriginalOperation(), "Refresh must leave the queued Seen action unsent.")
         try await core.sendOriginalOperationForUserTap(receipt.intentID)
+        try live.refreshFromDurableStore()
+        XCTAssertEqual(live.request(for: seenKey)?.informationalSeenStatus, .pending,
+                       "An accepted operation receipt cannot supply the server's Seen projection.")
+        let seenHigh = try await core.resyncAndDrainOutbox()
+        XCTAssertEqual(seenHigh, 4)
         XCTAssertEqual(try store.relayCursor(context: context), 4)
         XCTAssertEqual(session.acknowledgedSequences(), [3, 4],
                        "The checkpoint at 3 is ACKed separately; only the post-H terminal uses ordinary ACK.")
