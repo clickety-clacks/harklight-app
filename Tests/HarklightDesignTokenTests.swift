@@ -29,6 +29,29 @@ final class HarklightDesignTokenTests: XCTestCase {
         XCTAssertEqual(informationalRow.resolvedMessageType, .info)
     }
 
+    func testWireTypeAndKindChooseTheMessageType() {
+        func type(_ declared: MessageTypeValue?, _ kind: MessageKindValue?, seen: Bool = false) -> HarklightMessageType {
+            HarklightMessageType(declaredType: declared, kind: kind, hasSeenDescriptor: seen)
+        }
+        XCTAssertEqual(type(.request, nil), .request)
+        XCTAssertEqual(type(.request, .blocker), .error)
+        XCTAssertEqual(type(.request, .success), .request)
+        XCTAssertEqual(type(.fyi, nil), .info)
+        XCTAssertEqual(type(.fyi, .success), .done)
+        XCTAssertEqual(type(.fyi, .blocker), .warning)
+        XCTAssertEqual(type(.request, nil, seen: true), .request,
+                       "A declared type wins over the legacy Seen descriptor.")
+        XCTAssertEqual(type(nil, nil, seen: true), .info)
+        XCTAssertEqual(type(nil, nil), .request)
+
+        let blockerRow = InboxRequestRow(
+            key: RequestKey(accountScope: ExactText("design"), senderID: ExactText("sender"),
+                            messageID: ExactText("blocker")),
+            title: "Blocked", sender: "Sender", status: "",
+            declaredMessageType: .fyi, declaredMessageKind: .blocker)
+        XCTAssertEqual(blockerRow.resolvedMessageType, .warning)
+    }
+
     func testEveryMessageTypeHasATintInBothAppearances() {
         let expectedTypes = Set(HarklightMessageType.allCases.map(\.rawValue))
         XCTAssertEqual(Set(HarklightDesignSystem.source.light.derived.typeTint.keys), expectedTypes)

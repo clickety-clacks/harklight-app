@@ -2,6 +2,22 @@ import SwiftUI
 import UIKit
 import AttentionDomain
 
+extension HarklightMessageType {
+    /// The design type of a message from its wire type and kind, as the app
+    /// and the web page share it. An untyped legacy message is an fyi when it
+    /// carries the Seen descriptor and a request otherwise.
+    init(declaredType: MessageTypeValue?, kind: MessageKindValue?, hasSeenDescriptor: Bool) {
+        let type = declaredType ?? (hasSeenDescriptor ? .fyi : .request)
+        switch (type, kind) {
+        case (.request, .blocker): self = .error
+        case (.request, _): self = .request
+        case (.fyi, .blocker): self = .warning
+        case (.fyi, .success): self = .done
+        case (.fyi, nil): self = .info
+        }
+    }
+}
+
 enum InboxPriorityDisplay: String, Equatable {
     case urgent = "now"
     case high
@@ -542,8 +558,8 @@ struct InboxRequestRow: Identifiable {
 
     var resolvedMessageType: HarklightMessageType {
         if let messageType { return messageType }
-        if informationalSeenStatus != nil { return .info }
-        return .request
+        return HarklightMessageType(declaredType: declaredMessageType, kind: declaredMessageKind,
+                                    hasSeenDescriptor: informationalSeenStatus != nil)
     }
 
     static func responseReceiptStatus(_ receipt: IntentReceipt?,
