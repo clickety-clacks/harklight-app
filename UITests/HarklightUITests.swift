@@ -317,6 +317,8 @@ final class HarklightUITests: XCTestCase {
                       "The pending row is reopened to simulate its later server outcome.")
         XCTAssertTrue(app.descendants(matching: .any)["request-answered"].waitForExistence(timeout: 5),
                       "The reopened detail reflects the accepted answer.")
+        XCTAssertTrue(app.descendants(matching: .any)["request-closing-scene"].waitForExistence(timeout: 5),
+                      "The form's declared closing scene shows beneath the Answered card.\n\(app.debugDescription)")
         // Ghost, don't hide: the check stays visible but disabled once answered.
         let answeredFinish = app.buttons["request-finish"]
         XCTAssertTrue(answeredFinish.waitForExistence(timeout: 5), app.debugDescription)

@@ -1863,6 +1863,62 @@ final class HarklightTests: XCTestCase {
         }
     }
 
+    @MainActor
+    func testAnsweredAndNoCommentShowTheFormsClosingScene() throws {
+        let fixtures = try loadFixtures()
+        let fixture = try XCTUnwrap(fixtures.requests.first(where: { $0.key.messageID == ExactText("facilities-01") }))
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("fixture-only:test"),
+                                       personID: fixtures.accountScope,
+                                       deviceID: ExactText("device-a"))
+        let context = ProfileContext(identity: identity, transportMode: .fixture)
+        guard case let .sender(document) = fixture.interface else { return XCTFail("Expected sender document.") }
+        let point = try XCTUnwrap(document.inputs.first(where: { if case .point = $0.kind { return true }; return false }))
+        let note = try XCTUnwrap(document.inputs.first(where: { if case .text = $0.kind { return true }; return false }))
+
+        for (state, status) in [(TerminalState.answered, AppLifecycleStatus.answered), (.noComment, .noComment)] {
+            let store = try makeStore(fixtures: fixtures, context: context,
+                                      persistence: MemoryPendingActionPersistence())
+            let port = AttentionDomainPort(store: store)
+            let selector = try XCTUnwrap(port.inspect(context: port.context, request: fixture.key).requests.first?.selector)
+            _ = try port.submit(SubmitIntent(context: port.context, selector: selector, intentID: UUID(), inputs: [
+                .point(input: point.id, point: PointValue(x: 240, y: 610)),
+                .text(input: note.id, text: ExactText("A careful note"))
+            ]))
+            let pending = try XCTUnwrap(port.observe(context: port.context).requests.first(where: { $0.key == fixture.key }))
+            XCTAssertNil(LiveRequestDetail.closingSceneProjection(pending.projection,
+                                                                  lifecycleStatus: pending.lifecycleStatus),
+                         "A request still waiting for its outcome shows no closing scene.")
+
+            try store.recordFixtureTerminal(FixtureTerminal(state: state,
+                                                            evidenceLabel: "simulated closing state",
+                                                            authorizedAnswer: nil,
+                                                            ownOutcome: .unconfirmed),
+                                            for: fixture.key, context: context)
+            let presented = try XCTUnwrap(AttentionDomainPort(store: store).observe(context: port.context)
+                .requests.first(where: { $0.key == fixture.key }))
+            XCTAssertEqual(presented.lifecycleStatus, status)
+            let sender = try XCTUnwrap(LiveRequestDetail.closingSceneProjection(presented.projection,
+                                                                               lifecycleStatus: presented.lifecycleStatus),
+                                       "\(state) shows the form's closing scene beneath its card.")
+            // Neither state has its own scene in this form, so both fall back
+            // to the declared resolved scene.
+            XCTAssertNil(document.resolvedByState[state])
+            XCTAssertTrue(sceneTexts(in: sender.scene).contains("Location request closed"),
+                          "\(state) uses the form's fallback resolved scene.")
+        }
+    }
+
+    private func sceneTexts(in node: ProjectedSceneNode) -> [String] {
+        switch node.kind {
+        case let .text(value, _):
+            return [value.rawValue]
+        case let .stack(_, children), let .grid(_, children):
+            return children.flatMap(sceneTexts(in:))
+        case .illustration, .input, .resultPoint:
+            return []
+        }
+    }
+
     private func resultPointNodes(in node: ProjectedSceneNode) -> [ProjectedSceneNode] {
         switch node.kind {
         case .resultPoint:

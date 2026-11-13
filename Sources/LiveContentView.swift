@@ -1340,6 +1340,32 @@ struct LiveRequestDetail: View {
         answerIsComplete && !isSupersedesReadOnly
     }
 
+    /// A custom answer form that has been answered or got No comment shows its
+    /// declared closing scene beneath the card: the state's own scene, or the
+    /// form's fallback resolved scene. The projection carries that scene once
+    /// the request has reached either state.
+    static func closingSceneProjection(_ projection: AdmittedRequestProjection,
+                                       lifecycleStatus: AppLifecycleStatus) -> AdmittedSenderProjection? {
+        guard lifecycleStatus == .answered || lifecycleStatus == .noComment,
+              case let .sender(sender) = projection else { return nil }
+        return sender
+    }
+
+    @ViewBuilder
+    private var closingScene: some View {
+        if let sender = Self.closingSceneProjection(request.projection,
+                                                    lifecycleStatus: request.lifecycleStatus) {
+            LiveProjectedSceneView(request: request, sender: sender, node: sender.scene,
+                                   store: store, readOnly: true, hideAnswerControls: true,
+                                   focusedReplyActionID: $focusedReplyActionID,
+                                   replyTextBinding: { replyTextBinding(for: $0) },
+                                   enlargePicture: { enlargedPicture = $0 })
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("request-closing-scene")
+        }
+    }
+
     static func answeredConfirmationTitle(isDefaultAnswered: Bool) -> LocalizedStringResource {
         isDefaultAnswered ? "Answered by default" : "Answered"
     }
@@ -1692,10 +1718,12 @@ struct LiveRequestDetail: View {
                         symbolName: "checkmark",
                         answerIdentifier: request.isDefaultAnswered
                             ? "request-default-answer" : "request-account-answer")
+                    closingScene
                 } else if showsNoCommentConfirmation {
                     AnswerConfirmationCard(title: "No comment", answer: nil,
                         identifier: "request-no-comment-status",
                         accessibilityValue: "Completed", symbolName: "checkmark")
+                    closingScene
                 } else if showsPendingAnswerConfirmation {
                     AnswerConfirmationCard(title: "Pending", answer: pendingAnswerText,
                         identifier: "request-pending-answer-status",
