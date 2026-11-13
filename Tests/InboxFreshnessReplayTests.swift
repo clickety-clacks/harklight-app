@@ -866,7 +866,6 @@ final class InboxFreshnessReplayTests: XCTestCase {
             personID: ExactText("freshness-person"), deviceID: ExactText("reader"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
         let store = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
-        _ = try store.advanceConversationCursor(overIgnoredUpdateAt: 1, context: context)
 
         let session = InboxFreshnessRelaySession(identity: identity)
         session.rejectFirstConversationACK = true
@@ -877,6 +876,7 @@ final class InboxFreshnessReplayTests: XCTestCase {
         session.conversationFrameBatches = [
             [
                 data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
+                data(#"{"v":1,"type":"conversation","conversation_seq":1,"sender_id":"other-sender","message_id":"other-request","origin":"reader","session_handle":"handle","request_revision":2,"kind":"revision","author":"person","event_id":"unbound-revision"}"#),
                 data(#"{"v":1,"type":"conversation_resynced","conversation_seq":1}"#)
             ],
             [
@@ -936,7 +936,7 @@ final class InboxFreshnessReplayTests: XCTestCase {
     }
 
     @MainActor
-    func testRedactedRevisionSessionHandleMismatchIsSkippedBeforeFollowingRevision() async throws {
+    func testRedactedRevisionReplacesCachedSessionHandleBeforeFollowingRevision() async throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
             personID: ExactText("freshness-handle-mismatch"), deviceID: ExactText("reader"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
@@ -961,13 +961,14 @@ final class InboxFreshnessReplayTests: XCTestCase {
         let core = try NativeRelayCore(store: store, context: context, session: session,
             onDiagnostic: { diagnostics.append($0) })
         _ = try await core.resyncAndDrainOutbox()
-        let failure = try XCTUnwrap(diagnostics.events.first {
+        XCTAssertFalse(diagnostics.events.contains {
             $0.area == .conversation && $0.phase == .conversationReplay &&
                 $0.transition == .observed && $0.conversationValidationRejection != nil
-        })
-        let rejection = try XCTUnwrap(failure.conversationValidationRejection)
-        XCTAssertEqual(rejection.guardID, .redactedRevisionBinding)
-        XCTAssertEqual(rejection.facts.sessionHandleMatchesThread, false)
+        }, "The server's new session handle replaces the cached projection.")
+        let redacted = try XCTUnwrap(store.conversationSnapshot(context: context)
+            .threads[key]?.turns.first { $0.id == ExactText("wrong-session-handle") })
+        XCTAssertEqual(redacted.sessionHandle, ExactText("other-handle"))
+        XCTAssertTrue(redacted.contentRedacted)
         XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, 2)
         XCTAssertEqual(session.conversationACKs.count, 1)
         let presentation = try LivePresentationStore(store: store, context: context)
