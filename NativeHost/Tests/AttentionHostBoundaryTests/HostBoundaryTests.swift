@@ -65,32 +65,34 @@ final class HostBoundaryTests: XCTestCase {
                                       hostGeneration: afterRestart.hostGeneration))
     }
 
-    func testExactPostOriginHostAndNoCredentialFallback() throws {
+    func testAPIRequestShapeAndBearerAuthenticationDoNotDependOnHostOrOrigin() throws {
         let boundary = HostHTTPBoundary(port: 43123)
-        let valid = HTTPRequestHead(method: "POST", path: "/api/inspect", headers: [
-            "Host": ["127.0.0.1:43123"], "Origin": ["http://127.0.0.1:43123"],
-            "Content-Type": ["application/json"], "Authorization": ["Bearer abc"]
-        ])
-        XCTAssertNoThrow(try boundary.validateAPI(valid))
-        XCTAssertEqual(try boundary.bearerToken(valid), "abc")
-        for headers in [
-            ["Host": ["localhost:43123"], "Origin": [boundary.origin], "Content-Type": ["application/json"]],
-            ["Host": [boundary.host], "Content-Type": ["application/json"]],
-            ["Host": [boundary.host], "Origin": ["null"], "Content-Type": ["application/json"]],
-            ["Host": [boundary.host], "Origin": [boundary.origin, boundary.origin], "Content-Type": ["application/json"]],
-            ["Host": [boundary.host], "Origin": [boundary.origin], "Content-Type": ["text/plain"]]
-        ] {
-            XCTAssertThrowsError(try boundary.validateAPI(
-                HTTPRequestHead(method: "POST", path: "/api/inspect", headers: headers)))
+        let acceptedHeaders = [
+            ["Content-Type": ["application/json"], "Authorization": ["Bearer abc"]],
+            ["Host": ["localhost:43123"], "Origin": ["http://example.invalid"],
+             "Content-Type": ["application/json"], "Authorization": ["Bearer abc"]],
+            ["Host": ["localhost:43123", boundary.host], "Origin": ["null", "http://example.invalid"],
+             "Content-Type": ["application/json"], "Authorization": ["Bearer abc"]]
+        ]
+        for headers in acceptedHeaders {
+            let request = HTTPRequestHead(method: "POST", path: "/api/inspect", headers: headers)
+            XCTAssertNoThrow(try boundary.validateAPI(request))
+            XCTAssertEqual(try boundary.bearerToken(request), "abc")
         }
         XCTAssertThrowsError(try boundary.validateAPI(
-            HTTPRequestHead(method: "GET", path: "/api/inspect", headers: valid.headers)))
+            HTTPRequestHead(method: "GET", path: "/api/inspect", headers: acceptedHeaders[0])))
         XCTAssertThrowsError(try boundary.validateAPI(
-            HTTPRequestHead(method: "POST", path: "/api/inspect?token=abc", headers: valid.headers)))
+            HTTPRequestHead(method: "POST", path: "/api/inspect?token=abc", headers: acceptedHeaders[0])))
+        let unauthenticated = HTTPRequestHead(method: "POST", path: "/api/inspect",
+                                              headers: ["Content-Type": ["application/json"]])
+        XCTAssertNoThrow(try boundary.validateAPI(unauthenticated))
+        XCTAssertThrowsError(try boundary.bearerToken(unauthenticated))
         XCTAssertNoThrow(try boundary.validateStatic(
-            HTTPRequestHead(method: "GET", path: "/", headers: ["Host": [boundary.host]])))
+            HTTPRequestHead(method: "GET", path: "/", headers: ["Host": ["localhost:43123"]])))
+        XCTAssertNoThrow(try boundary.validateStatic(
+            HTTPRequestHead(method: "GET", path: "/", headers: [:])))
         XCTAssertThrowsError(try boundary.validateStatic(
-            HTTPRequestHead(method: "GET", path: "/api/inspect", headers: ["Host": [boundary.host]])))
+            HTTPRequestHead(method: "GET", path: "/api/inspect", headers: [:])))
     }
 
     func testSingleRequestFramingRejectsAmbiguousBodyAndDuplicateHeaders() throws {
@@ -111,7 +113,7 @@ final class HostBoundaryTests: XCTestCase {
         }
         let doubleOrigin = valid.replacingOccurrences(of: "Origin: \(origin)",
             with: "Origin: \(origin)\r\nOrigin: \(origin)")
-        XCTAssertThrowsError(try HostHTTPBoundary(port: 43123).validateAPI(
+        XCTAssertNoThrow(try HostHTTPBoundary(port: 43123).validateAPI(
             HTTPRequestParser.parse(Data(doubleOrigin.utf8)).head))
     }
 }

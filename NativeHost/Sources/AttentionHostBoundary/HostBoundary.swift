@@ -42,8 +42,8 @@ public struct HTTPRequestHead: Sendable {
     }
 }
 
-/// Exact same-origin validation before any account-scoped port call. The
-/// listener must itself bind literal 127.0.0.1 and supply its chosen port.
+/// Request-shape validation for the local presentation host. The listener
+/// binds literal 127.0.0.1 and supplies its chosen port.
 public struct HostHTTPBoundary: Sendable {
     public let port: UInt16
 
@@ -56,15 +56,13 @@ public struct HostHTTPBoundary: Sendable {
         guard request.method == "POST",
               request.path.hasPrefix("/api/"),
               !request.path.contains("?"), !request.path.contains("#"),
-              request.soleHeader("Host") == host,
-              request.soleHeader("Origin") == origin,
               request.soleHeader("Content-Type") == "application/json" else {
             throw HostBoundaryError.rejected
         }
     }
 
     public func validateStatic(_ request: HTTPRequestHead) throws {
-        guard request.method == "GET", request.soleHeader("Host") == host,
+        guard request.method == "GET",
               ["/", "/index.html", "/app.js", "/app.css", "/sender.js"].contains(request.path) else {
             throw HostBoundaryError.rejected
         }
