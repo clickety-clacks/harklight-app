@@ -236,8 +236,9 @@ final class ConversationDomainTests: XCTestCase {
         try restored.apply(RelayEvent(sequence: 1,
             body: .delivery(StoredRequest(key: first.request, originalPayload: original), .message)), context: context)
         let snapshot = try restored.snapshot(context: context)
-        XCTAssertEqual(snapshot.requests[first.request]?.originalPayload, original,
-                       "Delivery supplies the original; a revised question remains a separate server projection.")
+        XCTAssertEqual(snapshot.requests[first.request]?.originalPayload, revised,
+                       "The public snapshot renders the latest server question revision.")
+        XCTAssertEqual(try restored.conversationSnapshot(context: context).threads[first.request]?.revisions[1], original)
         XCTAssertEqual(try restored.conversationSnapshot(context: context).threads[first.request]?.currentQuestionPayload, revised)
         XCTAssertEqual(snapshot.remoteStates[first.request]?.state, .expired)
         XCTAssertEqual(snapshot.cursor, 1)

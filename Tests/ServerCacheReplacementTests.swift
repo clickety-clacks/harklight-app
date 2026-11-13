@@ -30,6 +30,48 @@ final class ServerCacheReplacementTests: XCTestCase {
         XCTAssertTrue(state.inboxCandidate?.hasInitialPage == true)
     }
 
+    func testRevisedRenderedCacheCannotRejectOriginalInboxDeliveryAfterRestart() async throws {
+        let context = context()
+        let key = key("revised", context: context)
+        let original = request(key, title: "Original")
+        let revised = request(key, title: "Revised")
+        let repository = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        _ = try repository.apply(RelayEvent(sequence: 1,
+            body: .delivery(original, .message)), context: context)
+        for (sequence, payload) in [(UInt64(1), original.originalPayload), (UInt64(2), revised.originalPayload)] {
+            try repository.applyConversation(ConversationEvent(sequence: sequence,
+                binding: ConversationBinding(request: key, revision: sequence),
+                fact: .request(sessionHandle: ExactText("session"), payload: payload)), context: context)
+        }
+        let rendered = try repository.snapshot(context: context)
+        XCTAssertEqual(rendered.requests[key]?.originalPayload, revised.originalPayload)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("server-cache.json")
+        let cache = FileServerStateCache(identity: context.identity, fileURL: url)
+        try await cache.save(ServerStateCacheSnapshot.make(identity: context.identity,
+            from: rendered, conversations: repository.conversationSnapshot(context: context)))
+        let reopenedCache = FileServerStateCache(identity: context.identity, fileURL: url)
+        let loaded = try await reopenedCache.load()
+        let cached = try XCTUnwrap(loaded)
+        XCTAssertEqual(cached.requests.first?.request.originalPayload, revised.originalPayload,
+                       "The rendered cache can differ from the original supplied by inbox_start.")
+        let restarted = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        try restarted.restoreCachedServerState(cached.attentionDomainState(for: context.identity), context: context)
+        _ = try restarted.beginInboxCandidate(startupID: "after-revised-cache", since: 1,
+            batches: [], context: context)
+        try restarted.saveInboxInitialPage(snapshotID: "original-delivery", highWater: 1,
+            items: [InboxSnapshotItem(acceptance: RelayEvent(sequence: 1,
+                body: .delivery(original, .message)))], nextCursor: nil, receiptCursor: nil, context: context)
+        XCTAssertEqual(try restarted.snapshot(context: context).requests[key]?.originalPayload, original.originalPayload)
+        for (sequence, payload) in [(UInt64(1), original.originalPayload), (UInt64(2), revised.originalPayload)] {
+            try restarted.applyConversation(ConversationEvent(sequence: sequence,
+                binding: ConversationBinding(request: key, revision: sequence),
+                fact: .request(sessionHandle: ExactText("session"), payload: payload)), context: context)
+        }
+        XCTAssertEqual(try restarted.snapshot(context: context).requests[key]?.originalPayload, revised.originalPayload)
+    }
+
     func testRefreshKeepsCacheUntilServerRespondsThenReplacesItEvenWhenEmpty() throws {
         let context = context()
         let cachedKey = key("cached", context: context)
