@@ -203,7 +203,7 @@ final class RetractionPresentationTests: XCTestCase {
                                                           operationID: operationID))
     }
 
-    func testDisconnectedStoreShowsNotAcceptedForRetainedRefusedAttempt() throws {
+    func testDisconnectedRetractionDoesNotPresentLocalAttemptAsServerAnswer() throws {
         let context = profile()
         let domain = try ClientRepository(context: context,
             persistence: MemoryPendingActionPersistence())
@@ -245,8 +245,9 @@ final class RetractionPresentationTests: XCTestCase {
 
         let attemptedAnswer = AnswerConfirmationText.formatted(accountAnswerOutcome: nil,
             submittedAnswer: shown.submittedAnswer, projection: shown.projection)
-        XCTAssertEqual(attemptedAnswer, "Keep original choice")
-        XCTAssertTrue(LiveRequestDetail.shouldShowNotAcceptedConfirmation(
+        XCTAssertNil(attemptedAnswer, "A locally attempted choice is not a server answer.")
+        XCTAssertEqual(try domain.lookupIntent(receipt.intentID, context: context)?.operationID, receipt.opID)
+        XCTAssertFalse(LiveRequestDetail.shouldShowNotAcceptedConfirmation(
             isRetracted: disconnected.isRetracted(key), isSupersedesReadOnly: false,
             ownOutcome: shown.receiptFacts?.ownOutcome,
             relayOutcome: shown.intentReceipt?.relayOutcome,
@@ -267,30 +268,32 @@ final class RetractionPresentationTests: XCTestCase {
         let receipt = try port.submit(SubmitIntent(context: port.context, selector: selector, intentID: UUID(),
             inputs: [.compatibilityValue(action: ExactText("keep"))]))
         let refused = IntentDisposition.refusedByRetraction(retractedAtMilliseconds: Self.retractedAt)
-        let session = RefusalSession(context.identity, refusal: refusal, profile: context)
+        let session = RefusalSession(context.identity, refusal: refusal, profile: context,
+                                     payload: payload, terminal: ordinary)
         let core = try NativeRelayCore(store: domain, context: context, session: session)
         _ = try await core.resyncAndDrainOutbox()
+        XCTAssertTrue(session.sentOperationIDs.isEmpty, "Refresh never sends the queued answer.")
+        try await core.sendOriginalOperationForUserTap(receipt.intentID)
         XCTAssertEqual(session.sentOperationIDs, [receipt.opID])
+        XCTAssertEqual(try domain.lookupIntent(receipt.intentID, context: context)?.disposition, refused)
 
-        let restored = try ClientRepository(context: context, persistence: persistence)
-        XCTAssertEqual(try restored.lookupIntent(receipt.intentID, context: context)?.disposition, refused)
+        let restored = try await reopenWithServerCache(domain, context: context, persistence: persistence)
+        XCTAssertNil(try restored.lookupIntent(receipt.intentID, context: context),
+                     "A definitively refused operation is no longer an unsent queue entry.")
         XCTAssertTrue(try restored.snapshot(context: context).outbox.isEmpty)
         let live = try LivePresentationStore(store: restored, context: context)
         let shown = try XCTUnwrap(live.request(for: key))
         XCTAssertEqual(shown.lifecycleStatus, .cleared)
-        XCTAssertEqual(shown.receiptFacts?.ownOutcome, .refused)
-        XCTAssertEqual(shown.intentReceipt?.relayOutcome,
-                       .refusedByRetraction(retractedAtMilliseconds: Self.retractedAt))
+        XCTAssertNil(shown.intentReceipt, "A queue receipt cannot override the restored server state.")
         let attemptedAnswerText = AnswerConfirmationText.formatted(
             accountAnswerOutcome: nil, submittedAnswer: shown.submittedAnswer,
             projection: shown.projection)
-        XCTAssertEqual(attemptedAnswerText, "Keep original choice",
-                       "Only the durable submitted answer supplies the Not accepted card text.")
-        XCTAssertTrue(LiveRequestDetail.shouldShowNotAcceptedConfirmation(
+        XCTAssertNil(attemptedAnswerText, "The refused local input is not a server answer.")
+        XCTAssertFalse(LiveRequestDetail.shouldShowNotAcceptedConfirmation(
             isRetracted: live.isRetracted(key), isSupersedesReadOnly: false,
             ownOutcome: nil, relayOutcome: shown.intentReceipt?.relayOutcome,
             attemptedAnswerText: attemptedAnswerText),
-            "The actual refused receipt remains visible even without receiptFacts.")
+            "The restored detail shows the server retraction without inventing an answer.")
         XCTAssertTrue(live.isRetracted(key))
         XCTAssertEqual(live.retractionDate(key)?.timeIntervalSince1970 ?? 0, Self.retractedAtSeconds, accuracy: 0.000_5)
         XCTAssertFalse(live.openRequests.contains { $0.key == key }, "A refused answer no longer needs attention")
@@ -301,7 +304,9 @@ final class RetractionPresentationTests: XCTestCase {
         XCTAssertEqual(session.sentOperationIDs, [receipt.opID], "A definite refusal is never resent")
 
         let otherTime = try RelayWire(profile: context).decodeEvent(edited(ordinary, "1760000000123", "1760000000999"))
-        XCTAssertThrowsError(try domain.apply(otherTime, context: context))
+        try domain.apply(otherTime, context: context)
+        XCTAssertEqual(try domain.conversationSnapshot(context: context).threads[key]?.retraction?.retractedAtMilliseconds,
+                       1_760_000_000_999, "An incoming server time replaces the cached one.")
         XCTAssertEqual(try domain.lookupIntent(receipt.intentID, context: context)?.disposition, refused)
 
         try domain.apply(RelayWire(profile: context).decodeEvent(ordinary), context: context)
@@ -518,13 +523,34 @@ private final class RefusalSession: AuthenticatedInboxPagingSession, @unchecked 
     let authenticatedIdentity: ProfileIdentity
     let refusal: Data
     let profile: ProfileContext
+    let payload: JSONValue
+    let terminal: Data
     private(set) var sentOperationIDs: [UUID] = []
-    init(_ identity: ProfileIdentity, refusal: Data, profile: ProfileContext) {
+    init(_ identity: ProfileIdentity, refusal: Data, profile: ProfileContext,
+         payload: JSONValue, terminal: Data) {
         authenticatedIdentity = identity; self.refusal = refusal; self.profile = profile
+        self.payload = payload; self.terminal = terminal
+    }
+    func inboxRequest(_ request: Data, ref: String) async throws -> Data {
+        let parsed = try JSONValue.parse(request)
+        guard parsed.uniqueValue(named: "type")?.stringValue?.rawValue == "inbox_start" else {
+            return try await emptyInboxReply(request, ref: ref)
+        }
+        var item: [String: Any] = ["acceptance": ["v": 1, "type": "delivery", "seq": 1,
+            "sender_id": "sender", "message_id": "request", "origin": "origin", "as": "message",
+            "message": try JSONSerialization.jsonObject(with: Data(payload.canonicalJSON.utf8)),
+            "request_revision": 1, "session_handle": "handle", "event_id": "1"]]
+        if !sentOperationIDs.isEmpty { item["terminal"] = try JSONSerialization.jsonObject(with: terminal) }
+        return try JSONSerialization.data(withJSONObject: [
+            "v": 1, "type": "ok", "ref": ref, "paging_version": 1,
+            "snapshot_id": "refusal-start", "high_water": sentOperationIDs.isEmpty ? 1 : 2,
+            "items": [item], "next_cursor": NSNull(), "receipt_cursor": NSNull()
+        ])
     }
     func resync(_ request: Data, consume: @Sendable (Data) async throws -> Void) async throws {
         try await consume(Data(#"{"v":1,"type":"ok","ref":"native-sync"}"#.utf8))
-        try await consume(Data(#"{"v":1,"type":"resynced","seq":1}"#.utf8))
+        let high = sentOperationIDs.isEmpty ? 1 : 2
+        try await consume(Data("{\"v\":1,\"type\":\"resynced\",\"seq\":\(high)}".utf8))
     }
     func acknowledge(_ request: Data) async throws {}
     func sendOriginalOperation(_ frame: Data, operationID: UUID) async throws -> OriginalOperationResult {
