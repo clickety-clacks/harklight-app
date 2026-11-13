@@ -2231,6 +2231,7 @@ final class LivePresentationStore {
         let hasDeliveryWarning = hasKnownDeliveryFailure || request.staleAnswerRevision != nil
         let hasMessageLoadWarning = requestTag(for: request.key)
             .map(skippedMessageRequestTags.contains) ?? false
+        let hasAcceptedSenderRevision = hasAcceptedUpdate(for: request.key)
         let hasUnconfirmedOwnSubmission = request.intentReceipt != nil &&
             request.receiptFacts?.ownOutcome == .unconfirmed &&
             request.lifecycleStatus != .pending
@@ -2244,12 +2245,13 @@ final class LivePresentationStore {
             serverReportedFinalResponse: serverReportedFinalResponse,
             hasAcceptedOwnSubmission: hasAcceptedOwnSubmission)
         var statusParts: [String] = []
-        if hasAcceptedUpdate(for: request.key) { statusParts.append("Updated") }
+        if hasAcceptedSenderRevision { statusParts.append("Updated") }
         if request.inboxStateIsCurrent {
             let lifecycle = retracted ? retractionLabel(for: request) :
                 request.defaultAnswerStatusText ??
                     String(localized: LiveLifecycleTitle(request.lifecycleStatus).label)
-            if request.lifecycleStatus != .open || retracted || request.defaultAnswerStatusText != nil {
+            if request.lifecycleStatus != .open || retracted || request.defaultAnswerStatusText != nil ||
+                hasAcceptedSenderRevision {
                 statusParts.append(lifecycle)
             }
             if let seenStatus = request.informationalSeenStatus, seenStatus != .available {
