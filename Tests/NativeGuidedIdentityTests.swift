@@ -10,12 +10,8 @@ final class NativeGuidedIdentityTests: XCTestCase {
         defer { removeTestIdentity(namespace) }
         let material = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
         let certificate = try XCTUnwrap(SecCertificateCreateWithData(nil, material.certificateDER as CFData))
-        let certificateValues = try XCTUnwrap(
-            SecCertificateCopyValues(certificate, [kSecOIDX509V1ValidityNotAfter] as CFArray, nil)
-                as? [CFString: Any])
-        let validity = try XCTUnwrap(certificateValues[kSecOIDX509V1ValidityNotAfter] as? [CFString: Any])
-        let notAfter = try XCTUnwrap(validity[kSecPropertyKeyValue] as? Date)
-        XCTAssertEqual(Calendar(identifier: .gregorian).component(.year, from: notAfter), 9999)
+        let expectedNotAfter = Data([0x18, 0x0f]) + Data("99991231235959Z".utf8)
+        XCTAssertNotNil(material.certificateDER.range(of: expectedNotAfter))
         XCTAssertEqual(DeviceCertificateBinding.fingerprint(material.certificateDER), material.deviceID)
         var privateKey: SecKey?
         XCTAssertEqual(SecIdentityCopyPrivateKey(material.value, &privateKey), errSecSuccess)
@@ -44,6 +40,42 @@ final class NativeGuidedIdentityTests: XCTestCase {
         var certificate: SecCertificate?
         XCTAssertEqual(SecIdentityCopyCertificate(restored.value, &certificate), errSecSuccess)
         XCTAssertEqual(SecCertificateCopyData(try XCTUnwrap(certificate)) as Data, first.certificateDER)
+    }
+
+    func testExistingOneYearCertificateIsReissuedForTheSameDeviceKey() throws {
+        let namespace = "Harklight.guided-identity-test." + UUID().uuidString
+        defer { removeTestIdentity(namespace) }
+        let store = NativeInstallationIdentityStore(namespace: namespace)
+        let original = try store.loadOrCreate()
+
+        var retainedPrivateKey: SecKey?
+        XCTAssertEqual(SecIdentityCopyPrivateKey(original.value, &retainedPrivateKey), errSecSuccess)
+        let privateKey = try XCTUnwrap(retainedPrivateKey)
+        let publicKey = try XCTUnwrap(SecKeyCopyPublicKey(privateKey))
+        let publicDER = try XCTUnwrap(SecKeyCopyExternalRepresentation(publicKey, nil) as Data?)
+        let legacyDER = try NativeInstallationIdentityStore.selfSignedCertificate(
+            publicKeyDER: publicDER,
+            privateKey: privateKey,
+            notAfter: Date().addingTimeInterval(365 * 24 * 60 * 60))
+        let legacyCertificate = try XCTUnwrap(SecCertificateCreateWithData(nil, legacyDER as CFData))
+        let labelQuery: [String: Any] = [
+            kSecClass as String: kSecClassCertificate,
+            kSecAttrLabel as String: original.label
+        ]
+        XCTAssertEqual(SecItemDelete(labelQuery as CFDictionary), errSecSuccess)
+        let legacyAttributes: [String: Any] = [
+            kSecClass as String: kSecClassCertificate,
+            kSecValueRef as String: legacyCertificate,
+            kSecAttrLabel as String: original.label,
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        ]
+        XCTAssertEqual(SecItemAdd(legacyAttributes as CFDictionary, nil), errSecSuccess)
+
+        let renewed = try store.loadOrCreate()
+        let expectedNotAfter = Data([0x18, 0x0f]) + Data("99991231235959Z".utf8)
+        XCTAssertNotNil(renewed.certificateDER.range(of: expectedNotAfter))
+        XCTAssertEqual(renewed.deviceID, original.deviceID)
+        XCTAssertNotEqual(renewed.certificateDER, legacyDER)
     }
 
     private func removeTestIdentity(_ namespace: String) {
