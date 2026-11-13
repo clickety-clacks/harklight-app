@@ -1175,15 +1175,16 @@ final class NativeGuidedTLSTests: XCTestCase {
         try live.refreshFromDurableStore()
 
         let legacyAfterRemoteSeen = try XCTUnwrap(port.inspect(context: port.context, request: legacyKey).requests.first)
-        XCTAssertNil(legacyAfterRemoteSeen.informationalSeenStatus,
-                     "A remote Seen answer does not make a request without answer_ui informational.")
+        XCTAssertEqual(legacyAfterRemoteSeen.informationalSeenStatus, .confirmed,
+                       "The server's Seen outcome is displayed even when the cached request omitted answer_ui.")
         guard case let .compatibility(legacyActionsAfterSeen) = legacyAfterRemoteSeen.projection else {
             return XCTFail("A missing answer_ui must retain the compatibility Reply control after remote Seen.")
         }
         XCTAssertEqual(legacyActionsAfterSeen.map(\.label), [ExactText("Reply")])
 
         let legacyRowAfterRemoteSeen = try XCTUnwrap(live.inboxRows.first { $0.key == legacyKey })
-        XCTAssertEqual(legacyRowAfterRemoteSeen.resolvedMessageType, .request)
+        XCTAssertEqual(legacyRowAfterRemoteSeen.resolvedMessageType, .info)
+        XCTAssertTrue(legacyRowAfterRemoteSeen.isResolved)
     }
 
     func testOnlyUnknownConversationOpenIsUnavailableAndOrdinaryExchangesContinue() async throws {
