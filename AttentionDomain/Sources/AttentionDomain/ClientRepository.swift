@@ -219,6 +219,9 @@ public final class FilePendingActionPersistence: PendingActionPersistence, @unch
 }
 
 public final class ClientRepository: @unchecked Sendable {
+    /// Harklight Server's maximum relay text message size.
+    public static let maximumRelayTextMessageBytes = 2 * 1024 * 1024
+
     // Serialize writers while presentation readers can keep using the last
     // committed state during a durable write.
     private let writerLock = NSRecursiveLock()
@@ -226,7 +229,6 @@ public final class ClientRepository: @unchecked Sendable {
     private let context: ProfileContext
     private let persistence: any PendingActionPersistence
     private let conversationFileReferences: (any ConversationFileReferenceStore)?
-    private let maximumWireFrameBytes: Int
     private var state: ClientSessionState
     // Accepted answers leave the outbox but remain unresolved until their exact
     // terminal sequence has been replayed. Keep only those operations in a
@@ -242,12 +244,10 @@ public final class ClientRepository: @unchecked Sendable {
 
     public init(context: ProfileContext,
                 persistence: any PendingActionPersistence,
-                maximumWireFrameBytes: Int = 65_536,
                 conversationFileReferences: (any ConversationFileReferenceStore)? = nil) throws {
         self.context = context
         self.persistence = persistence
         self.conversationFileReferences = conversationFileReferences
-        self.maximumWireFrameBytes = max(0, maximumWireFrameBytes)
         state = ClientSessionState(profileIdentity: context.identity)
         // A read failure (storage unavailable, file protection while locked)
         // is not evidence the queue is bad, so it still throws.
@@ -597,7 +597,13 @@ public final class ClientRepository: @unchecked Sendable {
         defer { lock.unlock() }
         try validate(suppliedContext)
         let request = try boundRequest(selector, context: suppliedContext)
-        return try compose(typedSubmission, draft: draft, for: request)
+        let answer = try compose(typedSubmission, draft: draft, for: request)
+        let operation = relayAnswerOperation(request: request,
+                                             answer: answer,
+                                             operationID: UUID(),
+                                             requestRevision: selector.requestRevision)
+        try requireServerRelayMessageSize(operation)
+        return answer
     }
 
     @discardableResult
@@ -654,8 +660,7 @@ public final class ClientRepository: @unchecked Sendable {
         let operationID = UUID()
         let operation = relayAnswerOperation(request: request, answer: answer, operationID: operationID,
                                              requestRevision: selector.requestRevision)
-        let frame = Data((operation.jsonString + "\n").utf8)
-        guard frame.count <= maximumWireFrameBytes else { throw AttentionStoreError.answerTooLarge }
+        try requireServerRelayMessageSize(operation)
         let submission = Submission(requestKey: request.key,
                                    answer: answer,
                                    intentID: intentID,
@@ -737,8 +742,7 @@ public final class ClientRepository: @unchecked Sendable {
             JSONMember("request_id", .string(request.key.messageID)),
             JSONMember("request_revision", .number(JSONNumber(lexeme: String(wireRevision))))
         ])
-        let frame = Data((operation.jsonString + "\n").utf8)
-        guard frame.count <= maximumWireFrameBytes else { throw AttentionStoreError.answerTooLarge }
+        try requireServerRelayMessageSize(operation)
         let interface = requestInterface(for: request)
         let draft = discardDraft ? RequestDraft(interface: interface) :
             (state.conversation?.threads[request.key]?.answerDrafts?[requestRevision] ??
@@ -4453,7 +4457,8 @@ public final class ClientRepository: @unchecked Sendable {
                 composedDrafts[input.inputID] = inputDraft
             }
             guard typedMatchesDraft(inputs, draft: draft, document: document),
-                  let answer = document.compose(drafts: composedDrafts, maximumBytes: maximumWireFrameBytes) else {
+                  let answer = document.compose(drafts: composedDrafts,
+                                                maximumBytes: Self.maximumRelayTextMessageBytes) else {
                 throw AttentionStoreError.invalidSubmission
             }
             return answer
@@ -4503,6 +4508,13 @@ public final class ClientRepository: @unchecked Sendable {
             }
         }
         return true
+    }
+
+    private func requireServerRelayMessageSize(_ operation: JSONValue) throws {
+        let message = Data((operation.jsonString + "\n").utf8)
+        guard message.count <= Self.maximumRelayTextMessageBytes else {
+            throw AttentionStoreError.answerTooLarge
+        }
     }
 
     private func normalizedSubmission(_ submission: TypedSubmission, interface: RequestInterface) -> JSONValue {
