@@ -272,8 +272,10 @@ public final class ClientRepository: @unchecked Sendable {
             }
             acceptanceOrder += 1
             next.requests[request.key] = request.assigningAcceptanceOrder(acceptanceOrder)
-            let draft = RequestDraft(interface: request.interface)
-            next.drafts[request.key] = draft
+            // Fixture definitions are reloaded on startup. Preserve compatible
+            // user input restored from the pending-action file.
+            refreshEditableDraft(for: request.key, in: &next)
+            let draft = next.drafts[request.key] ?? RequestDraft(interface: request.interface)
             next.fixtureSessions[request.key] = RequestSession(draft: draft)
             next.remoteStates[request.key] = RemoteRequestState()
             changed = true
