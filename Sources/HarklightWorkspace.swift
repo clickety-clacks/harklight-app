@@ -784,6 +784,12 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         }
     }
 
+    private func reopenInlineChat(for key: RequestKey) {
+        withAnimation(.easeInOut(duration: 0.22)) {
+            dismissedInlineChatRequests.remove(key)
+        }
+    }
+
     private func dismissPendingNotification() {
         guard let selection, case .notificationPending = selection else { return }
         navigate(to: nil)
@@ -982,7 +988,13 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             Group {
                 switch item {
                 case let .request(key)?:
-                    requestDetail(key, cardContext(for: .request(key), inlineChat: inlineChat))
+                    let reopenInlineChat: (() -> Void)? = inlineChat &&
+                        !pushedChatFallsBackToMessage &&
+                        conversationStore?.request(for: key) != nil
+                        ? { [self] in self.reopenInlineChat(for: key) }
+                        : nil
+                    requestDetail(key, cardContext(for: .request(key),
+                        inlineChat: inlineChat, reopenInlineChat: reopenInlineChat))
                         .id(key)
                         .simultaneousGesture(TapGesture().onEnded {
                             activatePassivePushContent(for: key)
@@ -1118,7 +1130,8 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         splitView.scrollBounceBehavior(.always, axes: .vertical)
     }
 
-    private func cardContext(for id: InboxSelection, inlineChat: Bool = false) -> InboxCardContext {
+    private func cardContext(for id: InboxSelection, inlineChat: Bool = false,
+                             reopenInlineChat: (() -> Void)? = nil) -> InboxCardContext {
         let ids = cardNavigationIDs
         let index = ids.firstIndex(of: id)
         let hasPrevious = index.map { $0 > 0 } ?? false
@@ -1157,6 +1170,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             hasPrevious: hasPrevious,
             hasNext: hasNext,
             inlineChat: inlineChat,
+            reopenInlineChat: reopenInlineChat,
             chatTargetFallsBackToMessage: chatTargetFallsBack,
             notificationChatRouteSerial: chatRouteSerial,
             notificationChatRouteDidOpen: chatRouteDidOpen,

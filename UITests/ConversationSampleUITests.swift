@@ -638,6 +638,14 @@ final class ConversationSampleUITests: XCTestCase {
             let chatButton = app.buttons["Chat"]
             XCTAssertTrue(chatButton.waitForExistence(timeout: 5), app.debugDescription)
             chatButton.tap()
+            XCTAssertTrue(history.waitForExistence(timeout: 5), app.debugDescription)
+            if isPad {
+                XCTAssertGreaterThan(
+                    history.frame.minX,
+                    heading.frame.maxX,
+                    "On iPad, reopening Chat must place it beside the same request detail. \(app.debugDescription)"
+                )
+            }
             let reopenedComposer = app.textViews["sample-chat-composer"]
             XCTAssertTrue(reopenedComposer.waitForExistence(timeout: 5), app.debugDescription)
             XCTAssertEqual(reopenedComposer.value as? String, draft,

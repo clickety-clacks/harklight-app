@@ -2132,7 +2132,11 @@ struct LiveRequestDetail: View {
                 NativePushedViewCoordinator.shared.recordOwnOpen()
             }
             localExample?.chatRead = true
-            chatPresented = true
+            if context.inlineChat, let reopenInlineChat = context.reopenInlineChat {
+                reopenInlineChat()
+            } else {
+                chatPresented = true
+            }
         }
         .labelStyle(.iconOnly)
         .badge(conversationIndicator == true ? 1 : 0)
