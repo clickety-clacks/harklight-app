@@ -1921,7 +1921,14 @@ final class LivePresentationStore {
         if let previous { flushPendingDraft(for: previous) }
         if !isReadOnly, let previous {
             do {
-                let pending = try port.abandonConversationUploads(for: previous, context: port.context)
+                let hasAcceptedSend = conversationThreads[previous]?.drafts.values.contains { draft in
+                    if draft.operationID != nil { return true }
+                    switch draft.disposition {
+                    case .submitting, .outcomeUnknown, .acceptedPendingReplay: return true
+                    case .saved, .rejected: return false
+                    }
+                } == true
+                let pending = hasAcceptedSend ? [] : try port.abandonConversationUploads(for: previous, context: port.context)
                 try refreshFromDurableStore()
                 UIDiagnostics.shared.record("store.navigate \(UIDiagnostics.describe(previous))->\(UIDiagnostics.describe(next)) local=\(self.isLocalExample) pending=\(pending.count)")
                 if !pending.isEmpty {
@@ -2039,6 +2046,8 @@ final class LivePresentationStore {
             }
             if permitsDelivery {
                 guard !isSendingDiscussion, let files = conversationFiles else { return }
+                _ = try attentionStore.prepareDiscussion(binding, context: profileContext)
+                try refreshFromDurableStore()
                 isSendingDiscussion = true
                 conversationError = nil
                 Task { [weak self] in

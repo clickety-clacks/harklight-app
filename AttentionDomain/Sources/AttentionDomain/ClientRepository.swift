@@ -2968,7 +2968,7 @@ public final class ClientRepository: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         try validate(suppliedContext)
-        let draft = try Self.externalizingConversationFiles(in: draft,
+        var draft = try Self.externalizingConversationFiles(in: draft,
             using: conversationFileReferences,
             allowInlinePersistence: persistence is MemoryPendingActionPersistence)
         try validate(draft.binding.request, in: context.identity)
@@ -2985,6 +2985,9 @@ public final class ClientRepository: @unchecked Sendable {
             }
         }
         guard case .saved = draft.disposition else { throw ConversationError.invalidBinding }
+        // An edited draft is a new submission, never new bytes under an old ID.
+        draft.operationID = nil
+        draft.wireFrame = nil
         try validateConversationFiles(draft.files)
         thread.drafts[draft.binding.revision] = draft
         conversation.threads[draft.binding.request] = thread
@@ -3018,8 +3021,11 @@ public final class ClientRepository: @unchecked Sendable {
         case .saved, .rejected:
             break
         }
+        guard draft.text != text else { return draft }
         draft.text = text
         draft.disposition = .saved
+        draft.operationID = nil
+        draft.wireFrame = nil
         thread.drafts[binding.revision] = draft
         conversation.threads[binding.request] = thread
         next.conversation = conversation
@@ -3192,10 +3198,14 @@ public final class ClientRepository: @unchecked Sendable {
         case let .submitting(id), let .outcomeUnknown(id), let .acceptedPendingReplay(id, _):
             guard thread.uploadGroups?[id]?.cleanupID == nil else { throw ConversationError.pendingSubmission }
             operation = id
-        case .saved, .rejected:
+        case .saved:
             operation = UUID()
             draft.disposition = .submitting(operation)
+        case .rejected:
+            operation = draft.operationID ?? UUID()
+            draft.disposition = .submitting(operation)
         }
+        draft.operationID = operation
         // Register planned upload-tier files before awaiting limits or disk/HTTP.
         // Departure during that preparation must fence this original operation too.
         let tiers = try ConversationFileLimits(inlineDecodedBytes: 262_144, uploadCap: nil).tiers(for: draft.files)
@@ -3210,6 +3220,31 @@ public final class ClientRepository: @unchecked Sendable {
         next.conversation = conversation
         try commit(next)
         return operation
+    }
+
+    /// Persist the exact prepared request before the first send. A lost reply
+    /// or process restart must not rebuild it from new upload limits or handles.
+    public func freezeDiscussionFrame(_ frame: Data, binding: ConversationBinding,
+                                      operation: UUID, context suppliedContext: ProfileContext) throws {
+        writerLock.lock()
+        defer { writerLock.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard context.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
+        var next = state
+        guard var conversation = next.conversation, var thread = conversation.threads[binding.request],
+              var draft = thread.drafts[binding.revision], draft.operationID == operation,
+              thread.uploadGroups?[operation]?.cleanupID == nil else { throw ConversationError.conflict }
+        if let saved = draft.wireFrame {
+            guard saved == frame else { throw ConversationError.conflict }
+            return
+        }
+        draft.wireFrame = frame
+        thread.drafts[binding.revision] = draft
+        conversation.threads[binding.request] = thread
+        next.conversation = conversation
+        try commit(next)
     }
 
     /// Called before starting an upload, not after its response: navigation may
@@ -3337,6 +3372,7 @@ public final class ClientRepository: @unchecked Sendable {
         default: throw ConversationError.conflict
         }
         // Rejection and unknown outcomes retain text, selected files and addressed revision.
+        draft.operationID = operation
         draft.disposition = rejection.map { .rejected($0) } ?? .outcomeUnknown(operation)
         thread.drafts[binding.revision] = draft
         thread.settleAbandonedDraft(revision: binding.revision)
@@ -3629,7 +3665,7 @@ public final class ClientRepository: @unchecked Sendable {
         using references: (any ConversationFileReferenceStore)?, allowInlinePersistence: Bool) throws -> ConversationDraft {
         ConversationDraft(binding: draft.binding, text: draft.text,
             files: try draft.files.map { try externalizingConversationFiles(in: $0, using: references, allowInlinePersistence: allowInlinePersistence) },
-            disposition: draft.disposition)
+            disposition: draft.disposition, operationID: draft.operationID, wireFrame: draft.wireFrame)
     }
 
     private static func externalizingConversationFiles(in event: ConversationEvent,

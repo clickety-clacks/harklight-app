@@ -239,6 +239,42 @@ public actor NativeRelayCore {
         guard thread?.uploadGroups?[operation]?.cleanupID == nil else { throw ConversationError.pendingSubmission }
     }
 
+    /// Resume only work already accepted locally by Send. Ordinary editor
+    /// drafts and definitive rejections never enter the automatic send path.
+    public func resumePendingDiscussions(
+        retainedFile: @Sendable (ConversationFile) async throws -> URL) async throws {
+        try validate()
+        let threads = try store.conversationSnapshot(context: context).threads
+        for thread in threads.values {
+            for draft in thread.drafts.values {
+                let operation: UUID
+                switch draft.disposition {
+                case let .submitting(id), let .outcomeUnknown(id), let .acceptedPendingReplay(id, _):
+                    operation = id
+                case .saved, .rejected: continue
+                }
+                guard thread.uploadGroups?[operation]?.cleanupID == nil else { continue }
+                try validate()
+                // Replay may have settled an earlier entry while awaiting IO.
+                guard let currentThread = try store.conversationSnapshot(context: context)
+                    .threads[draft.binding.request],
+                    let current = currentThread.drafts[draft.binding.revision],
+                    currentThread.uploadGroups?[operation]?.cleanupID == nil else { continue }
+                switch current.disposition {
+                case .submitting, .outcomeUnknown:
+                    if !currentThread.allowsDiscussion {
+                        try store.markDiscussionOutcome(draft.binding, operation: operation,
+                            rejection: ExactText("Not delivered: request closed"), context: context)
+                        continue
+                    }
+                case .acceptedPendingReplay: break
+                case .saved, .rejected: continue
+                }
+                _ = try await submitDiscussion(draft.binding, retainedFile: retainedFile)
+            }
+        }
+    }
+
     public func submitDiscussion(_ binding: ConversationBinding,
         retainedFile: @Sendable (ConversationFile) async throws -> URL) async throws -> DiscussionOperationResult {
         diagnose(.conversation, .discussionSubmission, .began, request: binding.request,
@@ -257,68 +293,77 @@ public actor NativeRelayCore {
             return .accepted(turnID: turn)
         }
         guard !draft.text.rawValue.isEmpty else { throw ConversationError.emptyDraft }
-        let wasUncertain: Bool
-        switch draft.disposition {
-        case .submitting, .outcomeUnknown: wasUncertain = true
-        default: wasUncertain = false
-        }
         let operation = try store.prepareDiscussion(binding, context: context)
         guard let frozen = try store.conversationSnapshot(context: context).threads[binding.request]?.drafts[binding.revision] else {
             throw ConversationError.missingRequest
         }
         let frame: Data
         do {
-            var prepared: [ConversationFile] = []
-            var limits: ConversationFileLimits?
-            if !frozen.files.isEmpty {
-                guard let endpoint = discoveredOriginURL else {
-                    throw ConversationError.uploadRequired(frozen.files[0].name)
-                }
-                let published = try await transport.conversationFileLimits(originURL: endpoint)
-                try validate()
-                limits = published
-                let tiers = try published.tiers(for: frozen.files)
-                for (file, tier) in zip(frozen.files, tiers) {
-                    if case .uploaded = file.content { prepared.append(file); continue }
-                    if tier == .upload {
-                        try store.registerConversationUpload(file, binding: binding, operation: operation, context: context)
-                        let source = try await retainedFile(file)
-                        try validateUploadOperation(binding, operation: operation)
-                        diagnose(.upload, .uploadTransfer, .began, operationID: operation,
-                                 request: binding.request, revision: binding.revision)
-                        let uploaded = try await transport.uploadConversationFile(file, from: source, binding: binding,
-                            operationID: operation, limits: published, originURL: endpoint)
-                        try validate()
-                        try store.recordConversationUpload(uploaded, binding: binding, operation: operation, context: context)
-                        diagnose(.upload, .uploadTransfer, .completed, operationID: operation,
-                                 request: binding.request, revision: binding.revision)
-                        prepared.append(uploaded)
-                    } else {
-                        let bytes: Data
-                        if case let .inline(inline) = file.content { bytes = inline }
-                        else {
-                            let source = try await retainedFile(file)
-                            bytes = try Data(contentsOf: source)
+            if let saved = frozen.wireFrame {
+                frame = saved
+            } else {
+                var prepared: [ConversationFile] = []
+                var limits: ConversationFileLimits?
+                if !frozen.files.isEmpty {
+                    guard let endpoint = discoveredOriginURL else {
+                        throw ConversationError.uploadRequired(frozen.files[0].name)
+                    }
+                    let published = try await transport.conversationFileLimits(originURL: endpoint)
+                    try validate()
+                    limits = published
+                    let tiers = try published.tiers(for: frozen.files)
+                    let priorUploads = try store.conversationSnapshot(context: context)
+                        .threads[binding.request]?.uploadGroups?[operation]?.uploaded ?? []
+                    for (file, tier) in zip(frozen.files, tiers) {
+                        if let uploaded = priorUploads.first(where: { $0.id == file.id }) {
+                            guard uploaded.name == file.name, uploaded.byteCount == file.byteCount,
+                                  uploaded.sha256 == file.sha256 else { throw ConversationError.fileMismatch }
+                            prepared.append(uploaded)
+                            continue
                         }
-                        prepared.append(ConversationFile(id: file.id, name: file.name, byteCount: file.byteCount,
-                            sha256: file.sha256, content: .inline(bytes)))
+                        if case .uploaded = file.content { prepared.append(file); continue }
+                        if tier == .upload {
+                            try store.registerConversationUpload(file, binding: binding, operation: operation, context: context)
+                            let source = try await retainedFile(file)
+                            try validateUploadOperation(binding, operation: operation)
+                            diagnose(.upload, .uploadTransfer, .began, operationID: operation,
+                                     request: binding.request, revision: binding.revision)
+                            let uploaded = try await transport.uploadConversationFile(file, from: source, binding: binding,
+                                operationID: operation, limits: published, originURL: endpoint)
+                            try validate()
+                            try store.recordConversationUpload(uploaded, binding: binding, operation: operation, context: context)
+                            diagnose(.upload, .uploadTransfer, .completed, operationID: operation,
+                                     request: binding.request, revision: binding.revision)
+                            prepared.append(uploaded)
+                        } else {
+                            let bytes: Data
+                            if case let .inline(inline) = file.content { bytes = inline }
+                            else {
+                                let source = try await retainedFile(file)
+                                bytes = try Data(contentsOf: source)
+                            }
+                            prepared.append(ConversationFile(id: file.id, name: file.name, byteCount: file.byteCount,
+                                sha256: file.sha256, content: .inline(bytes)))
+                        }
                     }
                 }
+                frame = try ConversationWire(profile: context, endpointHost: session.relayEndpointHost).discussion(frozen, operationID: operation,
+                    preparedFiles: prepared, limits: limits)
+                try store.freezeDiscussionFrame(frame, binding: binding, operation: operation, context: context)
             }
-            frame = try ConversationWire(profile: context, endpointHost: session.relayEndpointHost).discussion(frozen, operationID: operation,
-                preparedFiles: prepared, limits: limits)
         } catch {
             // No discussion frame has been sent by this attempt. A previous
             // ambiguous attempt must still keep its exact operation frozen.
             // Keep all original bytes/draft; unreferenced uploads do not submit a turn.
             let names = frozen.files.map { $0.name.rawValue }.joined(separator: ", ")
+            let definitiveFailure = error is ConversationError || error is CocoaError
             diagnose(.conversation, .discussionPreparation,
                      NativeDiagnosticCauseCode.failureTransition(for: error), error: error,
                      operationID: operation, request: binding.request, revision: binding.revision,
-                     receipt: wasUncertain ? .unknown : .pendingUnconfirmed)
+                     receipt: definitiveFailure ? .pendingUnconfirmed : .unknown)
             do {
                 try store.markDiscussionOutcome(binding, operation: operation,
-                    rejection: wasUncertain ? nil : ExactText("Not delivered: " + (names.isEmpty ? "the discussion" : names) + " could not be prepared (\(error)). Draft retained."),
+                    rejection: definitiveFailure ? ExactText("Not delivered: " + (names.isEmpty ? "the discussion" : names) + " could not be prepared (\(error)). Draft retained.") : nil,
                     context: context)
             } catch {
                 diagnose(.localStore, .discussionPreparation, .failed, error: error,

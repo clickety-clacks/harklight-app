@@ -1599,8 +1599,8 @@ final class NativeRelayLifecycle {
         let pending = try configuration.store.conversationSnapshot(context: expected).threads[binding.request]?.drafts[binding.revision]
         let operation: UUID?
         switch pending?.disposition {
-        case let .submitting(id), let .outcomeUnknown(id), let .acceptedPendingReplay(id, _): operation = id
-        default: operation = nil
+        case let .acceptedPendingReplay(id, _): operation = id
+        default: operation = try configuration.store.prepareDiscussion(binding, context: expected)
         }
         _ = await refreshFlights.coalesced()
         guard context == expected, let core else { throw NativeRelayCoreError.inactive }
@@ -1610,7 +1610,15 @@ final class NativeRelayLifecycle {
             .threads[binding.request]?.turns.first(where: { $0.operationID == operation }) {
             return .accepted(turnID: accepted.id)
         }
-        return try await core.submitDiscussion(binding, retainedFile: retainedFile)
+        // The coalesced refresh owns this attempt, including initial Send.
+        // Do not immediately resubmit an unresolved or newly rejected result.
+        let afterRefresh = try configuration.store.conversationSnapshot(context: expected)
+            .threads[binding.request]?.drafts[binding.revision]
+        if case let .acceptedPendingReplay(_, turn) = afterRefresh?.disposition {
+            return .accepted(turnID: turn)
+        }
+        if case let .rejected(reason) = afterRefresh?.disposition { return .rejected(reason) }
+        return .unresolved
     }
 
     func sendPendingConversationReadPositions(expected: ProfileContext) async {
@@ -1736,16 +1744,27 @@ final class NativeRelayLifecycle {
                                        attemptID: attemptID, serverStateCache: serverStateCache)
         self.core = core
         try await refreshConfirmedProjection(core: core, context: context, generation: generation)
+        try await resumeConfirmedDiscussions(core: core, context: context, generation: generation)
         return NativeRelayRefreshResult(relayConfirmed: true, pushRegistration: .notAttempted,
             confirmedContext: context, confirmedTransportAttemptID: attemptID)
     }
 #endif
+
+    private func resumeConfirmedDiscussions(core: NativeRelayCore, context: ProfileContext,
+                                            generation: UUID) async throws {
+        let files = try ConversationFileStorage(identity: context.identity)
+        try await core.resumePendingDiscussions { file in try files.fileURL(for: file) }
+        guard refreshGeneration == generation, self.context == context, self.core === core else {
+            throw NativeRelayCoreError.inactive
+        }
+    }
 
     private func refreshOnce(generation: UUID,
                              checkBlockedPush: Bool = false) async throws -> NativeRelayRefreshResult {
         guard refreshGeneration == generation else { throw NativeRelayCoreError.inactive }
         guard let core, let transport, let context else { throw NativeRelayCoreError.inactive }
         try await refreshConfirmedProjection(core: core, context: context, generation: generation)
+        try await resumeConfirmedDiscussions(core: core, context: context, generation: generation)
         if let configuration {
             let threads = try configuration.store.conversationSnapshot(context: context).threads
             for (request, thread) in threads where (thread.uploadCleanups ?? [:]).values.contains(where: {

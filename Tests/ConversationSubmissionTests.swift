@@ -10,6 +10,7 @@ final class ConversationSubmissionTests: XCTestCase {
         var turn: Data?
         var failReplay = false
         var failUpload = false
+        var uploadAttempts = 0
         var uploadHook: (@Sendable () async throws -> Void)?
         var cleanupRequests: [ConversationUploadCleanup] = []
         var failCleanup = false
@@ -40,6 +41,7 @@ final class ConversationSubmissionTests: XCTestCase {
         }
         func uploadConversationFile(_ file: ConversationFile, from source: URL, binding: ConversationBinding,
                                     operationID: UUID, limits: ConversationFileLimits, originURL: URL) async throws -> ConversationFile {
+            uploadAttempts += 1
             try await uploadHook?()
             if failUpload { throw ConversationFileTransportError.server(status: 503, reason: ExactText("Upload interrupted")) }
             return ConversationFile(id: file.id, name: file.name, byteCount: file.byteCount, sha256: file.sha256, content: .uploaded(ExactText(uploadID)))
@@ -181,21 +183,67 @@ final class ConversationSubmissionTests: XCTestCase {
         guard case let .rejected(reason) = draft.disposition else { return XCTFail("Known not-sent entry remains editable") }
         XCTAssertTrue(reason.rawValue.contains("large.bin"))
     }
-    func testPreparationFailureOnUnknownRetryCannotUnfreezeOrDiscardItsOriginalOperation() async throws {
+    func testUnknownUploadReplyRestartsWithSameFrameWithoutUploadingAgain() async throws {
         let file = ConversationFile(id: ExactText("retained"), name: ExactText("large.bin"), byteCount: 300_000,
             sha256: ExactText(String(repeating: "a", count: 64)), content: .localFile(ExactText("retained")))
-        let (context, _, domain, binding, session, core) = try await setup(files: [file])
+        let (context, persistence, domain, binding, session, core) = try await setup(files: [file])
         _ = try await core.submitDiscussion(binding) { _ in URL(fileURLWithPath: "/unused") }
         let operation = try XCTUnwrap(session.sent.first?.1)
-        session.failUpload = true
-        do { _ = try await core.submitDiscussion(binding) { _ in URL(fileURLWithPath: "/unused") }; XCTFail("Upload failure must stop this retry") }
-        catch {}
-        let retained = try XCTUnwrap(domain.conversationSnapshot(context: context).threads[binding.request]?.drafts[1])
+        let firstFrame = try XCTUnwrap(session.sent.first?.0)
+        let restored = try await reopenWithServerCache(domain, context: context, persistence: persistence)
+        let restartedCore = try NativeRelayCore(store: restored, context: context, session: session)
+        _ = try await restartedCore.resyncAndDrainOutbox()
+        session.failUpload = true // Recovery must reuse the prior upload reference.
+        try await restartedCore.resumePendingDiscussions { _ in
+            throw CocoaError(.fileNoSuchFile) // The already prepared frame needs no disk read.
+        }
+        let retained = try XCTUnwrap(restored.conversationSnapshot(context: context).threads[binding.request]?.drafts[1])
         XCTAssertEqual(retained.disposition, .outcomeUnknown(operation))
         XCTAssertEqual(retained.files, [file])
-        XCTAssertThrowsError(try domain.saveConversationDraft(ConversationDraft(binding: binding, text: ExactText("Replacement")), context: context))
-        XCTAssertEqual(session.sent.count, 1)
+        XCTAssertEqual(retained.wireFrame, firstFrame)
+        XCTAssertThrowsError(try restored.saveConversationDraft(ConversationDraft(binding: binding, text: ExactText("Replacement")), context: context))
+        XCTAssertEqual(session.uploadAttempts, 1)
+        XCTAssertEqual(session.sent.count, 2)
+        XCTAssertEqual(session.sent.last?.0, firstFrame)
+        XCTAssertEqual(session.sent.last?.1, operation)
     }
+
+    func testLocallyAcceptedDiscussionResumesAfterRestartButEditorDraftDoesNot() async throws {
+        let (context, persistence, domain, binding, session, _) = try await setup()
+        let operation = try domain.prepareDiscussion(binding, context: context)
+        let restored = try await reopenWithServerCache(domain, context: context, persistence: persistence)
+        let restartedCore = try NativeRelayCore(store: restored, context: context, session: session)
+        _ = try await restartedCore.resyncAndDrainOutbox()
+        try await restartedCore.resumePendingDiscussions { _ in URL(fileURLWithPath: "/unused") }
+        XCTAssertEqual(session.sent.map(\.1), [operation])
+        XCTAssertEqual(try restored.conversationSnapshot(context: context).threads[binding.request]?.drafts[1]?.disposition,
+                       .outcomeUnknown(operation))
+
+        let (_, _, _, _, editorSession, editorCore) = try await setup()
+        try await editorCore.resumePendingDiscussions { _ in URL(fileURLWithPath: "/unused") }
+        XCTAssertTrue(editorSession.sent.isEmpty, "An editor draft without Send is not queued work.")
+    }
+
+    func testDefiniteDiscussionRefusalSurvivesRestartAndExplicitRetryKeepsIdentity() async throws {
+        let (context, persistence, domain, binding, session, core) = try await setup()
+        session.result = .rejected(reason: ExactText("temporarily refused"))
+        _ = try await core.submitDiscussion(binding) { _ in URL(fileURLWithPath: "/unused") }
+        let first = try XCTUnwrap(session.sent.first)
+        let restored = try await reopenWithServerCache(domain, context: context, persistence: persistence)
+        let restartedCore = try NativeRelayCore(store: restored, context: context, session: session)
+        _ = try await restartedCore.resyncAndDrainOutbox()
+        try await restartedCore.resumePendingDiscussions { _ in URL(fileURLWithPath: "/unused") }
+        XCTAssertEqual(session.sent.count, 1, "A definitive refusal waits for explicit Retry.")
+        let rejected = try XCTUnwrap(restored.conversationSnapshot(context: context).threads[binding.request]?.drafts[1])
+        XCTAssertEqual(rejected.operationID, first.1)
+        XCTAssertEqual(rejected.disposition, .rejected(ExactText("temporarily refused")))
+        session.result = .unresolved
+        _ = try await restartedCore.submitDiscussion(binding) { _ in URL(fileURLWithPath: "/unused") }
+        XCTAssertEqual(session.sent.count, 2)
+        XCTAssertEqual(session.sent.last?.0, first.0)
+        XCTAssertEqual(session.sent.last?.1, first.1)
+    }
+
     func testDepartureDuringUploadPreventsLateReadinessAndSendWithoutLosingText() async throws {
         let file = ConversationFile(id: ExactText("retained"), name: ExactText("large.bin"), byteCount: 300_000,
             sha256: ExactText(String(repeating: "a", count: 64)), content: .localFile(ExactText("retained")))

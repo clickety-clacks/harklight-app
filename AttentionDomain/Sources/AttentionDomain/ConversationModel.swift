@@ -274,6 +274,10 @@ public struct ConversationDraft: Equatable, Codable, Sendable {
     public var text: ExactText
     public var files: [ConversationFile]
     public var disposition: Disposition
+    /// Delivery identity and the prepared bytes belong to the pending intent,
+    /// including a rejected intent offered for Retry. They are not Server state.
+    public var operationID: UUID?
+    public var wireFrame: Data?
 
     public enum Disposition: Equatable, Codable, Sendable {
         case saved
@@ -284,11 +288,14 @@ public struct ConversationDraft: Equatable, Codable, Sendable {
     }
 
     public init(binding: ConversationBinding, text: ExactText = ExactText(""),
-                files: [ConversationFile] = [], disposition: Disposition = .saved) {
+                files: [ConversationFile] = [], disposition: Disposition = .saved,
+                operationID: UUID? = nil, wireFrame: Data? = nil) {
         self.binding = binding
         self.text = text
         self.files = files
         self.disposition = disposition
+        self.operationID = operationID
+        self.wireFrame = wireFrame
     }
 }
 
@@ -507,6 +514,10 @@ public struct ConversationThread: Equatable, Codable, Sendable {
         let ids = Set(abandoned.flatMap { $0.originals.map(\.id) })
         guard !ids.isEmpty else { return }
         draft.files.removeAll { ids.contains($0.id) }
+        // Explicitly discarded uploads change the draft payload. A later Send
+        // is a new operation, never a retry of the fenced request bytes.
+        draft.operationID = nil
+        draft.wireFrame = nil
         draft.disposition = .rejected(ExactText("Not delivered. Reselect files to upload again; text draft retained."))
         drafts[revision] = draft
     }
