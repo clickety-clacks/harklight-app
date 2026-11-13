@@ -1784,7 +1784,7 @@ final class LivePresentationStore {
     func markConversationRead(_ key: RequestKey, through turnID: ExactText) {
         guard !isReadOnly, canUseCurrentServerState(for: key),
               conversationThreads[key]?.turns.contains(where: {
-                  $0.id == turnID && $0.kind == .reply && $0.author == .origin
+                  $0.id == turnID && $0.kind == .reply && $0.author != .person
               }) == true else { return }
         let readKey = ConversationReadKey(request: key, turnID: turnID)
         guard pendingConversationReadUpdates.insert(readKey).inserted else { return }

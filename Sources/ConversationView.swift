@@ -383,7 +383,7 @@ private struct ConversationHistoryContent: View, Equatable {
                                 }
                             }
                             .onScrollVisibilityChange(threshold: 0.5) { isVisible in
-                                guard turn.kind == .reply, turn.author == .origin else { return }
+                                guard turn.kind == .reply, turn.author != .person else { return }
                                 if isVisible {
                                     visibleAgentReplyTurnIDs.insert(turn.id)
                                     NativePushedViewCoordinator.shared.performReadIfContentIsActive(for: key) {
