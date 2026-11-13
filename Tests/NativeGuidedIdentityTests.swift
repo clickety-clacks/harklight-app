@@ -10,6 +10,12 @@ final class NativeGuidedIdentityTests: XCTestCase {
         defer { removeTestIdentity(namespace) }
         let material = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
         let certificate = try XCTUnwrap(SecCertificateCreateWithData(nil, material.certificateDER as CFData))
+        let certificateValues = try XCTUnwrap(
+            SecCertificateCopyValues(certificate, [kSecOIDX509V1ValidityNotAfter] as CFArray, nil)
+                as? [CFString: Any])
+        let validity = try XCTUnwrap(certificateValues[kSecOIDX509V1ValidityNotAfter] as? [CFString: Any])
+        let notAfter = try XCTUnwrap(validity[kSecPropertyKeyValue] as? Date)
+        XCTAssertEqual(Calendar(identifier: .gregorian).component(.year, from: notAfter), 9999)
         XCTAssertEqual(DeviceCertificateBinding.fingerprint(material.certificateDER), material.deviceID)
         var privateKey: SecKey?
         XCTAssertEqual(SecIdentityCopyPrivateKey(material.value, &privateKey), errSecSuccess)

@@ -19,6 +19,9 @@ struct NativeInstallationIdentity {
 struct NativeInstallationIdentityStore {
     let namespace: String
 
+    // Last second representable by X.509 GeneralizedTime: 9999-12-31T23:59:59Z.
+    private static let certificateNotAfter = Date(timeIntervalSince1970: 253_402_300_799)
+
     init(namespace: String = "co.clicketyclacks.Harklight.guided-installation") {
         self.namespace = namespace
     }
@@ -144,7 +147,7 @@ struct NativeInstallationIdentityStore {
         serial[0] |= 1
         let now = Date()
         let validity = DER.sequence(DER.time(now.addingTimeInterval(-300)),
-                                    DER.time(now.addingTimeInterval(365 * 24 * 60 * 60)))
+                                    DER.time(certificateNotAfter))
         let spki = DER.sequence(rsa, DER.bitString(publicKeyDER))
         let constraints = DER.sequence(DER.oid([0x55, 0x1d, 0x13]), DER.value(1, Data([0xff])),
                                        DER.value(4, DER.sequence()))
