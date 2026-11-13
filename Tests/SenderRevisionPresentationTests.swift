@@ -105,7 +105,7 @@ final class SenderRevisionPresentationTests: XCTestCase {
         let staleStatusParts = staleRow.status.components(separatedBy: " · ")
         XCTAssertTrue(staleStatusParts.contains("Updated"),
                       "A noncurrent cached inbox must retain the server-supplied accepted-revision label.")
-        XCTAssertTrue(staleStatusParts.contains("Cached history · status not refreshed"),
+        XCTAssertTrue(staleRow.status.contains("Cached history · status not refreshed"),
                       "The Updated label does not imply that the cached inbox itself is current.")
         XCTAssertFalse(staleStatusParts.contains("Open"),
                        "A noncurrent cached inbox must not expose an unrefreshed lifecycle status.")
