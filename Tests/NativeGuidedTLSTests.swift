@@ -634,7 +634,9 @@ final class NativeGuidedTLSTests: XCTestCase {
         let after = try domain.snapshot(context: context)
         XCTAssertEqual(after.outbox, before.outbox)
         XCTAssertEqual(after.intents, before.intents)
-        XCTAssertEqual(after.drafts, before.drafts)
+        XCTAssertNil(after.drafts[key], "The server terminal removes the answered request's editor.")
+        XCTAssertEqual(after.drafts, before.drafts.filter { $0.key != key },
+                       "Opening another request must retain all unrelated user input.")
         XCTAssertEqual(after.intents[receipt.intentID], before.intents[receipt.intentID])
         let persisted = try XCTUnwrap(persistence.load(identity: context.identity))
         router.receive(try notificationPayload(), opened: false)
