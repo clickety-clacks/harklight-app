@@ -759,6 +759,7 @@ public final class ClientRepository: @unchecked Sendable {
         }
         var next = state
         next.intents.removeValue(forKey: intentID)
+        next.replayPublishedIntents?.removeValue(forKey: intentID)
         next.intentByRequest.removeValue(forKey: submission.requestKey)
         next.outboxOrder.removeAll { $0 == intentID }
         try commit(next)
@@ -2605,9 +2606,22 @@ public final class ClientRepository: @unchecked Sendable {
         let inboxSourceOrder = state.inboxCheckpoint.flatMap {
             $0.checkpointAccepted ? $0.sourceOrder : nil
         }
+        var visibleIntents = state.intents
+        if published, let priorIntents = state.replayPublishedIntents {
+            // A replayed terminal retires the durable queue immediately, but
+            // the coherent UI still shows the prior request until finishReplay.
+            // Keep only that terminal's prior pending presentation until then;
+            // never resurrect explicitly cancelled or replaced operations.
+            for (id, intent) in priorIntents where visibleIntents[id] == nil {
+                if state.remoteStates[intent.requestKey]?.isTerminal == true,
+                   state.replayPublishedStates?[intent.requestKey]?.isTerminal != true {
+                    visibleIntents[id] = intent
+                }
+            }
+        }
         return AttentionStoreSnapshot(requests: publishedRequests,
                                       drafts: visibleDrafts,
-                                      intents: state.intents,
+                                      intents: visibleIntents,
                                       outbox: sortedOutbox,
                                       remoteStates: published ? (state.replayPublishedStates ?? state.remoteStates) : state.remoteStates,
                                       fixtureSessions: visibleSessions,

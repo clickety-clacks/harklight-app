@@ -1796,6 +1796,10 @@ final class HarklightTests: XCTestCase {
         _ = try store.apply(RelayEvent(sequence: 2, body: .terminal(fixture.key, .answered, nil)), context: context)
         XCTAssertEqual(try port.observe(context: port.context).requests.first?.lifecycleStatus, .pending,
                        "The prior coherent view remains published until resync.")
+        XCTAssertTrue(try store.serverCacheSnapshot(context: context).intents.isEmpty,
+                      "The prior UI receipt cannot return a completed operation to the durable queue.")
+        XCTAssertTrue(try store.inboxOperationInventory(context: context).isEmpty)
+        XCTAssertThrowsError(try store.queueOriginalOperationForUserTap(receipt.intentID, context: context))
         try store.finishReplay(at: 2, context: context)
         let presented = try XCTUnwrap(port.observe(context: port.context).requests.first)
         XCTAssertEqual(presented.lifecycleStatus, .answered)

@@ -109,7 +109,7 @@ final class ConversationUploadCleanupTests: XCTestCase {
     }
 
     @MainActor
-    func testActualMessageDepartureDiffersFromSelectionRebuildAndKeepsOfflineCleanupRecoverable() async throws {
+    func testMessageDepartureKeepsRejectedUploadIdentityAndFilesForRetry() async throws {
         let (context, persistence, domain, binding) = try setup()
         let original = file("unsubmitted.bin")
         try domain.saveConversationDraft(ConversationDraft(binding: binding, text: ExactText("Keep exact draft"), files: [original]), context: context)
@@ -122,15 +122,19 @@ final class ConversationUploadCleanupTests: XCTestCase {
         model.navigateMessage(from: binding.request, to: binding.request)
         XCTAssertTrue(try domain.conversationSnapshot(context: context).threads[binding.request]?.uploadCleanups?.isEmpty ?? true)
         model.navigateMessage(from: binding.request, to: nil)
-        XCTAssertTrue(model.hasPendingUploadCleanup(for: binding.request, revision: 1))
-        XCTAssertTrue(model.uploadNeedsReselection(original, for: binding.request, revision: 1))
-        let cleanup = try XCTUnwrap(domain.conversationSnapshot(context: context).threads[binding.request]?.uploadCleanups?.values.first)
-        await model.retryUploadCleanup(for: binding.request) // Unconfigured disposable profile: no service can be contacted.
+        XCTAssertFalse(model.hasPendingUploadCleanup(for: binding.request, revision: 1),
+                       "Leaving the message must not cancel a locally accepted upload's same-ID Retry.")
+        XCTAssertFalse(model.uploadNeedsReselection(original, for: binding.request, revision: 1))
         let restored = try await Self.reopenWithServerCache(domain, context: context, persistence: persistence)
-        let pending = try XCTUnwrap(restored.conversationSnapshot(context: context).threads[binding.request]?.uploadCleanups?[cleanup.id])
-        guard case .unknown = pending.outcome else { return XCTFail("Offline cleanup must not become confirmed") }
-        XCTAssertEqual(pending.uploadOperations, [operation])
-        XCTAssertEqual(try restored.conversationSnapshot(context: context).threads[binding.request]?.drafts[1]?.text, ExactText("Keep exact draft"))
+        let thread = try XCTUnwrap(restored.conversationSnapshot(context: context).threads[binding.request])
+        let draft = try XCTUnwrap(thread.drafts[1])
+        XCTAssertEqual(draft.operationID, operation)
+        XCTAssertEqual(draft.disposition, .rejected(ExactText("Not sent")))
+        XCTAssertEqual(draft.text, ExactText("Keep exact draft"))
+        XCTAssertEqual(draft.files, [original])
+        XCTAssertTrue(thread.uploadCleanups?.isEmpty ?? true)
+        XCTAssertEqual(try restored.prepareDiscussion(binding, context: context), operation,
+                       "Retry after navigation and restart reuses the original operation.")
         XCTAssertTrue(try restored.snapshot(context: context).outbox.isEmpty)
     }
 
