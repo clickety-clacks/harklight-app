@@ -283,8 +283,7 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         let session = AnswerSession(context.identity)
         session.rejectOperation = true
         let core = try NativeRelayCore(store: store, context: context, session: session)
-        let sent = try await core.sendPendingOriginalOperations()
-        XCTAssertEqual(sent, 1)
+        try await core.sendOriginalOperationForUserTap(failed.intentID)
         try live.refreshFromDurableStore()
 
         let request = try XCTUnwrap(live.request(for: key))
@@ -394,8 +393,7 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         let session = AnswerSession(context.identity)
         session.loseOperationReply = true
         let core = try NativeRelayCore(store: store, context: context, session: session)
-        let sent = try await core.sendPendingOriginalOperations()
-        XCTAssertEqual(sent, 1)
+        try await core.sendOriginalOperationForUserTap(receipt.intentID)
         try live.refreshFromDurableStore()
 
         let pending = try XCTUnwrap(live.request(for: key))
@@ -412,7 +410,7 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         XCTAssertNil(row.localStatus)
         XCTAssertEqual(try store.snapshot(context: context).outbox.map(\.operationID), [receipt.opID])
 
-        _ = try await core.sendPendingOriginalOperations()
+        try await core.sendOriginalOperationForUserTap(receipt.intentID)
         XCTAssertEqual(session.sentOperationIDs, [receipt.opID, receipt.opID],
                        "Retry sends the same durable operation rather than creating a duplicate answer.")
         XCTAssertEqual(try store.snapshot(context: context).intents.count, 1)
@@ -849,8 +847,7 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         let session = AnswerSession(context.identity)
         session.loseOperationReply = true
         let core = try NativeRelayCore(store: store, context: context, session: session)
-        let sentCount = try await core.sendPendingOriginalOperations()
-        XCTAssertEqual(sentCount, 1)
+        try await core.sendOriginalOperationForUserTap(receipt.intentID)
         try store.apply(RelayEvent(sequence: 2, body: .terminal(key, .noComment, nil)), context: context)
         try live.refreshFromDurableStore()
 

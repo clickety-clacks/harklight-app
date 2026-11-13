@@ -381,97 +381,6 @@ final class ConversationRelayTests: XCTestCase {
         await core.deactivate()
     }
 
-    func testLocalReadBeforeServerSupportMigratesAndRetriesWithSameOperationID() async throws {
-        let (context, persistence, store, session) = try setup()
-        let first = RequestKey(accountScope: context.identity.personID,
-            senderID: ExactText("author"), messageID: ExactText("request"))
-        let second = RequestKey(accountScope: context.identity.personID,
-            senderID: ExactText("author"), messageID: ExactText("second"))
-        session.ordinary = [data(#"{"v":1,"type":"ok","ref":"native-sync"}"#),
-            data(#"{"v":1,"type":"delivery","seq":1,"sender_id":"author","message_id":"request","origin":"origin","as":"message","message":{"title":"First question"},"session_handle":"handle","request_revision":1,"availability":"not_listening","last_detached_at":123}"#),
-            data(#"{"v":1,"type":"delivery","seq":2,"sender_id":"author","message_id":"second","origin":"origin","as":"message","message":{"title":"Second question"},"session_handle":"second-handle","request_revision":1,"availability":"not_listening","last_detached_at":123}"#),
-            data(#"{"v":1,"type":"resynced","seq":2}"#)]
-        session.conversation = [data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
-            event("reply", sequence: 1, fields: #""author":"origin","event_id":"reply-1","text":"First reply""#),
-            event("reply", sequence: 2, fields: #""author":"origin","event_id":"reply-2","text":"Second reply""#,
-                messageID: "second", sessionHandle: "second-handle"),
-            data(#"{"v":1,"type":"conversation_resynced","conversation_seq":2}"#)]
-        let core = try NativeRelayCore(store: store, context: context, session: session)
-        _ = try await core.resyncAndDrainOutbox()
-
-        XCTAssertNil(try store.markConversationRead(first, context: context),
-                     "An older server keeps the existing local read marker and receives no read-position write.")
-        XCTAssertTrue(session.conversationReadPositionRequests.isEmpty)
-        let locallyRead = try XCTUnwrap(store.conversationSnapshot(context: context).threads[first])
-        XCTAssertEqual(locallyRead.latestAgentReply?.id, ExactText("reply-1"))
-        XCTAssertEqual(locallyRead.readThroughTurn, ExactText("reply-1"))
-        XCTAssertFalse(locallyRead.hasUnreadAgentReply)
-        XCTAssertTrue(try XCTUnwrap(store.conversationSnapshot(context: context).threads[second]).hasUnreadAgentReply)
-
-        // The inbox replay is already at high water 2; this subsequent open
-        // returns only the accepted frame and its matching checkpoint.
-        session.ordinary = [data(#"{"v":1,"type":"ok","ref":"native-sync"}"#),
-            data(#"{"v":1,"type":"resynced","seq":2}"#)]
-        session.conversation = [data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
-            data(#"{"v":1,"type":"conversation_resynced","conversation_seq":2,"chat_read_positions":[]}"#)]
-        session.conversationReadPositionResults = [.unresolved,
-            .accepted(position: 1, eventSequence: 3, eventID: ExactText("read-3"), duplicate: false)]
-        _ = try await core.resyncAndDrainOutbox()
-
-        let migrated = try store.conversationSnapshot(context: context)
-        XCTAssertEqual(migrated.chatReadPositionSupport, true)
-        XCTAssertEqual(migrated.chatReadPositions?[first], 1)
-        XCTAssertEqual(migrated.pendingChatReadPositions.first?.readThroughConversationSequence, 1)
-        let firstAttempt = try XCTUnwrap(session.conversationReadPositionRequests.first)
-        let firstFrame = try JSONValue.parse(firstAttempt)
-        XCTAssertEqual(firstFrame.uniqueValue(named: "type")?.stringValue?.rawValue, "conversation_read")
-        XCTAssertEqual(firstFrame.uniqueValue(named: "sender_id")?.stringValue, first.senderID)
-        XCTAssertEqual(firstFrame.uniqueValue(named: "message_id")?.stringValue, first.messageID)
-        XCTAssertEqual(firstFrame.uniqueValue(named: "read_through_conversation_seq")?.integerValue, 1)
-        XCTAssertNil(firstFrame.uniqueValue(named: "request_revision"))
-        XCTAssertNil(firstFrame.uniqueValue(named: "person_id"))
-        XCTAssertNil(firstFrame.uniqueValue(named: "device_id"))
-
-        let pendingBeforeRelaunch = try XCTUnwrap(
-            store.conversationSnapshot(context: context).pendingChatReadPositions.first)
-        let relaunchedStore = try ClientRepository(context: context, persistence: persistence)
-        let persistedPending = try XCTUnwrap(
-            relaunchedStore.conversationSnapshot(context: context).pendingChatReadPositions.first)
-        XCTAssertEqual(persistedPending.operationID, pendingBeforeRelaunch.operationID,
-                       "The unresolved read operation and its identity survive a relaunch.")
-        await core.deactivate()
-
-        let retrySession = Session(context.identity)
-        retrySession.ordinary = [data(#"{"v":1,"type":"ok","ref":"native-sync"}"#),
-            data(#"{"v":1,"type":"resynced","seq":2}"#)]
-        retrySession.conversation = [data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
-            data(#"{"v":1,"type":"conversation_resynced","conversation_seq":2,"chat_read_positions":[]}"#)]
-        retrySession.conversationReadPositionResults = [
-            .accepted(position: 1, eventSequence: 3, eventID: ExactText("read-3"), duplicate: false)
-        ]
-        var conversationOpenCount = 0
-        retrySession.onConversationOpen = {
-            conversationOpenCount += 1
-            guard conversationOpenCount == 2 else { return }
-            retrySession.conversation = [self.data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
-                self.data(#"{"v":1,"type":"conversation","event_id":"read-3","conversation_seq":3,"sender_id":"author","message_id":"request","origin":"origin","kind":"read_position","read_through_conversation_seq":1}"#),
-                self.data(#"{"v":1,"type":"conversation_resynced","conversation_seq":3,"chat_read_positions":[{"sender_id":"author","message_id":"request","read_through_conversation_seq":1}]}"#)]
-        }
-        let retryCore = try NativeRelayCore(store: relaunchedStore, context: context, session: retrySession)
-        _ = try await retryCore.resyncAndDrainOutbox()
-
-        XCTAssertEqual(retrySession.conversationReadPositionRequests.count, 1)
-        let retryFrame = try JSONValue.parse(retrySession.conversationReadPositionRequests[0])
-        XCTAssertEqual(retryFrame.uniqueValue(named: "op_id")?.stringValue,
-                       firstFrame.uniqueValue(named: "op_id")?.stringValue,
-                       "A retry of the same logical read reuses its durable operation identity.")
-        let snapshot = try relaunchedStore.conversationSnapshot(context: context)
-        XCTAssertTrue(snapshot.pendingChatReadPositions.isEmpty)
-        XCTAssertEqual(snapshot.chatReadPositions?[first], 1)
-        XCTAssertFalse(try XCTUnwrap(snapshot.threads[first]).hasUnreadAgentReply)
-        XCTAssertTrue(try XCTUnwrap(snapshot.threads[second]).hasUnreadAgentReply)
-        await retryCore.deactivate()
-    }
 
     func testReadPositionWireDoesNotRequireRevisionOrSessionHandle() throws {
         let (context, _, _, _) = try setup()
@@ -491,33 +400,6 @@ final class ConversationRelayTests: XCTestCase {
         XCTAssertThrowsError(try wire.decodeUpdate(data(#"{"v":1,"type":"conversation","event_id":"","conversation_seq":7,"sender_id":"author","message_id":"request","kind":"read_position","read_through_conversation_seq":4}"#)))
     }
 
-    func testOlderSavedConversationTurnSequenceIsRecoveredForDuplicateReplay() throws {
-        let request = RequestKey(accountScope: ExactText("person"),
-            senderID: ExactText("author"), messageID: ExactText("request"))
-        let binding = ConversationBinding(request: request, revision: 1)
-        let handle = ExactText("handle")
-        let oldTurn = ConversationTurn(id: ExactText("reply-1"), binding: binding,
-            author: .origin, sessionHandle: handle, text: ExactText("Reply"), kind: .reply)
-        var thread = ConversationThread(request: request, sessionHandle: handle,
-            revision: 1, payload: .null)
-        let oldTurnEvent = ConversationEvent(sequence: 1, binding: binding, fact: .turn(oldTurn))
-        try thread.merge(oldTurn, event: oldTurnEvent)
-        var state = ConversationState()
-        state.cursor = 1
-        state.events[1] = oldTurnEvent
-        state.threads[request] = thread
-
-        state.orderTurnsFromProjectionEvents()
-        var replayedTurn = oldTurn
-        replayedTurn.conversationSequence = 1
-        try state.apply(ConversationEvent(sequence: 1, binding: binding, fact: .turn(replayedTurn)))
-
-        XCTAssertEqual(state.threads[request]?.latestAgentReply?.conversationSequence, 1)
-        guard case let .turn(savedTurn)? = state.events[1]?.fact else {
-            return XCTFail("The old saved conversation event should remain available.")
-        }
-        XCTAssertEqual(savedTurn.conversationSequence, 1)
-    }
 
     func testResyncSnapshotDistinguishesOldServerFromEmptyReadMap() throws {
         let (context, _, _, _) = try setup()
@@ -738,8 +620,11 @@ final class ConversationRelayTests: XCTestCase {
             context: context))
         XCTAssertEqual(firstPending.readThroughConversationSequence, 2)
         var thread = try XCTUnwrap(try store.conversationSnapshot(context: context).threads[key])
+        XCTAssertEqual(thread.accountReadThroughConversationSequence, 0,
+                       "A queued read request does not change server read state.")
+        try store.acceptConversationReadPosition(firstPending, serverPosition: 2, context: context)
+        thread = try XCTUnwrap(store.conversationSnapshot(context: context).threads[key])
         XCTAssertEqual(thread.accountReadThroughConversationSequence, 2)
-        XCTAssertEqual(thread.readThroughTurn, earliest.id)
         XCTAssertTrue(thread.hasUnreadAgentReply,
                       "The later reply remains unread until its own row is shown.")
 
@@ -747,6 +632,10 @@ final class ConversationRelayTests: XCTestCase {
             context: context))
         XCTAssertEqual(laterPending.readThroughConversationSequence, 3)
         thread = try XCTUnwrap(try store.conversationSnapshot(context: context).threads[key])
+        XCTAssertEqual(thread.accountReadThroughConversationSequence, 2)
+        XCTAssertTrue(thread.hasUnreadAgentReply)
+        try store.acceptConversationReadPosition(laterPending, serverPosition: 3, context: context)
+        thread = try XCTUnwrap(store.conversationSnapshot(context: context).threads[key])
         XCTAssertEqual(thread.accountReadThroughConversationSequence, 3)
         XCTAssertFalse(thread.hasUnreadAgentReply)
         await core.deactivate()

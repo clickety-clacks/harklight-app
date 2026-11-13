@@ -1378,7 +1378,7 @@ final class NativeGuidedTLSTests: XCTestCase {
         let collected = NativeDiagnosticEventCollector()
         let core = try NativeRelayCore(store: store, context: context, session: session,
                                        onDiagnostic: { collected.append($0) })
-        _ = try await core.sendPendingOriginalOperations()
+        try await core.sendOriginalOperationForUserTap(receipt.intentID)
         journal.record(collected.events)
         try presentation.refreshFromDurableStore()
         let reopened = try XCTUnwrap(presentation.inboxRow(for: request))
@@ -1479,8 +1479,7 @@ final class NativeGuidedTLSTests: XCTestCase {
         let coreDiagnostics = NativeDiagnosticEventCollector()
         let core = try NativeRelayCore(store: store, context: context, session: session,
             onDiagnostic: { coreDiagnostics.append($0) })
-        let attempted = try await core.sendPendingOriginalOperations()
-        XCTAssertEqual(attempted, 1)
+        try await core.sendOriginalOperationForUserTap(receipt.intentID)
         await session.close()
 
         let decodedResponse = transportDiagnostics.events.filter {
@@ -3136,13 +3135,11 @@ final class NativeGuidedTLSTests: XCTestCase {
         let firstSession = ForegroundProgressRelaySession(identity: identity, store: store, context: context)
         let firstCore = try NativeRelayCore(store: store, context: context, session: firstSession,
             attemptID: firstTransport, onDiagnostic: { diagnosticEvents.append($0) })
-        let firstAttempt = try await firstCore.sendPendingOriginalOperations()
+        try await firstCore.sendOriginalOperationForUserTap(originalReceipt.intentID)
         let secondSession = ForegroundProgressRelaySession(identity: identity, store: store, context: context)
         let secondCore = try NativeRelayCore(store: store, context: context, session: secondSession,
             attemptID: secondTransport, onDiagnostic: { diagnosticEvents.append($0) })
-        let secondAttempt = try await secondCore.sendPendingOriginalOperations()
-        XCTAssertEqual(firstAttempt, 1)
-        XCTAssertEqual(secondAttempt, 1)
+        try await secondCore.sendOriginalOperationForUserTap(originalReceipt.intentID)
 
         let firstSends = firstSession.originalOperationRecorder.snapshot()
         let secondSends = secondSession.originalOperationRecorder.snapshot()

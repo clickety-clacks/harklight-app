@@ -480,8 +480,7 @@ final class NativeRelayCoreTests: XCTestCase {
         session.result = .unsupported(operationID: receipt.opID)
 
         let core = try NativeRelayCore(store: store, context: context, session: session)
-        let attempted = try await core.sendPendingOriginalOperations()
-        XCTAssertEqual(attempted, 1)
+        try await core.sendOriginalOperationForUserTap(receipt.intentID)
         XCTAssertEqual(String(decoding: try XCTUnwrap(session.sent.first?.0), as: UTF8.self),
                        #"{"type":"answer_no_comment","request_id":"no-comment","request_revision":1}"# + "\n")
 
@@ -821,8 +820,7 @@ final class NativeRelayCoreTests: XCTestCase {
         session.result = .staleRevision(operationID: receipt.opID, currentRevision: 2)
 
         let core = try NativeRelayCore(store: store, context: context, session: session)
-        let attempted = try await core.sendPendingOriginalOperations()
-        XCTAssertEqual(attempted, 1)
+        try await core.sendOriginalOperationForUserTap(receipt.intentID)
         let declined = try XCTUnwrap(try port.lookupIntent(context: port.context, intentID: receipt.intentID))
         XCTAssertEqual(declined.localState, .notDelivered)
         XCTAssertEqual(try store.lookupIntent(receipt.intentID, context: context)?.disposition,
@@ -1356,8 +1354,7 @@ final class NativeRelayCoreTests: XCTestCase {
                                                   inputs: [.compatibilityValue(action: ExactText("yes"))]))
         let firstSession = Session(identity)
         let firstCore = try NativeRelayCore(store: store, context: context, session: firstSession)
-        let firstAttempt = try await firstCore.sendPendingOriginalOperations()
-        XCTAssertEqual(firstAttempt, 1)
+        try await firstCore.sendOriginalOperationForUserTap(receipt.intentID)
         XCTAssertEqual(firstSession.sent.first?.1, receipt.opID)
         XCTAssertEqual(try store.snapshot(context: context).outbox.count, 1)
 
@@ -1368,8 +1365,7 @@ final class NativeRelayCoreTests: XCTestCase {
         let secondCore = try NativeRelayCore(store: restarted,
                                              context: restartedContext,
                                              session: secondSession)
-        let secondAttempt = try await secondCore.sendPendingOriginalOperations()
-        XCTAssertEqual(secondAttempt, 1)
+        try await secondCore.sendOriginalOperationForUserTap(receipt.intentID)
         XCTAssertEqual(secondSession.sent.first?.0, firstSession.sent.first?.0)
         XCTAssertEqual(try restarted.snapshot(context: restartedContext).cursor, 1,
                        "An operation receipt at sequence 9 cannot jump the durable relay cursor.")
@@ -1430,8 +1426,6 @@ final class NativeRelayCoreTests: XCTestCase {
             .first { $0.contains("\"type\":\"inbox_start\"") })
         XCTAssertTrue(inboxStart.contains("\"since\":1"),
                       "Cache-backed sync resumes from the cached cursor.")
-        let backgroundSendCount = try await core.sendPendingOriginalOperations()
-        XCTAssertEqual(backgroundSendCount, 0)
         XCTAssertTrue(session.sent.isEmpty, "Refresh and legacy drain entry points do not resend cached answers.")
 
         let callStates = SendCallStateRecorder()
@@ -1445,8 +1439,6 @@ final class NativeRelayCoreTests: XCTestCase {
                       "An uncertain send is retained for Retry, not left for background drain.")
 
         _ = try await core.resyncAndDrainOutbox()
-        let retryBackgroundCount = try await core.sendPendingOriginalOperations()
-        XCTAssertEqual(retryBackgroundCount, 0)
         XCTAssertEqual(session.sent.count, 1)
 
         session.result = .accepted(operationID: receipt.opID, terminalSequence: 2)

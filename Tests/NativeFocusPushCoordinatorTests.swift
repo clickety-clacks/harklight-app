@@ -77,7 +77,7 @@ final class NativeFocusPushCoordinatorTests: XCTestCase {
         }
         let untouched = try XCTUnwrap(store.conversationSnapshot(context: context).threads[key])
         XCTAssertTrue(untouched.hasUnreadAgentReply, "All three replies remain unread while the pushed chat is untouched.")
-        XCTAssertNil(untouched.readThroughTurn)
+        XCTAssertNil(untouched.accountReadThroughConversationSequence)
         XCTAssertEqual(untouched.turns.filter {
             $0.kind == .reply && $0.author == .origin
         }.count, 3)
@@ -95,8 +95,9 @@ final class NativeFocusPushCoordinatorTests: XCTestCase {
         }
         XCTAssertTrue(readResumed, "The first scroll after the touch resumes normal chat read handling.")
         let touched = try XCTUnwrap(store.conversationSnapshot(context: context).threads[key])
-        XCTAssertFalse(touched.hasUnreadAgentReply)
-        XCTAssertEqual(touched.readThroughTurn, newest.id)
+        XCTAssertTrue(touched.hasUnreadAgentReply,
+                      "A visible read request cannot manufacture the server read position.")
+        XCTAssertNil(touched.accountReadThroughConversationSequence)
         coordinator.accountConnectionWillBeRemoved()
     }
 

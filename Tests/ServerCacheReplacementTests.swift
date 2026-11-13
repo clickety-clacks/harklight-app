@@ -87,6 +87,74 @@ final class ServerCacheReplacementTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: retired.path))
     }
 
+    func testQueuedAnswerSurvivesRestartButCannotOverrideServerAnswer() throws {
+        let context = context()
+        let key = key("answer", context: context)
+        let payload = try JSONValue.parse(Data(#"{"title":"Question","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"yes","label":"Yes","kind":"value","value":"yes"}]}}"#.utf8))
+        let request = StoredRequest(key: key, originalPayload: payload)
+        let persistence = MemoryPendingActionPersistence()
+        let first = try ClientRepository(context: context, persistence: persistence)
+        _ = try first.apply(RelayEvent(sequence: 1, body: .delivery(request, .message)), context: context)
+        let port = AttentionDomainPort(store: first)
+        let selector = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first?.selector)
+        let receipt = try port.submit(SubmitIntent(context: port.context, selector: selector,
+            intentID: UUID(), inputs: [.compatibilityValue(action: ExactText("yes"))]))
+        let queued = try XCTUnwrap(first.lookupIntent(receipt.intentID, context: context))
+
+        let restarted = try ClientRepository(context: context, persistence: persistence)
+        let restored = try XCTUnwrap(restarted.lookupIntent(receipt.intentID, context: context))
+        XCTAssertEqual(restored.operationID, queued.operationID)
+        XCTAssertEqual(restored.wireFrame, queued.wireFrame)
+        XCTAssertTrue(try restarted.snapshot(context: context).requests.isEmpty)
+        _ = try restarted.beginInboxCandidate(startupID: UUID().uuidString, since: 0,
+            batches: [], context: context)
+        let snapshotID = UUID().uuidString
+        let answered = RelayEvent(sequence: 2, body: .terminal(key, .answered, nil),
+            accountAnswerOutcome: .reply(ExactText("Server answer")))
+        try restarted.saveInboxInitialPage(snapshotID: snapshotID, highWater: 2,
+            items: [InboxSnapshotItem(acceptance: RelayEvent(sequence: 1,
+                body: .delivery(request, .message)), terminal: answered)],
+            nextCursor: nil, receiptCursor: nil, context: context)
+        _ = try restarted.prepareInboxCheckpointAcknowledgement(context: context)
+        _ = try restarted.acceptInboxCheckpoint(snapshotID: snapshotID, highWater: 2, context: context)
+
+        XCTAssertThrowsError(try restarted.queueOriginalOperationForUserTap(receipt.intentID, context: context)) {
+            XCTAssertEqual($0 as? AttentionStoreError, .requestClosed)
+        }
+        XCTAssertTrue(try restarted.snapshot(context: context).outbox.isEmpty)
+        let currentPort = AttentionDomainPort(store: restarted)
+        let shown = try XCTUnwrap(currentPort.inspect(context: currentPort.context, request: key).requests.first)
+        XCTAssertEqual(shown.accountAnswerOutcome, .reply(ExactText("Server answer")))
+        XCTAssertNil(shown.submittedAnswer, "A queued local answer is not the server's answer.")
+    }
+
+    func testReadRequestWaitsForServerAndNextSnapshotReplacesReadPosition() throws {
+        let context = context()
+        let key = key("chat", context: context)
+        let repository = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        _ = try repository.apply(RelayEvent(sequence: 1,
+            body: .delivery(request(key, title: "Chat"), .message),
+            conversation: RelayConversationMetadata(revision: 1, sessionHandle: ExactText("session"))), context: context)
+        let binding = ConversationBinding(request: key, revision: 1)
+        let turn = ConversationTurn(id: ExactText("reply"), binding: binding, author: .origin,
+            sessionHandle: ExactText("session"), text: ExactText("Reply"), kind: .reply)
+        _ = try repository.applyConversation(ConversationEvent(sequence: 1,
+            binding: binding, fact: .turn(turn)), context: context)
+        try repository.finishConversationReplay(at: 1, chatReadPositions: [], context: context)
+        let pending = try XCTUnwrap(repository.markConversationRead(key, through: turn.id, context: context))
+        var thread = try XCTUnwrap(repository.conversationSnapshot(context: context).threads[key])
+        XCTAssertEqual(thread.accountReadThroughConversationSequence, 0)
+        XCTAssertTrue(thread.hasUnreadAgentReply)
+
+        try repository.acceptConversationReadPosition(pending, serverPosition: 1, context: context)
+        thread = try XCTUnwrap(repository.conversationSnapshot(context: context).threads[key])
+        XCTAssertFalse(thread.hasUnreadAgentReply)
+        try repository.finishConversationReplay(at: 1, chatReadPositions: [], context: context)
+        thread = try XCTUnwrap(repository.conversationSnapshot(context: context).threads[key])
+        XCTAssertEqual(thread.accountReadThroughConversationSequence, 0)
+        XCTAssertTrue(thread.hasUnreadAgentReply, "No local read maximum overrides the server snapshot.")
+    }
+
     private func context() -> ProfileContext {
         ProfileContext(identity: ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
             personID: ExactText("person"), deviceID: ExactText("device")), transportMode: .relay)
