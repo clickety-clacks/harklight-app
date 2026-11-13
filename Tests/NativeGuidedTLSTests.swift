@@ -3196,7 +3196,7 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertEqual(Set(operationEvents.compactMap(\.requestRevision)), [1])
         XCTAssertEqual(Set(operationEvents.compactMap(\.receiptState)), [.unknown])
         XCTAssertEqual(Set(operationEvents.compactMap(\.requestTag)).count, 1)
-        let retained = try XCTUnwrap(store.snapshot(context: context).outbox.first)
+        let retained = try XCTUnwrap(store.lookupIntent(originalReceipt.intentID, context: context))
         XCTAssertEqual(retained.operationID, original.operationID)
         XCTAssertEqual(retained.requestKey, original.requestKey)
         XCTAssertEqual(retained.requestRevision, original.requestRevision)
