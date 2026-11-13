@@ -881,6 +881,9 @@ final class ConversationPresentationTests: XCTestCase {
         // Opening Chat clears it, and the cleared state survives a relaunch.
         model.markConversationRead(request)
         XCTAssertFalse(model.hasUnreadAgentReply(request))
+        await waitUntilMainActor("the persisted read position") {
+            (try? domain.conversationSnapshot(context: context).threads[request]?.hasUnreadAgentReply) == false
+        }
         let relaunched = try LivePresentationStore(store: AttentionDomainStore(context: context, persistence: persistence),
             context: context)
         XCTAssertFalse(relaunched.hasUnreadAgentReply(request))
@@ -899,7 +902,7 @@ final class ConversationPresentationTests: XCTestCase {
         XCTAssertFalse(resumed.hasUnreadAgentReply(request))
     }
 
-    func testInboxChatMarkerNeedsAChatTurnAndKeepsClosedUnreadRepliesVisible() throws {
+    func testInboxChatMarkerNeedsAChatTurnAndKeepsClosedUnreadRepliesVisible() async throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
             personID: ExactText("person"), deviceID: ExactText("device"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
@@ -945,6 +948,9 @@ final class ConversationPresentationTests: XCTestCase {
         XCTAssertEqual(model.inboxRow(for: key)?.chatUnread, true)
         model.markConversationRead(key)
         XCTAssertEqual(model.inboxRow(for: key)?.chatUnread, false)
+        await waitUntilMainActor("the persisted inbox chat read position") {
+            (try? domain.conversationSnapshot(context: context).threads[key]?.hasUnreadAgentReply) == false
+        }
 
         let later = ConversationTurn(id: ExactText("later-agent-turn"), binding: binding,
             author: .agent, sessionHandle: handle, text: ExactText("One more thing"),

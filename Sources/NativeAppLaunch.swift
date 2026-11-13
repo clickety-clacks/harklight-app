@@ -1442,7 +1442,7 @@ final class LivePresentationStore {
     @ObservationIgnored private var observation: Task<Void, Never>?
     @ObservationIgnored private var locallyReconciledConversationReadRevisions = Set<UInt64>()
     @ObservationIgnored private var failedResponseWarningGeneration: UInt64 = 0
-    @ObservationIgnored private var pendingConversationReadUpdates = Set<ConversationReadKey>()
+    private var pendingConversationReadUpdates = Set<ConversationReadKey>()
     @ObservationIgnored private var conversationProjectionRevision: UInt64?
     @ObservationIgnored private let messageAreaStore: NewMessageAreaStore?
     @ObservationIgnored private let replyAreaStore: ReplyItemAreaStore?
@@ -1739,14 +1739,29 @@ final class LivePresentationStore {
         }
     }
 
-    func conversation(for key: RequestKey) -> ConversationThread? { conversationThreads[key] }
+    // Project a visible reply as read while its durable update runs off the
+    // main actor. Removing the pending key on failure restores the saved state.
+    func conversation(for key: RequestKey) -> ConversationThread? {
+        guard var thread = conversationThreads[key] else { return nil }
+        let pendingTurnIDs = Set(pendingConversationReadUpdates
+            .lazy.filter { $0.request == key }.map(\.turnID))
+        guard let pendingReadThrough = thread.turns.last(where: { pendingTurnIDs.contains($0.id) }) else {
+            return thread
+        }
+        thread.readThroughTurn = pendingReadThrough.id
+        if let sequence = pendingReadThrough.conversationSequence {
+            thread.accountReadThroughConversationSequence = max(
+                thread.accountReadThroughConversationSequence ?? 0, sequence)
+        }
+        return thread
+    }
 
     func hasUnreadAgentReply(_ key: RequestKey) -> Bool {
-        conversationThreads[key]?.hasUnreadAgentReply == true
+        conversation(for: key)?.hasUnreadAgentReply == true
     }
 
     private func listChatUnread(_ key: RequestKey) -> Bool? {
-        guard let thread = conversationThreads[key],
+        guard let thread = conversation(for: key),
               thread.turns.contains(where: { turn in
                   switch turn.kind {
                   case .none, .some(.discussion), .some(.reply):
