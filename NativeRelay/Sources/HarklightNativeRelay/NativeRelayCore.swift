@@ -305,7 +305,7 @@ public actor NativeRelayCore {
             if operationSession == nil { try await replayConversationAndAcknowledge(using: transport) }
             return .accepted(turnID: turn)
         }
-        guard !draft.text.rawValue.isEmpty else { throw ConversationError.emptyDraft }
+        guard !draft.text.rawValue.isEmpty || !draft.files.isEmpty else { throw ConversationError.emptyDraft }
         let operation = try store.prepareDiscussion(binding, context: context)
         guard let frozen = try store.conversationSnapshot(context: context).threads[binding.request]?.drafts[binding.revision] else {
             throw ConversationError.missingRequest

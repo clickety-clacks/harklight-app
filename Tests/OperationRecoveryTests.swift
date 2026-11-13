@@ -1,8 +1,41 @@
 import AttentionDomain
 import Foundation
+import HarklightNativeRelay
 import XCTest
 
 final class OperationRecoveryTests: XCTestCase {
+    func testReplayCoreReplacementDoesNotCancelIndependentOriginalOperation() async throws {
+        let (context, key, payload) = try fixture()
+        let store = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        try confirm(store, context: context, key: key, payload: payload)
+        let original = try submit(store, context: context, key: key)
+        let sent = expectation(description: "Original operation reached its independent transport")
+        let session = HeldRecoveryOperationSession(identity: context.identity, sent: sent)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let cache = FileServerStateCache(identity: context.identity,
+            fileURL: directory.appendingPathComponent("cache.json"))
+        let replayCore = try NativeRelayCore(store: store, context: context, session: session,
+            automaticallySendsPendingOperations: false, serverStateCache: cache)
+        let mutationCore = try NativeRelayCore(store: store, context: context, session: session,
+            automaticallySendsPendingOperations: false, serverStateCache: cache)
+        let delivery = Task {
+            try await mutationCore.sendOriginalOperationForUserTap(original.intentID, using: session)
+        }
+        await fulfillment(of: [sent], timeout: 5)
+        await replayCore.deactivate()
+        await session.accept(operation: original.operationID)
+        try await delivery.value
+        let frames = await session.frames
+        XCTAssertEqual(frames, [original.wireFrame])
+        XCTAssertEqual(try store.lookupIntent(original.intentID, context: context)?.operationID, original.operationID)
+        XCTAssertEqual(try store.acceptedOperationsAwaitingTerminalReplay(context: context).map(\.operationID),
+                       [original.operationID])
+        XCTAssertNil(try store.snapshot(context: context).remoteStates[key],
+                     "Acceptance stays pending until an actual Server terminal arrives.")
+        await mutationCore.deactivate()
+    }
+
     func testInterruptedOperationQueuesExactFrameBeforeReplayAfterRestart() throws {
         for lostReply in [false, true] {
             let (context, key, payload) = try fixture()
@@ -193,5 +226,35 @@ final class OperationRecoveryTests: XCTestCase {
         let receipt = try port.submit(SubmitIntent(context: port.context, selector: selector,
             intentID: UUID(), inputs: [.compatibilityValue(action: ExactText("yes"))]))
         return try XCTUnwrap(repository.lookupIntent(receipt.intentID, context: context))
+    }
+}
+
+private actor HeldRecoveryOperationSession: AuthenticatedInstallationSession {
+    nonisolated let authenticatedIdentity: ProfileIdentity
+    let sent: XCTestExpectation
+    private var result: CheckedContinuation<OriginalOperationResult, Never>?
+    private(set) var frames: [Data] = []
+
+    init(identity: ProfileIdentity, sent: XCTestExpectation) {
+        authenticatedIdentity = identity
+        self.sent = sent
+    }
+
+    func resync(_ request: Data, consume: @Sendable (Data) async throws -> Void) async throws {
+        throw InstallationTransportError.unexpectedServerFrame
+    }
+    func acknowledge(_ request: Data) async throws {
+        throw InstallationTransportError.unexpectedServerFrame
+    }
+    func sendOriginalOperation(_ frame: Data, operationID: UUID) async throws -> OriginalOperationResult {
+        frames.append(frame)
+        return await withCheckedContinuation { continuation in
+            result = continuation
+            sent.fulfill()
+        }
+    }
+    func accept(operation: UUID) {
+        result?.resume(returning: .accepted(operationID: operation, terminalSequence: 2))
+        result = nil
     }
 }

@@ -1338,7 +1338,11 @@ final class LivePresentationStore {
         guard permitsDelivery, !isReadOnly else { return nil }
         return conversationAvailability.message(for: profileContext)
     }
-    private(set) var isSendingDiscussion = false
+    private var sendingDiscussionBindings: Set<ConversationBinding> = []
+
+    func isSendingDiscussion(for key: RequestKey, revision: UInt64) -> Bool {
+        sendingDiscussionBindings.contains(ConversationBinding(request: key, revision: revision))
+    }
     private(set) var sendingAnswerIntentIDs: Set<UUID> = []
     private(set) var retryingCleanupRequests: Set<RequestKey> = []
     private(set) var presentation: PresentationSnapshot
@@ -2038,14 +2042,14 @@ final class LivePresentationStore {
                 return
             }
             if permitsDelivery {
-                guard !isSendingDiscussion, let files = conversationFiles else { return }
+                guard !sendingDiscussionBindings.contains(binding), let files = conversationFiles else { return }
                 _ = try attentionStore.prepareDiscussion(binding, context: profileContext)
                 try refreshFromDurableStore()
-                isSendingDiscussion = true
+                sendingDiscussionBindings.insert(binding)
                 conversationError = nil
                 Task { [weak self] in
                     guard let self else { return }
-                    defer { isSendingDiscussion = false }
+                    defer { sendingDiscussionBindings.remove(binding) }
                     do {
                         let result = try await NativeRelayLifecycle.shared.submitDiscussion(binding, expected: profileContext) { file in
                             try files.fileURL(for: file)

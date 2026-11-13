@@ -1484,7 +1484,7 @@ final class NativeRelayLifecycle {
                                          expected: ProfileContext,
                                          onSendCallStateChange: @escaping @MainActor @Sendable (Bool) -> Void = { _ in },
                                          onSendCallCompleted: @MainActor () -> Void = {}) async throws {
-        guard context == expected, let configuration, let activeCore = core else {
+        guard context == expected, let configuration else {
             throw NativeRelayCoreError.inactive
         }
         if let existing = answerFlights[intentID] {
@@ -1494,7 +1494,7 @@ final class NativeRelayLifecycle {
         }
         let token = UUID()
         let flight = Task { @MainActor [self] in
-            guard context == expected, core === activeCore, !Task.isCancelled else {
+            guard context == expected, !Task.isCancelled else {
                 throw NativeRelayCoreError.inactive
             }
             let session = try URLSessionInstallationSession(profile: expected,
@@ -1504,7 +1504,11 @@ final class NativeRelayLifecycle {
                 onDiagnostic: diagnosticSink())
             answerTransports[intentID] = session
             do {
-                try await activeCore.sendOriginalOperationForUserTap(intentID, using: session,
+                let mutationCore = try NativeRelayCore(store: configuration.store, context: expected,
+                    session: session, automaticallySendsPendingOperations: false,
+                    attemptID: token, serverStateCache: configuration.serverStateCache,
+                    onDiagnostic: diagnosticSink())
+                try await mutationCore.sendOriginalOperationForUserTap(intentID, using: session,
                     onSendCallStateChange: { sending in onSendCallStateChange(sending) })
                 await session.close()
                 if answerFlights[intentID]?.token == token { answerTransports.removeValue(forKey: intentID) }
@@ -1573,7 +1577,7 @@ final class NativeRelayLifecycle {
 
     func submitDiscussion(_ binding: ConversationBinding, expected: ProfileContext,
                           retainedFile: @escaping @Sendable (ConversationFile) async throws -> URL) async throws -> DiscussionOperationResult {
-        guard context == expected, let configuration, let activeCore = core else {
+        guard context == expected, let configuration else {
             throw NativeRelayCoreError.inactive
         }
         let pending = try configuration.store.conversationSnapshot(context: expected)
@@ -1583,7 +1587,7 @@ final class NativeRelayLifecycle {
         if let existing = discussionFlights[operation] { return try await existing.task.value }
         let token = UUID()
         let flight = Task { @MainActor [self] in
-            guard context == expected, core === activeCore, !Task.isCancelled else {
+            guard context == expected, !Task.isCancelled else {
                 throw NativeRelayCoreError.inactive
             }
             var endpoint: URL?
@@ -1613,7 +1617,7 @@ final class NativeRelayLifecycle {
                     return DiscussionOperationResult.rejected(reason: explanation)
                 }
             }
-            guard context == expected, core === activeCore else { throw NativeRelayCoreError.inactive }
+            guard context == expected, !Task.isCancelled else { throw NativeRelayCoreError.inactive }
             let sending = try URLSessionInstallationSession(profile: expected,
                 relayURL: configuration.relayURL,
                 clientIdentity: TrustedKeychainIdentity(configuration.identity),
@@ -1621,7 +1625,11 @@ final class NativeRelayLifecycle {
                 onDiagnostic: diagnosticSink())
             discussionTransports[operation] = sending
             do {
-                let result = try await activeCore.submitDiscussion(binding, using: sending,
+                let mutationCore = try NativeRelayCore(store: configuration.store, context: expected,
+                    session: sending, automaticallySendsPendingOperations: false,
+                    attemptID: token, serverStateCache: configuration.serverStateCache,
+                    onDiagnostic: diagnosticSink())
+                let result = try await mutationCore.submitDiscussion(binding, using: sending,
                     originURL: endpoint, retainedFile: retainedFile)
                 await sending.close()
                 return result

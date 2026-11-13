@@ -703,7 +703,7 @@ private struct ConversationComposer: View {
             .accessibilityElement(children: .contain).accessibilityIdentifier("sample-chat-input-surface")
             ConversationComposerSendButton(session: textSession,
                 isLocalExample: store.isLocalExample, frozen: frozen,
-                isSendingDiscussion: store.isSendingDiscussion,
+                isSendingDiscussion: store.isSendingDiscussion(for: key, revision: revision),
                 allowsDiscussion: allowsDiscussion,
                 hasFiles: !draft.files.isEmpty,
                 hasPendingUploadCleanup: store.hasPendingUploadCleanup(for: key, revision: revision),
@@ -785,7 +785,7 @@ private struct ConversationComposer: View {
 
     private func sendStagedText() {
         textSession.textSaveTask?.cancel()
-        guard !store.isSendingDiscussion, allowsDiscussion,
+        guard !store.isSendingDiscussion(for: key, revision: revision), allowsDiscussion,
               !store.hasPendingUploadCleanup(for: key, revision: revision),
               !store.hasAbandonedDiscussion(for: key, revision: revision),
               !store.hasUnreadyUploadReference(for: key, revision: revision),
