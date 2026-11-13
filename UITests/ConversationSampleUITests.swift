@@ -175,15 +175,16 @@ final class ConversationSampleUITests: XCTestCase {
             let searchField = app.searchFields.firstMatch
             XCTAssertTrue(searchField.waitForExistence(timeout: 5), app.debugDescription)
             XCTAssertTrue(searchField.isHittable, searchField.debugDescription)
-            for _ in 0..<8 where replyText.frame.maxY > searchField.frame.minY {
-                list.swipeUp()
+            let scrollStart = list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.75))
+            let scrollEnd = list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.55))
+            for _ in 0..<8 where replyText.frame.intersects(searchField.frame) {
+                scrollStart.press(forDuration: 0.05, thenDragTo: scrollEnd)
             }
             XCTAssertTrue(normalReplyRow.isHittable, normalReplyRow.debugDescription)
             XCTAssertTrue(replyText.isHittable, replyText.debugDescription)
-            XCTAssertLessThanOrEqual(
-                replyText.frame.maxY,
-                searchField.frame.minY,
-                "The floating Search field must not cover the normal reply text.\n\(app.debugDescription)"
+            XCTAssertFalse(
+                replyText.frame.intersects(searchField.frame),
+                "The floating Search field must not overlap normal reply text.\n\(app.debugDescription)"
             )
 
             searchField.tap()
