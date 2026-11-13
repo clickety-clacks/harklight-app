@@ -2592,7 +2592,8 @@ final class NativeGuidedTLSTests: XCTestCase {
         _ = try port.submit(SubmitIntent(context: port.context, selector: selector, intentID: UUID(),
                                          inputs: [.compatibilityValue(action: ExactText("got-it"))]))
         let before = try XCTUnwrap(persistence.load(identity: identity))
-        XCTAssertEqual(try store.snapshot(context: context).outbox.count, 1)
+        XCTAssertEqual(try store.snapshot(context: context).intents.count, 1)
+        XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty)
         XCTAssertEqual(try store.conversationSnapshot(context: context).threads[key]?.drafts[1]?.text,
                        ExactText("Keep this draft"))
 
@@ -2633,9 +2634,10 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertEqual(deadline.progress.outcome, .timedOut)
         XCTAssertFalse(updates.contains(where: { $0.outcome == .confirmed }))
         XCTAssertEqual(try persistence.load(identity: identity), before,
-                       "Timeout preserves the saved request, answer outbox, and conversation draft byte-for-byte.")
+                       "Timeout preserves the pending answer and conversation draft byte-for-byte.")
         XCTAssertEqual(try store.snapshot(context: context).cursor, 1)
-        XCTAssertEqual(try store.snapshot(context: context).outbox.count, 1)
+        XCTAssertEqual(try store.snapshot(context: context).intents.count, 1)
+        XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty)
         XCTAssertEqual(try store.conversationSnapshot(context: context).threads[key]?.drafts[1]?.text,
                        ExactText("Keep this draft"))
     }

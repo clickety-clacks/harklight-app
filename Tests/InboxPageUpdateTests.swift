@@ -243,7 +243,11 @@ final class InboxPageUpdateTests: XCTestCase {
                 XCTAssertEqual(saved.cursor, PageFixture.highWater + (mutation == 2 ? 1 : 0))
                 XCTAssertEqual(try f.store.conversationSnapshot(context: f.context).cursor, 0)
                 if mutation == 0 { XCTAssertEqual(saved.conversationThreads[f.key(1)]?.drafts[1]?.text, ExactText("kept")) }
-                if mutation == 1 { XCTAssertEqual(saved.outbox.map(\.intentID), [operationID]) }
+                if mutation == 1 {
+                    XCTAssertEqual(Set(saved.intents.keys), [operationID])
+                    XCTAssertEqual(saved.intents[operationID]?.answerKind, .noComment)
+                    XCTAssertTrue(saved.outbox.isEmpty, "Concurrent page work must not authorize a queued operation to send.")
+                }
                 if mutation == 2 {
                     XCTAssertEqual(saved.remoteStates[f.key(2)]?.state, .answered)
                     XCTAssertTrue(saved.pendingRelayOverlays.isEmpty)
