@@ -1002,6 +1002,8 @@ final class NativeRelayLifecycle {
                                 identity: SecIdentity,
                                 rootDER: Data,
                                 serverStateCache: (any ServerStateCaching)?)?
+    private var answerFlights: [UUID: (token: UUID, task: Task<Void, Error>)] = [:]
+    private var answerTransports: [UUID: URLSessionInstallationSession] = [:]
     private var refreshGeneration = UUID()
     private lazy var refreshFlights = RelayRefreshFlights(inactive: NativeRelayRefreshResult.unavailable) { [weak self] in
         guard let self else { return .unavailable }
@@ -1100,6 +1102,7 @@ final class NativeRelayLifecycle {
         let nextCore: NativeRelayCore
         do {
             nextCore = try NativeRelayCore(store: store, context: context, session: nextTransport,
+                                           automaticallySendsPendingOperations: false,
                                            attemptID: transportAttemptID,
                                            serverStateCache: serverStateCache,
                                            onProgress: progressHandler(generation: generation,
@@ -1140,6 +1143,7 @@ final class NativeRelayLifecycle {
         focusTransportID = transportAttemptID
         installFocusReportHandler(for: nextTransport, transportID: transportAttemptID)
         configuration = (store, context, relayURL, clientIdentity, trustedRootDER, serverStateCache)
+        resumeSavedAnswers()
     }
 
     /// Validates a fixed, approved endpoint with the same client identity and
@@ -1176,6 +1180,7 @@ final class NativeRelayLifecycle {
         do {
             nextCore = try NativeRelayCore(store: current.store, context: current.context,
                                            session: nextTransport,
+                                           automaticallySendsPendingOperations: false,
                                            serverStateCache: current.serverStateCache)
             try await nextTransport.verifyEndpoint()
             guard refreshGeneration == expectedGeneration,
@@ -1205,6 +1210,11 @@ final class NativeRelayLifecycle {
     }
 
     func deactivate() async {
+        for flight in answerFlights.values { flight.task.cancel() }
+        let sendSessions = Array(answerTransports.values)
+        answerFlights.removeAll()
+        answerTransports.removeAll()
+        for session in sendSessions { await session.close() }
         refreshGeneration = UUID()
         refreshFlights.reset()
         let priorCore = core
@@ -1532,51 +1542,70 @@ final class NativeRelayLifecycle {
         return snapshotState.failureMessage
     }
 
-    /// Revalidates the current server projection, sends only the operation
-    /// selected by the person's current tap, then refreshes the projection.
+    /// A send joins only the same saved intent's flight, never the catch-up flight.
     func sendOriginalOperationForUserTap(_ intentID: UUID,
                                          expected: ProfileContext,
                                          onSendCallStateChange: @escaping @MainActor @Sendable (Bool) -> Void = { _ in },
-                                         onSendCallCompleted: @MainActor () -> Void = {}) async throws -> NativeRelayRefreshResult {
-        guard context == expected, let configuration, self.core != nil else {
+                                         onSendCallCompleted: @MainActor () -> Void = {}) async throws {
+        guard context == expected, let configuration, let activeCore = core else {
             throw NativeRelayCoreError.inactive
         }
-        let beforeRefresh = try configuration.store.snapshot(context: expected).intents[intentID]
-        let explicitlyRetriesFailure: Bool
-        switch beforeRefresh?.disposition {
-        case .failed?, .unsupported?: explicitlyRetriesFailure = true
-        default: explicitlyRetriesFailure = false
-        }
-        let current = await refreshFlights.coalesced()
-        guard context == expected, current.relayConfirmed,
-              confirmedRelayContext == expected, let activeCore = self.core else {
-            // A failed refresh does not prove the saved operation was never sent.
-            throw NativeRelayCoreError.inactive
-        }
-        let saved = try configuration.store.snapshot(context: expected).intents[intentID]
-        guard let saved else {
-            // The current Server terminal may already have retired this intent.
+        if let existing = answerFlights[intentID] {
+            try await existing.task.value
             onSendCallCompleted()
-            return current
+            return
         }
-        switch saved.disposition {
-        case .failed where explicitlyRetriesFailure, .unsupported where explicitlyRetriesFailure: break
-        default:
+        let token = UUID()
+        let flight = Task { @MainActor [self] in
+            let session = try URLSessionInstallationSession(profile: expected,
+                relayURL: configuration.relayURL,
+                clientIdentity: TrustedKeychainIdentity(configuration.identity),
+                trustedRootDER: configuration.rootDER, attemptID: token,
+                onDiagnostic: diagnosticSink())
+            answerTransports[intentID] = session
+            do {
+                try await activeCore.sendOriginalOperationForUserTap(intentID, using: session,
+                    onSendCallStateChange: { sending in onSendCallStateChange(sending) })
+                await session.close()
+                if answerFlights[intentID]?.token == token { answerTransports.removeValue(forKey: intentID) }
+            } catch {
+                await session.close()
+                if answerFlights[intentID]?.token == token { answerTransports.removeValue(forKey: intentID) }
+                throw error
+            }
+        }
+        answerFlights[intentID] = (token, flight)
+        defer {
+            if answerFlights[intentID]?.token == token { answerFlights.removeValue(forKey: intentID) }
             onSendCallCompleted()
-            return current
         }
+        try await flight.value
+        // Only a receipt calls for immediate reconciliation. An unresolved
+        // transport waits for a launch/refresh/reconnect trigger rather than
+        // recursively creating refresh/send attempts.
+        if case .accepted = try configuration.store.snapshot(context: expected).intents[intentID]?.disposition {
+            Task { [weak self] in _ = await self?.refreshResultFromTrustedRelay() }
+        }
+    }
+
+    private func resumeSavedAnswers() {
+        guard let expected = context, let configuration else { return }
         do {
-            try await activeCore.sendOriginalOperationForUserTap(
-                intentID,
-                onSendCallStateChange: { isSending in
-                    onSendCallStateChange(isSending)
-                })
+            try configuration.store.queueRecoverableOperations(context: expected)
+            let pending = try configuration.store.snapshot(context: expected).outbox
+            for operation in pending where answerFlights[operation.intentID] == nil {
+                Task { [weak self] in
+                    guard let self else { return }
+                    do { _ = try await self.sendOriginalOperationForUserTap(operation.intentID, expected: expected) }
+                    catch {
+                        self.recordDiagnostic(.answer, .originalOperationDelivery, .unresolved,
+                            error: error, attemptID: self.activeTransportAttemptID)
+                    }
+                }
+            }
         } catch {
-            onSendCallCompleted()
-            throw error
+            recordDiagnostic(.localStore, .originalOperationDelivery, .failed, error: error)
         }
-        onSendCallCompleted()
-        return await refreshFlights.coalesced()
     }
 
     @discardableResult
@@ -1750,6 +1779,7 @@ final class NativeRelayLifecycle {
         activeTransportAttemptID = attemptID
         self.context = context
         let core = try NativeRelayCore(store: store, context: context, session: session,
+                                       automaticallySendsPendingOperations: false,
                                        attemptID: attemptID, serverStateCache: serverStateCache)
         self.core = core
         try await refreshConfirmedProjection(core: core, context: context, generation: generation)
@@ -1772,6 +1802,7 @@ final class NativeRelayLifecycle {
                              checkBlockedPush: Bool = false) async throws -> NativeRelayRefreshResult {
         guard refreshGeneration == generation else { throw NativeRelayCoreError.inactive }
         guard let core, let transport, let context else { throw NativeRelayCoreError.inactive }
+        resumeSavedAnswers()
         try await refreshConfirmedProjection(core: core, context: context, generation: generation)
         try await resumeConfirmedDiscussions(core: core, context: context, generation: generation)
         if let configuration {
@@ -1927,6 +1958,7 @@ final class NativeRelayLifecycle {
             nextCore = try NativeRelayCore(store: configuration.store,
                                            context: configuration.context,
                                            session: nextTransport,
+                                           automaticallySendsPendingOperations: false,
                                            attemptID: transportAttemptID,
                                            serverStateCache: configuration.serverStateCache,
                                            onProgress: progressHandler(generation: generation,

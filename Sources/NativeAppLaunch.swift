@@ -2380,7 +2380,7 @@ final class LivePresentationStore {
             guard let self else { return }
             defer { self.endRefresh() }
             do {
-                let result = try await NativeRelayLifecycle.shared.sendOriginalOperationForUserTap(
+                try await NativeRelayLifecycle.shared.sendOriginalOperationForUserTap(
                     intentID, expected: self.profileContext,
                     onSendCallStateChange: { [weak self] isSending in
                         guard let self else { return }
@@ -2398,12 +2398,9 @@ final class LivePresentationStore {
                                           request: request)
                         }
                     })
-                self.applyRefreshResult(result)
             } catch {
                 self.actionErrorRequest = request
-                self.actionError = "The server could not confirm your answer. Check its saved status before trying again."
-                let result = await NativeRelayLifecycle.shared.refreshAfterAnswerStored()
-                self.applyRefreshResult(result)
+                self.actionError = "Can't reach the server. Your answer is saved and will resume when connected."
                 self.diagnose(.answer, .originalOperationDelivery, .unresolved, error: error,
                               operationID: intentID, request: request, receiptState: .unknown)
             }

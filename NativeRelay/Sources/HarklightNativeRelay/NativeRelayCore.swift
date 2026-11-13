@@ -136,6 +136,8 @@ public actor NativeRelayCore {
     private let store: ClientRepository
     private let context: ProfileContext
     private let session: any AuthenticatedInstallationSession
+    private let automaticallySendsPendingOperations: Bool
+    private var sendingIntentIDs: Set<UUID> = []
     private let serverStateCache: any ServerStateCaching
     private let wire: RelayWire
     private let inboxWire: InboxPagingWire
@@ -432,6 +434,7 @@ public actor NativeRelayCore {
     public init(store: ClientRepository,
                 context: ProfileContext,
                 session: any AuthenticatedInstallationSession,
+                automaticallySendsPendingOperations: Bool = true,
                 attemptID: UUID? = nil,
                 serverStateCache: (any ServerStateCaching)? = nil,
                 onProgress: @escaping @Sendable (NativeRelayProgressEvent) -> Void = { _ in },
@@ -444,6 +447,7 @@ public actor NativeRelayCore {
         self.store = store
         self.context = context
         self.session = session
+        self.automaticallySendsPendingOperations = automaticallySendsPendingOperations
         self.serverStateCache = serverStateCache ?? FileServerStateCache(identity: context.identity)
         self.onProgress = onProgress
         self.attemptID = attemptID
@@ -534,7 +538,7 @@ public actor NativeRelayCore {
             let attempted: Int
             do {
                 failedStep = .drainPendingOperations
-                attempted = try await drainPending()
+                attempted = automaticallySendsPendingOperations ? try await drainPending() : 0
             } catch {
                 // A later operation may fail after an earlier operation was
                 // accepted. Record that the accepted operation's terminal replay
@@ -2041,23 +2045,28 @@ public actor NativeRelayCore {
             submissions.map { ($0.operationID, $0) })
     }
 
-    /// Sends one exact answer operation after an explicit user tap. Refresh
-    /// never calls this method; retries keep the stored operation id and payload.
+    /// Sends an exact saved intent. An independent authenticated transport can
+    /// send while replay owns this core's ordinary connection.
     public func sendOriginalOperationForUserTap(
-        _ intentID: UUID, onSendCallStateChange: (@MainActor @Sendable (Bool) async -> Void)? = nil) async throws {
-        guard !busy else { throw NativeRelayCoreError.inactive }
-        busy = true
-        defer { releaseBusy() }
-        try validate()
-
-        _ = try store.queueOriginalOperationForUserTap(intentID, context: context)
-
-        let pending = try store.snapshot(context: context).outbox
-        guard pending.contains(where: { $0.intentID == intentID }) else {
-            throw NativeRelayCoreError.inactive
+        _ intentID: UUID,
+        using operationSession: (any AuthenticatedInstallationSession)? = nil,
+        onSendCallStateChange: (@MainActor @Sendable (Bool) async -> Void)? = nil) async throws {
+        if let operationSession {
+            guard operationSession.authenticatedIdentity == context.identity else {
+                throw NativeRelayCoreError.wrongInstallation
+            }
+        } else {
+            guard !busy else { throw NativeRelayCoreError.inactive }
+            busy = true
         }
+        defer { if operationSession == nil { releaseBusy() } }
+        guard sendingIntentIDs.insert(intentID).inserted else { return }
+        defer { sendingIntentIDs.remove(intentID) }
+        try validate()
+        _ = try store.queueOriginalOperationForUserTap(intentID, context: context)
         do {
-            _ = try await drainPending(onlyIntentID: intentID, onSendCallStateChange: onSendCallStateChange)
+            _ = try await drainPending(onlyIntentID: intentID, using: operationSession,
+                                      onSendCallStateChange: onSendCallStateChange)
         } catch {
             if let operation = try? store.snapshot(context: context).intents[intentID]?.operationID {
                 try? store.recordUnresolvedOperation(intentID, operationID: operation, context: context)
@@ -2110,6 +2119,7 @@ public actor NativeRelayCore {
 
     private func drainPending(
         onlyIntentID: UUID? = nil,
+        using operationSession: (any AuthenticatedInstallationSession)? = nil,
         onSendCallStateChange: (@MainActor @Sendable (Bool) async -> Void)? = nil) async throws -> Int {
         try validate()
         let pending = try store.snapshot(context: context).outbox.filter {
@@ -2130,7 +2140,7 @@ public actor NativeRelayCore {
             let result: OriginalOperationResult
             if let onSendCallStateChange { await onSendCallStateChange(true) }
             do {
-                result = try await session.sendOriginalOperation(submission.wireFrame,
+                result = try await (operationSession ?? session).sendOriginalOperation(submission.wireFrame,
                                                                  operationID: submission.operationID)
             } catch {
                 if let onSendCallStateChange { await onSendCallStateChange(false) }
