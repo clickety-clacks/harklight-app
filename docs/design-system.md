@@ -252,3 +252,5 @@ The Client PO ruled on these on 2026-11-13 (verdict `att_497f07a8`): where the a
 - Before typing, the search tab shows the list the person came from; typing filters that list. One search, in one tab. `.searchable` sits on the search tab's content, because on the tab view it also floated a field over the Inbox tab.
 - The Settings heading stays "Connection status".
 - The open message heading has no chat icon; the chat button's badge carries unread turns.
+- C10 iPad split: the list uses the stock flush `NavigationSplitView` sidebar, not a custom floating panel. The restyle supplies only the tint behind it, the iPad open row fill and bar, and the indent (C11); iPadOS decides column placement and visibility in each orientation.
+- C8 chat sheet grabber: the grabber is not forced visible. The sheet keeps today's short downward swipe to close.
