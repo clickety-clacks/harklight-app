@@ -144,7 +144,8 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         XCTAssertNil(live.request(for: key)?.receiptFacts,
                      "A completed account state does not expose the submitting device's receipt.")
         XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty)
-        XCTAssertEqual(try store.snapshot(context: context).intents.count, 1)
+        XCTAssertTrue(try store.snapshot(context: context).intents.isEmpty,
+                      "The Server terminal retires the pending intent; a delayed tap cannot create another.")
     }
 
     func testNewDurableReceiptClearsAnObsoleteSubmissionError() async throws {
@@ -262,11 +263,13 @@ final class LiveAnswerConfirmationTests: XCTestCase {
                       "The app leaves ordinary answer choices to an explicit user action.")
         XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty)
 
-        live.submitNoCommentFromUser(key)
-        XCTAssertTrue(live.draft(for: key)?.noCommentSelected == true,
-                      "A swipe submission persists the explicit No comment choice for retry.")
+        XCTAssertTrue(live.canRetryFailedResponse(for: key))
+        XCTAssertTrue(live.retryFailedResponse(for: key))
         let retryID = try XCTUnwrap(live.request(for: key)?.intentReceipt?.intentID)
         let retry = try XCTUnwrap(store.snapshot(context: context).intents[retryID])
+        XCTAssertEqual(retryID, receipt.intentID)
+        XCTAssertEqual(retry.operationID, submitted.operationID)
+        XCTAssertEqual(retry.wireFrame, submitted.wireFrame)
         try store.queueRecoverableOperations(context: context)
         XCTAssertEqual(try store.snapshot(context: context).outbox.map(\.operationID), [retry.operationID],
                        "An explicitly retried choice is eligible for automatic delivery using its saved frame.")
@@ -336,6 +339,8 @@ final class LiveAnswerConfirmationTests: XCTestCase {
 
         live.selectAction(ExactText("reply"), input: nil, for: key)
         live.updateCompatibilityText("Try again", action: ExactText("reply"), for: key)
+        XCTAssertEqual(try store.lookupIntent(failed.intentID, context: context)?.disposition, .failed,
+                       "Editing leaves the refused operation available to same-ID Retry.")
         let retry = try live.submit(key)
         XCTAssertNotEqual(retry.opID, failed.opID)
         XCTAssertEqual(try store.snapshot(context: context).intents.values.filter {
@@ -347,6 +352,59 @@ final class LiveAnswerConfirmationTests: XCTestCase {
                        "The new deliberate answer is eligible for automatic delivery.")
         XCTAssertFalse(try XCTUnwrap(live.request(for: key)).answerNotDelivered,
                        "A new pending attempt replaces the previous failure treatment.")
+    }
+
+    func testEditingAfterRefusalDoesNotChangeTheOperationUsedByRetry() async throws {
+        let (context, store, live, key) = try await setupTextReplyOnly()
+        live.selectNoComment(for: key)
+        let receipt = try live.submit(key)
+        let original = try XCTUnwrap(store.lookupIntent(receipt.intentID, context: context))
+        try store.recordAnswerNotDelivered(receipt.intentID, operationID: receipt.opID, context: context)
+        try live.refreshFromDurableStore()
+
+        live.selectAction(ExactText("reply"), input: nil, for: key)
+        live.updateCompatibilityText("A different answer", action: ExactText("reply"), for: key)
+        XCTAssertTrue(live.canRetryFailedResponse(for: key))
+        XCTAssertTrue(live.retryFailedResponse(for: key))
+        let retried = try XCTUnwrap(store.lookupIntent(receipt.intentID, context: context))
+        XCTAssertEqual(retried.operationID, original.operationID)
+        XCTAssertEqual(retried.wireFrame, original.wireFrame)
+        XCTAssertEqual(retried.answerKind, .noComment)
+        XCTAssertEqual(retried.disposition, .pending)
+        XCTAssertEqual(try store.snapshot(context: context).intents.count, 1)
+    }
+
+    func testUnconfirmedOrAcceptedOperationCannotBeReplacedByEditingOrAnotherSubmit() async throws {
+        for disposition in [IntentDisposition.pending, .lost, .accepted(sequence: 2)] {
+            let (context, store, live, key) = try await setupTextReplyOnly()
+            live.selectAction(ExactText("reply"), input: nil, for: key)
+            live.updateCompatibilityText("Original answer", action: ExactText("reply"), for: key)
+            let receipt = try live.submit(key)
+            let original = try XCTUnwrap(store.lookupIntent(receipt.intentID, context: context))
+            switch disposition {
+            case .lost:
+                try store.recordUnresolvedOperation(receipt.intentID, operationID: receipt.opID, context: context)
+            case .accepted:
+                try store.recordAcceptedOperation(receipt.intentID, operationID: receipt.opID,
+                    terminalSequence: 2, context: context)
+            default: break
+            }
+            let port = AttentionDomainPort(store: store)
+            let request = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first)
+            let selector = try XCTUnwrap(request.selector)
+            var replacement = request.draft
+            replacement.compatibility.textByActionID[ExactText("reply")] = ExactText("Replacement answer")
+            XCTAssertThrowsError(try port.saveDraft(context: port.context, selector: selector,
+                completeDraft: replacement), "Editing must not discard an operation that may have reached the Server.")
+            XCTAssertThrowsError(try port.submit(SubmitIntent(context: port.context, selector: selector,
+                intentID: UUID(), inputs: [.compatibilityText(action: ExactText("reply"),
+                                                              text: ExactText("Replacement answer"))])))
+            let retained = try XCTUnwrap(store.lookupIntent(receipt.intentID, context: context))
+            XCTAssertEqual(retained.operationID, original.operationID)
+            XCTAssertEqual(retained.wireFrame, original.wireFrame)
+            XCTAssertEqual(retained.disposition, disposition)
+            XCTAssertEqual(try store.snapshot(context: context).intents.count, 1)
+        }
     }
 
     func testFailedResponseRetryKeepsOriginalIdentityAndReturnsToPendingUntilConfirmation() async throws {
@@ -718,8 +776,11 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         expectedDraft.noCommentSelected = true
         XCTAssertTrue(queuedDraft == nil || queuedDraft == expectedDraft,
                       "Any retained draft contains only No comment, never the local Reply text.")
-        XCTAssertNil(try XCTUnwrap(live.request(for: key)).submittedAnswer,
-                     "The queued No comment operation does not create a server answer.")
+        let pending = try XCTUnwrap(live.request(for: key))
+        XCTAssertEqual(pending.submittedAnswer, expectedDraft,
+                       "Pending presentation shows the queued choice, never the discarded Reply text.")
+        XCTAssertEqual(pending.lifecycleStatus, .pending)
+        XCTAssertNil(try store.snapshot(context: context).remoteStates[key]?.state)
         XCTAssertEqual(submitted.answerKind, .noComment)
     }
 
