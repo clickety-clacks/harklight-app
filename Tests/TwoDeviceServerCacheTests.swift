@@ -87,30 +87,17 @@ final class TwoDeviceServerCacheTests: XCTestCase {
         } catch { reportFailure(error, phase: "a_prepare") }
     }
 
-    func testDeviceBCommitsSeenAndReply() async throws {
-        let config = try manifest()
+    func testRetainDeviceBApprovalForNormalAppLaunch() async throws {
+        _ = try manifest()
         do {
-            let material = try await approvedMaterial()
-            let (repository, cache) = try storage(material)
-            let lifecycle = NativeRelayLifecycle()
-            try await connect(lifecycle, material, repository, cache, config)
-            let port = AttentionDomainPort(store: repository)
-            let seen = key(config.seenMessageID, config, material)
-            let reply = key(config.replyMessageID, config, material)
-            let selector = try XCTUnwrap(try presented(port, seen).selector)
-            let receipt = try port.submit(SubmitIntent(context: port.context, selector: selector,
-                intentID: UUID(), inputs: [.compatibilityValue(action: ExactText("seen"))]))
-            let seenResult = try await lifecycle.sendOriginalOperationForUserTap(receipt.intentID, expected: material.context)
-            guard seenResult.relayConfirmed else { throw ProbeFailure.unconfirmed }
-            guard try presented(port, seen).accountAnswerOutcome == .seen else { throw ProbeFailure.incomplete }
-            print("TWO_DEVICE_B_SEEN_OBSERVED")
-            let answer = try queueReply(port, reply, text: config.replyText)
-            let replyResult = try await lifecycle.sendOriginalOperationForUserTap(answer.intentID, expected: material.context)
-            guard replyResult.relayConfirmed else { throw ProbeFailure.unconfirmed }
-            XCTAssertEqual(try presented(port, reply).accountAnswerOutcome, .reply(ExactText(config.replyText)))
-            print("TWO_DEVICE_B_REPLY_OBSERVED")
-            await lifecycle.deactivate()
-        } catch { reportFailure(error, phase: "b_actions") }
+            let join = NativeGuidedJoinStore(namespace: namespace)
+            let attempt = try await join.checkApproval()
+            guard attempt.phase == .approved, let record = try join.approvedRecord(),
+                  let person = record.personID else { throw NativeEnrollmentError.approvalPending }
+            try NativeEnrollmentStore().retainApprovedGuided(record,
+                expectedPersonID: person, expectedDeviceID: attempt.deviceID)
+            print("TWO_DEVICE_B_ACTUAL_APPROVAL_RETAINED_FOR_APP")
+        } catch { reportFailure(error, phase: "b_approval_for_app") }
     }
 
     func testDeviceARestartAdoptsOtherDevicesAnswersWithoutSendingItsQueue() async throws {
