@@ -1870,6 +1870,13 @@ struct LiveRequestDetail: View {
                 if let actionError = store.actionError {
                     Label(actionError, systemImage: "exclamationmark.triangle")
                         .foregroundStyle(.red)
+                        .accessibilityIdentifier("request-action-error")
+                } else if localExample == nil, fixtureStore == nil,
+                          request.lifecycleStatus == .open,
+                          let reason = store.actionUnavailableReason(for: request.key) {
+                    Label(reason, systemImage: "exclamationmark.triangle")
+                        .foregroundStyle(detailColors.secondaryTextColor)
+                        .accessibilityIdentifier("request-action-unavailable")
                 }
                 if let statusText = answerStatusText {
                     Text(statusText)

@@ -1366,7 +1366,11 @@ final class LivePresentationStore {
     private var actionErrorRequest: RequestKey?
     var notificationWarning: String?
     private(set) var pushRegistrationWarning: String?
-    var connectionWarning: String?
+    private var storedConnectionWarning: String?
+    var connectionWarning: String? {
+        get { NativeRelayLifecycle.shared.refreshFailureMessage(for: profileContext) ?? storedConnectionWarning }
+        set { storedConnectionWarning = newValue }
+    }
     private(set) var failedResponseWarnings: [RequestKey: FailedResponseWarning] = [:]
 
     /// Present while any send from this device remains unresolved; nil once
@@ -1413,9 +1417,27 @@ final class LivePresentationStore {
               attentionStore.requiresConfirmedServerProjection else {
             return permitsDelivery && !isReadOnly
         }
-        return permitsDelivery && !isReadOnly && !isRefreshing &&
+        return permitsDelivery && !isReadOnly &&
             NativeRelayLifecycle.shared.hasConfirmedServerSnapshot(for: profileContext)
     }
+    func actionUnavailableReason(for key: RequestKey) -> String? {
+        guard permitsDelivery, !isReadOnly else { return "This message is read-only." }
+        guard canSendToCurrentServer else {
+            return connectionWarning ?? "Connect to the server and refresh the inbox before answering."
+        }
+        guard profileContext.transportMode != .relay || request(for: key)?.inboxStateIsCurrent == true else {
+            return "Refresh this message before answering. Its saved status is not current."
+        }
+        return nil
+    }
+
+    private func validateUserAction(for key: RequestKey) -> Bool {
+        guard let reason = actionUnavailableReason(for: key) else { return true }
+        actionErrorRequest = key
+        actionError = reason
+        return false
+    }
+
     func canUseCurrentServerState(for key: RequestKey) -> Bool {
         guard profileContext.transportMode == .relay,
               attentionStore.requiresConfirmedServerProjection else {
@@ -1954,7 +1976,8 @@ final class LivePresentationStore {
 
     func refreshDiscussionHistory() async {
         guard permitsDelivery else { return }
-        _ = await NativeRelayLifecycle.shared.refreshFromTrustedRelay()
+        let result = await NativeRelayLifecycle.shared.refreshResultFromTrustedRelay()
+        applyRefreshResult(result)
         do { try refreshFromDurableStore() }
         catch { diagnose(.localStore, .projectionRefresh, .failed, error: error) }
     }
@@ -2393,6 +2416,8 @@ final class LivePresentationStore {
                     })
                 self.applyRefreshResult(result)
             } catch {
+                self.actionErrorRequest = request
+                self.actionError = "The server could not confirm your answer. Check its saved status before trying again."
                 let result = await NativeRelayLifecycle.shared.refreshAfterAnswerStored()
                 self.applyRefreshResult(result)
                 self.diagnose(.answer, .originalOperationDelivery, .unresolved, error: error,
@@ -2841,9 +2866,7 @@ final class LivePresentationStore {
     func submitFromUser(_ key: RequestKey,
                         answerDraft: RequestDraft,
                         requestRevision: UInt64) -> Bool {
-        guard permitsDelivery, !isReadOnly, canSendToCurrentServer,
-              profileContext.transportMode != .relay ||
-                request(for: key)?.inboxStateIsCurrent == true else { return false }
+        guard validateUserAction(for: key) else { return false }
         if answerDraft.noCommentSelected {
             return submitNoCommentFromUser(key, requestRevision: requestRevision,
                                            selectionIsLocal: true)
@@ -2858,9 +2881,7 @@ final class LivePresentationStore {
                                       answerDraftOverride: RequestDraft?,
                                       explicitCompatibilityAction: ExactText?,
                                       requestRevision: UInt64?) -> Bool {
-        guard canSendToCurrentServer,
-              profileContext.transportMode != .relay ||
-                request(for: key)?.inboxStateIsCurrent == true else { return false }
+        guard validateUserAction(for: key) else { return false }
         do {
             let receipt: IntentReceipt
             if let answerDraftOverride {
@@ -2914,9 +2935,7 @@ final class LivePresentationStore {
     func submitNoCommentFromUser(_ key: RequestKey,
                                  requestRevision: UInt64? = nil,
                                  selectionIsLocal: Bool = false) -> Bool {
-        guard permitsDelivery, canSendToCurrentServer,
-              profileContext.transportMode != .relay ||
-                request(for: key)?.inboxStateIsCurrent == true else { return false }
+        guard validateUserAction(for: key) else { return false }
         let revision: UInt64?
         if !selectionIsLocal {
             guard let request = try? inspectedRequest(key, revision: requestRevision),

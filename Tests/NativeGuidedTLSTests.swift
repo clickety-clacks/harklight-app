@@ -1584,6 +1584,64 @@ final class NativeGuidedTLSTests: XCTestCase {
                        "The connection warning may name the error without adding it to shareable diagnostics.")
     }
 
+    @MainActor
+    func testOrdinaryRefreshTimesOutWhenConversationReplayNeverFinishes() async throws {
+        let namespace = "Harklight.refresh-timeout-test." + UUID().uuidString
+        let identity = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
+        defer {
+            SecItemDelete([kSecClass as String: kSecClassCertificate,
+                           kSecAttrLabel as String: identity.label] as CFDictionary)
+            SecItemDelete([kSecClass as String: kSecClassKey,
+                           kSecAttrApplicationTag as String: Data(namespace.utf8)] as CFDictionary)
+        }
+        let requests = ConversationFrameCollector()
+        let relay = try LocalRelayWebSocket(expectedDevice: identity.deviceID) { text in
+            guard let value = try? JSONValue.parse(Data(text.utf8)),
+                  let kind = value.uniqueValue(named: "type")?.stringValue?.rawValue,
+                  let ref = value.uniqueValue(named: "ref")?.stringValue?.rawValue else { return [] }
+            requests.append(Data(text.utf8))
+            let ok = "{\"v\":1,\"type\":\"ok\",\"ref\":\"\(ref)\""
+            let checkpoint = ",\"paging_version\":1,\"snapshot_id\":\"timeout-snapshot\",\"high_water\":0"
+            switch kind {
+            case "inbox_start":
+                return [ok + checkpoint + ",\"items\":[],\"next_cursor\":null,\"receipt_cursor\":null}\n"]
+            case "inbox_checkpoint_ack":
+                return [ok + checkpoint + ",\"checkpoint_accepted\":true}\n"]
+            case "inbox_attach":
+                return [ok + checkpoint + ",\"checkpoint_accepted\":true,\"replay_started\":true}\n",
+                        "{\"v\":1,\"type\":\"resynced\",\"seq\":0}\n"]
+            case "conversation_open":
+                // A live socket acknowledges the request, but never ends replay.
+                return [ok + "}\n"]
+            default:
+                return [ok + "}\n"]
+            }
+        }
+        defer { relay.close() }
+        let port = try await relay.start()
+        let context = ProfileContext(identity: ProfileIdentity(trustedRelayAuthority: ExactText("localhost"),
+            personID: ExactText("refresh-timeout-person"), deviceID: ExactText(identity.deviceID)), transportMode: .relay)
+        let store = try AttentionDomainStore(context: context,
+            persistence: MemoryAttentionStatePersistence(), persistsOnlyLocalState: true)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let lifecycle = NativeRelayLifecycle(refreshDeadline: .seconds(2))
+        try await lifecycle.activate(store: store, context: context,
+            relayURL: XCTUnwrap(URL(string: "wss://localhost:\(port)/relay")),
+            clientIdentity: identity.value, trustedRootDER: relay.rootDER,
+            serverStateCache: FileServerStateCache(fileURL: directory.appendingPathComponent("cache.json")))
+        let result = await lifecycle.refreshResultFromTrustedRelay()
+        XCTAssertTrue(requests.types.contains("inbox_checkpoint_ack"), "Establish that inbox setup reached its ACK.")
+        XCTAssertTrue(requests.types.contains("conversation_open"), "Establish the exact stalled protocol phase.")
+        XCTAssertFalse(result.relayConfirmed)
+        XCTAssertNotNil(result.failureMessage)
+        XCTAssertNotNil(lifecycle.refreshFailureMessage(for: context),
+                        "A background caller need not forward its result for the timeout to be visible.")
+        XCTAssertFalse(lifecycle.hasConfirmedServerSnapshot(for: context))
+        await lifecycle.deactivate()
+    }
+
     func testLiveConversationFrameDuringInboxPagingKeepsTheRelayOpen() async throws {
         let namespace = "Harklight.relay-live-conversation-test." + UUID().uuidString
         let identity = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
