@@ -46,7 +46,11 @@ final class SenderRevisionPresentationTests: XCTestCase {
         XCTAssertTrue(model.hasAcceptedUpdate(for: key))
         XCTAssertEqual(model.inboxRows.count, 1)
         XCTAssertEqual(model.inboxRows.first?.key, key)
-        XCTAssertTrue(model.inboxRows.first?.status.components(separatedBy: " · ").contains("Updated") == true)
+        XCTAssertTrue(try XCTUnwrap(model.request(for: key)).inboxStateIsCurrent)
+        let currentStatusParts = try XCTUnwrap(model.inboxRows.first?.status).components(separatedBy: " · ")
+        XCTAssertTrue(currentStatusParts.contains("Updated"))
+        XCTAssertTrue(currentStatusParts.contains("Open"),
+                      "A current open request retains its lifecycle label beside Updated.")
         XCTAssertEqual(model.request(for: key)?.title, ExactText("Current wording"))
         let earlier = try XCTUnwrap(model.historicalAnswerDraft(for: key, revision: 1))
         XCTAssertEqual(earlier.title, ExactText("Earlier wording"))
@@ -68,10 +72,11 @@ final class SenderRevisionPresentationTests: XCTestCase {
         XCTAssertThrowsError(try domain.saveDraft(oldDraft, selector: selector, context: context))
         try await cache.save(ServerStateCacheSnapshot.make(identity: context.identity,
             from: domain.snapshot(context: context), conversations: domain.conversationSnapshot(context: context)))
-        let cached = try await FileServerStateCache(identity: context.identity, fileURL: cacheURL).load()
+        let cachedValue = try await FileServerStateCache(identity: context.identity, fileURL: cacheURL).load()
+        let cached = try XCTUnwrap(cachedValue)
         let restored = try ClientRepository(context: context, persistence: persistence)
         XCTAssertTrue(try restored.conversationSnapshot(context: context).threads.isEmpty)
-        try restored.restoreCachedServerState(try XCTUnwrap(cached).attentionDomainState(for: context.identity),
+        try restored.restoreCachedServerState(cached.attentionDomainState(for: context.identity),
                                               context: context)
         XCTAssertEqual(try restored.conversationSnapshot(context: context).threads[key]?.acceptedUpdates,
                        [expectedUpdate])
@@ -79,5 +84,30 @@ final class SenderRevisionPresentationTests: XCTestCase {
                      "The old revision is no longer an eligible unsent operation after the server replaces it.")
         XCTAssertTrue(try restored.snapshot(context: context).outbox.isEmpty)
         XCTAssertEqual(try restored.snapshot(context: context).requests[key]?.originalPayload, newPayload)
+
+        let staleSnapshot = ServerStateCacheSnapshot(identity: context.identity,
+            cursor: cached.cursor, conversationCursor: cached.conversationCursor,
+            requests: cached.requests, conversations: cached.conversations,
+            inboxView: cached.inboxView, currentRequestKeys: [],
+            chatReadPositions: cached.chatReadPositions)
+        try await cache.save(staleSnapshot)
+        let staleCachedValue = try await cache.load()
+        let staleCached = try XCTUnwrap(staleCachedValue)
+        let staleRepository = try ClientRepository(context: context, persistence: persistence)
+        try staleRepository.restoreCachedServerState(
+            staleCached.attentionDomainState(for: context.identity), context: context)
+        let staleModel = try LivePresentationStore(store: staleRepository, context: context)
+        let staleRequest = try XCTUnwrap(staleModel.request(for: key))
+        let staleRow = try XCTUnwrap(staleModel.inboxRows.first { $0.key == key })
+        XCTAssertFalse(staleRequest.inboxStateIsCurrent)
+        XCTAssertTrue(staleModel.hasAcceptedUpdate(for: key),
+                      "The accepted revision must still come from the server conversation cache.")
+        let staleStatusParts = staleRow.status.components(separatedBy: " · ")
+        XCTAssertTrue(staleStatusParts.contains("Updated"),
+                      "A noncurrent cached inbox must retain the server-supplied accepted-revision label.")
+        XCTAssertTrue(staleStatusParts.contains("Cached history · status not refreshed"),
+                      "The Updated label does not imply that the cached inbox itself is current.")
+        XCTAssertFalse(staleStatusParts.contains("Open"),
+                       "A noncurrent cached inbox must not expose an unrefreshed lifecycle status.")
     }
 }
