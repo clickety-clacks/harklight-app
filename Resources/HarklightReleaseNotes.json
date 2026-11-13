@@ -105,6 +105,12 @@
       "testFlightBuildNumber": null,
       "highlights": [
         {
+          "id": "connection-health-crash-fix",
+          "symbol": "wrench.and.screwdriver",
+          "title": "Fix a connection-check crash",
+          "detail": "Fixes a crash during connection checks when opening the app or reconnecting. Formal testing continues."
+        },
+        {
           "id": "catch-up-testing-continues",
           "symbol": "info.circle",
           "title": "Formal testing is still underway",
