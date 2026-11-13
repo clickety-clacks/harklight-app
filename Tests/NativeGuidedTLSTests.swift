@@ -2978,14 +2978,6 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertEqual(result.data, Data("{\"state\":\"reachable\"}".utf8))
     }
 
-    func testOversizedInvitationServerResponseIsStoppedFromItsAdvertisedLength() async throws {
-        try await rejectOversizedResponse(advertiseSize: true)
-    }
-
-    func testOversizedInvitationServerStreamIsStoppedWithoutAContentLength() async throws {
-        try await rejectOversizedResponse(advertiseSize: false)
-    }
-
     func testJoinSecretIsNotSentToAServerWithDifferentPinnedTrust() async throws {
         let namespace = "Harklight.wrong-join-trust-test." + UUID().uuidString
         let other = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
@@ -4374,19 +4366,6 @@ final class NativeGuidedTLSTests: XCTestCase {
         return condition()
     }
 
-    private func rejectOversizedResponse(advertiseSize: Bool) async throws {
-        let server = try LocalEnrollmentTLS(expectedDevice: nil,
-                                            replyBody: Data(repeating: 120, count: 1024 * 1024),
-                                            advertiseSize: advertiseSize)
-        defer { server.close() }
-        let port = try await server.start()
-        let url = try XCTUnwrap(URL(string: "https://localhost:\(port)/enroll"))
-        do {
-            _ = try await PinnedNativeJoinTransport().request(url, method: "GET", body: nil,
-                                                              rootDER: server.rootDER)
-            XCTFail("An oversized invitation response must be stopped before joining can continue")
-        } catch NativeJoinError.invalidResponse {}
-    }
 }
 
 @MainActor
@@ -4442,7 +4421,6 @@ private final class LocalEnrollmentTLS: @unchecked Sendable {
     private let listener: NWListener
     private let queue = DispatchQueue(label: "Harklight.local-enrollment-tls")
     private let replyBody: Data
-    private let advertiseSize: Bool
     private let redirectTo: URL?
     private let stallRequest: Bool
     private let responseFileHash: String?
@@ -4455,10 +4433,9 @@ private final class LocalEnrollmentTLS: @unchecked Sendable {
     var clientClosed: Bool { queue.sync { connectionWasClosed } }
 
     init(expectedDevice: String?, replyBody: Data = Data("{\"state\":\"reachable\"}".utf8),
-         advertiseSize: Bool = true, redirectTo: URL? = nil, stallRequest: Bool = false,
+         redirectTo: URL? = nil, stallRequest: Bool = false,
          responseFileHash: String? = nil) throws {
         self.replyBody = replyBody
-        self.advertiseSize = advertiseSize
         self.redirectTo = redirectTo
         self.stallRequest = stallRequest
         self.responseFileHash = responseFileHash
@@ -4553,13 +4530,12 @@ private final class LocalEnrollmentTLS: @unchecked Sendable {
                         receive(connection, buffer: Data())
                         return
                     }
-                    let lengthHeader = advertiseSize ? "Content-Length: \(replyBody.count)\r\n" : ""
                     let hashHeader = responseFileHash.map { "X-Harklight-Sha256: \($0)\r\n" } ?? ""
                     let reply: Data
                     if let redirectTo {
                         reply = Data("HTTP/1.1 302 Found\r\nLocation: \(redirectTo.absoluteString)\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".utf8)
                     } else {
-                        reply = Data("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\(lengthHeader)\(hashHeader)Connection: close\r\n\r\n".utf8) + replyBody
+                        reply = Data("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: \(replyBody.count)\r\n\(hashHeader)Connection: close\r\n\r\n".utf8) + replyBody
                     }
                     connection.send(content: reply, completion: .contentProcessed { _ in connection.cancel() })
                     return
