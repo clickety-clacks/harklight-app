@@ -833,7 +833,7 @@ final class ConversationPresentationTests: XCTestCase {
         XCTAssertTrue(fixture.viewModel.request(for: revised.key)?.body?.rawValue.contains("review before archiving") == true)
         let files = try XCTUnwrap(library.responses["sample-information-2"])
         let fileThread = try XCTUnwrap(fixture.viewModel.conversation(for: files.key))
-        let turn = try XCTUnwrap(fileThread.turns.last)
+        let turn = try XCTUnwrap(fileThread.turns.first { !$0.files.isEmpty })
         let file = try XCTUnwrap(turn.files.first)
         XCTAssertEqual(fileThread.facts[turn.id]?.fileTransfers[file.id], .transferred)
         XCTAssertEqual(fileThread.facts[turn.id]?.fileUses[file.id], .unusable(reason: ExactText("Fictional unsupported format")))
