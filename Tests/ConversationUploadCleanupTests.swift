@@ -4,7 +4,7 @@ import XCTest
 @testable import Harklight
 
 final class ConversationUploadCleanupTests: XCTestCase {
-    private func reopenWithServerCache(_ domain: ClientRepository, context: ProfileContext,
+    private static func reopenWithServerCache(_ domain: ClientRepository, context: ProfileContext,
                                        persistence: MemoryPendingActionPersistence) async throws -> ClientRepository {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -46,7 +46,7 @@ final class ConversationUploadCleanupTests: XCTestCase {
         try store.registerConversationUpload(second, binding: binding, operation: operation2, context: context)
         try store.markDiscussionOutcome(binding, operation: operation2, rejection: nil, context: context)
         // Rebuild/restoration and transport uncertainty alone do not request cleanup.
-        let restored = try await reopenWithServerCache(store, context: context, persistence: persistence)
+        let restored = try await Self.reopenWithServerCache(store, context: context, persistence: persistence)
         XCTAssertTrue(try restored.conversationSnapshot(context: context).threads[binding.request]?.uploadCleanups?.isEmpty ?? true)
         let cleanup = try XCTUnwrap(restored.abandonConversationUploads(for: binding.request, context: context).first)
         XCTAssertEqual(Set(cleanup.uploadOperations), Set([operation1, operation2]))
@@ -54,7 +54,7 @@ final class ConversationUploadCleanupTests: XCTestCase {
         XCTAssertNotEqual(cleanup.id, operation2)
         try restored.recordConversationCleanup(cleanup.id, request: binding.request,
             outcome: .unknown(ExactText("Offline")), context: context)
-        let retryStore = try await reopenWithServerCache(restored, context: context, persistence: persistence)
+        let retryStore = try await Self.reopenWithServerCache(restored, context: context, persistence: persistence)
         let retry = try XCTUnwrap(retryStore.abandonConversationUploads(for: binding.request, context: context).first)
         XCTAssertEqual(retry.id, cleanup.id)
         XCTAssertEqual(retry.binding, binding)
@@ -90,7 +90,7 @@ final class ConversationUploadCleanupTests: XCTestCase {
         XCTAssertEqual(zero.discarded, 0)
         try store.recordConversationCleanup(cleanup.id, request: binding.request, outcome: .acknowledged(zero), context: context)
         try store.recordConversationCleanup(cleanup.id, request: binding.request, outcome: .unknown(ExactText("Late failure")), context: context)
-        let restored = try await reopenWithServerCache(store, context: context, persistence: persistence)
+        let restored = try await Self.reopenWithServerCache(store, context: context, persistence: persistence)
         let thread = try XCTUnwrap(restored.conversationSnapshot(context: context).threads[binding.request])
         XCTAssertEqual(thread.uploadCleanups?[cleanup.id]?.outcome, .acknowledged(zero))
         XCTAssertEqual(thread.drafts[1]?.text, ExactText("Text remains"))
@@ -126,7 +126,7 @@ final class ConversationUploadCleanupTests: XCTestCase {
         XCTAssertTrue(model.uploadNeedsReselection(original, for: binding.request, revision: 1))
         let cleanup = try XCTUnwrap(domain.conversationSnapshot(context: context).threads[binding.request]?.uploadCleanups?.values.first)
         await model.retryUploadCleanup(for: binding.request) // Unconfigured disposable profile: no service can be contacted.
-        let restored = try await reopenWithServerCache(domain, context: context, persistence: persistence)
+        let restored = try await Self.reopenWithServerCache(domain, context: context, persistence: persistence)
         let pending = try XCTUnwrap(restored.conversationSnapshot(context: context).threads[binding.request]?.uploadCleanups?[cleanup.id])
         guard case .unknown = pending.outcome else { return XCTFail("Offline cleanup must not become confirmed") }
         XCTAssertEqual(pending.uploadOperations, [operation])
@@ -150,7 +150,7 @@ final class ConversationUploadCleanupTests: XCTestCase {
         let cleanup = try XCTUnwrap(store.abandonConversationUploads(for: binding.request, context: context).first)
         let mixed = ConversationUploadDiscardResult(state: .committed, discarded: 1)
         try store.recordConversationCleanup(cleanup.id, request: binding.request, outcome: .acknowledged(mixed), context: context)
-        let restored = try await reopenWithServerCache(store, context: context, persistence: persistence)
+        let restored = try await Self.reopenWithServerCache(store, context: context, persistence: persistence)
         let thread = try XCTUnwrap(restored.conversationSnapshot(context: context).threads[binding.request])
         XCTAssertEqual(thread.drafts[1]?.files, [original], "A count cannot identify which draft file was discarded or committed")
         XCTAssertEqual(thread.drafts[1]?.text, ExactText("Keep original note"))
