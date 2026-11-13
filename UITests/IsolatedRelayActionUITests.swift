@@ -158,7 +158,8 @@ final class IsolatedRelayActionUITests: XCTestCase {
         for identifier in ["inbox-refreshing-badge", "inbox-status-unrefreshed",
                            "inbox-warning-button", "request-seen-action", "request-finish-seen",
                            "request-finish", "inbox-mark-seen", "inbox-no-comment",
-                           "inbox-list-diagnostics", "request-delivery-warning"] {
+                           "inbox-list-diagnostics", "request-delivery-warning",
+                           "request-action-error", "request-action-unavailable"] {
             let element = app.descendants(matching: .any)[identifier].firstMatch
             lines.append("\(identifier): exists=\(element.exists)" + (element.exists
                 ? " enabled=\(element.isEnabled) hittable=\(element.isHittable) label=\(element.label)" : ""))

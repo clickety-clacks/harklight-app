@@ -870,6 +870,16 @@ final class NativeConversationAvailability {
     }
 }
 
+/// SwiftUI must observe connection confirmation even when a push callback,
+/// rather than a view-owned refresh, changes it.
+@MainActor
+@Observable
+private final class NativeRelaySnapshotState {
+    var confirmedContext: ProfileContext?
+    var failureContext: ProfileContext?
+    var failureMessage: String?
+}
+
 /// App-owned wake boundary. A future enrollment/profile owner supplies the
 /// authenticated installation material and the SAME C store used by live UI.
 /// Fixture launch deliberately leaves this unconfigured.
@@ -883,10 +893,15 @@ final class NativeRelayLifecycle {
     }
     private var transport: URLSessionInstallationSession?
     private var context: ProfileContext?
-    private var confirmedRelayContext: ProfileContext?
+    private let snapshotState = NativeRelaySnapshotState()
+    private var confirmedRelayContext: ProfileContext? {
+        get { snapshotState.confirmedContext }
+        set { snapshotState.confirmedContext = newValue }
+    }
     private var activeTransportAttemptID: UUID?
     private var focusTransportID: UUID?
     private let foregroundDeadline = ForegroundConnectDeadline()
+    private let refreshDeadline: Duration
     private var diagnosticJournal: NativeClientDiagnosticJournal?
     private var foregroundDiagnosticContext: ProfileContext?
     private var foregroundDiagnosticOperationsAtStart: [UUID: NativeForegroundOperationDiagnostic] = [:]
@@ -907,7 +922,9 @@ final class NativeRelayLifecycle {
     }
     private let enrollment = NativeEnrollmentStore()
 
-    init() {}
+    init(refreshDeadline: Duration = .seconds(30)) {
+        self.refreshDeadline = refreshDeadline
+    }
 
     private func focusReportingReadyHandler(generation: UUID,
                                             transportID: UUID) -> @Sendable () -> Void {
@@ -1018,6 +1035,8 @@ final class NativeRelayLifecycle {
         core = nil
         transport = nil
         self.context = nil
+        snapshotState.failureContext = nil
+        snapshotState.failureMessage = nil
         confirmedRelayContext = nil
         configuration = nil
         if let priorCore { await priorCore.deactivate() }
@@ -1107,6 +1126,8 @@ final class NativeRelayLifecycle {
         core = nil
         transport = nil
         context = nil
+        snapshotState.failureContext = nil
+        snapshotState.failureMessage = nil
         confirmedRelayContext = nil
         activeTransportAttemptID = nil
         focusTransportID = nil
@@ -1415,7 +1436,13 @@ final class NativeRelayLifecycle {
     }
 
     func hasConfirmedServerSnapshot(for expected: ProfileContext) -> Bool {
-        context == expected && confirmedRelayContext == expected
+        // Read the observable value first, including before activation.
+        confirmedRelayContext == expected && context == expected
+    }
+
+    func refreshFailureMessage(for expected: ProfileContext) -> String? {
+        guard snapshotState.failureContext == expected, context == expected else { return nil }
+        return snapshotState.failureMessage
     }
 
     /// Revalidates the current server projection, sends only the operation
@@ -1520,8 +1547,31 @@ final class NativeRelayLifecycle {
     private func performRefresh(generation: UUID,
                                 checkBlockedPush: Bool = false) async -> NativeRelayRefreshResult {
         guard refreshGeneration == generation else { return .unavailable }
-        // A past replay is not proof that this connection attempt worked.
-        confirmedRelayContext = nil
+        guard let expected = context else { return .unavailable }
+        // Use the same bound as foreground connection setup. Ordinary push and
+        // pull-to-refresh flights must also retire a socket that never replies.
+        let deadline = ForegroundConnectDeadline()
+        var result = NativeRelayRefreshResult.unavailable
+        let progress = await deadline.run(deadline: refreshDeadline, operation: { [self] in
+            result = await performRefreshAttempt(generation: generation, checkBlockedPush: checkBlockedPush)
+            return result.relayConfirmed
+        }, onTimeout: { [self] in
+            guard refreshGeneration == generation, context == expected else { return }
+            snapshotState.failureContext = expected
+            snapshotState.failureMessage = NativeRelayRefreshResult.failed(error: URLError(.timedOut)).failureMessage
+            await cancelTimedOutSession(generation: generation, expected: expected)
+        }, onProgress: { _ in })
+        if progress.outcome == .timedOut { return .failed(error: URLError(.timedOut)) }
+        guard refreshGeneration == generation else { return .unavailable }
+        snapshotState.failureContext = expected
+        snapshotState.failureMessage = result.failureMessage
+        return result
+    }
+
+    private func performRefreshAttempt(generation: UUID,
+                                       checkBlockedPush: Bool) async -> NativeRelayRefreshResult {
+        // Refreshing the same session does not invalidate its last confirmed
+        // inbox. A transport failure/replacement does; sends still revalidate.
         recordDiagnostic(.relay, .projectionRefresh, .began, attemptID: activeTransportAttemptID)
         do {
             let result = try await refreshOnce(generation: generation,
@@ -1535,6 +1585,7 @@ final class NativeRelayLifecycle {
             recordDiagnostic(.relay, .projectionRefresh, .retrying, error: error,
                              attemptID: activeTransportAttemptID)
             foregroundDeadline.recordFailure(error)
+            confirmedRelayContext = nil
             // Retire an ambiguous WebSocket before retrying C's exact durable
             // outbox and cursor once on a fresh authenticated session.
             do {
@@ -1571,6 +1622,8 @@ final class NativeRelayLifecycle {
             throw NativeRelayCoreError.inactive
         }
         conversationAvailability.confirm(for: context, conversationsUnavailable: conversationsUnavailable)
+        snapshotState.failureContext = context
+        snapshotState.failureMessage = nil
         confirmedRelayContext = context
     }
 
