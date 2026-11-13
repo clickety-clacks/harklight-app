@@ -957,6 +957,9 @@ final class NativeRelayLifecycle {
     private var refreshGeneration = UUID()
     private var pathMonitor: NWPathMonitor?
     private var hasObservedInitialPath = false
+    private var connectionHealthTask: Task<Void, Never>?
+    private var connectionRecoveryTask: Task<Void, Never>?
+    private var connectionHealthCheckID: UUID?
     private lazy var refreshFlights = RelayRefreshFlights(inactive: NativeRelayRefreshResult.unavailable) { [weak self] in
         guard let self else { return .unavailable }
         return await self.performRefresh(generation: self.refreshGeneration)
@@ -967,7 +970,21 @@ final class NativeRelayLifecycle {
 
     private func observeNetworkPath(generation: UUID) {
         pathMonitor?.cancel()
+        connectionHealthTask?.cancel()
+        connectionRecoveryTask?.cancel()
+        connectionRecoveryTask = nil
+        connectionHealthCheckID = nil
         hasObservedInitialPath = false
+        // This is check cadence, never a catch-up or pong deadline. A healthy
+        // peer may keep replay open across any number of these checks.
+        connectionHealthTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .seconds(15)) }
+                catch { return }
+                guard let self, self.refreshGeneration == generation else { return }
+                await self.checkConnectionHealth(allowReconnect: true, generation: generation)
+            }
+        }
         let monitor = NWPathMonitor()
         pathMonitor = monitor
         monitor.pathUpdateHandler = { [weak self] path in
@@ -980,24 +997,44 @@ final class NativeRelayLifecycle {
     }
 
     private func networkPathChanged(available: Bool, generation: UUID) async {
-        guard refreshGeneration == generation, let current = transport else { return }
+        guard refreshGeneration == generation else { return }
         // The first callback describes the current path, not a network change.
         guard hasObservedInitialPath else { hasObservedInitialPath = true; return }
+        await checkConnectionHealth(allowReconnect: available, generation: generation)
+    }
+
+    private func checkConnectionHealth(allowReconnect: Bool, generation: UUID) async {
+        guard refreshGeneration == generation, let current = transport,
+              connectionHealthCheckID == nil else { return }
+        let checkID = UUID()
+        connectionHealthCheckID = checkID
+        defer {
+            if connectionHealthCheckID == checkID { connectionHealthCheckID = nil }
+        }
         do {
             try await current.checkConnection()
             guard refreshGeneration == generation else { return }
             resumeSavedAnswers()
             resumeSavedDiscussions()
         } catch {
-            guard refreshGeneration == generation, available else { return }
+            guard refreshGeneration == generation, allowReconnect,
+                  connectionRecoveryTask == nil else { return }
             // A failed ping unblocks the current replay with its actual error.
             // Serialize replacement after that replay saves its validated prefix.
-            _ = await refreshFlights.afterCurrent { [weak self] in
-                guard let self, self.refreshGeneration == generation else { return .unavailable }
-                do {
-                    if self.transport === current { try await self.reconnect(generation: generation) }
-                } catch { return .failed(error: error) }
-                return await self.performRefresh(generation: generation)
+            // Recovery must not occupy the health cadence: the replacement replay
+            // can also be long-running and still needs independent pings.
+            connectionRecoveryTask = Task { @MainActor [weak self] in
+                guard let self else { return }
+                defer {
+                    if self.refreshGeneration == generation { self.connectionRecoveryTask = nil }
+                }
+                _ = await self.refreshFlights.afterCurrent { [weak self] in
+                    guard let self, self.refreshGeneration == generation else { return .unavailable }
+                    do {
+                        if self.transport === current { try await self.reconnect(generation: generation) }
+                    } catch { return .failed(error: error) }
+                    return await self.performRefresh(generation: generation)
+                }
             }
         }
     }
@@ -1215,6 +1252,11 @@ final class NativeRelayLifecycle {
     func deactivate() async {
         pathMonitor?.cancel()
         pathMonitor = nil
+        connectionHealthTask?.cancel()
+        connectionHealthTask = nil
+        connectionRecoveryTask?.cancel()
+        connectionRecoveryTask = nil
+        connectionHealthCheckID = nil
         hasObservedInitialPath = false
         refreshGeneration = UUID()
         refreshFlights.reset()

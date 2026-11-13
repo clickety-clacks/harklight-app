@@ -303,7 +303,7 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
         }
     }
 
-    /// A path-change check is a WebSocket control frame, not an application
+    /// A connection-health check is a WebSocket control frame, not an application
     /// exchange. It must remain usable while replay or an ACK owns that gate.
     /// Only URLSession's reported failure closes the connection; no timer races it.
     public func checkConnection() async throws {
