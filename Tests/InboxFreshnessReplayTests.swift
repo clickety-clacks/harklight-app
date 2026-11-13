@@ -513,7 +513,7 @@ final class InboxFreshnessReplayTests: XCTestCase {
     }
 
     @MainActor
-    func testRecoveredOriginDiscussionKeepsRedactedContentAndRejectsContradictoryRepeat() throws {
+    func testRecoveredOriginDiscussionKeepsRedactedContentAndReplacesCachedProjection() throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
             personID: ExactText("redacted-recovery"), deviceID: ExactText("origin"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
@@ -540,13 +540,19 @@ final class InboxFreshnessReplayTests: XCTestCase {
         let contradiction = ConversationTurn(id: turn.id, binding: binding, author: .origin,
             sessionHandle: turn.sessionHandle, text: turn.text, contentRedacted: true,
             kind: .discussion, conversationSequence: 2)
-        XCTAssertThrowsError(try store.applyConversation(ConversationEvent(sequence: 2,
-            binding: binding, fact: .turn(contradiction)), context: context))
+        XCTAssertEqual(try store.applyConversation(ConversationEvent(sequence: 2,
+            binding: binding, fact: .turn(contradiction)), context: context), 3)
+        let replacement = try XCTUnwrap(store.conversationSnapshot(context: context)
+            .threads[key]?.turns.first { $0.id == turn.id })
+        XCTAssertEqual(replacement.author, .origin)
+        XCTAssertTrue(replacement.contentRedacted)
+        XCTAssertEqual(replacement.text, ExactText(""))
+        XCTAssertTrue(replacement.files.isEmpty)
         XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, 3)
     }
 
     @MainActor
-    func testMissingDiscussionRestorationPreservesAnsweredRowAndDurableCursor() throws {
+    func testMissingDiscussionRestorationPreservesAnsweredRowAndDurableCursor() async throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
             personID: ExactText("recovery-person"), deviceID: ExactText("reader"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
@@ -608,13 +614,24 @@ final class InboxFreshnessReplayTests: XCTestCase {
         XCTAssertFalse(try XCTUnwrap(store.conversationSnapshot(context: context).threads[key])
             .turns.contains { $0.id == discussion.id })
         try store.restoreReferencedConversationTurn(historical, for: receipt, context: context)
+        let cacheRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: cacheRoot) }
+        let cacheURL = cacheRoot.appendingPathComponent("server-cache.json")
+        let cache = FileServerStateCache(identity: identity, fileURL: cacheURL)
+        try await cache.save(ServerStateCacheSnapshot.make(identity: identity,
+            from: store.snapshot(context: context), conversations: store.conversationSnapshot(context: context)))
         let repaired = try ClientRepository(context: context, persistence: persistence)
+        let firstCache = try await FileServerStateCache(identity: identity, fileURL: cacheURL).load()
+        try repaired.restoreCachedServerState(try XCTUnwrap(firstCache).attentionDomainState(for: identity), context: context)
         XCTAssertEqual(try repaired.conversationSnapshot(context: context).cursor, 1)
-        // An exact repeat compares to the restored turn without adding history
-        // or advancing its already-durable cursor.
+        // Reapplying the server turn must not duplicate history or advance the cursor.
         XCTAssertEqual(try repaired.applyConversation(historical, context: context), 1)
         try repaired.applyConversation(receipt, context: context)
+        try await cache.save(ServerStateCacheSnapshot.make(identity: identity,
+            from: repaired.snapshot(context: context), conversations: repaired.conversationSnapshot(context: context)))
         let reloaded = try ClientRepository(context: context, persistence: persistence)
+        let finalCache = try await FileServerStateCache(identity: identity, fileURL: cacheURL).load()
+        try reloaded.restoreCachedServerState(try XCTUnwrap(finalCache).attentionDomainState(for: identity), context: context)
         let snapshot = try reloaded.conversationSnapshot(context: context)
         let thread = try XCTUnwrap(snapshot.threads[key])
         XCTAssertEqual(snapshot.cursor, 2)
