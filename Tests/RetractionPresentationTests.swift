@@ -31,6 +31,14 @@ final class RetractionPresentationTests: XCTestCase {
             let domain = try ClientRepository(context: context, persistence: persistence)
             let key = RequestKey(accountScope: context.identity.personID, senderID: ExactText("sender"), messageID: ExactText("request"))
             let payload = try JSONValue.parse(Data(#"{"title":"Original wording","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"keep","label":"Keep original choice","kind":"value","value":"keep"}]}}"#.utf8))
+            let confirmationDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: confirmationDirectory) }
+            let confirmation = try await NativeRelayLifecycle.shared.confirmInProcessSessionForTesting(
+                store: domain, context: context,
+                session: ReplyCheckpointSession(identity: context.identity, key: key, payload: payload),
+                serverStateCache: FileServerStateCache(identity: context.identity,
+                    fileURL: confirmationDirectory.appendingPathComponent("server-cache.json")))
+            XCTAssertTrue(confirmation.relayConfirmed)
             try domain.apply(RelayEvent(sequence: 1, body: .delivery(StoredRequest(key: key, originalPayload: payload), .message),
                 conversation: RelayConversationMetadata(revision: 1, sessionHandle: ExactText("handle"), eventID: ExactText("1"))), context: context)
             let port = AttentionDomainPort(store: domain)
