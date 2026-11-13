@@ -472,7 +472,7 @@ final class HarklightTests: XCTestCase {
         XCTAssertEqual(receipt.exactAnswerJSON, #""  Yes, I can help.\n""#)
         XCTAssertEqual(visible.selectedRequest?.lifecycleStatus, .pending)
         XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty)
-        XCTAssertEqual(try store.lookupIntent(receipt.intentID, context: context)?.opID, receipt.opID)
+        XCTAssertEqual(try store.lookupIntent(receipt.intentID, context: context)?.operationID, receipt.opID)
     }
 
     @MainActor
@@ -634,7 +634,7 @@ final class HarklightTests: XCTestCase {
         XCTAssertEqual(live.selectedRequest?.lifecycleStatus, .pending)
         XCTAssertEqual(live.selectedRequest?.intentReceipt?.opID, receipt.opID)
         XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty)
-        XCTAssertEqual(try store.lookupIntent(receipt.intentID, context: context)?.opID, receipt.opID)
+        XCTAssertEqual(try store.lookupIntent(receipt.intentID, context: context)?.operationID, receipt.opID)
 
         let reopenedContext = ProfileContext(identity: identity, transportMode: .relay)
         let reopened = try ClientRepository(context: reopenedContext, persistence: persistence)
@@ -647,7 +647,7 @@ final class HarklightTests: XCTestCase {
         XCTAssertThrowsError(try reopenedLive.submit(fixture.key),
                              "The visible Pending answer must not mint another original operation.")
         XCTAssertTrue(try reopened.snapshot(context: reopenedContext).outbox.isEmpty)
-        XCTAssertEqual(try reopened.lookupIntent(receipt.intentID, context: reopenedContext)?.opID, receipt.opID)
+        XCTAssertEqual(try reopened.lookupIntent(receipt.intentID, context: reopenedContext)?.operationID, receipt.opID)
     }
 
     func testNormativeFixturesAdmitTwoDifferentSenderScenesAndWholeFallback() throws {
