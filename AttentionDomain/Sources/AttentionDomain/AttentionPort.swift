@@ -1396,11 +1396,11 @@ public final class AttentionDomainPort: @unchecked Sendable {
                                          status: AppLifecycleStatus,
                                          remote: RemoteRequestState?,
                                          submission: Submission?) -> InformationalSeenStatus? {
-        guard request.hasExplicitInformationalSeenAction else { return nil }
         if remote?.state == .answered,
            remote?.accountAnswerOutcome == .seen {
             return .confirmed
         }
+        guard request.hasExplicitInformationalSeenAction else { return nil }
         let seenValue = JSONValue.object([
             JSONMember("acknowledgment", .string(ExactText("seen")))
         ])
@@ -1411,6 +1411,11 @@ public final class AttentionDomainPort: @unchecked Sendable {
         if submission?.isNoComment == true { return .resolvedWithoutSeen }
         if status == .open || status == .pending {
             return submission?.answer.semanticallyEquals(seenValue) == true ? .pending : .available
+        }
+        if status == .answered,
+           remote?.accountAnswerOutcome == nil,
+           remote?.authorizedOriginAnswer != nil {
+            return nil
         }
         return .resolvedWithoutSeen
     }
@@ -1423,12 +1428,10 @@ public final class AttentionDomainPort: @unchecked Sendable {
         guard status == .answered,
               remote?.state == .answered,
               let terminalSequence = remote?.eventSequence else { return false }
-        if let authorizedOriginAnswer = remote?.authorizedOriginAnswer {
-            return authorizedOriginAnswer.semanticallyEquals(seenValue)
-        }
-        // Receiving devices get an answer-free lifecycle. Their local original
-        // operation is authoritative only when its accepted terminal sequence
-        // is the exact terminal now projected for this same request and answer.
+        // Shared lifecycle outcomes are handled above. Without one, this
+        // device's local original operation is authoritative only when its
+        // accepted terminal sequence is the exact terminal now projected for
+        // this same request and answer.
         guard let submission,
               submission.requestKey == requestKey,
               submission.answer.semanticallyEquals(seenValue),

@@ -1036,8 +1036,8 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(port.inspect(context: port.context, request: remotelySeenKey).requests.first).informationalSeenStatus,
                        .resolvedWithoutSeen,
                        "An answer-free terminal from another device is not a local operation receipt.")
-        XCTAssertEqual(try XCTUnwrap(port.inspect(context: port.context, request: originSeenKey).requests.first).informationalSeenStatus,
-                       .confirmed, "An authorized origin answer remains sufficient confirmation.")
+        XCTAssertNil(try XCTUnwrap(port.inspect(context: port.context, request: originSeenKey).requests.first).informationalSeenStatus,
+                     "An origin-only legacy answer does not establish shared Seen state.")
 
         let live = try LivePresentationStore(store: store, context: context)
         let availableSeenRow = try XCTUnwrap(live.inboxRows.first { $0.key == seenKey })
