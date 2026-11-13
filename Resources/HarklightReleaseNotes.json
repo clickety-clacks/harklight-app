@@ -105,6 +105,12 @@
       "testFlightBuildNumber": null,
       "highlights": [
         {
+          "id": "new-design-light-and-dark",
+          "symbol": "paintpalette",
+          "title": "A new design",
+          "detail": "Harklight has a new look in light and dark, following your device’s appearance setting. The new design is still pending formal testing."
+        },
+        {
           "id": "connection-health-crash-fix",
           "symbol": "wrench.and.screwdriver",
           "title": "Fix a connection-check crash",
