@@ -1821,7 +1821,9 @@ final class NativeGuidedTLSTests: XCTestCase {
                     return [ok + "}\n", discussion, receipt, pending, arriving, end]
                 }
                 if since == 2 { return [ok + "}\n", suffix, arriving, end] }
-                if since == 1 { return [ok + "}\n", skippedHistory, receipt, suffix, arriving, end] }
+                // Resume strictly after the committed cursor; sequence 1 was
+                // already accounted for before the dependency lookup.
+                if since == 1 { return [ok + "}\n", receipt, suffix, arriving, end] }
                 return [ok + "}\n", end]
             case "conversation_ack":
                 return [ok + ",\"conversation_seq\":4}\n"]
