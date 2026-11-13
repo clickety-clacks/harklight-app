@@ -98,6 +98,21 @@ final class CacheBackedActionEligibilityTests: XCTestCase {
         await fulfillment(of: [changed], timeout: 1)
     }
 
+    func testBackgroundRefreshFailureIsVisibleWithoutViewOwnedRefresh() async throws {
+        let scenario = try await confirmedColdLaunch()
+        // The in-process session has no reconnect credentials. This exercises
+        // the ordinary refresh failure path without touching an enrolled account.
+        let refreshed = await NativeRelayLifecycle.shared.refreshFromTrustedRelay()
+        XCTAssertFalse(refreshed)
+        XCTAssertFalse(scenario.live.isRefreshing)
+        XCTAssertFalse(scenario.live.canSendToCurrentServer)
+        XCTAssertNotNil(scenario.live.connectionWarning,
+                        "A push-owned refresh failure must reach the UI even without applyRefreshResult.")
+        XCTAssertFalse(scenario.live.submitFromUser(scenario.seen, explicitCompatibilityAction: ExactText("seen")))
+        XCTAssertNotNil(scenario.live.actionError)
+        await NativeRelayLifecycle.shared.deactivate()
+    }
+
     private func withConfirmedColdLaunch(_ check: (Scenario) throws -> Void) async throws {
         await NativeRelayLifecycle.shared.deactivate()
         do {
