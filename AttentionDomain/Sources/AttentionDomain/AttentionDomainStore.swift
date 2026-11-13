@@ -3394,7 +3394,7 @@ public final class AttentionDomainStore: @unchecked Sendable {
         let turn: ConversationTurn?
         if let requestedTurnID {
             turn = thread.turns.first {
-                $0.id == requestedTurnID && $0.kind == .reply && $0.author == .origin
+                $0.id == requestedTurnID && $0.kind == .reply && $0.author != .person
             }
         } else {
             turn = thread.latestAgentReply
