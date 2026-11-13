@@ -1328,6 +1328,14 @@ final class NativeGuidedTLSTests: XCTestCase {
             SecItemDelete([kSecClass as String: kSecClassKey,
                            kSecAttrApplicationTag as String: Data(namespace.utf8)] as CFDictionary)
         }
+        let fileBytes = Data("File remains available during catch-up".utf8)
+        let fileHash = SHA256.hash(data: fileBytes).map { String(format: "%02x", $0) }.joined()
+        let origin = try LocalEnrollmentTLS(expectedDevice: identity.deviceID, replyBody: fileBytes,
+                                             responseFileHash: fileHash)
+        defer { origin.close() }
+        let originPort = try await origin.start()
+        let destination = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: destination) }
         let conversationStarted = expectation(description: "Post-ACK conversation replay is still open")
         let frames = ConversationFrameCollector()
         let seenPayload = #"{"title":"Information","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"seen","label":"Seen","kind":"value","value":{"acknowledgment":"seen"}}]}}"#
@@ -1356,7 +1364,7 @@ final class NativeGuidedTLSTests: XCTestCase {
                         #"{"v":1,"type":"resynced","seq":2}"# + "\n"]
             case "conversation_open":
                 conversationStarted.fulfill()
-                return [ok + "}\n"] // No conversation_resynced: catch-up stays active.
+                return [ok + ",\"origin_https_port\":\(originPort)}\n"] // No replay end frame.
             default: return [ok + "}\n"]
             }
         }
@@ -1398,14 +1406,104 @@ final class NativeGuidedTLSTests: XCTestCase {
             }
         }
         await fulfillment(of: [completed], timeout: 5)
+        let fileCompleted = expectation(description: "File downloads before catch-up finishes")
+        let download = Task { @MainActor in
+            defer { fileCompleted.fulfill() }
+            let file = ConversationFile(id: ExactText("file"), name: ExactText("file.txt"),
+                byteCount: UInt64(fileBytes.count), sha256: ExactText(fileHash),
+                content: .uploaded(ExactText(UUID().uuidString)))
+            try await lifecycle.fetchConversationFile(file, to: destination, expected: context)
+            XCTAssertFalse(refreshCompleted)
+        }
+        await fulfillment(of: [fileCompleted], timeout: 5)
         await lifecycle.deactivate()
+        try await download.value
+        XCTAssertEqual(try Data(contentsOf: destination), fileBytes)
         try await sends.value
-        _ = await refresh.value
+        let cancelled = await refresh.value
+        XCTAssertFalse(cancelled.relayConfirmed, "Deactivation cannot confirm an unfinished replay.")
         let submitted = try frames.snapshot().map { try JSONValue.parse($0) }
         XCTAssertEqual(submitted.count, 2)
         XCTAssertEqual(submitted.first?.uniqueValue(named: "answer"), .string(ExactText("While replay is open")))
         XCTAssertEqual(submitted.last?.uniqueValue(named: "answer"), .null)
         XCTAssertEqual(Set(submitted.compactMap { $0.uniqueValue(named: "op_id")?.stringValue }).count, 2)
+    }
+
+    func testLifecycleReconnectsTwiceFromPersistedConversationPrefix() async throws {
+        let namespace = "Harklight.lifecycle-reset." + UUID().uuidString
+        let identity = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
+        defer {
+            SecItemDelete([kSecClass as String: kSecClassCertificate,
+                           kSecAttrLabel as String: identity.label] as CFDictionary)
+            SecItemDelete([kSecClass as String: kSecClassKey,
+                           kSecAttrApplicationTag as String: Data(namespace.utf8)] as CFDictionary)
+        }
+        let requests = ConversationFrameCollector()
+        let relay = try LocalRelayWebSocket(expectedDevice: identity.deviceID) { text in
+            requests.append(Data(text.utf8))
+            guard let value = try? JSONValue.parse(Data(text.utf8)),
+                  let kind = value.uniqueValue(named: "type")?.stringValue?.rawValue,
+                  let ref = value.uniqueValue(named: "ref")?.stringValue?.rawValue else { return [] }
+            let ok = "{\"v\":1,\"type\":\"ok\",\"ref\":\"\(ref)\""
+            let checkpoint = ",\"paging_version\":1,\"snapshot_id\":\"reset-replay\",\"high_water\":1"
+            switch kind {
+            case "inbox_start":
+                let item = #"{"acceptance":{"v":1,"type":"delivery","seq":1,"sender_id":"sender","message_id":"conversation","origin":"origin","as":"message","message":{"title":"Conversation"},"request_revision":1,"session_handle":"session","event_id":"request"}}"#
+                return [ok + checkpoint + ",\"items\":[\(item)],\"next_cursor\":null,\"receipt_cursor\":null}\n"]
+            case "inbox_checkpoint_ack":
+                return [ok + checkpoint + ",\"checkpoint_accepted\":true}\n"]
+            case "inbox_attach":
+                return [ok + checkpoint + ",\"checkpoint_accepted\":true,\"replay_started\":true}\n",
+                        #"{"v":1,"type":"resynced","seq":1}"# + "\n"]
+            case "conversation_open":
+                let since = value.uniqueValue(named: "since")?.integerValue ?? -1
+                guard (0...2).contains(since) else { return [ok + "}\n"] }
+                let sequence = since + 1
+                let turn = "{\"v\":1,\"type\":\"conversation\",\"conversation_seq\":\(sequence),\"sender_id\":\"sender\",\"message_id\":\"conversation\",\"request_revision\":1,\"origin\":\"origin\",\"session_handle\":\"session\",\"kind\":\"discussion\",\"author\":\"person\",\"event_id\":\"turn-\(sequence)\",\"text\":\"Server turn \(sequence)\"}\n"
+                // The cache observer disconnects only after turns 1 and 2 are
+                // durably saved. Neither interrupted replay has an end frame.
+                return [ok + "}\n", turn] + (sequence == 3
+                    ? [#"{"v":1,"type":"conversation_resynced","conversation_seq":3}"# + "\n"] : [])
+            default: return [ok + "}\n"]
+            }
+        }
+        defer { relay.close() }
+        let port = try await relay.start()
+        let context = ProfileContext(identity: ProfileIdentity(trustedRelayAuthority: ExactText("localhost"),
+            personID: ExactText("reset-person"), deviceID: ExactText(identity.deviceID)), transportMode: .relay)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let cacheURL = directory.appendingPathComponent("cache.json")
+        let cache = DisconnectingConversationCache(identity: context.identity, url: cacheURL) {
+            relay.disconnectClients()
+        }
+        let store = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        let lifecycle = NativeRelayLifecycle()
+        try await lifecycle.activate(store: store, context: context,
+            relayURL: XCTUnwrap(URL(string: "wss://localhost:\(port)/relay")),
+            clientIdentity: identity.value, trustedRootDER: relay.rootDER, serverStateCache: cache)
+        let completed = expectation(description: "Catch-up completes after two real socket closures")
+        let refresh = Task { @MainActor in
+            defer { completed.fulfill() }
+            return await lifecycle.refreshResultFromTrustedRelay()
+        }
+        await fulfillment(of: [completed], timeout: 10)
+        await lifecycle.deactivate()
+        let result = await refresh.value
+        XCTAssertTrue(result.relayConfirmed)
+        let starts = try requests.snapshot().map { try JSONValue.parse($0) }.filter {
+            $0.uniqueValue(named: "type")?.stringValue?.rawValue == "conversation_open"
+        }.compactMap { $0.uniqueValue(named: "since")?.integerValue }
+        XCTAssertEqual(starts, [0, 1, 2], "Reconnect requests only each uncommitted suffix.")
+        let loaded = try await FileServerStateCache(identity: context.identity, fileURL: cacheURL).load()
+        let snapshot = try XCTUnwrap(loaded)
+        XCTAssertEqual(snapshot.conversationCursor, 3)
+        let restarted = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        try restarted.restoreCachedServerState(snapshot.attentionDomainState(for: context.identity), context: context)
+        let key = RequestKey(accountScope: context.identity.personID, senderID: ExactText("sender"),
+                             messageID: ExactText("conversation"))
+        let turns = try restarted.conversationSnapshot(context: context).threads[key]?.turns ?? []
+        XCTAssertEqual(turns.map(\.id), [ExactText("turn-1"), ExactText("turn-2"), ExactText("turn-3")])
     }
 
     func testUploadEndpointDiscoveryDoesNotWaitForConversationHistoryOrAcknowledgeIt() async throws {
@@ -4269,6 +4367,7 @@ private final class LocalEnrollmentTLS: @unchecked Sendable {
     private let advertiseSize: Bool
     private let redirectTo: URL?
     private let stallRequest: Bool
+    private let responseFileHash: String?
     // All connection ownership is serialized on queue, including close().
     private var connections: [NWConnection] = []
     private var requestWasReceived = false
@@ -4278,11 +4377,13 @@ private final class LocalEnrollmentTLS: @unchecked Sendable {
     var clientClosed: Bool { queue.sync { connectionWasClosed } }
 
     init(expectedDevice: String?, replyBody: Data = Data("{\"state\":\"reachable\"}".utf8),
-         advertiseSize: Bool = true, redirectTo: URL? = nil, stallRequest: Bool = false) throws {
+         advertiseSize: Bool = true, redirectTo: URL? = nil, stallRequest: Bool = false,
+         responseFileHash: String? = nil) throws {
         self.replyBody = replyBody
         self.advertiseSize = advertiseSize
         self.redirectTo = redirectTo
         self.stallRequest = stallRequest
+        self.responseFileHash = responseFileHash
         let (tls, root) = try LocalEnrollmentTLS.fixtureTLS(expectedDevice: expectedDevice, queue: queue)
         rootDER = root
         let parameters = NWParameters(tls: tls, tcp: NWProtocolTCP.Options())
@@ -4375,11 +4476,12 @@ private final class LocalEnrollmentTLS: @unchecked Sendable {
                         return
                     }
                     let lengthHeader = advertiseSize ? "Content-Length: \(replyBody.count)\r\n" : ""
+                    let hashHeader = responseFileHash.map { "X-Harklight-Sha256: \($0)\r\n" } ?? ""
                     let reply: Data
                     if let redirectTo {
                         reply = Data("HTTP/1.1 302 Found\r\nLocation: \(redirectTo.absoluteString)\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".utf8)
                     } else {
-                        reply = Data("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\(lengthHeader)Connection: close\r\n\r\n".utf8) + replyBody
+                        reply = Data("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\(lengthHeader)\(hashHeader)Connection: close\r\n\r\n".utf8) + replyBody
                     }
                     connection.send(content: reply, completion: .contentProcessed { _ in connection.cancel() })
                     return
@@ -4467,12 +4569,39 @@ private final class LocalRelayWebSocket: @unchecked Sendable {
         }
     }
 
+    /// Interrupt active sockets while leaving the listener available for reconnect.
+    func disconnectClients() {
+        queue.sync {
+            connections.forEach { $0.forceCancel() }
+            connections.removeAll()
+        }
+    }
+
     func close() {
         queue.sync {
             listener.cancel()
             connections.forEach { $0.cancel() }
             connections.removeAll()
         }
+    }
+}
+
+/// Fault injection observes the existing cache seam after an actual file write.
+private actor DisconnectingConversationCache: ServerStateCaching {
+    private let file: FileServerStateCache
+    private let disconnect: @Sendable () -> Void
+    private var disconnected: Set<UInt64> = []
+
+    init(identity: ProfileIdentity, url: URL, disconnect: @escaping @Sendable () -> Void) {
+        file = FileServerStateCache(identity: identity, fileURL: url)
+        self.disconnect = disconnect
+    }
+    func load() async throws -> ServerStateCacheSnapshot? { try await file.load() }
+    func discard() async throws { try await file.discard() }
+    func save(_ snapshot: ServerStateCacheSnapshot) async throws {
+        try await file.save(snapshot)
+        let cursor = snapshot.conversationCursor
+        if (cursor == 1 || cursor == 2), disconnected.insert(cursor).inserted { disconnect() }
     }
 }
 
