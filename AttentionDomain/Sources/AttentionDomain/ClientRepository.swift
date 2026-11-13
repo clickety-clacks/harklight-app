@@ -2947,7 +2947,9 @@ public final class ClientRepository: @unchecked Sendable {
         var next = state
         guard var conversation = next.conversation, var thread = conversation.threads[draft.binding.request],
               thread.revisions[draft.binding.revision] != nil else { throw ConversationError.missingRequest }
-        guard thread.allowsDiscussion else { throw ConversationError.closed }
+        // Saving user input does not send it or make cached closure authoritative.
+        // Delivery still validates the current server projection separately.
+        guard context.transportMode == .relay || thread.allowsDiscussion else { throw ConversationError.closed }
         if let previous = thread.drafts[draft.binding.revision] {
             switch previous.disposition {
             case .submitting, .outcomeUnknown, .acceptedPendingReplay: throw ConversationError.pendingSubmission
@@ -2977,7 +2979,9 @@ public final class ClientRepository: @unchecked Sendable {
         guard var conversation = next.conversation,
               var thread = conversation.threads[binding.request],
               thread.revisions[binding.revision] != nil else { throw ConversationError.missingRequest }
-        guard thread.allowsDiscussion else { throw ConversationError.closed }
+        // Saving user input does not send it or make cached closure authoritative.
+        // Delivery still validates the current server projection separately.
+        guard context.transportMode == .relay || thread.allowsDiscussion else { throw ConversationError.closed }
         var draft = thread.drafts[binding.revision] ?? ConversationDraft(binding: binding)
         guard draft.binding == binding else { throw ConversationError.invalidBinding }
         switch draft.disposition {
