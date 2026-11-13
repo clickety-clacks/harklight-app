@@ -653,7 +653,7 @@ final class InboxFreshnessReplayTests: XCTestCase {
     }
 
     @MainActor
-    func testPagedTerminalRecoversLiveAndHeldReceiptsWithCurrentRevision() throws {
+    func testPagedTerminalRecoversLiveAndHeldReceiptsWithCurrentRevision() async throws {
         for receiptHeld in [false, true] {
             let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
                 personID: ExactText("receipt-person"), deviceID: ExactText("reader"))
@@ -664,6 +664,13 @@ final class InboxFreshnessReplayTests: XCTestCase {
                 senderID: ExactText("author"), messageID: ExactText("answered-request"))
             let handle = ExactText("session")
             let terminalID = ExactText("answer-terminal")
+            // The history arrives after the current initial checkpoint and before
+            // the older page containing its request, not from a retired cache generation.
+            _ = try store.beginInboxCandidate(startupID: "startup", since: 0, batches: [], context: context)
+            try store.saveInboxInitialPage(snapshotID: "snapshot", highWater: 2,
+                items: [], nextCursor: "older", receiptCursor: nil, context: context)
+            _ = try store.prepareInboxCheckpointAcknowledgement(context: context)
+            _ = try store.acceptInboxCheckpoint(snapshotID: "snapshot", highWater: 2, context: context)
             for revision in UInt64(2)...3 {
                 let binding = ConversationBinding(request: key, revision: revision)
                 let turn = ConversationTurn(id: ExactText("revision-\(revision)"), binding: binding,
@@ -683,7 +690,6 @@ final class InboxFreshnessReplayTests: XCTestCase {
                 binding: ConversationBinding(request: key, revision: 3),
                 fact: .delivered(turn: terminalID))
             if receiptHeld { try store.applyConversation(receipt, context: context) }
-            _ = try store.beginInboxCandidate(startupID: "startup", since: 0, batches: [], context: context)
             let acceptance = RelayEvent(sequence: 1,
                 body: .delivery(StoredRequest(key: key,
                     originalPayload: try JSONValue.parse(data(#"{"title":"Original question"}"#))), .message),
@@ -694,21 +700,28 @@ final class InboxFreshnessReplayTests: XCTestCase {
                 conversation: RelayConversationMetadata(revision: 3, eventID: terminalID, author: .person),
                 accountAnswerOutcome: .noComment)
             let item = InboxSnapshotItem(acceptance: acceptance, terminal: terminal)
+            let beforePage = try store.conversationSnapshot(context: context)
+            let beforePending = try persistence.load(identity: identity)
             persistence.failNextCommit()
-            XCTAssertThrowsError(try store.saveInboxInitialPage(snapshotID: "snapshot", highWater: 2,
-                items: [item], nextCursor: nil, receiptCursor: nil, context: context))
-            let restored = try ClientRepository(context: context, persistence: persistence)
-            XCTAssertNil(try restored.conversationSnapshot(context: context).threads[key])
-            XCTAssertEqual(try restored.conversationSnapshot(context: context).cursor, receiptHeld ? 4 : 3)
-            XCTAssertNil(try restored.snapshot(context: context).requests[key])
-            XCTAssertFalse(try XCTUnwrap(restored.snapshot(context: context).inboxCandidate).hasInitialPage)
+            XCTAssertThrowsError(try store.saveInboxOlderPage(snapshotID: "snapshot", highWater: 2,
+                cursor: "older", items: [item], nextCursor: nil, context: context))
+            XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, beforePage.cursor)
+            XCTAssertEqual(try store.conversationSnapshot(context: context).threads, beforePage.threads)
+            XCTAssertEqual(try persistence.load(identity: identity), beforePending)
+            XCTAssertNil(try store.snapshot(context: context).requests[key])
 
-            try restored.saveInboxInitialPage(snapshotID: "snapshot", highWater: 2,
-                items: [item], nextCursor: nil, receiptCursor: nil, context: context)
-            _ = try restored.prepareInboxCheckpointAcknowledgement(context: context)
-            _ = try restored.acceptInboxCheckpoint(snapshotID: "snapshot", highWater: 2, context: context)
-            if !receiptHeld { try restored.applyConversation(receipt, context: context) }
+            try store.saveInboxOlderPage(snapshotID: "snapshot", highWater: 2,
+                cursor: "older", items: [item], nextCursor: nil, context: context)
+            if !receiptHeld { try store.applyConversation(receipt, context: context) }
+            let cacheRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: cacheRoot) }
+            let cacheURL = cacheRoot.appendingPathComponent("server-cache.json")
+            let cache = FileServerStateCache(identity: identity, fileURL: cacheURL)
+            try await cache.save(ServerStateCacheSnapshot.make(identity: identity,
+                from: store.snapshot(context: context), conversations: store.conversationSnapshot(context: context)))
             let reloaded = try ClientRepository(context: context, persistence: persistence)
+            let saved = try await FileServerStateCache(identity: identity, fileURL: cacheURL).load()
+            try reloaded.restoreCachedServerState(try XCTUnwrap(saved).attentionDomainState(for: identity), context: context)
             let thread = try XCTUnwrap(reloaded.conversationSnapshot(context: context).threads[key])
             XCTAssertEqual(thread.terminalTurn, terminalID)
             XCTAssertEqual(thread.facts[terminalID]?.delivered, true)
