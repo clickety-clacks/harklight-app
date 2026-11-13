@@ -5,7 +5,7 @@ import XCTest
 @testable import Harklight
 
 final class InboxFreeOrderTests: XCTestCase {
-    private func reopenWithServerCache(_ domain: ClientRepository, context: ProfileContext,
+    private static func reopenWithServerCache(_ domain: ClientRepository, context: ProfileContext,
                                        persistence: MemoryPendingActionPersistence) async throws -> ClientRepository {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -166,7 +166,7 @@ final class InboxFreeOrderTests: XCTestCase {
         malformedReply.removeValue(forKey: "open_at_conversation_seq")
         let view = try decode([reference("valid"), reference("omitted-open", kind: "future"), malformedReply])
         try store.setInboxView(view, context: context)
-        let restored = try await reopenWithServerCache(store, context: context, persistence: persistence)
+        let restored = try await Self.reopenWithServerCache(store, context: context, persistence: persistence)
         let port = AttentionDomainPort(store: restored)
         let presentation = try port.observe(context: port.context)
         XCTAssertEqual(presentation.requests.count, 3)
@@ -224,7 +224,7 @@ final class InboxFreeOrderTests: XCTestCase {
         let history = try decode([reference("parent", state: "history")], revision: "view-2")
         try store.setInboxView(active, context: context)
         try store.setInboxView(history, context: context)
-        let restored = try await reopenWithServerCache(store, context: context, persistence: persistence)
+        let restored = try await Self.reopenWithServerCache(store, context: context, persistence: persistence)
         let port = AttentionDomainPort(store: restored)
         let presentation = try port.observe(context: port.context)
         XCTAssertEqual(presentation.inboxFreeOrderVersion, 1)
