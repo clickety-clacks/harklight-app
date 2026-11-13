@@ -115,7 +115,7 @@ final class ReplyFocusDuringSyncTests: XCTestCase {
                                             requestRevision: reopenedSession.requestRevision))
         let committed = try domain.snapshot(context: context)
         XCTAssertNil(committed.drafts[key], "Submitting does not create a resumable draft.")
-        let submission = try XCTUnwrap(committed.outbox.first)
+        let submission = try XCTUnwrap(committed.intents.values.first { $0.requestKey == key })
         XCTAssertEqual(submission.requestRevision, request.requestRevision)
         XCTAssertEqual(submission.typedInputs,
                        [.compatibilityText(action: reply.id, text: ExactText("Typed locally"))],
@@ -161,7 +161,7 @@ final class ReplyFocusDuringSyncTests: XCTestCase {
                                              answerDraft: session.draft,
                                              requestRevision: session.requestRevision))
 
-        let submission = try XCTUnwrap(domain.snapshot(context: context).outbox.first)
+        let submission = try XCTUnwrap(domain.snapshot(context: context).intents.values.first { $0.requestKey == key })
         XCTAssertEqual(submission.typedInputs,
                        [.point(input: ExactText("location"), point: point),
                         .text(input: ExactText("note"), text: ExactText("Please check the partition."))],

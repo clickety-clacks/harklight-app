@@ -1374,10 +1374,13 @@ final class NativeGuidedTLSTests: XCTestCase {
                        "Reading inbox rows does not create new routing events.")
 
         let session = U2ReplaySession(identity)
+        session.snapshotRequest = (request, payload)
         session.result = .unsupported(operationID: receipt.opID)
         let collected = NativeDiagnosticEventCollector()
         let core = try NativeRelayCore(store: store, context: context, session: session,
                                        onDiagnostic: { collected.append($0) })
+        _ = try await core.resyncAndDrainOutbox()
+        XCTAssertTrue(session.sent.isEmpty, "Refresh does not send a queued No comment choice.")
         try await core.sendOriginalOperationForUserTap(receipt.intentID)
         journal.record(collected.events)
         try presentation.refreshFromDurableStore()
@@ -3847,7 +3850,8 @@ final class NativeGuidedTLSTests: XCTestCase {
         let selector = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first?.selector)
         let receipt = try port.submit(SubmitIntent(context: port.context, selector: selector,
             intentID: UUID(), inputs: [.compatibilityValue(action: ExactText("yes"))]))
-        let submission = try XCTUnwrap(store.snapshot(context: context).outbox.first)
+        let submission = try XCTUnwrap(store.snapshot(context: context).intents[receipt.intentID])
+        session.snapshotRequest = (key, payload)
         session.result = .accepted(operationID: receipt.opID, terminalSequence: 2)
         session.replayFrames = [
             [u2Data(#"{"v":1,"type":"ok","ref":"native-sync"}"#),
@@ -3860,6 +3864,9 @@ final class NativeGuidedTLSTests: XCTestCase {
         let core = try NativeRelayCore(store: store, context: context, session: session,
                                        onDiagnostic: { events.append($0) })
 
+        _ = try await core.resyncAndDrainOutbox()
+        XCTAssertTrue(session.sent.isEmpty, "Refresh does not send a queued answer.")
+        try await core.sendOriginalOperationForUserTap(receipt.intentID)
         _ = try await core.resyncAndDrainOutbox()
 
         let replay = events.events.filter {
@@ -3908,6 +3915,7 @@ final class NativeGuidedTLSTests: XCTestCase {
         let selector = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first?.selector)
         let receipt = try port.submit(SubmitIntent(context: port.context, selector: selector,
             intentID: UUID(), inputs: [.compatibilityValue(action: ExactText("yes"))]))
+        session.snapshotRequest = (key, payload)
         session.result = .accepted(operationID: receipt.opID, terminalSequence: 2)
         session.replayFrames = [
             [u2Data(#"{"v":1,"type":"ok","ref":"native-sync"}"#),
@@ -3918,6 +3926,9 @@ final class NativeGuidedTLSTests: XCTestCase {
         let core = try NativeRelayCore(store: store, context: context, session: session,
                                        onDiagnostic: { events.append($0) })
 
+        _ = try await core.resyncAndDrainOutbox()
+        XCTAssertTrue(session.sent.isEmpty, "Refresh does not send a queued answer.")
+        try await core.sendOriginalOperationForUserTap(receipt.intentID)
         do {
             _ = try await core.resyncAndDrainOutbox()
             XCTFail("The follow-on replay failure must remain visible to its accepted operation.")
@@ -3972,6 +3983,23 @@ final class NativeGuidedTLSTests: XCTestCase {
         var result: OriginalOperationResult = .unresolved
         var replayFrames: [[Data]] = []
         var resyncFailureOnCall: Int?
+        var snapshotRequest: (RequestKey, JSONValue)?
+
+        func inboxRequest(_ request: Data, ref: String) async throws -> Data {
+            let value = try JSONValue.parse(request)
+            guard value.uniqueValue(named: "type")?.stringValue?.rawValue == "inbox_start",
+                  let (key, payload) = snapshotRequest else {
+                return try await emptyInboxReply(request, ref: ref)
+            }
+            let startup = value.uniqueValue(named: "startup_id")?.stringValue?.rawValue ?? ""
+            let delivery: [String: Any] = ["v": 1, "type": "delivery", "seq": 1,
+                "sender_id": key.senderID.rawValue, "message_id": key.messageID.rawValue,
+                "origin": "source", "as": "message",
+                "message": try JSONSerialization.jsonObject(with: Data(payload.canonicalJSON.utf8))]
+            return try JSONSerialization.data(withJSONObject: ["v": 1, "type": "ok", "ref": ref,
+                "paging_version": 1, "snapshot_id": "test-\(startup)-h1", "high_water": 1,
+                "items": [["acceptance": delivery]], "next_cursor": NSNull(), "receipt_cursor": NSNull()])
+        }
 
         private var requests: [Data] = []
 
