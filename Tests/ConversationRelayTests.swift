@@ -25,6 +25,8 @@ final class ConversationRelayTests: XCTestCase {
         var conversation: [Data] = []
         var consumedConversationFrames: [Data] = []
         var inboxStartItemsJSON: String?
+        var inboxStartNextCursorJSON = "null"
+        var inboxOlderItemsJSON: String?
         var ordinaryACKs: [Data] = []
         var conversationACKs: [Data] = []
         var conversationReadPositionRequests: [Data] = []
@@ -69,8 +71,12 @@ final class ConversationRelayTests: XCTestCase {
             let value = try JSONValue.parse(request)
             if value.uniqueValue(named: "type")?.stringValue?.rawValue == "inbox_start",
                let items = inboxStartItemsJSON {
-                let response = #"{"v":1,"type":"ok","ref":"\#(ref)","paging_version":1,"snapshot_id":"held-fact-snapshot","high_water":1,"items":\#(items),"next_cursor":null,"receipt_cursor":null}"#
+                let response = #"{"v":1,"type":"ok","ref":"\#(ref)","paging_version":1,"snapshot_id":"held-fact-snapshot","high_water":1,"items":\#(items),"next_cursor":\#(inboxStartNextCursorJSON),"receipt_cursor":null}"#
                 return Data(response.utf8)
+            }
+            if value.uniqueValue(named: "type")?.stringValue?.rawValue == "inbox_page",
+               let items = inboxOlderItemsJSON {
+                return Data(#"{"v":1,"type":"ok","ref":"\#(ref)","paging_version":1,"snapshot_id":"held-fact-snapshot","high_water":1,"items":\#(items),"next_cursor":null}"#.utf8)
             }
             return try await emptyInboxReply(request, ref: ref)
         }
@@ -188,19 +194,11 @@ final class ConversationRelayTests: XCTestCase {
 
     func testRejectedConversationCursorWriteFailureDoesNotAdvanceOrAcknowledge() async throws {
         let (context, persistence, store, session) = try setup()
-        let key = RequestKey(accountScope: context.identity.personID,
-            senderID: ExactText("author"), messageID: ExactText("request"))
-        try store.applyConversation(ConversationEvent(sequence: 1,
-            binding: ConversationBinding(request: key, revision: 1),
-            fact: .request(sessionHandle: ExactText("handle"), payload: .object([
-                JSONMember("title", .string(ExactText("Question")))
-            ]))), context: context)
-
         session.conversation = [
             data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
-            data(#"{"v":1,"type":"conversation","conversation_seq":2,"sender_id":"author","message_id":"request","origin":"reader","session_handle":"handle","request_revision":2,"kind":"revision","author":"person","event_id":"private-event-marker"}"#),
-            data(#"{"v":1,"type":"conversation","conversation_seq":3,"sender_id":"author","message_id":"request","origin":"origin","session_handle":"handle","request_revision":2,"kind":"revision","author":"origin","event_id":"valid-event","message":{"title":"Later wording"}}"#),
-            data(#"{"v":1,"type":"conversation_resynced","conversation_seq":3}"#)
+            data(#"{"v":1,"type":"conversation","conversation_seq":1,"sender_id":"author","message_id":"request","origin":"reader","session_handle":"handle","request_revision":2,"kind":"revision","author":"person","event_id":"private-event-marker"}"#),
+            data(#"{"v":1,"type":"conversation","conversation_seq":2,"sender_id":"author","message_id":"request","origin":"origin","session_handle":"handle","request_revision":2,"kind":"revision","author":"origin","event_id":"valid-event","message":{"title":"Later wording"}}"#),
+            data(#"{"v":1,"type":"conversation_resynced","conversation_seq":2}"#)
         ]
         session.onConversationOpen = { persistence.failNextCommit() }
         let core = try NativeRelayCore(store: store, context: context, session: session)
@@ -213,8 +211,8 @@ final class ConversationRelayTests: XCTestCase {
         }
 
         let snapshot = try store.conversationSnapshot(context: context)
-        XCTAssertEqual(snapshot.cursor, 1,
-            "A failed cursor commit must leave the prior durable cursor unchanged.")
+        XCTAssertEqual(snapshot.cursor, 0,
+            "A failed cursor commit must leave the prior committed cursor unchanged.")
         XCTAssertEqual(session.consumedConversationFrames.count, 2,
             "Replay stops at the failed rejected-sequence cursor commit.")
         XCTAssertTrue(session.conversationACKs.isEmpty,
@@ -224,29 +222,21 @@ final class ConversationRelayTests: XCTestCase {
 
     func testUnusableConversationHandleIsSkippedAndAcknowledged() async throws {
         let (context, _, store, session) = try setup()
-        let key = RequestKey(accountScope: context.identity.personID,
-            senderID: ExactText("author"), messageID: ExactText("request"))
-        try store.applyConversation(ConversationEvent(sequence: 1,
-            binding: ConversationBinding(request: key, revision: 1),
-            fact: .request(sessionHandle: ExactText("handle"), payload: .object([
-                JSONMember("title", .string(ExactText("Question")))
-            ]))), context: context)
-
         session.conversation = [
             data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
-            data(#"{"v":1,"type":"conversation","conversation_seq":2,"sender_id":"author","message_id":"request","origin":"origin","session_handle":"","request_revision":2,"kind":"revision","author":"origin","event_id":"invalid-revision","message":{"title":"Later wording"}}"#),
-            data(#"{"v":1,"type":"conversation_resynced","conversation_seq":2}"#)
+            data(#"{"v":1,"type":"conversation","conversation_seq":1,"sender_id":"author","message_id":"request","origin":"origin","session_handle":"","request_revision":2,"kind":"revision","author":"origin","event_id":"invalid-revision","message":{"title":"Later wording"}}"#),
+            data(#"{"v":1,"type":"conversation_resynced","conversation_seq":1}"#)
         ]
         let diagnostics = DiagnosticCollector()
         let core = try NativeRelayCore(store: store, context: context, session: session,
             onDiagnostic: diagnostics.append)
 
         _ = try await core.resyncAndDrainOutbox()
-        XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, 2)
+        XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, 1)
         XCTAssertEqual(session.conversationACKs.count, 1)
         XCTAssertNotNil(diagnostics.events.first {
             $0.area == .conversation && $0.phase == .conversationReplay &&
-                $0.transition == .observed && $0.conversationSequence == 2
+                $0.transition == .observed && $0.conversationSequence == 1
         })
         await core.deactivate()
     }
@@ -308,19 +298,24 @@ final class ConversationRelayTests: XCTestCase {
             persistence: MemoryPendingActionPersistence())
         let key = RequestKey(accountScope: identity.personID,
             senderID: ExactText("author"), messageID: ExactText("request"))
-        try store.applyConversation(ConversationEvent(sequence: 1,
-            binding: ConversationBinding(request: key, revision: 1),
-            fact: .delivered(turn: ExactText("missing-turn"))), context: context)
-
         let session = Session(identity)
-        session.inboxStartItemsJSON = #"[{"acceptance":{"v":1,"type":"delivery","seq":1,"sender_id":"author","message_id":"request","origin":"origin","as":"message","message":{"title":"Question"},"session_handle":"handle","request_revision":1}}]"#
-        session.conversationOpenError = .conversationsUnavailable
+        session.inboxStartItemsJSON = "[]"
+        session.inboxStartNextCursorJSON = #""older-page""#
+        session.inboxOlderItemsJSON = #"[{"acceptance":{"v":1,"type":"delivery","seq":1,"sender_id":"author","message_id":"request","origin":"origin","as":"message","message":{"title":"Question"},"session_handle":"handle","request_revision":1}}]"#
+        session.conversation = [data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
+            self.event("receipt", sequence: 1,
+                  fields: #""author":"origin","event_id":"missing-turn","delivered":true"#),
+            data(#"{"v":1,"type":"conversation_resynced","conversation_seq":1}"#)]
         session.ordinary = [data(#"{"v":1,"type":"resynced","seq":1}"#)]
         let diagnostics = DiagnosticCollector()
         let core = try NativeRelayCore(store: store, context: context, session: session,
             onDiagnostic: { diagnostics.append($0) })
 
         _ = try await core.resyncAndDrainOutbox()
+        XCTAssertNil(try store.conversationSnapshot(context: context).threads[key])
+        session.conversationOpenError = .conversationsUnavailable
+        let loaded = try await core.fetchNextInboxPage()
+        XCTAssertTrue(loaded)
 
         let event = try XCTUnwrap(diagnostics.events.first { $0.phase == .inboxPage })
         XCTAssertEqual(event.transition, .observed)
@@ -509,7 +504,17 @@ final class ConversationRelayTests: XCTestCase {
         XCTAssertEqual(session.ordinaryACKs.count, 1)
         await core.deactivate()
 
+        let cacheDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: cacheDirectory) }
+        let cacheURL = cacheDirectory.appendingPathComponent("server-cache.json")
+        let cache = FileServerStateCache(identity: context.identity, fileURL: cacheURL)
+        try await cache.save(ServerStateCacheSnapshot.make(identity: context.identity,
+            from: store.snapshot(context: context), conversations: store.conversationSnapshot(context: context)))
+        let reopenedCache = FileServerStateCache(identity: context.identity, fileURL: cacheURL)
+        let cached = try await reopenedCache.load()
         let restarted = try ClientRepository(context: context, persistence: persistence)
+        try restarted.restoreCachedServerState(try XCTUnwrap(cached).attentionDomainState(for: context.identity),
+                                               context: context)
         XCTAssertEqual(try restarted.conversationSnapshot(context: context)
             .threads.values.first?.facts[reply.id]?.localLiveArrivalAtMilliseconds,
             liveReceiptTime, "The genuinely live receipt time survives store restart.")
@@ -760,15 +765,15 @@ final class ConversationRelayTests: XCTestCase {
         XCTAssertEqual(session.conversationACKs, [data(#"{"v":1,"type":"conversation_ack","conversation_seq":8,"ref":"native-conversation-ack"}"# + "\n")])
         await core.deactivate()
 
-        // The held events survive a store restart, then apply when inbox paging
-        // eventually loads their request.
+        // A fresh connection rebuilds server history after restart. The pending
+        // action file cannot supply either the server cursor or held facts.
         let restored = try ClientRepository(context: context, persistence: persistence)
         let later = Session(context.identity)
         later.ordinary = [data(#"{"v":1,"type":"ok","ref":"native-sync"}"#),
+            session.ordinary[1],
             data(#"{"v":1,"type":"delivery","seq":2,"sender_id":"author","message_id":"earlier","origin":"origin","as":"message","message":{"title":"Earlier request"},"session_handle":"earlier-handle","request_revision":1,"availability":"not_listening","last_detached_at":null}"#),
             data(#"{"v":1,"type":"resynced","seq":2}"#)]
-        later.conversation = [data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
-            data(#"{"v":1,"type":"conversation_resynced","conversation_seq":8}"#)]
+        later.conversation = session.conversation
         let resumed = try NativeRelayCore(store: restored, context: context, session: later)
         _ = try await resumed.resyncAndDrainOutbox()
 
@@ -777,7 +782,7 @@ final class ConversationRelayTests: XCTestCase {
         XCTAssertEqual(thread.availability, .listening)
         XCTAssertEqual(thread.latestAvailabilityObservation,
             ConversationAvailabilityObservation(state: .listening),
-            "The replayed current availability remains after the duplicate delivery is ignored.")
+            "Current server conversation replay replaces the delivery availability.")
         XCTAssertEqual(thread.turns.first { $0.id == ExactText("5") }?.text, ExactText("Hi there"))
         XCTAssertEqual(thread.facts[ExactText("5")]?.delivered, true)
         XCTAssertEqual(thread.facts[ExactText("5")]?.actedBy, ExactText("6"))
@@ -787,7 +792,7 @@ final class ConversationRelayTests: XCTestCase {
         await resumed.deactivate()
     }
     func testUnboundTierFactStaysInternalAndIsNotPresentedWhenDeliveryArrives() async throws {
-        let (context, persistence, store, session) = try setup()
+        let (context, _, store, session) = try setup()
         let key = RequestKey(accountScope: context.identity.personID,
             senderID: ExactText("author"), messageID: ExactText("future"))
         session.conversation = [data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
@@ -801,26 +806,24 @@ final class ConversationRelayTests: XCTestCase {
             XCTAssertNil(snapshot.requests[key], "A tier fact must not create a duplicate message row.")
             XCTAssertNil(snapshot.remoteStates[key])
             XCTAssertEqual(snapshot.inboxReferences[key]?.attentionTier, .low,
-                           "The tier fact must be durable before the conversation cursor is acknowledged.")
+                           "The tier fact is applied before the conversation cursor is acknowledged.")
             XCTAssertEqual(snapshot.inboxReferences[key]?.attentionTierFeed, .conversation)
-            let restored = try ClientRepository(context: context, persistence: persistence)
-            XCTAssertEqual(try restored.snapshot(context: context).inboxReferences[key]?.attentionTier, .low)
         }
 
         let core = try NativeRelayCore(store: store, context: context, session: session)
         _ = try await core.resyncAndDrainOutbox()
         XCTAssertEqual(session.conversationACKs.count, 1)
 
-        let restored = try ClientRepository(context: context, persistence: persistence)
         let payload = try JSONValue.parse(data(#"{"title":"Arrived later"}"#))
-        try restored.apply(RelayEvent(sequence: 2,
+        try store.apply(RelayEvent(sequence: 2,
             body: .delivery(StoredRequest(key: key, originalPayload: payload), .message),
             origin: ExactText("future-origin"), attentionTier: .top), context: context)
-        let port = AttentionDomainPort(store: restored)
+        let port = AttentionDomainPort(store: store)
         let rows = try port.observe(context: port.context).requests.filter { $0.key == key }
         XCTAssertEqual(rows.count, 1)
         XCTAssertEqual(rows.first?.attentionTier, .middle,
                        "A stored attention tier is not presented by the client.")
+        await core.deactivate()
     }
     func testOriginSourceResultCommitsBeforeItsACKAndKeepsAgentTerminalAsTheOnlyClosure() async throws {
         let (context, _, store, session) = try setup()
