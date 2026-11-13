@@ -1045,7 +1045,8 @@ final class HarklightTests: XCTestCase {
                                                 horizontalText: ExactText("500"),
                                                 verticalText: ExactText("500"))
         ]
-        let pictureAnswer = try XCTUnwrap(document.compose(drafts: drafts, maximumBytes: 65_536))
+        let pictureAnswer = try XCTUnwrap(document.compose(
+            drafts: drafts, maximumBytes: ClientRepository.maximumRelayTextMessageBytes))
         let expectedPictureAnswer = try JSONValue.parse(Data(
             #"{"cover":{"cover":"B","issue":18446744073709551617},"note":"  Exact note\n🗺  ","location":{"x":500,"y":500},"details":[true,{"x":500,"y":500}]}"#.utf8))
         XCTAssertEqual(pictureAnswer, expectedPictureAnswer)
@@ -1056,7 +1057,8 @@ final class HarklightTests: XCTestCase {
 
         drafts[ExactText("cover")] = InputDraft(selectedActionID: ExactText("note-action"),
                                                  textByActionID: [ExactText("note-action"): exactNote])
-        let noteAnswer = try XCTUnwrap(document.compose(drafts: drafts, maximumBytes: 65_536))
+        let noteAnswer = try XCTUnwrap(document.compose(
+            drafts: drafts, maximumBytes: ClientRepository.maximumRelayTextMessageBytes))
         let expectedNoteAnswer = try JSONValue.parse(Data(
             #"{"cover":"  Exact note\n🗺  ","note":"  Exact note\n🗺  ","location":{"x":500,"y":500},"details":[true,{"x":500,"y":500}]}"#.utf8))
         XCTAssertEqual(noteAnswer, expectedNoteAnswer)
@@ -1137,7 +1139,7 @@ final class HarklightTests: XCTestCase {
     }
 
     @MainActor
-    func testInvalidTypedStatesCapacityAndUnsupportedDocumentsCreateNoReceipt() throws {
+    func testInvalidTypedStatesAndUnsupportedDocumentsCreateNoReceipt() throws {
         let fixtures = try loadFixtures()
         let review = try XCTUnwrap(fixtures.requests.first)
         guard case let .sender(reviewDocument) = review.interface else { return XCTFail("Missing review document") }
@@ -1148,15 +1150,20 @@ final class HarklightTests: XCTestCase {
         let coverAction = try XCTUnwrap(actions.first(where: { $0.id == ExactText("cover-a") }))
 
         var missingSelection = RequestDraft(interface: review.interface)
-        XCTAssertNil(reviewDocument.compose(drafts: missingSelection.inputs, maximumBytes: 65_536))
+        XCTAssertNil(reviewDocument.compose(
+            drafts: missingSelection.inputs, maximumBytes: ClientRepository.maximumRelayTextMessageBytes))
 
         missingSelection.inputs[response.id]?.selectedActionID = noteAction.id
-        XCTAssertNil(reviewDocument.compose(drafts: missingSelection.inputs, maximumBytes: 65_536), "A selected text action needs an explicit text record.")
+        XCTAssertNil(reviewDocument.compose(
+            drafts: missingSelection.inputs, maximumBytes: ClientRepository.maximumRelayTextMessageBytes),
+                     "A selected text action needs an explicit text record.")
 
         var extraText = RequestDraft(interface: review.interface)
         extraText.inputs[response.id]?.selectedActionID = coverAction.id
         extraText.inputs[response.id]?.textByActionID[coverAction.id] = ExactText("override")
-        XCTAssertNil(reviewDocument.compose(drafts: extraText.inputs, maximumBytes: 65_536), "Literal responses cannot carry text overrides.")
+        XCTAssertNil(reviewDocument.compose(
+            drafts: extraText.inputs, maximumBytes: ClientRepository.maximumRelayTextMessageBytes),
+                     "Literal responses cannot carry text overrides.")
 
         let facilities = try XCTUnwrap(fixtures.requests.first(where: { $0.key.messageID == ExactText("facilities-01") }))
         guard case let .sender(facilitiesDocument) = facilities.interface else { return XCTFail("Missing facilities document") }
@@ -1175,13 +1182,28 @@ final class HarklightTests: XCTestCase {
         missingNote.inputs[ExactText("location")]?.horizontalText = ExactText("240")
         missingNote.inputs[ExactText("location")]?.verticalText = ExactText("610")
         missingNote.inputs[ExactText("note")]?.text = nil
-        XCTAssertNil(facilitiesDocument.compose(drafts: missingNote.inputs, maximumBytes: 65_536))
+        XCTAssertNil(facilitiesDocument.compose(
+            drafts: missingNote.inputs, maximumBytes: ClientRepository.maximumRelayTextMessageBytes))
 
-        let lowCapacity = PrototypeStore(fixtures: fixtures, captureLimitBytes: 2)
-        lowCapacity.selectAction(coverAction.id, inputID: response.id, for: review.key)
-        XCTAssertFalse(lowCapacity.canSend(for: review.key))
-        XCTAssertEqual(lowCapacity.session(for: review.key)?.draft.inputs[response.id]?.selectedActionID, coverAction.id)
-        XCTAssertEqual(lowCapacity.session(for: review.key)?.lifecycle, .open)
+        let largeAnswerStore = PrototypeStore(fixtures: fixtures)
+        largeAnswerStore.selectAction(noteAction.id, inputID: response.id, for: review.key)
+        largeAnswerStore.updateText(String(repeating: "x", count: 70_000),
+                                    for: review.key,
+                                    inputID: response.id,
+                                    actionID: noteAction.id)
+        XCTAssertTrue(largeAnswerStore.canSend(for: review.key),
+                      "A valid answer larger than the former 64 KiB app cap remains sendable.")
+        XCTAssertTrue(largeAnswerStore.sendSelectedAnswer(for: review.key))
+
+        let beyondRelayLimitStore = PrototypeStore(fixtures: fixtures)
+        beyondRelayLimitStore.selectAction(noteAction.id, inputID: response.id, for: review.key)
+        beyondRelayLimitStore.updateText(
+            String(repeating: "x", count: ClientRepository.maximumRelayTextMessageBytes + 1),
+            for: review.key,
+            inputID: response.id,
+            actionID: noteAction.id)
+        XCTAssertFalse(beyondRelayLimitStore.canSend(for: review.key),
+                       "The Server-published relay text message bound still applies.")
 
         let unknown = try XCTUnwrap(fixtures.requests.last)
         XCTAssertFalse(store.canSend(for: unknown.key))

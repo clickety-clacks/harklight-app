@@ -61,11 +61,8 @@ extension NativeServerRetractionFixture {
 @MainActor
 @Observable
 final class PrototypeStore {
-    static let defaultCaptureLimit = 65_536
-
     let fixtures: FixtureSet
     let loadError: String?
-    let captureLimitBytes: Int
     private(set) var selectedRequestKey: RequestKey?
     private(set) var persistenceError: String?
     private(set) var serverRetractionTestStatus: String?
@@ -81,14 +78,12 @@ final class PrototypeStore {
 
     init(fixtures: FixtureSet,
          loadError: String? = nil,
-         captureLimitBytes: Int = defaultCaptureLimit,
          persistence: (any PendingActionPersistence)? = nil,
          resetFixtureAtLaunch: Bool = false,
          serverRetractionFixture: NativeServerRetractionFixture? = nil,
          seedServerRetractionFixture: Bool = false,
          expireServerRetractionAtLaunch: Bool = false) {
         self.fixtures = fixtures
-        self.captureLimitBytes = max(0, captureLimitBytes)
         self.selectedRequestKey = fixtures.requests.first?.key
 
         let identity = ProfileIdentity(
@@ -108,8 +103,7 @@ final class PrototypeStore {
         var serverRetractionTestStatus: String?
         do {
             let store = try ClientRepository(context: profile,
-                                                 persistence: persistence ?? MemoryPendingActionPersistence(),
-                                                 maximumWireFrameBytes: max(0, captureLimitBytes))
+                                            persistence: persistence ?? MemoryPendingActionPersistence())
             let requests = fixtures.requests.map { StoredRequest(key: $0.key, originalPayload: $0.originalPayload) }
             if serverRetractionFixture == nil {
                 if resetFixtureAtLaunch {
@@ -521,11 +515,15 @@ final class PrototypeStore {
             return canSendNoCommentLocally(for: key)
         }
         guard let port, let records = typedRecords(for: key, draft: session.draft),
-              let selector = try? boundSelector(for: key),
-              let answer = try? port.preview(context: port.context, selector: selector, inputs: records) else {
+              let selector = try? boundSelector(for: key) else {
             return false
         }
-        return answer.jsonString.utf8.count <= captureLimitBytes
+        do {
+            _ = try port.preview(context: port.context, selector: selector, inputs: records)
+            return true
+        } catch {
+            return false
+        }
     }
 
     func canSendNoCommentLocally(for key: RequestKey) -> Bool {
