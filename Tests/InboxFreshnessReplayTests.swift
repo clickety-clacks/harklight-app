@@ -280,7 +280,9 @@ final class InboxFreshnessReplayTests: XCTestCase {
                 XCTAssertLessThan(try XCTUnwrap(turns.firstIndex { $0.id == ExactText("2") }),
                     try XCTUnwrap(turns.firstIndex { $0.id == ExactText("3") }))
             } else {
-                XCTAssertNil(snapshot.threads[key("answered")]?.facts[ExactText("2")])
+                XCTAssertEqual(snapshot.threads[key("answered")]?.facts[ExactText("2")]?.delivered,
+                    historyCase == "missing" ? nil : true,
+                    "ACK-behind replay adopts later server history even after the first recovery was refused or mismatched.")
             }
             XCTAssertNotNil(snapshot.threads[key("open")]?.revisions[2],
                 "The pending revision is retained, not skipped by the later revision")
@@ -649,6 +651,8 @@ final class InboxFreshnessReplayTests: XCTestCase {
         XCTAssertFalse(try XCTUnwrap(store.conversationSnapshot(context: context).threads[key])
             .turns.contains { $0.id == discussion.id })
         try store.restoreReferencedConversationTurn(historical, for: receipt, context: context)
+        XCTAssertEqual(try store.conversationSnapshot(context: context).threads[key]?.drafts[1], pendingDraft,
+                       "Dependency recovery alone must not confirm a queued discussion.")
         let cacheRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: cacheRoot) }
         let cacheURL = cacheRoot.appendingPathComponent("server-cache.json")
@@ -659,6 +663,7 @@ final class InboxFreshnessReplayTests: XCTestCase {
         let firstCache = try await FileServerStateCache(identity: identity, fileURL: cacheURL).load()
         try repaired.restoreCachedServerState(try XCTUnwrap(firstCache).attentionDomainState(for: identity), context: context)
         XCTAssertEqual(try repaired.conversationSnapshot(context: context).cursor, 1)
+        XCTAssertEqual(try repaired.conversationSnapshot(context: context).threads[key]?.drafts[1], pendingDraft)
         // Reapplying the server turn must not duplicate history or advance the cursor.
         XCTAssertEqual(try repaired.applyConversation(historical, context: context), 1)
         try repaired.applyConversation(receipt, context: context)
@@ -671,8 +676,9 @@ final class InboxFreshnessReplayTests: XCTestCase {
         let thread = try XCTUnwrap(snapshot.threads[key])
         XCTAssertEqual(snapshot.cursor, 2)
         XCTAssertEqual(thread.facts[discussion.id]?.delivered, true)
-        XCTAssertEqual(thread.drafts[1], pendingDraft)
-        XCTAssertEqual(thread.drafts[1]?.disposition, .submitting(operation))
+        XCTAssertNil(thread.drafts[1],
+                     "The full server turn carrying this exact operation settles the queued discussion.")
+        XCTAssertEqual(thread.turns.first { $0.id == discussion.id }?.operationID, operation)
         XCTAssertEqual(thread.terminal, .answered)
         XCTAssertEqual(try reloaded.snapshot(context: context).cursor, 2)
         let presentation = try LivePresentationStore(store: reloaded, context: context)
