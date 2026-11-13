@@ -14,8 +14,20 @@ final class TwoDeviceServerCacheUITests: XCTestCase {
         let app = launchEnrolledApp()
         let row = try findMessage(message, in: app)
         try requireActiveCatchUp(app, stage: "before-opening-message")
-        try tap(row, stage: "open-message-during-catch-up", in: app)
-        guard app.scrollViews["message-card-scroll"].waitForExistence(timeout: 5) else {
+        snapshot("open-message-during-catch-up-before", app)
+        guard row.exists, row.isEnabled, row.isHittable else {
+            throw Failure.missing("hittable message row during catch-up")
+        }
+        let startedAt = ISO8601DateFormatter().string(from: Date())
+        let started = ProcessInfo.processInfo.systemUptime
+        row.tap()
+        let tapReturned = ProcessInfo.processInfo.systemUptime
+        let detailAppeared = app.scrollViews["message-card-scroll"].waitForExistence(timeout: 5)
+        let observed = ProcessInfo.processInfo.systemUptime
+        attach("started_at=\(startedAt) tap_return_seconds=\(tapReturned - started) " +
+               "detail_observation_seconds=\(observed - tapReturned) detail_exists=\(detailAppeared)",
+               named: "message-opening-timing")
+        guard detailAppeared else {
             snapshot("detail-missing-during-catch-up", app)
             throw Failure.missing("message detail during catch-up")
         }
