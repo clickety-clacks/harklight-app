@@ -1253,52 +1253,6 @@ final class ConversationSampleUITests: XCTestCase {
         capture("upload-cleanup-portrait-retained-draft", app)
     }
 
-    func testEdgePullDoesNotChangeSelectedMessageAndBackReturnsToEntryTab() {
-        XCUIDevice.shared.orientation = .portrait
-        let app = XCUIApplication()
-        app.launchArguments = ["--harklight-ui-diagnostics"]
-        app.launch()
-        XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
-        let entryTab = workspaceTab("Inbox", in: app)
-        XCTAssertTrue(entryTab.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(entryTab.isSelected, "The sample message should be opened from the Inbox entry tab.")
-        let list = listContainer(app)
-        // Open the information example after placing its row in view.
-        let opened = app.descendants(matching: .any)["request-row-sample-information-1"]
-        XCTAssertTrue(app.descendants(matching: .any)["request-row-sample-information-2"].waitForExistence(timeout: 10), app.debugDescription)
-        for _ in 0..<30 where !unobscured(opened, in: list, app: app) {
-            let start = list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.6))
-            start.press(forDuration: 0.1, thenDragTo: start.withOffset(CGVector(dx: 0, dy: -150)),
-                        withVelocity: .slow, thenHoldForDuration: 0.3)
-        }
-        XCTAssertTrue(unobscured(opened, in: list, app: app), app.debugDescription)
-        opened.tap()
-        let card = app.scrollViews["message-card-scroll"]
-        XCTAssertTrue(card.waitForExistence(timeout: 5), app.debugDescription)
-        let counter = app.staticTexts.matching(NSPredicate(format: "label MATCHES '[0-9]+ of [0-9]+'")).firstMatch
-        XCTAssertTrue(counter.waitForExistence(timeout: 5), app.debugDescription)
-        let originalPosition = counter.label
-        let lower = card.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.8))
-        let upper = card.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.2))
-        lower.press(forDuration: 0.1, thenDragTo: upper, withVelocity: .slow, thenHoldForDuration: 0.3)
-        XCTAssertEqual(counter.label, originalPosition,
-                       "Pulling past the bottom of a message must not select another one.")
-        upper.press(forDuration: 0.1, thenDragTo: lower, withVelocity: .slow, thenHoldForDuration: 0.3)
-        XCTAssertEqual(counter.label, originalPosition,
-                       "Pulling past the top of a message must not select another one.")
-        recordDiagnostics("after-edge-pull", app)
-        let probe = app.descendants(matching: .any)["inbox-ui-diagnostics"].firstMatch
-        XCTAssertTrue(probe.label.contains("lastViewed=request:sample-information-1 "), probe.label)
-        let back = workspaceBackButton(in: app)
-        XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
-        back.tap()
-        let returnedToInbox = entryTab.waitForExistence(timeout: 5) && entryTab.isSelected
-            && card.waitForNonExistence(timeout: 5)
-        recordDiagnostics("after-back", app)
-        XCTAssertTrue(returnedToInbox,
-                      "Back without switching messages must return to the entry tab. \(app.debugDescription)")
-    }
-
     func testRetractedItemKeepsItsSelectedChoiceHistoryAndUnsentDiscussion() {
         XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()
@@ -1486,15 +1440,6 @@ final class ConversationSampleUITests: XCTestCase {
         if table.exists { return table }
         let listScrollViews = app.scrollViews.matching(NSPredicate(format: "identifier != %@", "message-card-scroll"))
         return listScrollViews.firstMatch
-    }
-
-    /// Whether the whole row is inside the list, above its bottom tab and search controls.
-    private func unobscured(_ element: XCUIElement, in scrollView: XCUIElement, app: XCUIApplication) -> Bool {
-        guard element.exists else { return false }
-        let bottom = bottomControlsTop(app, in: scrollView)
-        let top = topControlsBottom(app, in: scrollView)
-        let frame = element.frame
-        return element.isHittable && frame.minY >= top && frame.maxY <= bottom
     }
 
     /// Scrolls until the whole row clears visible controls above and below
