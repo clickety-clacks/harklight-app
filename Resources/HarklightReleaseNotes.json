@@ -105,6 +105,36 @@
       "testFlightBuildNumber": null,
       "highlights": [
         {
+          "id": "catch-up-testing-continues",
+          "symbol": "info.circle",
+          "title": "Formal testing is still underway",
+          "detail": "This build hasn't finished formal testing yet. Testing continues, and you'll hear if it finds anything."
+        },
+        {
+          "id": "actions-during-catch-up",
+          "symbol": "hand.tap",
+          "title": "Keep working while messages catch up",
+          "detail": "Open messages and chats, swipe rows, mark Seen and reply while Harklight catches up. Your actions show as pending until the server confirms them."
+        },
+        {
+          "id": "recover-stuck-replies",
+          "symbol": "arrow.clockwise",
+          "title": "Resume stuck replies",
+          "detail": "Saved replies, Seen actions and uploads retry automatically after reconnecting or reopening the app, using the same operation so they are not sent as new actions."
+        },
+        {
+          "id": "catch-up-without-deadline",
+          "symbol": "arrow.down.circle",
+          "title": "Let catch-up finish",
+          "detail": "Catch-up no longer stops at a fixed time limit. If the connection fails, Harklight reconnects and resumes saved progress."
+        },
+        {
+          "id": "plain-connection-status",
+          "symbol": "text.bubble",
+          "title": "Clearer connection status",
+          "detail": "Connection messages use plain language. Technical details stay in diagnostics."
+        },
+        {
           "id": "notification-tap-loading",
           "symbol": "bell",
           "title": "See when a notification is opening",
