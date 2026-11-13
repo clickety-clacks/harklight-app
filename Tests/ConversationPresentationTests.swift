@@ -834,7 +834,7 @@ final class ConversationPresentationTests: XCTestCase {
         XCTAssertTrue(model.hasUnreadAgentReply(request))
         try domain.applyConversation(ConversationEvent(sequence: 4,
             binding: ConversationBinding(request: request, revision: 0),
-            fact: .readPosition(eventID: ExactText("read-3"), position: 3)), context: context)
+            fact: .readPosition(eventID: ExactText("read-3"), readThroughConversationSequence: 3)), context: context)
         try model.refreshFromDurableStore()
         XCTAssertFalse(model.hasUnreadAgentReply(request))
 
@@ -862,7 +862,7 @@ final class ConversationPresentationTests: XCTestCase {
         XCTAssertTrue(resumed.hasUnreadAgentReply(request))
         try resumedStore.applyConversation(ConversationEvent(sequence: 6,
             binding: ConversationBinding(request: request, revision: 0),
-            fact: .readPosition(eventID: ExactText("read-5"), position: 5)), context: context)
+            fact: .readPosition(eventID: ExactText("read-5"), readThroughConversationSequence: 5)), context: context)
         try resumed.refreshFromDurableStore()
         XCTAssertFalse(resumed.hasUnreadAgentReply(request))
     }
@@ -916,7 +916,7 @@ final class ConversationPresentationTests: XCTestCase {
                        "An unconfirmed tap cannot override server read state.")
         try domain.applyConversation(ConversationEvent(sequence: 3,
             binding: ConversationBinding(request: key, revision: 0),
-            fact: .readPosition(eventID: ExactText("read-agent"), position: 2)), context: context)
+            fact: .readPosition(eventID: ExactText("read-agent"), readThroughConversationSequence: 2)), context: context)
         try model.refreshFromDurableStore()
         XCTAssertEqual(model.inboxRow(for: key)?.chatUnread, false)
 
