@@ -2552,6 +2552,8 @@ private struct InboxRowSurface: ViewModifier {
         content
             .padding(.leading, decoration == nil ? 0 : InboxRowSelectionDecoration.contentInset)
             .frame(maxWidth: .infinity, alignment: .leading)
+            // Rows show the page through them; keep the whole row tappable.
+            .contentShape(Rectangle())
             .background {
                 if let decoration {
                     Rectangle().fill(decoration.fill)

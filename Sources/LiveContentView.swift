@@ -1958,10 +1958,8 @@ struct LiveRequestDetail: View {
         }
         .sheet(isPresented: $chatPresented, onDismiss: { pendingChatScrollTarget = nil }) {
             conversationPanel
-                .padding(.top, 20)
                 .foregroundChatNotificationLayer(testRouter: testNotificationRouter,
                                                  testOpen: testOpenForegroundChatIndicator)
-                .presentationDragIndicator(.visible)
                 .harklightSheetSurface()
         }
         .onChange(of: context.inlineChat) { _, inline in

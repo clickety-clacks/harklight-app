@@ -392,6 +392,9 @@ private struct ConversationHistoryContent: View, Equatable {
                     }
                 }.padding(.horizontal)
             }
+            // Room under the sheet's grabber, inside the history so a drag from
+            // its top still reaches the chat's dismissal gesture.
+            .contentMargins(.top, 20, for: .scrollContent)
             .accessibilityIdentifier("conversation-history-scroll")
             .background {
                 GeometryReader { geometry in

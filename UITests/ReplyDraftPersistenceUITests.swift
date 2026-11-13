@@ -19,7 +19,8 @@ final class ReplyDraftPersistenceUITests: XCTestCase {
         let back = workspaceBackButton(in: app)
         if back.exists && back.isHittable {
             back.tap()
-            XCTAssertTrue(workspaceSearchField(in: app).waitForExistence(timeout: 5),
+            // Back returns to the list; search is a separate tab now.
+            XCTAssertTrue(app.collectionViews.firstMatch.waitForExistence(timeout: 5),
                           app.debugDescription)
         } else {
             let other = app.descendants(matching: .any)["request-row-facilities-01"]

@@ -141,61 +141,6 @@ final class ConversationSampleUITests: XCTestCase {
         }
     }
 
-    func testFloatingSearchKeepsNormalReplyTextVisibleAtLargeContentSizes() {
-        XCUIDevice.shared.orientation = .landscapeLeft
-
-        for contentSize in [
-            UIContentSizeCategory.large,
-            UIContentSizeCategory.extraExtraLarge,
-            UIContentSizeCategory.extraExtraExtraLarge
-        ] {
-            let app = XCUIApplication()
-            app.launchArguments = [
-                "-UIPreferredContentSizeCategoryName", contentSize.rawValue,
-                "--harklight-test-inbox-list-column",
-                "--harklight-test-inbox-list-light",
-                "--harklight-test-inbox-list-state=markdown",
-                "--harklight-markdown-acceptance",
-                "--harklight-test-markdown-reply-item"
-            ]
-            app.launch()
-
-            let list = app.collectionViews.firstMatch
-            XCTAssertTrue(list.waitForExistence(timeout: 10), app.debugDescription)
-
-            let normalReplyRow = app.descendants(matching: .any)[
-                "normal-reply-item-sample-markdown-acceptance"
-            ]
-            XCTAssertTrue(normalReplyRow.waitForExistence(timeout: 5), app.debugDescription)
-            let replyText = normalReplyRow.staticTexts.matching(
-                NSPredicate(format: "label CONTAINS %@", "Open reply guide")
-            ).firstMatch
-            XCTAssertTrue(replyText.waitForExistence(timeout: 5), app.debugDescription)
-
-            let searchField = app.searchFields.firstMatch
-            XCTAssertTrue(searchField.waitForExistence(timeout: 5), app.debugDescription)
-            XCTAssertTrue(searchField.isHittable, searchField.debugDescription)
-            let scrollStart = list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.75))
-            let scrollEnd = list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.55))
-            for _ in 0..<8 where replyText.frame.intersects(searchField.frame) {
-                scrollStart.press(forDuration: 0.05, thenDragTo: scrollEnd)
-            }
-            XCTAssertTrue(normalReplyRow.isHittable, normalReplyRow.debugDescription)
-            XCTAssertTrue(replyText.isHittable, replyText.debugDescription)
-            XCTAssertFalse(
-                replyText.frame.intersects(searchField.frame),
-                "The floating Search field must not overlap normal reply text.\n\(app.debugDescription)"
-            )
-
-            searchField.tap()
-            XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5), app.debugDescription)
-            searchField.typeText("Markdown\n")
-            XCTAssertTrue(normalReplyRow.waitForExistence(timeout: 5),
-                          "Searching still finds the visible reply.\n\(app.debugDescription)")
-            app.terminate()
-        }
-    }
-
     func testMarkdownRendersInNewNormalDetailAndConversationWithoutChangingRowTaps() {
         XCUIDevice.shared.orientation = .landscapeLeft
 
@@ -315,6 +260,8 @@ final class ConversationSampleUITests: XCTestCase {
                 NSPredicate(format: "label CONTAINS %@", "Open guide")
             ).firstMatch
             XCTAssertTrue(normalGuide.waitForExistence(timeout: 5), app.debugDescription)
+            // Taller rows can leave the link below a short landscape window.
+            for _ in 0..<4 where !normalGuide.isHittable { list.swipeUp() }
             XCTAssertTrue(normalGuide.isHittable, normalGuide.debugDescription)
             normalGuide.tap()
             XCTAssertTrue(safari.wait(for: .runningForeground, timeout: 10), app.debugDescription)
@@ -407,7 +354,13 @@ final class ConversationSampleUITests: XCTestCase {
         XCTAssertTrue(normalRow.label.contains("A Markdown note"), normalRow.debugDescription)
         captureInboxColumnState("markdown-accessibility-normal-row", app)
 
-        for _ in 0..<8 where !newRow.isHittable { list.swipeDown() }
+        // Larger rows can stay partly under the top bar after the row first
+        // becomes hittable; bring the whole row below the bar before tapping.
+        let topBarBottom = app.navigationBars.firstMatch.exists
+            ? app.navigationBars.firstMatch.frame.maxY : list.frame.minY
+        for _ in 0..<8 where !newRow.isHittable || newRow.frame.minY < topBarBottom {
+            list.swipeDown()
+        }
         XCTAssertTrue(newRow.isHittable, newRow.debugDescription)
         newRow.coordinate(withNormalizedOffset: CGVector(dx: 0.88, dy: 0.82)).tap()
 
@@ -1158,7 +1111,8 @@ final class ConversationSampleUITests: XCTestCase {
         XCTAssertEqual(composer.value as? String, "Keep the original mixed-result note.")
         XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label == %@",
             "Some upload references are committed. Individual file status awaits synchronized history; retained draft references are not ready to resend.")).firstMatch.exists)
-        XCTAssertTrue(app.staticTexts["Unidentified example.txt"].exists)
+        // The drawn attachment is a thumbnail; its file name is the thumbnail's label.
+        XCTAssertTrue(app.buttons["Unidentified example.txt"].exists, app.debugDescription)
         XCTAssertTrue(app.staticTexts["Not ready · reselect after cleanup"].exists)
         XCTAssertFalse(app.buttons["Send locally"].isEnabled)
         XCTAssertFalse(app.staticTexts["Committed file references remain available in history. This result does not identify individual files."].exists)
@@ -1525,17 +1479,20 @@ private func workspaceTab(_ title: String, in app: XCUIApplication) -> XCUIEleme
     return app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", title)).firstMatch
 }
 
+/// Search is a tab: selecting it raises the one search field.
 @MainActor
 private func workspaceSearchField(in app: XCUIApplication) -> XCUIElement {
     let field = app.searchFields.firstMatch
     if field.exists { return field }
-    let list = app.collectionViews.firstMatch
-    if list.exists {
-        for _ in 0..<3 {
-            list.swipeDown()
-            if field.waitForExistence(timeout: 1) { break }
-        }
+    let searchTab = app.tabBars.buttons["Search"]
+    if searchTab.exists {
+        searchTab.tap()
+    } else {
+        let tab = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "label == %@", "Search")).firstMatch
+        if tab.exists { tab.tap() }
     }
+    _ = field.waitForExistence(timeout: 3)
     return field
 }
 

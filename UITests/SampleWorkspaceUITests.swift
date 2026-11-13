@@ -369,7 +369,8 @@ final class SampleWorkspaceUITests: XCTestCase {
             let sidebar = app.buttons["Show Sidebar"]
             if sidebar.exists && sidebar.isHittable { sidebar.tap() }
         }
-        XCTAssertTrue(workspaceSearchField(in: app).waitForExistence(timeout: 5),
+        // Back returns to the list; search is a separate tab now.
+        XCTAssertTrue(app.collectionViews.firstMatch.waitForExistence(timeout: 5),
                       app.debugDescription)
     }
 
@@ -385,6 +386,8 @@ final class SampleWorkspaceUITests: XCTestCase {
     private func clearSearch(in app: XCUIApplication) {
         let clearText = workspaceSearchField(in: app).buttons["Clear text"]
         if clearText.exists && clearText.isHittable { clearText.tap() }
+        // Search is its own tab; leaving it returns to the list it searched.
+        leaveWorkspaceSearch(in: app)
     }
 
     private func seenSwipeAction(in app: XCUIApplication) -> XCUIElement? {
