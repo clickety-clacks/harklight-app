@@ -988,7 +988,17 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             Group {
                 switch item {
                 case let .request(key)?:
-                    requestDetail(key, cardContext(for: .request(key), inlineChat: inlineChat))
+                    let reopenInlineChat: (() -> Void)?
+                    if inlineChat, !pushedChatFallsBackToMessage,
+                       conversationStore?.request(for: key) != nil {
+                        reopenInlineChat = { [self] in
+                            self.reopenInlineChat(for: key)
+                        }
+                    } else {
+                        reopenInlineChat = nil
+                    }
+                    requestDetail(key, cardContext(for: .request(key),
+                        inlineChat: inlineChat, reopenInlineChat: reopenInlineChat))
                         .id(key)
                         .simultaneousGesture(TapGesture().onEnded {
                             activatePassivePushContent(for: key)
@@ -1124,7 +1134,8 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         splitView.scrollBounceBehavior(.always, axes: .vertical)
     }
 
-    private func cardContext(for id: InboxSelection, inlineChat: Bool = false) -> InboxCardContext {
+    private func cardContext(for id: InboxSelection, inlineChat: Bool = false,
+                             reopenInlineChat: (() -> Void)? = nil) -> InboxCardContext {
         let ids = cardNavigationIDs
         let index = ids.firstIndex(of: id)
         let hasPrevious = index.map { $0 > 0 } ?? false
@@ -1157,15 +1168,6 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             }
         } else {
             chatRouteSerial = nil
-        }
-        let reopenInlineChat: (() -> Void)?
-        if inlineChat, case let .request(key) = id,
-           conversationStore?.request(for: key) != nil {
-            reopenInlineChat = { [self] in
-                self.reopenInlineChat(for: key)
-            }
-        } else {
-            reopenInlineChat = nil
         }
         return InboxCardContext(position: index.map { $0 + 1 },
             total: index == nil ? nil : ids.count,
