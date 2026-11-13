@@ -1174,13 +1174,9 @@ public final class ClientRepository: @unchecked Sendable {
                 }
             }
             thread.listeningSupport = metadata.listeningSupport
-            thread.terminal = next.remoteStates[request.key]?.state
-            if thread.terminal == nil {
-                thread.terminalTurn = nil
-                thread.terminalAuthor = nil
-                thread.retraction = nil
-                thread.reportedRetractedAtMilliseconds = nil
-            }
+            // Delivery hydrates the original request; it is not a new terminal
+            // fact. Held server conversation events applied above may already
+            // retract it. Fresh inbox snapshots rebuild this cache separately.
             if let reported = metadata.retractedAtMilliseconds { try thread.recordReportedRetraction(at: reported) }
             if let id = metadata.eventID, !thread.turns.contains(where: { $0.id == id }) {
                 try validateConversationFiles(metadata.files ?? [])
