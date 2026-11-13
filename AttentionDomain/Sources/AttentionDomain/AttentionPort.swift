@@ -151,7 +151,6 @@ public enum ApplyEventResult: Equatable, Sendable {
     case compatibleRepeat(contiguousCursor: UInt64, classificationChanged: Bool)
     case deferred(contiguousCursor: UInt64)
     case gap(expected: UInt64)
-    case conflict
     case repairRequired
 }
 

@@ -897,7 +897,6 @@ public struct RelayConversationMetadata: Equatable, Codable, Sendable {
 public enum StoreRepairIssue: Equatable, Codable, Sendable {
     case eventGap(expected: UInt64, received: UInt64)
     case missingOriginContent(sequence: UInt64, requestKey: RequestKey)
-    case conflictingEvent(sequence: UInt64)
 }
 
 public struct AttentionStoreSnapshot: Sendable {
@@ -1011,7 +1010,6 @@ public enum AttentionStoreError: Error, Equatable, LocalizedError, Sendable {
     case intentConflict
     case intentMissing
     case eventGap(expected: UInt64, received: UInt64)
-    case eventConflict(UInt64)
     case missingOriginContent(RequestKey)
     case replayAlreadyActive
     case replayNotActive
@@ -1041,7 +1039,6 @@ public enum AttentionStoreError: Error, Equatable, LocalizedError, Sendable {
         case .intentConflict: return "This intent ID is already bound to different immutable content."
         case .intentMissing: return "No durable intent exists for this ID in the current profile."
         case let .eventGap(expected, received): return "Event replay has a gap: expected sequence \(expected), received \(received)."
-        case let .eventConflict(sequence): return "Sequence \(sequence) was replayed with conflicting semantic content."
         case let .missingOriginContent(key): return "Origin content for \(key.senderID.rawValue)/\(key.messageID.rawValue) is missing; the cursor was not advanced."
         case .replayAlreadyActive: return "A replay barrier is already active."
         case .replayNotActive: return "There is no active replay barrier."

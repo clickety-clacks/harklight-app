@@ -439,7 +439,6 @@ final class NativeClientDiagnosticJournal {
             case .intentConflict: return "store_intent_conflict"
             case .intentMissing: return "store_intent_missing"
             case .eventGap: return "store_event_gap"
-            case .eventConflict: return "store_event_conflict"
             case .missingOriginContent: return "store_origin_content_missing"
             case .replayAlreadyActive: return "store_replay_already_active"
             case .replayNotActive: return "store_replay_not_active"

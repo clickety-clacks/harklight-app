@@ -1151,7 +1151,7 @@ public actor NativeRelayCore {
                         durableCursor = contiguousCursor
                     case let .deferred(contiguousCursor) where contiguousCursor == event.sequence:
                         durableCursor = contiguousCursor
-                    case .gap, .conflict, .repairRequired, .deferred:
+                    case .gap, .repairRequired, .deferred:
                         throw NativeRelayCoreError.eventRejected
                     }
                 case let .ignored(ignoredSequence):
@@ -1449,7 +1449,7 @@ public actor NativeRelayCore {
                 break
             case let .deferred(cursor) where cursor == event.sequence:
                 break
-            case .gap, .conflict, .repairRequired, .deferred:
+            case .gap, .repairRequired, .deferred:
                 throw NativeRelayCoreError.eventRejected
             }
             replay.expected = event.sequence

@@ -561,7 +561,6 @@ final class NativeRelayCoreTests: XCTestCase {
             .intentConflict,
             .intentMissing,
             .eventGap(expected: 1, received: 2),
-            .eventConflict(1),
             .missingOriginContent(key),
             .replayAlreadyActive,
             .replayNotActive,

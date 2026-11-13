@@ -966,17 +966,7 @@ public final class ClientRepository: @unchecked Sendable {
         switch event.body {
         case let .delivery(request, classification):
             try validate(request.key, in: context.identity)
-            if next.requests[request.key] != nil {
-                next.requests[request.key] = request.assigningAcceptanceOrder(event.sequence)
-            } else {
-                next.requests[request.key] = request.assigningAcceptanceOrder(event.sequence)
-                let thread = next.conversation?.threads[request.key]
-                let currentPayload = thread?.currentQuestionPayload ?? request.originalPayload
-                let deliveredNames = Self.deliveredFileNames(for: request.key, in: next.conversation)
-                    .union(event.conversation?.files?.map(\.name) ?? [])
-                let currentRequest = StoredRequest(key: request.key, originalPayload: currentPayload)
-                next.drafts[request.key] = RequestDraft(interface: currentRequest.interface(deliveredFileNames: deliveredNames))
-            }
+            next.requests[request.key] = request.assigningAcceptanceOrder(event.sequence)
             let reference = next.inboxReferences?.removeValue(forKey: request.key)
             let previous = next.remoteStates[request.key] ?? reference
             var remoteState = previous?.state ?? next.conversation?.threads[request.key]?.terminal
@@ -1052,6 +1042,9 @@ public final class ClientRepository: @unchecked Sendable {
             }
         }
         try applyOrdinaryConversationMetadata(event, to: &next)
+        if case let .delivery(request, _) = event.body {
+            refreshEditableDraft(for: request.key, additionalFiles: Set(event.conversation?.files?.map(\.name) ?? []), in: &next)
+        }
         if let requestKey = Self.requestKey(in: event) {
             Self.markInboxCurrent(requestKey, at: event.sequence, in: &next)
         }
@@ -1061,7 +1054,6 @@ public final class ClientRepository: @unchecked Sendable {
             switch issue {
             case let .eventGap(_, received): return received <= event.sequence + 1
             case let .missingOriginContent(sequence, _): return sequence == event.sequence
-            case let .conflictingEvent(sequence): return sequence == event.sequence
             }
         }
         try commit(next)
@@ -1098,7 +1090,6 @@ public final class ClientRepository: @unchecked Sendable {
             switch issue {
             case let .eventGap(_, received): return sequence == UInt64.max || received <= sequence + 1
             case let .missingOriginContent(received, _): return received == sequence
-            case let .conflictingEvent(received): return received == sequence
             }
         }
         try commit(next)
@@ -1245,17 +1236,7 @@ public final class ClientRepository: @unchecked Sendable {
             guard request.key == key else { throw AttentionStoreError.inboxPageConflict }
             try validate(request.key, in: context.identity)
             classification = value
-            if next.requests[key] != nil {
-                next.requests[key] = request.assigningAcceptanceOrder(acceptance.sequence)
-            } else {
-                next.requests[key] = request.assigningAcceptanceOrder(acceptance.sequence)
-                let thread = next.conversation?.threads[key]
-                let payload = thread?.currentQuestionPayload ?? request.originalPayload
-                let deliveredNames = Self.deliveredFileNames(for: key, in: next.conversation)
-                    .union(acceptance.conversation?.files?.map(\.name) ?? [])
-                let acceptedRequest = StoredRequest(key: key, originalPayload: payload)
-                next.drafts[key] = RequestDraft(interface: acceptedRequest.interface(deliveredFileNames: deliveredNames))
-            }
+            next.requests[key] = request.assigningAcceptanceOrder(acceptance.sequence)
             if let reference = next.inboxReferences?.removeValue(forKey: key), next.remoteStates[key] == nil {
                 next.remoteStates[key] = reference
             }
@@ -1339,6 +1320,10 @@ public final class ClientRepository: @unchecked Sendable {
         if hasContent {
             try applyOrdinaryConversationMetadata(acceptance, restoredTurns: restoredTurns,
                 skippingHeldEvents: skippingHeldEvents, onHeldEventFailure: onHeldEventFailure, to: &next)
+        }
+
+        if hasContent {
+            refreshEditableDraft(for: key, additionalFiles: Set(acceptance.conversation?.files?.map(\.name) ?? []), in: &next)
         }
 
         let pending = (next.pendingRelayOverlays ?? [:]).values
@@ -1823,8 +1808,6 @@ public final class ClientRepository: @unchecked Sendable {
             switch error {
             case let .eventGap(expected, _):
                 return .gap(expected: expected)
-            case .eventConflict:
-                return .conflict
             default:
                 return .repairRequired
             }
@@ -1861,7 +1844,6 @@ public final class ClientRepository: @unchecked Sendable {
             return .deferred(contiguousCursor: state.cursor)
         } catch let error as AttentionStoreError {
             if case let .eventGap(expected, _) = error { return .gap(expected: expected) }
-            if case .eventConflict = error { return .conflict }
             return .repairRequired
         } catch {
             return .repairRequired
@@ -2811,6 +2793,7 @@ public final class ClientRepository: @unchecked Sendable {
             next.outboxOrder.removeAll { next.intents[$0]?.requestKey == key }
         }
         next.conversation = conversation
+        refreshEditableDraft(for: key, in: &next)
         try commit(next, allowingCommittedReads: true)
         return conversation.cursor
     }
@@ -3666,6 +3649,20 @@ public final class ClientRepository: @unchecked Sendable {
         var next = state
         next.repairIssues.append(issue)
         try commit(next)
+    }
+
+    /// Editor input is local work, never a constraint on an incoming server
+    /// projection. Recreate an incompatible editor from the current question;
+    /// already queued operations retain their exact bytes for the send check.
+    private func refreshEditableDraft(for key: RequestKey, additionalFiles: Set<ExactText> = [],
+                                      in next: inout ClientSessionState) {
+        guard let original = next.requests[key] else { return }
+        let payload = next.conversation?.threads[key]?.currentQuestionPayload ?? original.originalPayload
+        let request = StoredRequest(key: key, originalPayload: payload)
+        let files = Self.deliveredFileNames(for: key, in: next.conversation).union(additionalFiles)
+        let interface = request.interface(deliveredFileNames: files)
+        if let draft = next.drafts[key], validateDraft(draft, for: interface) { return }
+        next.drafts[key] = RequestDraft(interface: interface)
     }
 
     private func validateDraft(_ draft: RequestDraft, for interface: RequestInterface) -> Bool {

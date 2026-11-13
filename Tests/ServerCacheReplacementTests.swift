@@ -128,6 +128,55 @@ final class ServerCacheReplacementTests: XCTestCase {
         XCTAssertNil(shown.submittedAnswer, "A queued local answer is not the server's answer.")
     }
 
+    func testChangedServerInterfaceRebuildsDraftAndAllowsReply() throws {
+        let replacement = try JSONValue.parse(Data(#"{"title":"New reply","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"reply","label":"Reply","kind":"text"}]}}"#.utf8))
+        try assertChangedInterfaceCanSubmit(replacement,
+            inputs: [.compatibilityText(action: ExactText("reply"), text: ExactText("Fresh reply"))])
+    }
+
+    func testChangedServerInterfaceRebuildsDraftAndAllowsSeen() throws {
+        let replacement = try JSONValue.parse(Data(#"{"title":"New notice","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"seen","label":"Seen","kind":"value","value":{"acknowledgment":"seen"}}]}}"#.utf8))
+        try assertChangedInterfaceCanSubmit(replacement,
+            inputs: [.compatibilityValue(action: ExactText("seen"))])
+    }
+
+    private func assertChangedInterfaceCanSubmit(_ payload: JSONValue,
+                                                 inputs: [TypedInputRecord]) throws {
+        for viaPage in [false, true] {
+            let context = context()
+            let key = key("changed-draft", context: context)
+            let repository = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+            if viaPage {
+                _ = try repository.beginInboxCandidate(startupID: UUID().uuidString, since: 0,
+                    batches: [], context: context)
+            }
+            let oldPayload = try JSONValue.parse(Data(#"{"title":"Old form","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"old-text","label":"Old","kind":"text"}]}}"#.utf8))
+            _ = try repository.apply(RelayEvent(sequence: 1,
+                body: .delivery(StoredRequest(key: key, originalPayload: oldPayload), .message)), context: context)
+            let port = AttentionDomainPort(store: repository)
+            let oldSelector = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first?.selector)
+            let oldDraft = RequestDraft(inputs: [:], compatibility: CompatibilityDraft(
+                selectedActionID: ExactText("old-text"), textByActionID: [ExactText("old-text"): ExactText("Earlier edit")]))
+            try repository.saveDraft(oldDraft, selector: oldSelector, context: context)
+            let replacement = StoredRequest(key: key, originalPayload: payload)
+            let event = RelayEvent(sequence: 2, body: .delivery(replacement, .message))
+            if viaPage {
+                try repository.saveInboxInitialPage(snapshotID: UUID().uuidString, highWater: 2,
+                    items: [InboxSnapshotItem(acceptance: event)], nextCursor: nil, receiptCursor: nil, context: context)
+            } else {
+                _ = try repository.apply(event, context: context)
+            }
+            XCTAssertEqual(try repository.snapshot(context: context).drafts[key],
+                           RequestDraft(interface: replacement.interface))
+            let shown = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first)
+            let selector = try XCTUnwrap(shown.selector)
+            let receipt = try port.submit(SubmitIntent(context: port.context, selector: selector,
+                intentID: UUID(), inputs: inputs))
+            XCTAssertEqual(receipt.inputs, inputs, "The fresh current interface must accept the new tap.")
+            XCTAssertNotNil(try repository.lookupIntent(receipt.intentID, context: context))
+        }
+    }
+
     func testServerRetractionReplacesEarlierOperationRefusalTimestamp() throws {
         let context = context()
         let key = key("retraction", context: context)

@@ -1698,10 +1698,10 @@ final class HarklightTests: XCTestCase {
         XCTAssertThrowsError(try store.apply(RelayEvent(sequence: 4, body: .terminal(fixture.key, .answered, nil)), context: context)) {
             XCTAssertEqual($0 as? AttentionStoreError, .eventGap(expected: 3, received: 4))
         }
-        XCTAssertThrowsError(try store.apply(RelayEvent(sequence: 3, body: .terminal(fixture.key, .cleared, nil)), context: context)) {
-            XCTAssertEqual($0 as? AttentionStoreError, .eventConflict(3))
-        }
-        XCTAssertEqual(try store.snapshot(context: context).cursor, 2)
+        XCTAssertEqual(try store.apply(RelayEvent(sequence: 3,
+            body: .terminal(fixture.key, .cleared, nil)), context: context), 3)
+        XCTAssertEqual(try store.snapshot(context: context).remoteStates[fixture.key]?.state, .cleared,
+                       "The next server terminal replaces the prior cached terminal.")
     }
 
     func testOwnOperationReceiptDoesNotJumpCursorOrBecomeSharedOutcome() throws {
