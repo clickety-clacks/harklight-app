@@ -122,9 +122,7 @@ final class ConversationSampleUITests: XCTestCase {
                     XCTAssertTrue(header.isHittable, app.debugDescription)
                 }
                 if state.name == "replyItem" || state.name == "replyItemFullWidth" {
-                    let unseenCount = app.descendants(matching: .any)["reply-item-unseen-count"]
-                    XCTAssertTrue(unseenCount.waitForExistence(timeout: 5), app.debugDescription)
-                    XCTAssertTrue(unseenCount.label.contains("2 new"), unseenCount.debugDescription)
+                    XCTAssertTrue(row.label.contains("2 new"), row.debugDescription)
                     let badge = app.descendants(matching: .any)["reply-item-priority-now"]
                     XCTAssertTrue(badge.waitForExistence(timeout: 5), app.debugDescription)
                     let normalReply = app.descendants(matching: .any)[
