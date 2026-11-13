@@ -189,6 +189,7 @@ public final class ClientRepository: @unchecked Sendable {
             }
             state.intents = queue.operations
             state.intentByRequest = queue.activeOperations
+            state.fencedIntents = queue.cancelledOperations
             state.drafts = queue.answerDrafts
             state.pendingMessageOpens = queue.messageOpens
             state.pendingConversations = queue.conversations
@@ -4064,6 +4065,9 @@ private struct PersistedPendingActions: Codable {
     let profileIdentity: ProfileIdentity
     let operations: [UUID: Submission]
     let activeOperations: [RequestKey: UUID]
+    // Local cancellation of an unsent operation belongs to the send queue.
+    // It must survive restart so a late submit cannot recreate that operation.
+    let cancelledOperations: [UUID: RequestKey]?
     let answerDrafts: [RequestKey: RequestDraft]
     let messageOpens: [PendingMessageOpen]?
     let conversations: [RequestKey: PendingConversationActions]
@@ -4081,6 +4085,7 @@ private struct PersistedPendingActions: Codable {
         }
         operations = pending
         activeOperations = state.intentByRequest.filter { pending[$0.value] != nil }
+        cancelledOperations = state.fencedIntents
         let keys = Set(pending.values.map(\.requestKey))
         answerDrafts = state.drafts.filter { $0.value.hasEdits || keys.contains($0.key) }
         messageOpens = state.pendingMessageOpens
