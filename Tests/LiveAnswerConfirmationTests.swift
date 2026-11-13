@@ -6,7 +6,7 @@ import XCTest
 
 @MainActor
 final class LiveAnswerConfirmationTests: XCTestCase {
-    private func setup() throws -> (ProfileContext, ClientRepository, LivePresentationStore, RequestKey) {
+    private func setup() async throws -> (ProfileContext, ClientRepository, LivePresentationStore, RequestKey) {
         let context = ProfileContext(identity: ProfileIdentity(
             trustedRelayAuthority: ExactText("relay.example"), personID: ExactText("person"),
             deviceID: ExactText("device")), transportMode: .relay)
@@ -16,10 +16,10 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         let payload = try JSONValue.parse(Data(#"{"title":"Sample","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"got-it","label":"Got it","kind":"value","value":"got-it"}]}}"#.utf8))
         _ = try store.apply(RelayEvent(sequence: 1, body: .delivery(
             StoredRequest(key: key, originalPayload: payload), .message)), context: context)
-        return (context, store, try LivePresentationStore(store: store, context: context), key)
+        return (context, store, try await confirmedPresentation(store: store, context: context, key: key, payload: payload), key)
     }
 
-    private func setupReplyOnly() throws -> (ProfileContext, ClientRepository, LivePresentationStore, RequestKey) {
+    private func setupReplyOnly() async throws -> (ProfileContext, ClientRepository, LivePresentationStore, RequestKey) {
         let context = ProfileContext(identity: ProfileIdentity(
             trustedRelayAuthority: ExactText("relay.example"), personID: ExactText("person"),
             deviceID: ExactText("device")), transportMode: .relay)
@@ -29,7 +29,7 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         let payload = try JSONValue.parse(Data(#"{"title":"Reply-only request"}"#.utf8))
         _ = try store.apply(RelayEvent(sequence: 1, body: .delivery(
             StoredRequest(key: key, originalPayload: payload), .message)), context: context)
-        return (context, store, try LivePresentationStore(store: store, context: context), key)
+        return (context, store, try await confirmedPresentation(store: store, context: context, key: key, payload: payload), key)
     }
 
     func testCachedCurrentRowDoesNotAuthorizeAnswerUntilRelayConfirmsIt() throws {
@@ -64,7 +64,7 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty)
     }
 
-    private func setupTextReplyOnly() throws -> (ProfileContext, ClientRepository, LivePresentationStore, RequestKey) {
+    private func setupTextReplyOnly() async throws -> (ProfileContext, ClientRepository, LivePresentationStore, RequestKey) {
         let context = ProfileContext(identity: ProfileIdentity(
             trustedRelayAuthority: ExactText("relay.example"), personID: ExactText("person"),
             deviceID: ExactText("device")), transportMode: .relay)
@@ -74,7 +74,24 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         let payload = try JSONValue.parse(Data(#"{"title":"Text reply request","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"reply","label":"Reply","kind":"text"}]}}"#.utf8))
         _ = try store.apply(RelayEvent(sequence: 1, body: .delivery(
             StoredRequest(key: key, originalPayload: payload), .message)), context: context)
-        return (context, store, try LivePresentationStore(store: store, context: context), key)
+        return (context, store, try await confirmedPresentation(store: store, context: context, key: key, payload: payload), key)
+    }
+
+    private func confirmedPresentation(store: ClientRepository, context: ProfileContext,
+                                       key: RequestKey, payload: JSONValue) async throws -> LivePresentationStore {
+        let session = AnswerSession(context.identity, messageID: key.messageID.rawValue, payload: payload)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        addTeardownBlock {
+            await NativeRelayLifecycle.shared.deactivate()
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let result = try await NativeRelayLifecycle.shared.confirmInProcessSessionForTesting(
+            store: store, context: context, session: session,
+            serverStateCache: FileServerStateCache(identity: context.identity,
+                fileURL: directory.appendingPathComponent("server-cache.json")))
+        XCTAssertTrue(result.relayConfirmed)
+        XCTAssertTrue(try store.snapshot(context: context).inboxCheckpoint?.checkpointAccepted == true)
+        return try LivePresentationStore(store: store, context: context)
     }
 
     private func commitAnswer(_ store: ClientRepository, key: RequestKey) throws -> IntentReceipt {
@@ -98,8 +115,8 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         return SampleResponse(viewModel: live, key: key, message: message)
     }
 
-    func testDelayedSendAfterDurableAnswerNeverClaimsFailureOrCreatesAnotherIntent() throws {
-        let (context, store, live, key) = try setup()
+    func testDelayedSendAfterDurableAnswerNeverClaimsFailureOrCreatesAnotherIntent() async throws {
+        let (context, store, live, key) = try await setup()
         // The displayed Open view is deliberately older than the durable intent.
         let receipt = try commitAnswer(store, key: key)
         live.submitFromUser(key)
@@ -114,8 +131,8 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         try live.refreshFromDurableStore()
         XCTAssertNil(live.request(for: key)?.intentReceipt,
                      "The account-level answered state does not expose this device's receipt.")
-        XCTAssertNotNil(live.request(for: key)?.submittedAnswer,
-                        "The retained answer identifies a late callback for this device's submission.")
+        XCTAssertNil(live.request(for: key)?.submittedAnswer,
+                     "A server terminal replaces the device's pending answer projection.")
         live.submitFromUser(key)
         XCTAssertNil(live.actionError)
         XCTAssertEqual(live.request(for: key)?.lifecycleStatus, .answered)
@@ -125,8 +142,8 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         XCTAssertEqual(try store.snapshot(context: context).intents.count, 1)
     }
 
-    func testNewDurableReceiptClearsAnObsoleteSubmissionError() throws {
-        let (context, store, live, key) = try setup()
+    func testNewDurableReceiptClearsAnObsoleteSubmissionError() async throws {
+        let (context, store, live, key) = try await setup()
         live.submitFromUser(key) // No choice made: a genuine local validation error.
         XCTAssertEqual(live.actionError, "Complete the response before sending your answer.")
         XCTAssertTrue(try store.snapshot(context: context).intents.isEmpty)
@@ -138,8 +155,8 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         XCTAssertEqual(live.request(for: key)?.receiptFacts?.ownOutcome, .accepted)
     }
 
-    func testRejectedNoCommentThenBlankReplyShowsValidationWithoutSendingText() throws {
-        let (context, store, live, key) = try setupTextReplyOnly()
+    func testRejectedNoCommentThenBlankReplyShowsValidationWithoutSendingText() async throws {
+        let (context, store, live, key) = try await setupTextReplyOnly()
         live.selectNoComment(for: key)
         live.submitFromUser(key)
         let noComment = try XCTUnwrap(live.request(for: key)?.intentReceipt)
@@ -172,8 +189,8 @@ final class LiveAnswerConfirmationTests: XCTestCase {
                       "The person can add text and submit after the empty attempt is refused.")
     }
 
-    func testWhitespaceOnlyReplyIsRefusedAndTypedSurroundingSpacesAreSentAsIs() throws {
-        let (context, store, live, key) = try setupTextReplyOnly()
+    func testWhitespaceOnlyReplyIsRefusedAndTypedSurroundingSpacesAreSentAsIs() async throws {
+        let (context, store, live, key) = try await setupTextReplyOnly()
         live.selectAction(ExactText("reply"), input: nil, for: key)
         live.updateCompatibilityText("  \n \n  ", action: ExactText("reply"), for: key)
         live.submitFromUser(key)
@@ -197,8 +214,8 @@ final class LiveAnswerConfirmationTests: XCTestCase {
                        "Ordinary surrounding whitespace goes out exactly as typed.")
     }
 
-    func testNoCommentUsesItsOwnPayloadFreeFrameAndUnsupportedLeavesTheRequestOpen() throws {
-        let (context, store, live, key) = try setup()
+    func testNoCommentUsesItsOwnPayloadFreeFrameAndUnsupportedLeavesTheRequestOpen() async throws {
+        let (context, store, live, key) = try await setup()
         let port = AttentionDomainPort(store: store)
         let selector = try XCTUnwrap(port.inspect(context: port.context, request: key)
             .requests.first?.selector)
@@ -256,8 +273,8 @@ final class LiveAnswerConfirmationTests: XCTestCase {
                        "The known delivery failure keeps the row in Inbox until the retry is accepted.")
     }
 
-    func testAcceptedNoCommentIsFinalAndCannotBeResubmitted() throws {
-        let (context, store, live, key) = try setupReplyOnly()
+    func testAcceptedNoCommentIsFinalAndCannotBeResubmitted() async throws {
+        let (context, store, live, key) = try await setupReplyOnly()
         live.selectNoComment(for: key)
         live.submitFromUser(key)
         let receipt = try XCTUnwrap(live.request(for: key)?.intentReceipt)
@@ -277,7 +294,7 @@ final class LiveAnswerConfirmationTests: XCTestCase {
     }
 
     func testDefinitiveNoCommentErrorReturnsToInboxWithNotDeliveredTreatment() async throws {
-        let (context, store, live, key) = try setupReplyOnly()
+        let (context, store, live, key) = try await setupReplyOnly()
         live.selectNoComment(for: key)
         let failed = try live.submit(key)
         let session = AnswerSession(context.identity)
@@ -317,8 +334,8 @@ final class LiveAnswerConfirmationTests: XCTestCase {
                        "A new pending attempt replaces the previous failure treatment.")
     }
 
-    func testFailedResponseRetryUsesTheRetainedAnswerAndClearsWarningOnlyAfterAcceptance() throws {
-        let (context, store, live, key) = try setup()
+    func testFailedResponseRetryUsesTheRetainedAnswerAndClearsWarningOnlyAfterAcceptance() async throws {
+        let (context, store, live, key) = try await setup()
         live.selectAction(ExactText("got-it"), input: nil, for: key)
         let original = try live.submit(key)
         try store.recordAnswerNotDelivered(original.intentID, operationID: original.opID,
@@ -358,8 +375,8 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         XCTAssertFalse(try XCTUnwrap(live.inboxRows.first { $0.key == key }).hasDeliveryWarning)
     }
 
-    func testFailedNoCommentWarningRetriesTheSameNoCommentResponse() throws {
-        let (context, store, live, key) = try setupReplyOnly()
+    func testFailedNoCommentWarningRetriesTheSameNoCommentResponse() async throws {
+        let (context, store, live, key) = try await setupReplyOnly()
         XCTAssertTrue(live.submitNoCommentFromUser(key))
         let original = try XCTUnwrap(live.request(for: key)?.intentReceipt)
         try store.recordNoCommentUnsupported(original.intentID, operationID: original.opID,
@@ -388,7 +405,7 @@ final class LiveAnswerConfirmationTests: XCTestCase {
     }
 
     func testMissingNoCommentReplyKeepsPendingExplanationAndReusesOperationID() async throws {
-        let (context, store, live, key) = try setupReplyOnly()
+        let (context, store, live, key) = try await setupReplyOnly()
         let receipt = try commitNoComment(store, key: key)
         let session = AnswerSession(context.identity)
         session.loseOperationReply = true
@@ -417,8 +434,8 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         XCTAssertEqual(try store.snapshot(context: context).outbox.map(\.operationID), [receipt.opID])
     }
 
-    func testSwipeNoCommentAcceptanceIsFinalAndCannotBeResubmitted() throws {
-        let (context, store, live, key) = try setupReplyOnly()
+    func testSwipeNoCommentAcceptanceIsFinalAndCannotBeResubmitted() async throws {
+        let (context, store, live, key) = try await setupReplyOnly()
         live.submitNoCommentFromUser(key)
 
         let receipt = try XCTUnwrap(live.request(for: key)?.intentReceipt)
@@ -445,8 +462,8 @@ final class LiveAnswerConfirmationTests: XCTestCase {
                        "An accepted swipe choice cannot create another answer.")
     }
 
-    func testServerNoCommentTerminalStaysDistinctAndAppearsInReplied() throws {
-        let (context, store, live, key) = try setup()
+    func testServerNoCommentTerminalStaysDistinctAndAppearsInReplied() async throws {
+        let (context, store, live, key) = try await setup()
         let terminal = Data(#"{"v":1,"type":"lifecycle","seq":2,"sender_id":"sender","message_id":"sample","origin":"other-installation","state":"no_comment","at":2}"#.utf8)
         let event = try RelayWire(profile: context).decodeEvent(terminal)
         _ = try store.apply(event, context: context)
@@ -460,8 +477,8 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         XCTAssertTrue(try XCTUnwrap(live.inboxRows.first { $0.key == key }).belongsToReplied)
     }
 
-    func testAccountSeenOutcomeConfirmsOnAnyDeviceWithoutLocalAnswerReceipt() throws {
-        let (context, store, live, key) = try setup()
+    func testAccountSeenOutcomeConfirmsOnAnyDeviceWithoutLocalAnswerReceipt() async throws {
+        let (context, store, live, key) = try await setup()
         _ = try store.apply(RelayEvent(sequence: 2,
             body: .terminal(key, .answered, nil)), context: context)
         let terminal = Data(#"{"v":1,"type":"lifecycle","seq":2,"sender_id":"sender","message_id":"sample","origin":"another-device","state":"answered","answer_outcome":{"kind":"seen"}}"#.utf8)
@@ -515,8 +532,8 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         XCTAssertNil(replyEvent.accountAnswerOutcome)
     }
 
-    func testAccountReplyOutcomePreservesExactTextAndHidesOriginOnlyLegacyAnswer() throws {
-        let (context, store, live, key) = try setup()
+    func testAccountReplyOutcomePreservesExactTextAndHidesOriginOnlyLegacyAnswer() async throws {
+        let (context, store, live, key) = try await setup()
         let exactText = "Exact reply, with spaces."
         let terminal = Data(#"{"v":1,"type":"lifecycle","seq":2,"sender_id":"sender","message_id":"sample","origin":"another-device","state":"answered","answer_outcome":{"kind":"reply","text":"Exact reply, with spaces."}}"#.utf8)
         let event = try RelayWire(profile: context).decodeEvent(terminal)
@@ -533,8 +550,8 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         XCTAssertNil(request.receiptFacts)
     }
 
-    func testDefaultOutcomeShowsServerWordsAndMarksTheMatchingCurrentChoice() throws {
-        let (context, _, _, key) = try setup()
+    func testDefaultOutcomeShowsServerWordsAndMarksTheMatchingCurrentChoice() async throws {
+        let (context, _, _, key) = try await setup()
         let initialPayload = try JSONValue.parse(Data(#"{"title":"Choose","stake":"Earlier stake","by_when":1793200000000,"answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"old","label":"Old choice","kind":"value","value":1}]}}"#.utf8))
         // Replace the setup message with a fresh store to keep the event sequence coherent.
         let freshStore = try ClientRepository(context: context,
@@ -572,8 +589,8 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         XCTAssertEqual(row.defaultAnswerStatus, "Answered by default: Hold for now")
     }
 
-    func testDefaultOutcomeWithoutValueStillShowsTextAndDefaultStatus() throws {
-        let (context, _, _, key) = try setup()
+    func testDefaultOutcomeWithoutValueStillShowsTextAndDefaultStatus() async throws {
+        let (context, _, _, key) = try await setup()
         let store = try ClientRepository(context: context,
             persistence: MemoryPendingActionPersistence())
         let payload = try JSONValue.parse(Data(#"{"title":"Choose","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"yes","label":"Yes","kind":"value","value":true}]}}"#.utf8))
@@ -590,8 +607,8 @@ final class LiveAnswerConfirmationTests: XCTestCase {
                        "Answered by default: Yes, automatically")
     }
 
-    func testTerminalInboxPageCarriesTheSharedAccountOutcome() throws {
-        let (context, _, _, key) = try setup()
+    func testTerminalInboxPageCarriesTheSharedAccountOutcome() async throws {
+        let (context, _, _, key) = try await setup()
         let paging = try InboxPagingWire(profile: context)
         let page = Data(#"{"v":1,"type":"ok","paging_version":1,"ref":"page","snapshot_id":"snapshot","high_water":2,"items":[{"acceptance":{"v":1,"type":"delivery","seq":1,"sender_id":"sender","message_id":"sample","origin":"origin","as":"message","message":{"title":"Question","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"first","label":"Later","kind":"value","value":1},{"id":"second","label":"Later","kind":"value","value":2}]}},"session_handle":"handle","request_revision":1,"availability":"not_listening","last_detached_at":123},"terminal":{"v":1,"type":"lifecycle","seq":2,"sender_id":"sender","message_id":"sample","origin":"another-device","state":"answered","answer_outcome":{"kind":"default","value":2,"text":"Hold for now"}}}],"next_cursor":null}"#.utf8)
 
@@ -654,8 +671,8 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         XCTAssertNil(saved.accountAnswerOutcome)
     }
 
-    func testNoCommentCheckmarkCommitsWithoutSavingReplyContents() throws {
-        let (context, store, live, key) = try setupReplyOnly()
+    func testNoCommentCheckmarkCommitsWithoutSavingReplyContents() async throws {
+        let (context, store, live, key) = try await setupReplyOnly()
         let draftBeforeEditing = try XCTUnwrap(store.snapshot(context: context).drafts[key])
         let request = try XCTUnwrap(live.request(for: key))
         let session = ReplyEditorDraftSession(request: request, canSubmitFromSnapshot: true)
@@ -735,8 +752,8 @@ final class LiveAnswerConfirmationTests: XCTestCase {
                        "The current open revision belongs in Inbox after the older No comment intent is superseded.")
     }
 
-    func testDisconnectedInboxKeepsDraftReadOnlyAndCannotCreateOrRetryAnAnswer() throws {
-        let (context, store, live, key) = try setup()
+    func testDisconnectedInboxKeepsDraftReadOnlyAndCannotCreateOrRetryAnAnswer() async throws {
+        let (context, store, live, key) = try await setup()
         live.selectAction(ExactText("got-it"), input: nil, for: key)
         let savedDraft = try XCTUnwrap(live.request(for: key)?.draft)
         XCTAssertTrue(savedDraft.hasEdits)
@@ -790,8 +807,8 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         XCTAssertEqual(deliveries, 1, "The saved original operation cannot wait for another app wake.")
     }
 
-    func testLateSendOnAnotherDevicesTerminalRequestDoesNotClaimOurAnswerWasAccepted() throws {
-        let (context, store, live, key) = try setup()
+    func testLateSendOnAnotherDevicesTerminalRequestDoesNotClaimOurAnswerWasAccepted() async throws {
+        let (context, store, live, key) = try await setup()
         _ = try store.apply(RelayEvent(sequence: 2, body: .terminal(key, .answered, nil)), context: context)
         live.submitFromUser(key)
         XCTAssertEqual(live.actionError, "This request is no longer open for an answer.")
@@ -800,16 +817,19 @@ final class LiveAnswerConfirmationTests: XCTestCase {
     }
 
     func testAcceptedAnswerReplaysTerminalEventBeforeCompletingRefresh() async throws {
-        let (context, store, live, key) = try setup()
+        let (context, store, live, key) = try await setup()
         let receipt = try commitAnswer(store, key: key)
         let session = AnswerSession(context.identity)
         let core = try NativeRelayCore(store: store, context: context, session: session)
+        _ = try await core.resyncAndDrainOutbox()
+        XCTAssertTrue(session.sentOperationIDs.isEmpty, "Refresh never sends the queued tap.")
+        try await core.sendOriginalOperationForUserTap(receipt.intentID)
         let high = try await core.resyncAndDrainOutbox()
         try live.refreshFromDurableStore()
         XCTAssertEqual(high, 2)
         XCTAssertEqual(try store.snapshot(context: context).cursor, 2)
         XCTAssertEqual(session.sentOperationIDs, [receipt.opID])
-        XCTAssertEqual(session.acknowledgedCursors, [2],
+        XCTAssertEqual(session.acknowledgedCursors, [1, 2],
                        "The checkpoint ACK is distinct; ordinary ACKs cover only post-H events.")
         XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty)
         XCTAssertEqual(live.request(for: key)?.lifecycleStatus, .answered)
@@ -818,11 +838,14 @@ final class LiveAnswerConfirmationTests: XCTestCase {
     }
 
     func testServerAnsweredAfterLostOperationReplyMovesToRepliedWithoutInventingAcceptance() async throws {
-        let (context, store, live, key) = try setup()
+        let (context, store, live, key) = try await setup()
         let receipt = try commitAnswer(store, key: key)
         let session = AnswerSession(context.identity)
         session.loseOperationReply = true
         let core = try NativeRelayCore(store: store, context: context, session: session)
+        _ = try await core.resyncAndDrainOutbox()
+        XCTAssertTrue(session.sentOperationIDs.isEmpty, "Refresh never sends the queued tap.")
+        try await core.sendOriginalOperationForUserTap(receipt.intentID)
         _ = try await core.resyncAndDrainOutbox()
         try live.refreshFromDurableStore()
         XCTAssertEqual(session.sentOperationIDs, [receipt.opID])
@@ -842,7 +865,7 @@ final class LiveAnswerConfirmationTests: XCTestCase {
     }
 
     func testServerNoCommentAfterLostOperationReplyMovesToRepliedWithoutInventingAcceptance() async throws {
-        let (context, store, live, key) = try setup()
+        let (context, store, live, key) = try await setup()
         let receipt = try commitNoComment(store, key: key)
         let session = AnswerSession(context.identity)
         session.loseOperationReply = true
@@ -875,8 +898,8 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         XCTAssertNil(sampleRow.localStatus)
     }
 
-    func testServerNoCommentHidesPriorUnsupportedNoteFromBothRepliedProjections() throws {
-        let (context, store, live, key) = try setupReplyOnly()
+    func testServerNoCommentHidesPriorUnsupportedNoteFromBothRepliedProjections() async throws {
+        let (context, store, live, key) = try await setupReplyOnly()
         let receipt = try commitNoComment(store, key: key)
         try store.recordNoCommentUnsupported(receipt.intentID, operationID: receipt.opID, context: context)
         try live.refreshFromDurableStore()
@@ -906,11 +929,14 @@ final class LiveAnswerConfirmationTests: XCTestCase {
     }
 
     func testFailedTerminalReplayDoesNotEraseAcceptedAnswerOrResendItOnReconnect() async throws {
-        let (context, store, live, key) = try setup()
+        let (context, store, live, key) = try await setup()
         let receipt = try commitAnswer(store, key: key)
         let session = AnswerSession(context.identity)
         session.failReplayAfterSend = true
         let core = try NativeRelayCore(store: store, context: context, session: session)
+        _ = try await core.resyncAndDrainOutbox()
+        XCTAssertTrue(session.sentOperationIDs.isEmpty, "Refresh never sends the queued tap.")
+        try await core.sendOriginalOperationForUserTap(receipt.intentID)
         do { _ = try await core.resyncAndDrainOutbox(); XCTFail("The second replay is interrupted") }
         catch InstallationTransportError.unexpectedServerFrame {}
         try live.refreshFromDurableStore()
@@ -931,10 +957,13 @@ final class LiveAnswerConfirmationTests: XCTestCase {
     }
 
     func testNotificationRegistrationRefusalDoesNotDowngradeAcceptedAnswer() async throws {
-        let (context, store, live, key) = try setup()
+        let (context, store, live, key) = try await setup()
         let receipt = try commitAnswer(store, key: key)
         let session = AnswerSession(context.identity)
         let core = try NativeRelayCore(store: store, context: context, session: session)
+        _ = try await core.resyncAndDrainOutbox()
+        XCTAssertTrue(session.sentOperationIDs.isEmpty, "Refresh never sends the queued tap.")
+        try await core.sendOriginalOperationForUserTap(receipt.intentID)
         _ = try await core.resyncAndDrainOutbox()
         try live.refreshFromDurableStore()
 
@@ -957,7 +986,7 @@ final class LiveAnswerConfirmationTests: XCTestCase {
     }
 
     func testLaterRelayFailureKeepsAcceptedReceiptAndNoRegistrationIsInventedOnRecovery() async throws {
-        let (context, store, live, key) = try setup()
+        let (context, store, live, key) = try await setup()
         let receipt = try commitAnswer(store, key: key)
         try store.recordAcceptedOperation(receipt.intentID, operationID: receipt.opID,
                                           terminalSequence: 2, context: context)
@@ -977,7 +1006,7 @@ final class LiveAnswerConfirmationTests: XCTestCase {
     }
 
     func testConfirmedNotificationSetupClearsItsWarningWithoutCreatingAnAnswer() async throws {
-        let (context, store, live, key) = try setup()
+        let (context, store, live, key) = try await setup()
         let refused = await NativeRelayRefreshResult.afterConfirmedRelay(
             context: context, transportAttemptID: UUID()) {
             throw InstallationTransportError.serverRejected
@@ -1004,7 +1033,14 @@ private final class AnswerSession: AuthenticatedInboxPagingSession, @unchecked S
     var rejectOperation = false
     var failReplayAfterSend = false
 
-    init(_ identity: ProfileIdentity) { authenticatedIdentity = identity }
+    let messageID: String
+    let payload: JSONValue?
+
+    init(_ identity: ProfileIdentity, messageID: String = "sample", payload: JSONValue? = nil) {
+        authenticatedIdentity = identity
+        self.messageID = messageID
+        self.payload = payload
+    }
 
     func resync(_ request: Data, consume: @Sendable (Data) async throws -> Void) async throws {
         if !sentOperationIDs.isEmpty && failReplayAfterSend {
@@ -1035,31 +1071,43 @@ private final class AnswerSession: AuthenticatedInboxPagingSession, @unchecked S
         return .accepted(operationID: operationID, terminalSequence: 2)
     }
 
-    /// Once the relay has accepted an answer, a new connection's inbox
-    /// snapshot includes its terminal at sequence 2 and reconciles the
-    /// operation as committed, as the relay reports an accepted original.
+    /// Snapshots contain the server's request, rather than relying on a local
+    /// request record surviving an empty replacement snapshot.
     func inboxRequest(_ request: Data, ref: String) async throws -> Data {
         let value = try JSONValue.parse(request)
         let kind = value.uniqueValue(named: "type")?.stringValue?.rawValue
-        guard !acceptedOperationIDs.isEmpty, kind == "inbox_start" || kind == "inbox_reconcile" else {
+        guard kind == "inbox_start" || (kind == "inbox_reconcile" && !acceptedOperationIDs.isEmpty) else {
             return try await emptyInboxReply(request, ref: ref)
         }
-        var reply = "{\"v\":1,\"type\":\"ok\",\"ref\":\"\(ref)\",\"paging_version\":1,\"high_water\":2"
+        let high = acceptedOperationIDs.isEmpty ? 1 : 2
+        let terminal: [String: Any] = ["v": 1, "type": "lifecycle", "seq": 2,
+            "sender_id": "sender", "message_id": messageID, "origin": "device",
+            "state": "answered", "at": 1, "answer": "got-it"]
+        var response: [String: Any] = ["v": 1, "type": "ok", "ref": ref,
+            "paging_version": 1, "high_water": high]
         if kind == "inbox_start" {
             let startupID = value.uniqueValue(named: "startup_id")?.stringValue?.rawValue ?? ""
-            reply += ",\"snapshot_id\":\"test-\(startupID)-h2\",\"items\":[],\"next_cursor\":null,\"receipt_cursor\":null}"
+            let body = try payload ?? JSONValue.parse(Data(#"{"title":"Sample","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"got-it","label":"Got it","kind":"value","value":"got-it"}]}}"#.utf8))
+            var item: [String: Any] = ["acceptance": ["v": 1, "type": "delivery", "seq": 1,
+                "sender_id": "sender", "message_id": messageID, "origin": "source", "as": "message",
+                "message": try JSONSerialization.jsonObject(with: Data(body.canonicalJSON.utf8))]]
+            if high == 2 { item["terminal"] = terminal }
+            response["snapshot_id"] = "test-\(startupID)-h\(high)"
+            response["items"] = [item]
+            response["next_cursor"] = NSNull()
+            response["receipt_cursor"] = NSNull()
         } else {
-            let snapshotID = value.uniqueValue(named: "snapshot_id")?.stringValue?.rawValue ?? ""
-            let batchID = value.uniqueValue(named: "batch_id")?.stringValue?.rawValue ?? ""
-            let results = (value.uniqueValue(named: "operations")?.arrayValues ?? []).map { operation -> String in
+            response["snapshot_id"] = value.uniqueValue(named: "snapshot_id")?.stringValue?.rawValue ?? ""
+            response["batch_id"] = value.uniqueValue(named: "batch_id")?.stringValue?.rawValue ?? ""
+            response["results"] = (value.uniqueValue(named: "operations")?.arrayValues ?? []).map { operation -> [String: Any] in
                 let opID = operation.uniqueValue(named: "op_id")?.stringValue?.rawValue ?? ""
                 guard let id = UUID(uuidString: opID), acceptedOperationIDs.contains(id) else {
-                    return "{\"op_id\":\"\(opID)\",\"status\":\"not_committed_at_snapshot\"}"
+                    return ["op_id": opID, "status": "not_committed_at_snapshot"]
                 }
-                return "{\"op_id\":\"\(opID)\",\"status\":\"committed\",\"result\":{\"v\":1,\"type\":\"ok\",\"seq\":2,\"duplicate\":true},\"terminal\":{\"v\":1,\"type\":\"lifecycle\",\"seq\":2,\"sender_id\":\"sender\",\"message_id\":\"sample\",\"origin\":\"device\",\"state\":\"answered\",\"at\":1,\"answer\":\"got-it\"}}"
+                return ["op_id": opID, "status": "committed",
+                    "result": ["v": 1, "type": "ok", "seq": 2, "duplicate": true], "terminal": terminal]
             }
-            reply += ",\"snapshot_id\":\"\(snapshotID)\",\"batch_id\":\"\(batchID)\",\"results\":[\(results.joined(separator: ","))]}"
         }
-        return Data((reply + "\n").utf8)
+        return try JSONSerialization.data(withJSONObject: response)
     }
 }

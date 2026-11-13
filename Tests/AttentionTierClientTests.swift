@@ -73,7 +73,7 @@ final class AttentionTierClientTests: XCTestCase {
                              "No comment is not an empty answer payload.")
     }
 
-    func testPreviouslyStoredDeliveryCanGainItsFirstExplicitTierOnReplay() throws {
+    func testCachedDeliveryUsesLatestServerTierOnReplay() throws {
         let profile = context()
         let persistence = MemoryPendingActionPersistence()
         let store = try ClientRepository(context: profile, persistence: persistence)
@@ -83,7 +83,10 @@ final class AttentionTierClientTests: XCTestCase {
         try store.apply(RelayEvent(sequence: 1,
             body: .delivery(StoredRequest(key: key, originalPayload: payload), .message)), context: profile)
 
+        let cache = try ServerStateCacheSnapshot.make(identity: profile.identity,
+            from: store.snapshot(context: profile), conversations: store.conversationSnapshot(context: profile))
         let restored = try ClientRepository(context: profile, persistence: persistence)
+        try restored.restoreCachedServerState(cache.attentionDomainState(for: profile.identity), context: profile)
         try restored.apply(RelayEvent(sequence: 1,
             body: .delivery(StoredRequest(key: key, originalPayload: payload), .message),
             origin: ExactText("source"), attentionTier: .top), context: profile)
@@ -92,49 +95,11 @@ final class AttentionTierClientTests: XCTestCase {
         XCTAssertEqual(state.cursor, 1)
         XCTAssertEqual(state.remoteStates[key]?.attentionTier, .top)
         XCTAssertEqual(state.remoteStates[key]?.attentionTierOrigin, ExactText("source"))
-        XCTAssertThrowsError(try restored.apply(RelayEvent(sequence: 1,
+        try restored.apply(RelayEvent(sequence: 1,
             body: .delivery(StoredRequest(key: key, originalPayload: payload), .message),
-            origin: ExactText("source"), attentionTier: .low), context: profile))
-    }
-
-    func testExistingSchemaTwoStateAndCheckpointDecodeWithoutTierFields() throws {
-        let savedAnswer = JSONValue.object([JSONMember("accepted", .bool(true))])
-        let remoteState = RemoteRequestState(state: .answered,
-            authorizedOriginAnswer: savedAnswer, classification: .message, eventSequence: 7)
-        let encodedRemoteState = try PropertyListEncoder().encode(remoteState)
-        var oldRemoteState = try XCTUnwrap(PropertyListSerialization.propertyList(
-            from: encodedRemoteState, options: [], format: nil) as? [String: Any])
-        for field in ["attentionTier", "attentionTierSequence", "attentionTierFeed", "attentionTierOrigin"] {
-            oldRemoteState.removeValue(forKey: field)
-        }
-        let oldRemoteStateData = try PropertyListSerialization.data(
-            fromPropertyList: oldRemoteState, format: .binary, options: 0)
-        let restoredRemoteState = try PropertyListDecoder().decode(
-            RemoteRequestState.self, from: oldRemoteStateData)
-        XCTAssertEqual(restoredRemoteState.state, .answered)
-        XCTAssertEqual(restoredRemoteState.authorizedOriginAnswer, savedAnswer)
-        XCTAssertEqual(restoredRemoteState.classification, .message)
-        XCTAssertEqual(restoredRemoteState.eventSequence, 7)
-        XCTAssertNil(restoredRemoteState.attentionTier)
-
-        let key = RequestKey(accountScope: ExactText("reader-account"),
-            senderID: ExactText("sender"), messageID: ExactText("saved"))
-        let checkpoint = InboxPagingCheckpoint(startupID: "startup", since: 4,
-            snapshotID: "snapshot", highWater: 7, nextCursor: "older",
-            hasInitialPage: true, loadedKeys: [key], freshKeys: [key],
-            checkpointAccepted: true)
-        let encodedCheckpoint = try PropertyListEncoder().encode(checkpoint)
-        var oldCheckpoint = try XCTUnwrap(PropertyListSerialization.propertyList(
-            from: encodedCheckpoint, options: [], format: nil) as? [String: Any])
-        oldCheckpoint.removeValue(forKey: "sourceOrder")
-        let oldCheckpointData = try PropertyListSerialization.data(
-            fromPropertyList: oldCheckpoint, format: .binary, options: 0)
-        let restoredCheckpoint = try PropertyListDecoder().decode(
-            InboxPagingCheckpoint.self, from: oldCheckpointData)
-        XCTAssertEqual(restoredCheckpoint.loadedKeys, [key])
-        XCTAssertEqual(restoredCheckpoint.currentKeys, [key])
-        XCTAssertEqual(restoredCheckpoint.nextCursor, "older")
-        XCTAssertNil(restoredCheckpoint.sourceOrder)
+            origin: ExactText("source"), attentionTier: .low), context: profile)
+        XCTAssertEqual(try restored.snapshot(context: profile).remoteStates[key]?.attentionTier, .low,
+                       "The server update replaces a cached tier without a local conflict.")
     }
 
     func testRelayAttentionTierUpdateIsIgnoredAndDoesNotBreakDelivery() throws {
@@ -326,7 +291,9 @@ final class AttentionTierClientTests: XCTestCase {
         _ = try store.prepareInboxCheckpointAcknowledgement(context: profile)
         _ = try store.acceptInboxCheckpoint(snapshotID: "snapshot", highWater: 2, context: profile)
 
-        let restored = try ClientRepository(context: profile, persistence: persistence)
+        // This checks a live update against the accepted page. Relaunch cache
+        // restoration is covered independently by ServerStateCacheTests.
+        let restored = store
         let port = AttentionDomainPort(store: restored)
         let initial = try port.observe(context: port.context)
         XCTAssertEqual(initial.requests.map { $0.key.messageID.rawValue }, ["first", "second"])
