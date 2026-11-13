@@ -473,8 +473,8 @@ final class InboxFreshnessReplayTests: XCTestCase {
     }
 
     @MainActor
-    func testRecoveredDiscussionUsesConfirmedOriginFeedOrderAroundPagedTerminal() throws {
-        for targetID in ["2", "4"] {
+    func testRecoveredDiscussionUsesConfirmedOriginFeedOrderAroundPagedTerminal() async throws {
+        for (targetID, sameOrigin) in [("2", true), ("4", true), ("2", false), ("4", false)] {
             let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
                 personID: ExactText("ordered-recovery"), deviceID: ExactText("reader"))
             let context = ProfileContext(identity: identity, transportMode: .relay)
@@ -497,16 +497,23 @@ final class InboxFreshnessReplayTests: XCTestCase {
                     kind: .discussion, conversationSequence: 1)))
             let receipt = ConversationEvent(sequence: 2, binding: binding,
                 fact: .delivered(turn: ExactText(targetID)))
-            XCTAssertThrowsError(try store.restoreReferencedConversationTurn(target, for: receipt,
-                origin: ExactText("different-origin"), context: context))
             try store.restoreReferencedConversationTurn(target, for: receipt,
-                origin: ExactText("origin"), context: context)
+                origin: ExactText(sameOrigin ? "origin" : "different-origin"), context: context)
             try store.applyConversation(receipt, context: context)
+            let cacheRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: cacheRoot) }
+            let cacheURL = cacheRoot.appendingPathComponent("server-cache.json")
+            let cache = FileServerStateCache(identity: identity, fileURL: cacheURL)
+            try await cache.save(ServerStateCacheSnapshot.make(identity: identity,
+                from: store.snapshot(context: context), conversations: store.conversationSnapshot(context: context)))
             let reloaded = try ClientRepository(context: context, persistence: persistence)
+            let saved = try await FileServerStateCache(identity: identity, fileURL: cacheURL).load()
+            try reloaded.restoreCachedServerState(try XCTUnwrap(saved).attentionDomainState(for: identity), context: context)
             let thread = try XCTUnwrap(reloaded.conversationSnapshot(context: context).threads[key])
-            XCTAssertEqual(thread.turns.map(\.id), targetID == "2"
+            XCTAssertEqual(thread.turns.map(\.id), sameOrigin && targetID == "2"
                 ? [ExactText("1"), ExactText("2"), ExactText("3")]
-                : [ExactText("1"), ExactText("3"), ExactText("4")])
+                : [ExactText("1"), ExactText("3"), ExactText(targetID)],
+                "Only a confirmed shared origin feed orders opaque terminal and discussion IDs numerically.")
             XCTAssertEqual(thread.terminalTurn, ExactText("3"))
             XCTAssertEqual(try reloaded.conversationSnapshot(context: context).cursor, 2)
         }
