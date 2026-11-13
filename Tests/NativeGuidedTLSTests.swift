@@ -1755,6 +1755,8 @@ final class NativeGuidedTLSTests: XCTestCase {
     }
 
     private func exerciseReceiptCatchup(historyAvailable: Bool) async throws {
+        var phase = "installation identity"
+        defer { print("Receipt catch-up last phase: \(phase)") }
         let namespace = "Harklight.receipt-history-test." + UUID().uuidString
         let identity = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
         defer {
@@ -1782,6 +1784,7 @@ final class NativeGuidedTLSTests: XCTestCase {
         // Account a deliberately malformed history entry in this connection's
         // generation; the following receipt then requires a history lookup.
         let skippedHistory = #"{"v":1,"type":"conversation","conversation_seq":1,"sender_id":"author","message_id":"answered","origin":"origin","session_handle":"closed","request_revision":1,"kind":"revision","author":"person","event_id":"unusable-history"}"# + "\n"
+        phase = "local TLS relay setup"
         let relay = try LocalRelayWebSocket(expectedDevice: identity.deviceID) { text in
             guard let value = try? JSONValue.parse(Data(text.utf8)),
                   let kind = value.uniqueValue(named: "type")?.stringValue?.rawValue,
@@ -1827,7 +1830,9 @@ final class NativeGuidedTLSTests: XCTestCase {
             }
         }
         defer { relay.close() }
+        phase = "local TLS relay start"
         let port = try await relay.start()
+        phase = "installation session setup"
         let session = try URLSessionInstallationSession(profile: context,
             relayURL: XCTUnwrap(URL(string: "wss://localhost:\(port)/relay")),
             clientIdentity: TrustedKeychainIdentity(identity.value), trustedRootDER: relay.rootDER)
@@ -1836,18 +1841,22 @@ final class NativeGuidedTLSTests: XCTestCase {
         let cacheURL = cacheRoot.appendingPathComponent("server-cache.json")
         let cache = FileServerStateCache(identity: context.identity, fileURL: cacheURL)
         let core = try NativeRelayCore(store: store, context: context, session: session, serverStateCache: cache)
+        phase = "inbox and conversation catch-up"
         do {
             _ = try await core.resyncAndDrainOutbox()
         } catch {
+            XCTFail("Receipt catch-up failed with \(String(reflecting: type(of: error))): \(String(reflecting: error)); requests: \(requests.types.compactMap { $0 })")
             await core.deactivate()
             await session.close()
             throw error
         }
         await core.deactivate()
         await session.close()
+        phase = "restore accepted server cache"
         let restored = try ClientRepository(context: context, persistence: persistence)
         let saved = try await FileServerStateCache(identity: context.identity, fileURL: cacheURL).load()
         try restored.restoreCachedServerState(try XCTUnwrap(saved).attentionDomainState(for: context.identity), context: context)
+        phase = "verify restored conversation and ACK order"
         let snapshot = try restored.conversationSnapshot(context: context)
         let answered = RequestKey(accountScope: context.identity.personID,
             senderID: ExactText("author"), messageID: ExactText("answered"))
