@@ -105,8 +105,8 @@ final class InboxStockTabsUITests: XCTestCase {
         let lastFilteredResult = app.descendants(matching: .any)["sample-approval-0"]
         XCTAssertFalse(lastFilteredResult.exists && lastFilteredResult.isHittable,
                        "The final matching sample is not initially visible above the bottom filter.")
-        let tabBar = app.tabBars.firstMatch
-        XCTAssertTrue(tabBar.exists, app.debugDescription)
+        XCTAssertTrue(inboxTab.exists, app.debugDescription)
+        XCTAssertTrue(repliedTab.exists, app.debugDescription)
         var stationarySwipes = 0
         for _ in 0..<40 {
             guard lastFilteredResult.exists else {
@@ -115,7 +115,9 @@ final class InboxStockTabsUITests: XCTestCase {
                 continue
             }
             let resultFrame = lastFilteredResult.frame
-            if lastFilteredResult.isHittable && resultFrame.maxY <= tabBar.frame.minY {
+            let clearsMessageFilters = !resultFrame.intersects(inboxTab.frame) &&
+                !resultFrame.intersects(repliedTab.frame)
+            if lastFilteredResult.isHittable && clearsMessageFilters {
                 break
             }
             list.swipeUp()
@@ -134,8 +136,10 @@ final class InboxStockTabsUITests: XCTestCase {
         }
         XCTAssertTrue(lastFilteredResult.exists, app.debugDescription)
         XCTAssertTrue(lastFilteredResult.isHittable, app.debugDescription)
-        XCTAssertLessThanOrEqual(lastFilteredResult.frame.maxY, tabBar.frame.minY,
-                                 "The last filtered result clears the bottom message filter.")
+        XCTAssertFalse(lastFilteredResult.frame.intersects(inboxTab.frame),
+                       "The last filtered result clears the Inbox filter control.")
+        XCTAssertFalse(lastFilteredResult.frame.intersects(repliedTab.frame),
+                       "The last filtered result clears the Replied filter control.")
         XCTAssertTrue(inboxTab.isHittable, app.debugDescription)
         XCTAssertTrue(repliedTab.isHittable, app.debugDescription)
         attachScreenshot("Inbox filtered results above bottom message filter", from: app)
