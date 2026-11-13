@@ -1,10 +1,11 @@
 import AttentionDomain
+import HarklightNativeRelay
 import XCTest
 @testable import Harklight
 
 @MainActor
 final class SenderRevisionPresentationTests: XCTestCase {
-    func testAcceptedSenderUpdateRetainsEarlierChoicesTurnsAndQueuedAnswerBinding() throws {
+    func testAcceptedSenderUpdateRetainsEarlierChoicesTurnsAndQueuedAnswerBinding() async throws {
         let context = ProfileContext(identity: ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
             personID: ExactText("person"), deviceID: ExactText("reader")), transportMode: .relay)
         let persistence = MemoryPendingActionPersistence()
@@ -12,6 +13,15 @@ final class SenderRevisionPresentationTests: XCTestCase {
         let key = RequestKey(accountScope: context.identity.personID, senderID: ExactText("sender"), messageID: ExactText("same-item"))
         let oldPayload = try JSONValue.parse(Data(#"{"title":"Earlier wording","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"old","label":"Earlier choice","kind":"value","value":"old"}]}}"#.utf8))
         let newPayload = try JSONValue.parse(Data(#"{"title":"Current wording","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"new","label":"Current choice","kind":"value","value":"new"}]}}"#.utf8))
+        let cacheDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: cacheDirectory) }
+        let cacheURL = cacheDirectory.appendingPathComponent("server-cache.json")
+        let cache = FileServerStateCache(identity: context.identity, fileURL: cacheURL)
+        let confirmation = try await NativeRelayLifecycle.shared.confirmInProcessSessionForTesting(
+            store: domain, context: context,
+            session: ReplyCheckpointSession(identity: context.identity, key: key, payload: oldPayload),
+            serverStateCache: cache)
+        XCTAssertTrue(confirmation.relayConfirmed)
         try domain.apply(RelayEvent(sequence: 1, body: .delivery(StoredRequest(key: key, originalPayload: oldPayload), .message),
             conversation: RelayConversationMetadata(revision: 1, sessionHandle: ExactText("handle"), eventID: ExactText("1"))), context: context)
         let port = AttentionDomainPort(store: domain)
@@ -56,7 +66,13 @@ final class SenderRevisionPresentationTests: XCTestCase {
         XCTAssertEqual(retained.disposition, .lost)
         XCTAssertTrue(try domain.snapshot(context: context).outbox.isEmpty)
         XCTAssertThrowsError(try domain.saveDraft(oldDraft, selector: selector, context: context))
+        try await cache.save(ServerStateCacheSnapshot.make(identity: context.identity,
+            from: domain.snapshot(context: context), conversations: domain.conversationSnapshot(context: context)))
+        let cached = try await FileServerStateCache(identity: context.identity, fileURL: cacheURL).load()
         let restored = try ClientRepository(context: context, persistence: persistence)
+        XCTAssertTrue(try restored.conversationSnapshot(context: context).threads.isEmpty)
+        try restored.restoreCachedServerState(try XCTUnwrap(cached).attentionDomainState(for: context.identity),
+                                              context: context)
         XCTAssertEqual(try restored.conversationSnapshot(context: context).threads[key]?.acceptedUpdates,
                        [expectedUpdate])
         XCTAssertEqual(try restored.lookupIntent(receipt.intentID, context: context)?.operation, original.operation)
