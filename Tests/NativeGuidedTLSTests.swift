@@ -109,6 +109,18 @@ private final class MessageLinkRefreshPlan {
 /// request an optional certificate; that server seam needs server integration.
 @MainActor
 final class NativeGuidedTLSTests: XCTestCase {
+    private func confirmRequestForAction(_ store: ClientRepository, context: ProfileContext,
+                                         key: RequestKey, payload: JSONValue) async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let result = try await NativeRelayLifecycle.shared.confirmInProcessSessionForTesting(
+            store: store, context: context,
+            session: ReplyCheckpointSession(identity: context.identity, key: key, payload: payload),
+            serverStateCache: FileServerStateCache(identity: context.identity,
+                fileURL: directory.appendingPathComponent("server-cache.json")))
+        XCTAssertTrue(result.relayConfirmed)
+    }
+
     /// Run only with an isolated, preapproved fixture matching the deployed
     /// server. The fixture remains quiescent after seeding its ordinary message.
     /// Resources are copied into Tests/Fixtures before the unchanged wrapper runs;
@@ -698,7 +710,8 @@ final class NativeGuidedTLSTests: XCTestCase {
                           "A similar title cannot stand in for the linked sender/message identity.")
         XCTAssertFalse(live.submitFromUser(otherKey))
         let otherRequestWarning = try XCTUnwrap(live.actionError)
-        XCTAssertEqual(otherRequestWarning, "Complete the response before sending your answer.")
+        XCTAssertEqual(otherRequestWarning,
+                       "The relay could not be refreshed. Saved requests, answers and confirmed receipts remain on this device.")
 
         refreshPlan.step = 1
         await app.refreshLive()
@@ -923,7 +936,7 @@ final class NativeGuidedTLSTests: XCTestCase {
                        "Could not verify notification. Checking again while open.")
         let retained = try XCTUnwrap(live.inboxRows.first { $0.key == key })
         XCTAssertFalse(retained.belongsToReplied)
-        XCTAssertTrue(retained.canMarkSeen)
+        XCTAssertFalse(retained.canMarkSeen, "Retained rows do not authorize actions before relay confirmation.")
         XCTAssertEqual(live.request(for: key)?.informationalSeenStatus, .available)
         XCTAssertEqual(try persistence.load(identity: context.identity), before)
 
@@ -999,7 +1012,7 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertEqual(snapshot.requests.map(\.isResolved), [false, true, true])
     }
 
-    func testExplicitSeenRequiresCanonicalDescriptorAndConfirmsOnlyAuthorizedEvidence() throws {
+    func testExplicitSeenRequiresCanonicalDescriptorAndConfirmsOnlyAuthorizedEvidence() async throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
                                        personID: ExactText("person-seen"), deviceID: ExactText("device-seen"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
@@ -1015,6 +1028,7 @@ final class NativeGuidedTLSTests: XCTestCase {
         let legacyPayload = try JSONValue.parse(Data(#"{"title":"Legacy request"}"#.utf8))
         let misleadingLabelPayload = try JSONValue.parse(Data(#"{"title":"Still a request","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"seen","label":"Seen","kind":"value","value":"different"}]}}"#.utf8))
         _ = store.applyRelayEvent(RelayEvent(sequence: 1, body: .delivery(StoredRequest(key: seenKey, originalPayload: seenPayload), .message)), context: context)
+        try await confirmRequestForAction(store, context: context, key: seenKey, payload: seenPayload)
         _ = store.applyRelayEvent(RelayEvent(sequence: 2, body: .delivery(StoredRequest(key: legacyKey, originalPayload: legacyPayload), .message)), context: context)
         _ = store.applyRelayEvent(RelayEvent(sequence: 3, body: .delivery(StoredRequest(key: misleadingLabelKey, originalPayload: misleadingLabelPayload), .message)), context: context)
         _ = store.applyRelayEvent(RelayEvent(sequence: 4, body: .delivery(StoredRequest(key: remotelySeenKey, originalPayload: seenPayload), .message)), context: context)
@@ -1057,6 +1071,10 @@ final class NativeGuidedTLSTests: XCTestCase {
         try store.recordAcceptedOperation(receipt.intentID, operationID: receipt.opID,
                                           terminalSequence: 9, context: context)
         _ = store.applyRelayEvent(RelayEvent(sequence: 9, body: .terminal(seenKey, .answered, nil)), context: context)
+        try live.refreshFromDurableStore()
+        XCTAssertEqual(live.request(for: seenKey)?.informationalSeenStatus, .resolvedWithoutSeen,
+                       "An operation receipt alone cannot manufacture the server Seen value.")
+        try store.apply(RelayEvent(sequence: 9, body: .terminal(seenKey, .answered, seenValue)), context: context)
         try live.refreshFromDurableStore()
         XCTAssertEqual(live.request(for: seenKey)?.informationalSeenStatus, .confirmed)
 
@@ -1117,8 +1135,11 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertEqual(receipt.exactAnswer, seenAnswer)
         XCTAssertEqual(live.request(for: seenKey)?.informationalSeenStatus, .pending)
 
-        let secondHigh = try await core.resyncAndDrainOutbox()
-        XCTAssertEqual(secondHigh, 4)
+        let queuedHigh = try await core.resyncAndDrainOutbox()
+        XCTAssertEqual(queuedHigh, 3)
+        XCTAssertNil(session.sentOriginalOperation(), "Refresh must leave the queued Seen action unsent.")
+        try await core.sendOriginalOperationForUserTap(receipt.intentID)
+        XCTAssertEqual(try store.relayCursor(context: context), 4)
         XCTAssertEqual(session.acknowledgedSequences(), [3, 4],
                        "The checkpoint at 3 is ACKed separately; only the post-H terminal uses ordinary ACK.")
         let sent = try XCTUnwrap(session.sentOriginalOperation())
@@ -1448,6 +1469,7 @@ final class NativeGuidedTLSTests: XCTestCase {
             body: .delivery(StoredRequest(key: key, originalPayload: first), .message),
             conversation: RelayConversationMetadata(revision: 1, sessionHandle: ExactText("origin"))),
             context: context)
+        try await confirmRequestForAction(store, context: context, key: key, payload: first)
         try store.applyConversation(ConversationEvent(sequence: 1, binding: firstBinding,
             fact: .request(sessionHandle: ExactText("origin"), payload: first)), context: context)
         for (revision, payload, title) in [(UInt64(2), second, "Second wording"),
@@ -1464,7 +1486,7 @@ final class NativeGuidedTLSTests: XCTestCase {
             request: key).requests.first?.selector)
         let receipt = try answerPort.submitNoComment(context: answerPort.context,
             selector: selector, intentID: UUID())
-        let original = try XCTUnwrap(store.snapshot(context: context).outbox.first)
+        let original = try XCTUnwrap(store.lookupIntent(receipt.intentID, context: context))
         XCTAssertEqual(original.operationID, receipt.opID)
         XCTAssertEqual(original.requestRevision, 3)
         let directRequest = try JSONValue.parse(original.wireFrame)
@@ -3125,12 +3147,13 @@ final class NativeGuidedTLSTests: XCTestCase {
             StoredRequest(key: key, originalPayload: payload), .message),
             conversation: RelayConversationMetadata(revision: 1, sessionHandle: ExactText("session"))),
             context: context)
+        try await confirmRequestForAction(store, context: context, key: key, payload: payload)
         let port = AttentionDomainPort(store: store)
         let selector = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first?.selector)
         let originalReceipt = try port.submit(SubmitIntent(context: port.context, selector: selector,
                                                             intentID: UUID(),
                                                             inputs: [.compatibilityValue(action: ExactText("approve"))]))
-        let original = try XCTUnwrap(store.snapshot(context: context).outbox.first)
+        let original = try XCTUnwrap(store.lookupIntent(originalReceipt.intentID, context: context))
         XCTAssertEqual(originalReceipt.opID, original.operationID)
         XCTAssertEqual(original.requestRevision, 1)
 

@@ -46,7 +46,7 @@ final class SenderRevisionPresentationTests: XCTestCase {
         XCTAssertTrue(model.hasAcceptedUpdate(for: key))
         XCTAssertEqual(model.inboxRows.count, 1)
         XCTAssertEqual(model.inboxRows.first?.key, key)
-        XCTAssertTrue(model.inboxRows.first?.status.hasPrefix("Updated · ") == true)
+        XCTAssertTrue(model.inboxRows.first?.status.components(separatedBy: " · ").contains("Updated") == true)
         XCTAssertEqual(model.request(for: key)?.title, ExactText("Current wording"))
         let earlier = try XCTUnwrap(model.historicalAnswerDraft(for: key, revision: 1))
         XCTAssertEqual(earlier.title, ExactText("Earlier wording"))
@@ -75,6 +75,9 @@ final class SenderRevisionPresentationTests: XCTestCase {
                                               context: context)
         XCTAssertEqual(try restored.conversationSnapshot(context: context).threads[key]?.acceptedUpdates,
                        [expectedUpdate])
-        XCTAssertEqual(try restored.lookupIntent(receipt.intentID, context: context)?.operation, original.operation)
+        XCTAssertNil(try restored.lookupIntent(receipt.intentID, context: context),
+                     "The old revision is no longer an eligible unsent operation after the server replaces it.")
+        XCTAssertTrue(try restored.snapshot(context: context).outbox.isEmpty)
+        XCTAssertEqual(try restored.snapshot(context: context).requests[key]?.originalPayload, newPayload)
     }
 }
