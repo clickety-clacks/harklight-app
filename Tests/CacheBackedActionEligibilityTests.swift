@@ -1,5 +1,6 @@
 import AttentionDomain
 import Foundation
+import Observation
 import HarklightNativeRelay
 import XCTest
 @testable import Harklight
@@ -37,6 +38,7 @@ final class CacheBackedActionEligibilityTests: XCTestCase {
         }
         XCTAssertTrue(try domain.snapshot(context: context).intents.isEmpty)
         XCTAssertEqual(live.request(for: key)?.informationalSeenStatus, .available)
+        XCTAssertNotNil(live.actionError, "A rejected Seen tap must explain why it cannot proceed.")
         XCTAssertEqual(dismissals, 0, "A rejected Seen tap must keep the detail open instead of navigating as if submitted.")
     }
 
@@ -64,6 +66,36 @@ final class CacheBackedActionEligibilityTests: XCTestCase {
             XCTAssertTrue(LiveRequestDetail(request: request, store: scenario.live).canSubmitCurrentAnswer,
                           "The actual checkmark availability predicate must enable a confirmed valid reply.")
         }
+    }
+
+    func testRefreshingConfirmedInboxKeepsSeenAndReplyActionsAvailable() async throws {
+        try await withConfirmedColdLaunch { scenario in
+            scenario.live.beginRefresh()
+            defer { scenario.live.endRefresh() }
+            XCTAssertTrue(scenario.live.isRefreshing)
+            XCTAssertTrue(scenario.live.canSendToCurrentServer,
+                          "Refreshing must not hide actions on an already confirmed current inbox.")
+            XCTAssertTrue(try XCTUnwrap(scenario.live.inboxRows.first { $0.key == scenario.seen }).canMarkSeen)
+            XCTAssertTrue(try XCTUnwrap(scenario.live.inboxRows.first { $0.key == scenario.reply }).canNoComment)
+            let request = try XCTUnwrap(scenario.live.request(for: scenario.reply))
+            let session = scenario.live.replyEditorSession(for: request)
+            session.selectAction(ExactText("reply"), inputID: nil)
+            session.updateText("An answer during refresh", target: ReplyEditorTarget(inputID: nil, actionID: "reply"))
+            XCTAssertTrue(LiveRequestDetail(request: request, store: scenario.live).canSubmitCurrentAnswer)
+        }
+    }
+
+    func testConnectionInvalidationNotifiesActionEligibilityObservers() async throws {
+        let scenario = try await confirmedColdLaunch()
+        let changed = expectation(description: "Visible actions update when their connection is invalidated")
+        withObservationTracking {
+            XCTAssertTrue(scenario.live.canSendToCurrentServer)
+        } onChange: {
+            changed.fulfill()
+        }
+        await NativeRelayLifecycle.shared.deactivate()
+        XCTAssertFalse(scenario.live.canSendToCurrentServer)
+        await fulfillment(of: [changed], timeout: 1)
     }
 
     private func withConfirmedColdLaunch(_ check: (Scenario) throws -> Void) async throws {
