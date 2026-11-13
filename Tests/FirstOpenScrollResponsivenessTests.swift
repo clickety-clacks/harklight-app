@@ -133,6 +133,7 @@ final class FirstOpenScrollResponsivenessTests: XCTestCase {
             fact: .turn(question)), context: context)
         try domain.applyConversation(ConversationEvent(sequence: 3, binding: binding,
             fact: .turn(reply)), context: context)
+        try domain.finishConversationReplay(at: 3, chatReadPositions: [], context: context)
         let store = try LivePresentationStore(localFixtureStore: domain, context: context)
 
         let writesBefore = persistence.writes
@@ -141,7 +142,15 @@ final class FirstOpenScrollResponsivenessTests: XCTestCase {
             store.markConversationRead(request, through: reply.id)
         }
         await waitForWriteCount(persistence, atLeast: writesBefore + 1)
-        await waitUntil { !store.hasUnreadAgentReply(request) }
+        XCTAssertTrue(store.hasUnreadAgentReply(request),
+                      "A queued read request must not replace the server read position.")
+        let pending = try XCTUnwrap(domain.conversationSnapshot(context: context).pendingChatReadPositions.first)
+        XCTAssertEqual(pending.readThroughConversationSequence, 3)
+        try domain.applyConversation(ConversationEvent(sequence: 4,
+            binding: ConversationBinding(request: request, revision: 0),
+            fact: .readPosition(eventID: ExactText("read-3"), readThroughConversationSequence: 3)), context: context)
+        try store.refreshFromDurableStore()
+        XCTAssertFalse(store.hasUnreadAgentReply(request))
 
         XCTAssertLessThan(mainActorDelay, persistenceDelay * 1_000 * 0.5,
                           "Opening a visible reply must not hold the detail scroll's main actor.")

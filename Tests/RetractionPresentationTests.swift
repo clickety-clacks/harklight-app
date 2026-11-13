@@ -73,10 +73,9 @@ final class RetractionPresentationTests: XCTestCase {
             try domain.apply(lifecycle, context: context)
             try domain.applyConversation(fact, context: context)
             let thread = try XCTUnwrap(domain.conversationSnapshot(context: context).threads[key])
-            let savedAnswer = try XCTUnwrap(port.inspectAnswerDraft(context: port.context, request: key, revision: 1))
-            XCTAssertEqual(savedAnswer.title, ExactText("Original wording"))
-            XCTAssertEqual(savedAnswer.draft.compatibility.selectedActionID, ExactText("keep"))
-            XCTAssertNil(savedAnswer.selector)
+            XCTAssertNil(try port.inspectAnswerDraft(context: port.context, request: key, revision: 1),
+                         "A terminal server state drops the stale unsent answer draft.")
+            XCTAssertEqual(thread.currentQuestionPayload.value(named: "title")?.stringValue, ExactText("Original wording"))
             XCTAssertEqual(thread.turns.filter { $0.kind == .terminal }.count, 1)
             XCTAssertEqual(thread.terminalTurn, ExactText("3"))
             XCTAssertEqual(thread.retraction?.terminalSequence, 2)
@@ -111,8 +110,7 @@ final class RetractionPresentationTests: XCTestCase {
             XCTAssertTrue(model.isRetracted(key))
             XCTAssertTrue(model.conversation(for: key)?.isRetracted == true)
             XCTAssertEqual(try domain.snapshot(context: context).requests.count, 1)
-            XCTAssertEqual(try XCTUnwrap(port.inspectAnswerDraft(context: port.context, request: key, revision: 1))
-                .draft.compatibility.selectedActionID, ExactText("keep"))
+            XCTAssertNil(try port.inspectAnswerDraft(context: port.context, request: key, revision: 1))
             XCTAssertEqual(try domain.lookupIntent(receipt.intentID, context: context), retained)
 
             let relaunchedDomain = try await reopenWithServerCache(domain, context: context, persistence: persistence)
@@ -238,11 +236,11 @@ final class RetractionPresentationTests: XCTestCase {
         let selector = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first?.selector)
         let receipt = try port.submit(SubmitIntent(context: port.context, selector: selector,
             intentID: UUID(), inputs: [.compatibilityValue(action: ExactText("keep"))]))
+        try domain.recordAnswerRefusedByRetraction(receipt.intentID, operationID: receipt.opID,
+            retractedAtMilliseconds: Self.retractedAt, context: context)
         try domain.applyConversation(ConversationEvent(sequence: 3, binding: binding,
             fact: .retraction(turn: ExactText("not-accepted-retracted"), terminalSequence: 1),
             retractedAtMilliseconds: Self.retractedAt), context: context)
-        try domain.recordAnswerRefusedByRetraction(receipt.intentID, operationID: receipt.opID,
-            retractedAtMilliseconds: Self.retractedAt, context: context)
 
         let disconnected = try LivePresentationStore(disconnectedStore: domain, context: context)
         let shown = try XCTUnwrap(disconnected.request(for: key))
@@ -558,6 +556,9 @@ private final class RefusalSession: AuthenticatedInboxPagingSession, @unchecked 
     func resync(_ request: Data, consume: @Sendable (Data) async throws -> Void) async throws {
         try await consume(Data(#"{"v":1,"type":"ok","ref":"native-sync"}"#.utf8))
         let high = sentOperationIDs.isEmpty ? 1 : 2
+        let frame = try JSONSerialization.jsonObject(with: request) as? [String: Any]
+        let since = (frame?["since"] as? NSNumber)?.uint64Value ?? 0
+        if high == 2 && since < 2 { try await consume(terminal) }
         try await consume(Data("{\"v\":1,\"type\":\"resynced\",\"seq\":\(high)}".utf8))
     }
     func acknowledge(_ request: Data) async throws {}
