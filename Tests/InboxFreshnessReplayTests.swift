@@ -26,6 +26,8 @@ private final class InboxFreshnessRelaySession: AuthenticatedInboxPagingSession,
     var ordinaryFrames: [Data] = []
     var inboxStartItemsJSON: String?
     var inboxStartHighWater: UInt64 = 0
+    var inboxStartNextCursor: String?
+    var inboxOlderItemsJSON: String?
     var conversationFrames: [Data] = []
     var conversationFrameBatches: [[Data]] = []
     var consumedConversationFrames: [Data] = []
@@ -52,8 +54,13 @@ private final class InboxFreshnessRelaySession: AuthenticatedInboxPagingSession,
         let value = try JSONValue.parse(request)
         if value.uniqueValue(named: "type")?.stringValue?.rawValue == "inbox_start",
            let items = inboxStartItemsJSON {
-            let reply = #"{"v":1,"type":"ok","ref":"\#(ref)","paging_version":1,"snapshot_id":"receipt-snapshot-h\#(inboxStartHighWater)","high_water":\#(inboxStartHighWater),"items":\#(items),"next_cursor":null,"receipt_cursor":null}"#
+            let nextCursor = inboxStartNextCursor.map { JSONValue.string(ExactText($0)).canonicalJSON } ?? "null"
+            let reply = #"{"v":1,"type":"ok","ref":"\#(ref)","paging_version":1,"snapshot_id":"receipt-snapshot-h\#(inboxStartHighWater)","high_water":\#(inboxStartHighWater),"items":\#(items),"next_cursor":\#(nextCursor),"receipt_cursor":null}"#
             return Data(reply.utf8)
+        }
+        if value.uniqueValue(named: "type")?.stringValue?.rawValue == "inbox_page",
+           let items = inboxOlderItemsJSON {
+            return Data(#"{"v":1,"type":"ok","ref":"\#(ref)","paging_version":1,"snapshot_id":"receipt-snapshot-h\#(inboxStartHighWater)","high_water":\#(inboxStartHighWater),"items":\#(items),"next_cursor":null}"#.utf8)
         }
         return try await emptyInboxReply(request, ref: ref)
     }
@@ -405,15 +412,11 @@ final class InboxFreshnessReplayTests: XCTestCase {
                 senderID: ExactText("author"), messageID: ExactText("answered"))
             let open = RequestKey(accountScope: identity.personID,
                 senderID: ExactText("author"), messageID: ExactText("open"))
-            // Explicit missing-local-history precondition. The retained receipt
-            // is already durable, but waits for its request's first loaded page.
-            _ = try store.advanceConversationCursor(overIgnoredUpdateAt: 1, context: context)
-            try store.applyConversation(ConversationEvent(sequence: 2,
-                binding: ConversationBinding(request: answered, revision: 1),
-                fact: .delivered(turn: ExactText("2"))), context: context)
             let session = InboxFreshnessRelaySession(identity: identity)
             session.inboxStartHighWater = 3
-            session.inboxStartItemsJSON = #"""
+            session.inboxStartItemsJSON = "[]"
+            session.inboxStartNextCursor = "older"
+            session.inboxOlderItemsJSON = #"""
                 [{"acceptance":{"v":1,"type":"delivery","seq":1,"sender_id":"author","message_id":"answered","origin":"origin","as":"message","message":{"title":"Answered"},"session_handle":"closed","request_revision":1,"event_id":"1"},
                   "terminal":{"v":1,"type":"lifecycle","seq":2,"sender_id":"author","message_id":"answered","origin":"origin","state":"answered","author":"person","terminal_kind":"no_comment","answer_outcome":{"kind":"no_comment"},"event_id":"3","request_revision":1}},
                  {"acceptance":{"v":1,"type":"delivery","seq":3,"sender_id":"author","message_id":"open","origin":"origin","as":"message","message":{"title":"Open"},"session_handle":"open","request_revision":1,"event_id":"4"}}]
@@ -429,39 +432,56 @@ final class InboxFreshnessReplayTests: XCTestCase {
             let current = data(#"{"v":1,"type":"conversation","conversation_seq":3,"sender_id":"author","message_id":"open","origin":"origin","session_handle":"open","request_revision":2,"kind":"revision","author":"origin","event_id":"5","message":{"title":"Current"}}"#)
             let end = data(#"{"v":1,"type":"conversation_resynced","conversation_seq":3}"#)
             let historyFrames = [accepted, discussion, receipt, current, end]
+            let skippedHistory = data(#"{"v":1,"type":"conversation","conversation_seq":1,"sender_id":"author","message_id":"answered","origin":"origin","session_handle":"closed","request_revision":0,"kind":"revision","author":"origin","event_id":"unusable-history"}"#)
+            let initialHistory = [accepted, skippedHistory, receipt,
+                data(#"{"v":1,"type":"conversation_resynced","conversation_seq":2}"#)]
             session.conversationFrameBatches = mode == "write-failure"
-                ? [historyFrames, historyFrames, [accepted, current, end], [accepted, end]]
-                : [historyFrames, [accepted, current, end], [accepted, end]]
-            if mode == "refused" { session.conversationOpenErrors[1] = .serverRejected }
+                ? [initialHistory, historyFrames, historyFrames, [accepted, current, end], [accepted, end]]
+                : [initialHistory, historyFrames, [accepted, current, end], [accepted, end]]
+            if mode == "refused" { session.conversationOpenErrors[2] = .serverRejected }
             if mode == "write-failure" {
                 session.beforeConversationFrame = { frame in
-                    if (try? JSONValue.parse(frame).uniqueValue(named: "type")?.stringValue) == ExactText("conversation_resynced") {
+                    if let value = try? JSONValue.parse(frame),
+                       value.uniqueValue(named: "type")?.stringValue == ExactText("conversation_resynced"),
+                       value.uniqueValue(named: "conversation_seq")?.integerValue == 3 {
                         persistence.failNextCommit()
                     }
                 }
             }
             let diagnostics = InboxFreshnessDiagnosticCollector()
+            let cacheRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: cacheRoot) }
+            let cacheURL = cacheRoot.appendingPathComponent("server-cache.json")
+            let cache = FileServerStateCache(identity: identity, fileURL: cacheURL)
             let core = try NativeRelayCore(store: store, context: context, session: session,
-                onDiagnostic: { diagnostics.append($0) })
+                serverStateCache: cache, onDiagnostic: { diagnostics.append($0) })
+            _ = try await core.resyncAndDrainOutbox()
+            XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, 2)
             if mode == "write-failure" {
-                do { _ = try await core.resyncAndDrainOutbox(); XCTFail("Page commit must fail") }
+                do { _ = try await core.fetchNextInboxPage(); XCTFail("Page commit must fail") }
                 catch let error as AttentionStoreError {
                     guard case .persistence = error else { return XCTFail("Unexpected error") }
                 }
                 XCTAssertNil(try store.conversationSnapshot(context: context).threads[answered])
                 XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, 2)
-                XCTAssertTrue(session.conversationACKs.isEmpty)
-                XCTAssertFalse(try store.snapshot(context: context).inboxCandidate?.hasInitialPage ?? true)
-                XCTAssertFalse(diagnostics.events.contains { $0.causeCode == "conversation_message_skipped" })
+                XCTAssertEqual(try session.conversationACKs.map {
+                    try JSONValue.parse($0).uniqueValue(named: "conversation_seq")?.integerValue
+                }, [2], "A failed page must not acknowledge the recovered suffix.")
+                XCTAssertEqual(try store.snapshot(context: context).inboxCheckpoint?.nextCursor, "older")
+                XCTAssertFalse(diagnostics.events.contains {
+                    $0.causeCode == "conversation_message_skipped" && $0.conversationSequence == 2
+                })
                 session.beforeConversationFrame = nil
-                _ = try await core.resyncAndDrainOutbox()
+                _ = try await core.fetchNextInboxPage()
                 XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, 3)
                 XCTAssertEqual(try store.conversationSnapshot(context: context).threads[answered]?
                     .facts[ExactText("2")]?.delivered, true,
                     "A failed page write must not consume restoration or erase the held receipt")
             } else {
-                _ = try await core.resyncAndDrainOutbox()
+                _ = try await core.fetchNextInboxPage()
                 let reloaded = try ClientRepository(context: context, persistence: persistence)
+                let saved = try await FileServerStateCache(identity: identity, fileURL: cacheURL).load()
+                try reloaded.restoreCachedServerState(try XCTUnwrap(saved).attentionDomainState(for: identity), context: context)
                 let snapshot = try reloaded.conversationSnapshot(context: context)
                 XCTAssertEqual(snapshot.cursor, 3)
                 XCTAssertEqual(snapshot.threads[answered]?.facts[ExactText("2")]?.delivered,
@@ -469,11 +489,12 @@ final class InboxFreshnessReplayTests: XCTestCase {
                 let presentation = try LivePresentationStore(store: reloaded, context: context)
                 XCTAssertTrue(try XCTUnwrap(presentation.inboxRow(for: answered)).belongsToReplied)
                 XCTAssertEqual(presentation.request(for: open)?.title, ExactText("Current"))
-                XCTAssertEqual(try session.conversationOpens.prefix(2).map {
+                XCTAssertEqual(try session.conversationOpens.prefix(3).map {
                     try JSONValue.parse($0).uniqueValue(named: "since")?.integerValue
-                }, [0, 2])
-                XCTAssertEqual(diagnostics.events.contains { $0.causeCode == "conversation_message_skipped" },
-                    mode != "matching")
+                }, [0, 0, 2])
+                XCTAssertEqual(diagnostics.events.contains {
+                    $0.causeCode == "conversation_message_skipped" && $0.conversationSequence == 2
+                }, mode != "matching")
             }
             await core.deactivate()
         }
