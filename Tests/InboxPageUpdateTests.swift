@@ -119,11 +119,19 @@ final class InboxPageUpdateTests: XCTestCase {
         XCTAssertNil(try f.current().inboxCheckpoint?.nextCursor)
     }
 
+    func testServerPageWithMoreThanTwentyItemsIsAccepted() throws {
+        let f = try PageFixture()
+        defer { f.remove() }
+        try f.save((2...22).map { f.item($0) })
+        let snapshot = try f.current()
+        XCTAssertEqual(snapshot.inboxSourceOrder, (1...22).map { f.key($0) })
+        XCTAssertEqual(snapshot.inboxCheckpoint?.loadedKeys, Set((1...22).map { f.key($0) }))
+    }
+
     func testInvalidPageLeavesAcceptedProjectionUnchanged() throws {
         let f = try PageFixture()
         defer { f.remove() }
         let bytes = try f.persistence.load(identity: f.context.identity)
-        XCTAssertThrowsError(try f.save((2...22).map { f.item($0) }))
         XCTAssertThrowsError(try f.save([f.item(2), f.item(2)]))
         XCTAssertThrowsError(try f.save([f.item(1)]))
         XCTAssertThrowsError(try f.save([], next: "last"))

@@ -1291,7 +1291,7 @@ final class NativeGuidedTLSTests: XCTestCase {
         let sending = try URLSessionInstallationSession(profile: context, relayURL: url,
             clientIdentity: TrustedKeychainIdentity(identity.value), trustedRootDER: relay.rootDER)
         let heldAck = Task {
-            try await replay.acknowledge(Data(#"{"v":1,"type":"ack","seq":1,"ref":"native-ack"}"#.utf8))
+            try await replay.acknowledge(Data(#"{"v":1,"type":"ack","seq":1,"ref":"native-ack"}"#.utf8) + Data([0x0A]))
         }
         await fulfillment(of: [acknowledgementArrived], timeout: 5)
         let sendsCompleted = expectation(description: "Both send responses complete before replay ACK")

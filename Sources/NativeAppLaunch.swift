@@ -1425,15 +1425,14 @@ final class LivePresentationStore {
     }
     func canEditDiscussionDraft(for key: RequestKey) -> Bool {
         guard !isReadOnly, conversationThreads[key] != nil else { return false }
-        if profileContext.transportMode == .relay,
-           attentionStore.requiresConfirmedServerProjection,
-           !canUseCurrentServerState(for: key) {
-            return true
-        }
+        // Editing a local draft neither sends it nor reopens a closed chat.
+        // Preserve that distinction even when the closed state came from cache.
+        if profileContext.transportMode == .relay { return true }
         return conversationThreads[key]?.allowsDiscussion == true
     }
     func canSendDiscussion(for key: RequestKey) -> Bool {
-        canSendToCurrentServer && conversationThreads[key]?.allowsDiscussion == true
+        !isReadOnly && (isLocalExample || canSendToCurrentServer) &&
+            conversationThreads[key]?.allowsDiscussion == true
     }
     @ObservationIgnored var notificationProjectionDidChange: (() -> Void)?
     @ObservationIgnored var confirmedRelayRefresh: (() -> Void)?
