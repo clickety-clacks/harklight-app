@@ -52,6 +52,51 @@ jobs:
             HarklightConversationUITests
         run: Scripts/verify.sh test
 
+  ios-ipad-layout-tests:
+    name: iOS iPad layout tests
+    runs-on: xcode-27
+    timeout-minutes: 120
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Select an available iPad simulator
+        run: |
+          xcrun simctl list devices available --json | python3 -c '
+          import json, os, re, sys
+
+          devices = []
+          for runtime, entries in json.load(sys.stdin)["devices"].items():
+              version = re.search(r"iOS-(\d+)(?:-(\d+))?", runtime)
+              if not version or int(version.group(1)) < 27:
+                  continue
+              runtime_version = (int(version.group(1)), int(version.group(2) or 0))
+              for device in entries:
+                  name = device.get("name", "")
+                  if device.get("isAvailable") and name.startswith("iPad"):
+                      devices.append((runtime_version, name, device.get("udid")))
+
+          devices.sort(key=lambda item: (item[0], "iPad Pro" in item[1], item[1]), reverse=True)
+          if not devices or not devices[0][2]:
+              sys.exit("No available iPad simulator on iOS 27 or newer.")
+
+          runtime, name, device_id = devices[0]
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env_file:
+              env_file.write(f"HARKLIGHT_SIMULATOR_ID={device_id}\n")
+          print(f"Selected {name} on iOS {runtime[0]}.{runtime[1]} for regular-width UI tests.")
+          '
+
+      - name: Test layout selectors on regular-width iPad
+        env:
+          HARKLIGHT_ONLY_TESTING: >-
+            HarklightUITests/AdaptiveDuoNavigationUITests/testLandscapeSelectionKeepsListAndDetailVisibleAcrossMessages
+            HarklightUITests/AdaptiveDuoNavigationUITests/testSelectionFromActualOverlaidListOpensDetailAndDismissesList
+            HarklightConversationUITests/ConversationSampleUITests/testPriorityRowsAndNewMessageAreaRenderIn250PointListColumn
+        run: Scripts/verify.sh test
+
   native-host-tests:
     name: NativeHost tests
     runs-on: xcode-27
