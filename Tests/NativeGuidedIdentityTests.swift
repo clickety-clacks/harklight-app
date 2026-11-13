@@ -44,8 +44,9 @@ final class NativeGuidedIdentityTests: XCTestCase {
 
     func testExistingOneYearCertificateIsReissuedForTheSameDeviceKey() throws {
         let namespace = "Harklight.guided-identity-test." + UUID().uuidString
-        defer { removeTestIdentity(namespace) }
-        let store = NativeInstallationIdentityStore(namespace: namespace)
+        let keyNamespace = namespace + ".key." + UUID().uuidString
+        defer { removeTestIdentity(keyNamespace) }
+        let store = NativeInstallationIdentityStore(namespace: keyNamespace)
         let original = try store.loadOrCreate()
 
         var retainedPrivateKey: SecKey?
@@ -71,11 +72,21 @@ final class NativeGuidedIdentityTests: XCTestCase {
         ]
         XCTAssertEqual(SecItemAdd(legacyAttributes as CFDictionary, nil), errSecSuccess)
 
-        let renewed = try store.loadOrCreate()
+        let record = NativeEnrollmentRecord(host: "relay.example", enrollmentPort: 18444,
+                                            relayPort: 18443, trustedRootDER: Data(),
+                                            identityLabel: original.label, deviceID: original.deviceID,
+                                            approvalCode: "ABCDEFGH", statusSecret: "secret",
+                                            expiresAt: 1, statusExpiresAt: 2, personID: "person")
+        let renewed = try NativeEnrollmentStore(service: namespace).material(from: record)
         let expectedNotAfter = Data([0x18, 0x0f]) + Data("99991231235959Z".utf8)
-        XCTAssertNotNil(renewed.certificateDER.range(of: expectedNotAfter))
-        XCTAssertEqual(renewed.deviceID, original.deviceID)
-        XCTAssertNotEqual(renewed.certificateDER, legacyDER)
+        var renewedCertificate: SecCertificate?
+        XCTAssertEqual(SecIdentityCopyCertificate(renewed.keychainIdentity, &renewedCertificate), errSecSuccess)
+        let renewedDER = SecCertificateCopyData(try XCTUnwrap(renewedCertificate)) as Data
+        XCTAssertNotNil(renewedDER.range(of: expectedNotAfter))
+        XCTAssertEqual(renewed.context.identity.personID.rawValue, "person")
+        XCTAssertEqual(renewed.context.identity.deviceID.rawValue, record.deviceID)
+        XCTAssertNotEqual(renewedDER, legacyDER)
+        XCTAssertEqual(DeviceCertificateBinding.fingerprint(renewedDER), record.deviceID)
     }
 
     private func removeTestIdentity(_ namespace: String) {

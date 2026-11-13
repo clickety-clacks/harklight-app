@@ -27,7 +27,17 @@ struct NativeInstallationIdentityStore {
     }
 
     func loadOrCreate() throws -> NativeInstallationIdentity {
-        let privateKey = try retainedPrivateKey()
+        try load(creatingIfMissing: true)
+    }
+
+    /// Loads the enrolled key and renews its certificate when needed without
+    /// creating a replacement key or identity for an existing installation.
+    func loadExisting() throws -> NativeInstallationIdentity {
+        try load(creatingIfMissing: false)
+    }
+
+    private func load(creatingIfMissing: Bool) throws -> NativeInstallationIdentity {
+        let privateKey = try retainedPrivateKey(creatingIfMissing: creatingIfMissing)
         guard let publicKey = SecKeyCopyPublicKey(privateKey),
               let publicDER = SecKeyCopyExternalRepresentation(publicKey, nil) as Data? else {
             throw NativeEnrollmentError.invalidIdentity
@@ -54,6 +64,7 @@ struct NativeInstallationIdentityStore {
                                                      replacingExisting: true)
             }
         } else if status == errSecItemNotFound {
+            guard creatingIfMissing else { throw NativeEnrollmentError.invalidIdentity }
             certificate = try retainCertificate(publicKeyDER: publicDER,
                                                  privateKey: privateKey,
                                                  label: label,
@@ -133,7 +144,7 @@ struct NativeInstallationIdentityStore {
         return certificateDER.range(of: DER.time(certificateNotAfter)) != nil
     }
 
-    private func retainedPrivateKey() throws -> SecKey {
+    private func retainedPrivateKey(creatingIfMissing: Bool) throws -> SecKey {
         let tag = Data(namespace.utf8)
         let query: [String: Any] = [
             kSecClass as String: kSecClassKey,
@@ -151,6 +162,7 @@ struct NativeInstallationIdentityStore {
         guard status == errSecItemNotFound else {
             throw InstallationIdentityFailure.keychain(operation: "load private key", status: status)
         }
+        guard creatingIfMissing else { throw NativeEnrollmentError.invalidIdentity }
         let attributes: [String: Any] = [
             kSecAttrKeyType as String: kSecAttrKeyTypeRSA,
             kSecAttrKeySizeInBits as String: 2048,

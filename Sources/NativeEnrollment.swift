@@ -321,8 +321,20 @@ struct NativeEnrollmentStore {
     func material(from record: NativeEnrollmentRecord) throws -> NativeInstallationMaterial {
         guard let personID = record.personID,
               !personID.isEmpty,
-              let identity = identity(label: record.identityLabel),
               let relayURL = URL(string: "wss://\(record.host):\(record.relayPort)/relay") else {
+            throw NativeEnrollmentError.invalidIdentity
+        }
+        let identity: SecIdentity
+        if let namespace = guidedIdentityNamespace(for: record.identityLabel) {
+            let installation = try NativeInstallationIdentityStore(namespace: namespace).loadExisting()
+            guard installation.label == record.identityLabel,
+                  installation.deviceID == record.deviceID else {
+                throw NativeEnrollmentError.invalidIdentity
+            }
+            identity = installation.value
+        } else if let retained = identity(label: record.identityLabel) {
+            identity = retained
+        } else {
             throw NativeEnrollmentError.invalidIdentity
         }
         var certificate: SecCertificate?
@@ -340,6 +352,12 @@ struct NativeEnrollmentStore {
                                           relayURL: relayURL,
                                           keychainIdentity: identity,
                                           trustedRootDER: record.trustedRootDER)
+    }
+
+    private func guidedIdentityNamespace(for label: String) -> String? {
+        let certificateSuffix = ".certificate"
+        guard label.hasPrefix(service + ".key."), label.hasSuffix(certificateSuffix) else { return nil }
+        return String(label.dropLast(certificateSuffix.count))
     }
 
     func retainApprovedGuided(_ record: NativeEnrollmentRecord,
