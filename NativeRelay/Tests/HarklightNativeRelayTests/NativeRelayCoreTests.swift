@@ -1245,7 +1245,12 @@ final class NativeRelayCoreTests: XCTestCase {
         let firstSession = Session(identity)
         firstSession.frames = [start] + events + [end]
         firstSession.interruptAfterFrames = 6
-        let firstCore = try NativeRelayCore(store: store, context: context, session: firstSession)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let cacheURL = directory.appendingPathComponent("cache.json")
+        let cache = FileServerStateCache(identity: identity, fileURL: cacheURL)
+        let firstCore = try NativeRelayCore(store: store, context: context, session: firstSession,
+                                            serverStateCache: cache)
         do {
             _ = try await firstCore.resyncAndDrainOutbox()
             XCTFail("An interrupted replay cannot be confirmed as complete.")
@@ -1259,13 +1264,27 @@ final class NativeRelayCoreTests: XCTestCase {
 
         let restartedContext = ProfileContext(identity: identity, transportMode: .relay)
         let restarted = try ClientRepository(context: restartedContext, persistence: persistence)
+        let savedPrefix = try await FileServerStateCache(identity: identity, fileURL: cacheURL).load()
+        let prefix = try XCTUnwrap(savedPrefix)
+        XCTAssertEqual(prefix.cursor, 5)
+        XCTAssertEqual(prefix.requests.count, 5,
+                       "The durable prefix contains the message bodies belonging to its cursor, despite hidden replay UI.")
+        try restarted.restoreCachedServerState(prefix.attentionDomainState(for: identity), context: restartedContext)
         let secondSession = Session(identity)
+        secondSession.snapshotHighWater = 5
+        secondSession.snapshotItems = try events.prefix(5).map {
+            .object([JSONMember(key: ExactText("acceptance"), value: try JSONValue.parse($0))])
+        }
         secondSession.frames = [start] + Array(events.dropFirst(5)) + [end]
         let secondCore = try NativeRelayCore(store: restarted,
                                              context: restartedContext,
-                                             session: secondSession)
+                                             session: secondSession, serverStateCache: cache)
         let high = try await secondCore.resyncAndDrainOutbox()
         XCTAssertEqual(high, 9)
+        let replayRequest = try XCTUnwrap(secondSession.requests.compactMap { try? JSONValue.parse($0) }
+            .first { $0.uniqueValue(named: "type")?.stringValue?.rawValue == "inbox_attach" })
+        XCTAssertEqual(replayRequest.uniqueValue(named: "since")?.integerValue, 5,
+                       "Reconnect asks for the suffix after the durable prefix, not a replay from zero.")
         let visible = AttentionDomainPort(store: restarted)
         XCTAssertEqual(try visible.observe(context: visible.context).requests.count, 9)
         XCTAssertEqual(secondSession.acknowledgements.count, 1)

@@ -1536,7 +1536,7 @@ public actor NativeRelayCore {
     }
 
     private func consumeInboxReplay(_ frame: Data, ref: String,
-                                    snapshotID: String, highWater: UInt64) throws {
+                                    snapshotID: String, highWater: UInt64) async throws {
         try validate()
         guard var replay = activeInboxReplay, replay.high == nil else {
             throw NativeRelayCoreError.invalidReplay
@@ -1586,6 +1586,7 @@ public actor NativeRelayCore {
             return
         }
         activeInboxReplay = replay
+        try await saveServerStateCache()
     }
 
     private func replayConversationAndAcknowledge(using transport: any AuthenticatedConversationSession,
@@ -1832,7 +1833,7 @@ public actor NativeRelayCore {
         }
     }
 
-    private func consumeConversationReplay(_ frame: Data) throws {
+    private func consumeConversationReplay(_ frame: Data) async throws {
         try validate()
         guard var replay = conversationReplay, replay.high == nil else { throw NativeRelayCoreError.invalidReplay }
         let wire = try ConversationWire(profile: context, endpointHost: session.relayEndpointHost)
@@ -1893,6 +1894,7 @@ public actor NativeRelayCore {
                 }
                 replay.expected = sequence
                 conversationReplay = replay
+                if !replay.historyOnly && replay.recoveryReceipt == nil { try await saveServerStateCache() }
                 return
             }
             switch update {
@@ -1983,6 +1985,7 @@ public actor NativeRelayCore {
             }
         }
         conversationReplay = replay
+        if !replay.historyOnly && replay.recoveryReceipt == nil { try await saveServerStateCache() }
     }
 
     /// Message rejection can be accounted for; a failed durable write, stale
@@ -2472,7 +2475,7 @@ public actor NativeRelayCore {
     }
 
     private func saveServerStateCache(cursorOverride: UInt64? = nil) async throws {
-        let inbox = try store.snapshot(context: context)
+        let inbox = try store.serverCacheSnapshot(context: context)
         let conversations = try store.conversationSnapshot(context: context)
         let snapshot = ServerStateCacheSnapshot.make(identity: context.identity, from: inbox,
                                                       conversations: conversations,

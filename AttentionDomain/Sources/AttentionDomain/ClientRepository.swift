@@ -215,6 +215,8 @@ public final class ClientRepository: @unchecked Sendable {
         let keys = Set(cached.requests.keys)
             .union(cached.remoteStates.keys)
             .union(cached.conversations.keys)
+            .union(cached.inboxReferences.keys)
+            .union(cached.pendingRelayOverlays.values.compactMap { Self.requestKey(in: $0) })
         guard keys.allSatisfy({ $0.accountScope == context.identity.personID }) else {
             throw AttentionStoreError.wrongAccount
         }
@@ -232,8 +234,8 @@ public final class ClientRepository: @unchecked Sendable {
         next.inboxCandidate = nil
         next.cachedInboxCurrentKeys = cached.currentRequestKeys
         next.inboxView = cached.inboxView
-        next.pendingRelayOverlays = nil
-        next.inboxReferences = nil
+        next.pendingRelayOverlays = cached.pendingRelayOverlays
+        next.inboxReferences = cached.inboxReferences
 
         var conversation = ConversationState()
         conversation.cursor = cached.conversationCursor
@@ -2547,15 +2549,25 @@ public final class ClientRepository: @unchecked Sendable {
     }
 
     public func snapshot(context suppliedContext: ProfileContext) throws -> AttentionStoreSnapshot {
+        try snapshot(context: suppliedContext, published: true)
+    }
+
+    /// Cache the validated contiguous prefix, not the older view retained for
+    /// presentation while replay is active. Its bodies must match its cursor.
+    public func serverCacheSnapshot(context suppliedContext: ProfileContext) throws -> AttentionStoreSnapshot {
+        try snapshot(context: suppliedContext, published: false)
+    }
+
+    private func snapshot(context suppliedContext: ProfileContext, published: Bool) throws -> AttentionStoreSnapshot {
         lock.lock()
         defer { lock.unlock() }
         try validate(suppliedContext)
-        let publishedRequests = (state.replayPublishedRequests ?? state.requests).mapValues { original in
+        let publishedRequests = (published ? (state.replayPublishedRequests ?? state.requests) : state.requests).mapValues { original in
             effectiveRequest(for: original.key) ?? original
         }
         let visibleDrafts: [RequestKey: RequestDraft]
         let visibleSessions: [RequestKey: RequestSession]
-        if state.replayPublishedRequests == nil {
+        if !published || state.replayPublishedRequests == nil {
             // Outside replay, these maps are already scoped to accepted requests.
             // A partial replay view is the only snapshot that needs to filter them.
             visibleDrafts = state.drafts
@@ -2567,7 +2579,7 @@ public final class ClientRepository: @unchecked Sendable {
         }
         let sortedOutbox = state.outboxOrder.compactMap { state.intents[$0] }
         var inboxCurrentKeys: Set<RequestKey>?
-        if state.replayBarrier != nil {
+        if published && state.replayBarrier != nil {
             inboxCurrentKeys = state.replayPublishedInboxCurrentKeys
         } else if state.inboxCandidate != nil,
                   let checkpoint = state.inboxCheckpoint, checkpoint.checkpointAccepted {
@@ -2593,7 +2605,7 @@ public final class ClientRepository: @unchecked Sendable {
                                       drafts: visibleDrafts,
                                       intents: state.intents,
                                       outbox: sortedOutbox,
-                                      remoteStates: state.replayPublishedStates ?? state.remoteStates,
+                                      remoteStates: published ? (state.replayPublishedStates ?? state.remoteStates) : state.remoteStates,
                                       fixtureSessions: visibleSessions,
                                       revision: state.revision,
                                       cursor: state.cursor,

@@ -6,6 +6,34 @@ import XCTest
 final class ServerStateCacheTests: XCTestCase {
     private let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
         personID: ExactText("person"), deviceID: ExactText("device"))
+    func testCacheExportsCommittedPrefixWhilePresentationWaitsForReplayEnd() async throws {
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let pending = MemoryPendingActionPersistence()
+        let store = try ClientRepository(context: context, persistence: pending)
+        let key = RequestKey(accountScope: identity.personID, senderID: ExactText("sender"),
+                             messageID: ExactText("during-replay"))
+        try store.beginReplay(through: UInt64.max, context: context)
+        _ = try store.apply(RelayEvent(sequence: 1,
+            body: .delivery(StoredRequest(key: key, originalPayload: .string(ExactText("Server body"))), .message)),
+            context: context)
+        XCTAssertTrue(try store.snapshot(context: context).requests.isEmpty)
+        let cacheView = try store.serverCacheSnapshot(context: context)
+        XCTAssertEqual(cacheView.cursor, 1)
+        XCTAssertEqual(cacheView.requests[key]?.originalPayload, .string(ExactText("Server body")))
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let path = directory.appendingPathComponent("cache.json")
+        try await FileServerStateCache(identity: identity, fileURL: path).save(
+            ServerStateCacheSnapshot.make(identity: identity, from: cacheView,
+                conversations: store.conversationSnapshot(context: context)))
+        let restored = try ClientRepository(context: context, persistence: pending)
+        let saved = try await FileServerStateCache(identity: identity, fileURL: path).load()
+        try restored.restoreCachedServerState(try XCTUnwrap(saved).attentionDomainState(for: identity), context: context)
+        XCTAssertEqual(try restored.snapshot(context: context).cursor, 1)
+        XCTAssertEqual(try restored.snapshot(context: context).requests[key]?.originalPayload,
+                       .string(ExactText("Server body")))
+    }
+
     func testFileCacheRoundTripsServerRowsAndCursors() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("harklight-server-cache-\(UUID().uuidString)", isDirectory: true)

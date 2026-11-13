@@ -975,6 +975,8 @@ public struct CachedAttentionServerState: Sendable {
     public let inboxView: InboxView?
     public let currentRequestKeys: Set<RequestKey>?
     public let chatReadPositions: [RequestKey: UInt64]?
+    public let pendingRelayOverlays: [UInt64: RelayEvent]
+    public let inboxReferences: [RequestKey: RemoteRequestState]
 
     public init(identity: ProfileIdentity, requests: [RequestKey: StoredRequest],
                 remoteStates: [RequestKey: RemoteRequestState],
@@ -983,7 +985,9 @@ public struct CachedAttentionServerState: Sendable {
                 conversations: [RequestKey: ConversationThread],
                 inboxView: InboxView?,
                 currentRequestKeys: Set<RequestKey>?,
-                chatReadPositions: [RequestKey: UInt64]? = nil) {
+                chatReadPositions: [RequestKey: UInt64]? = nil,
+                pendingRelayOverlays: [UInt64: RelayEvent] = [:],
+                inboxReferences: [RequestKey: RemoteRequestState] = [:]) {
         self.identity = identity
         self.requests = requests
         self.remoteStates = remoteStates
@@ -993,6 +997,8 @@ public struct CachedAttentionServerState: Sendable {
         self.inboxView = inboxView
         self.currentRequestKeys = currentRequestKeys
         self.chatReadPositions = chatReadPositions
+        self.pendingRelayOverlays = pendingRelayOverlays
+        self.inboxReferences = inboxReferences
     }
 }
 

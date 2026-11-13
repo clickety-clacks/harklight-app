@@ -511,7 +511,6 @@ public struct ConversationWire: Sendable {
         guard let raw = value.uniqueValue(named: "files") else { return [] }
         guard let values = raw.arrayValues else { throw RelayWireError.invalidFrame }
         var result: [ConversationFile] = [], names = Set<ExactText>()
-        var total: UInt64 = 0
         for item in values {
             let name = ExactText(try text(item, "name"))
             guard names.insert(name).inserted else { throw RelayWireError.invalidFrame }
@@ -520,9 +519,8 @@ public struct ConversationWire: Sendable {
             switch try text(item, "tier") {
             case "inline":
                 guard let encoded = item.uniqueValue(named: "data_base64")?.stringValue?.rawValue,
-                      let bytes = Data(base64Encoded: encoded), size == UInt64(bytes.count), size <= 262_144 - total,
+                      let bytes = Data(base64Encoded: encoded), size == UInt64(bytes.count),
                       SHA256.hash(data: bytes).map({ String(format: "%02x", $0) }).joined() == digest else { throw RelayWireError.invalidFrame }
-                total += size
                 content = .inline(bytes)
             case "upload":
                 let id = try text(item, "upload_id")

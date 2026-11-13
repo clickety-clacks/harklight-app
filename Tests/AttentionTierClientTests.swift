@@ -11,6 +11,20 @@ final class AttentionTierClientTests: XCTestCase {
 
     private func data(_ value: String) -> Data { Data(value.utf8) }
 
+    func testServerInboxPageMayContainMoreThanTwentyItems() throws {
+        let items: [[String: Any]] = (1...21).map { sequence in
+            ["acceptance": ["v": 1, "type": "delivery", "seq": sequence,
+                "sender_id": "sender", "message_id": "message-\(sequence)", "origin": "source",
+                "as": "message", "message": ["title": "Message \(sequence)"]]]
+        }
+        let frame: [String: Any] = ["v": 1, "type": "ok", "ref": "start", "paging_version": 1,
+            "snapshot_id": "snapshot", "high_water": 21, "items": items,
+            "next_cursor": NSNull(), "receipt_cursor": NSNull()]
+        let page = try InboxPagingWire(profile: context()).decodeStart(
+            JSONSerialization.data(withJSONObject: frame), ref: "start")
+        XCTAssertEqual(page.items.count, 21)
+    }
+
     func testInboxPageAttentionTierIsIgnoredAndInvalidValueDoesNotDropMessage() throws {
         let frame = #"{"v":1,"type":"ok","ref":"start","paging_version":1,"snapshot_id":"snapshot","high_water":2,"items":[{"acceptance":{"v":1,"type":"delivery","seq":1,"sender_id":"sender","message_id":"top-row","origin":"source","as":"message","message":{"title":"Top"}},"attention_tier":"top"},{"acceptance":{"v":1,"type":"delivery","seq":2,"sender_id":"sender","message_id":"legacy-row","origin":"source","as":"message","message":{"title":"Legacy"}}}],"next_cursor":null,"receipt_cursor":null}"#
         let wire = try InboxPagingWire(profile: context())

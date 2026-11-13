@@ -34,6 +34,8 @@ public struct ServerStateCacheSnapshot: Codable, Equatable, Sendable {
     public let inboxView: InboxView?
     public let currentRequestKeys: Set<RequestKey>?
     public let chatReadPositions: [RequestKey: UInt64]?
+    public let pendingRelayOverlays: [UInt64: RelayEvent]?
+    public let inboxReferences: [RequestKey: RemoteRequestState]?
 
     public init(identity: ProfileIdentity, cursor: UInt64,
                 conversationCursor: UInt64,
@@ -41,7 +43,9 @@ public struct ServerStateCacheSnapshot: Codable, Equatable, Sendable {
                 conversations: [CachedServerConversation],
                 inboxView: InboxView?,
                 currentRequestKeys: Set<RequestKey>?,
-                chatReadPositions: [RequestKey: UInt64]? = nil) {
+                chatReadPositions: [RequestKey: UInt64]? = nil,
+                pendingRelayOverlays: [UInt64: RelayEvent]? = nil,
+                inboxReferences: [RequestKey: RemoteRequestState]? = nil) {
         version = Self.currentVersion
         self.identity = identity
         self.cursor = cursor
@@ -56,6 +60,8 @@ public struct ServerStateCacheSnapshot: Codable, Equatable, Sendable {
         self.inboxView = inboxView
         self.currentRequestKeys = currentRequestKeys
         self.chatReadPositions = chatReadPositions
+        self.pendingRelayOverlays = pendingRelayOverlays
+        self.inboxReferences = inboxReferences
     }
 
     public static func make(identity: ProfileIdentity, from inbox: AttentionStoreSnapshot,
@@ -87,7 +93,9 @@ public struct ServerStateCacheSnapshot: Codable, Equatable, Sendable {
                                         conversations: Array(recentThreads),
                                         inboxView: inbox.inboxView,
                                         currentRequestKeys: currentKeys,
-                                        chatReadPositions: conversations.chatReadPositions)
+                                        chatReadPositions: conversations.chatReadPositions,
+                                        pendingRelayOverlays: inbox.pendingRelayOverlays,
+                                        inboxReferences: inbox.inboxReferences)
     }
 
     public func attentionDomainState(for identity: ProfileIdentity) throws -> CachedAttentionServerState {
@@ -117,7 +125,9 @@ public struct ServerStateCacheSnapshot: Codable, Equatable, Sendable {
                                           conversations: conversations,
                                           inboxView: inboxView,
                                           currentRequestKeys: currentRequestKeys,
-                                          chatReadPositions: chatReadPositions)
+                                          chatReadPositions: chatReadPositions,
+                                          pendingRelayOverlays: pendingRelayOverlays ?? [:],
+                                          inboxReferences: inboxReferences ?? [:])
     }
 
     private static func key(_ value: RequestKey) -> String {

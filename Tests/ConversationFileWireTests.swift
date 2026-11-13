@@ -100,6 +100,23 @@ final class ConversationFileWireTests: XCTestCase {
         try bytes.dropLast().write(to: url)
         XCTAssertThrowsError(try wire.verify(url, file: file))
     }
+    func testIncomingInlineFilesAreNotRejectedByAnUnpublishedLocalTotal() throws {
+        let bytes = Data(repeating: 7, count: 262_145)
+        let digest = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+        let frame: [String: Any] = ["v": 1, "type": "conversation", "conversation_seq": 1,
+            "sender_id": "sender", "message_id": "request", "origin": "other-installation",
+            "session_handle": "session", "request_revision": 1, "kind": "discussion",
+            "author": "person", "event_id": "discussion", "text": "Attached",
+            "files": [["name": "large.bin", "size": bytes.count, "sha256": digest,
+                       "tier": "inline", "data_base64": bytes.base64EncodedString()]]]
+        let update = try ConversationWire(profile: context()).decodeUpdate(
+            JSONSerialization.data(withJSONObject: frame))
+        guard case let .event(event) = update, case let .turn(turn) = event.fact else {
+            return XCTFail("Expected the Server's discussion with its inline file")
+        }
+        XCTAssertEqual(turn.files.first?.content, .inline(bytes))
+    }
+
     func testDefiniteRefusalAndUnknownSubmissionRemainDifferentFromAcceptedTurn() throws {
         let wire = try ConversationWire(profile: context())
         XCTAssertEqual(try wire.decodeDiscussionResult(Data(#"{"v":1,"type":"error","ref":"native-discussion","reason":"closed"}"#.utf8)), .rejected(reason: ExactText("closed")))
