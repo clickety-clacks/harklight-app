@@ -662,7 +662,8 @@ final class SampleWorkspaceUITests: XCTestCase {
             XCTAssertTrue(app.descendants(matching: .any)["request-seen-confirmation"]
                 .waitForExistence(timeout: 5), app.debugDescription)
             XCTAssertFalse(app.buttons["request-seen-action"].exists)
-            XCTAssertFalse(app.buttons["request-finish-seen"].exists)
+            XCTAssertFalse(app.buttons["request-finish-seen"].isEnabled,
+                           "The confirmed toolbar Seen action stays visible but unavailable.")
         } else {
             XCTAssertTrue(detail.waitForNonExistence(timeout: 5),
                           "In a single-pane presentation, confirmed Seen returns to the list.")

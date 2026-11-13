@@ -1884,37 +1884,40 @@ struct LiveRequestDetail: View {
                 Spacer()
                 chatButton
             }
-            if !isSupersedesReadOnly {
-                ToolbarItem(placement: .confirmationAction) {
+            // The action check stays in place once it cannot apply (completed,
+            // answered or superseded), shown greyed out rather than removed.
+            ToolbarItem(placement: .confirmationAction) {
+                if isSupersedesReadOnly {
                     if request.informationalSeenStatus != nil {
-                        if seenActionIsComplete { EmptyView() } else { finishSeenButton }
-                    } else if let localExample {
-                        if localExample.localSeenSelected {
-                            EmptyView()
-                        } else {
-                            Button {
-                                closeReplyEditor()
-                                localExample.finishLocally()
-                            } label: {
-                                Label("Finish locally", systemImage: "checkmark")
-                                    .labelStyle(.iconOnly)
-                                    .foregroundStyle(HarklightDesignSystem.palette(for: colorScheme).onInverse)
-                            }
-                            .buttonStyle(.glassProminent)
-                            .tint(HarklightDesignSystem.palette(for: colorScheme).inverse)
-                            .disabled(!localExample.canFinishLocally || localExample.finished)
-                            .accessibilityIdentifier("sample-finish")
-                        }
-                    } else if failedResponseWarning != nil {
-                        failedResponseWarningButton
-                    } else if isEditingLocalReply {
-                        submitReplyButton
-                    } else if showsAnsweredConfirmation || showsNoCommentConfirmation ||
-                                showsNotAcceptedConfirmation {
-                        EmptyView()
+                        finishSeenButton.disabled(true)
                     } else {
-                        submitReplyButton
+                        submitReplyButton.disabled(true)
                     }
+                } else if request.informationalSeenStatus != nil {
+                    finishSeenButton
+                } else if let localExample {
+                    Button {
+                        closeReplyEditor()
+                        localExample.finishLocally()
+                    } label: {
+                        Label("Finish locally", systemImage: "checkmark")
+                            .labelStyle(.iconOnly)
+                            .foregroundStyle(HarklightDesignSystem.palette(for: colorScheme).onInverse)
+                    }
+                    .buttonStyle(.glassProminent)
+                    .tint(HarklightDesignSystem.palette(for: colorScheme).inverse)
+                    .disabled(!localExample.canFinishLocally || localExample.finished ||
+                              localExample.localSeenSelected)
+                    .accessibilityIdentifier("sample-finish")
+                } else if failedResponseWarning != nil {
+                    failedResponseWarningButton
+                } else if isEditingLocalReply {
+                    submitReplyButton
+                } else if showsAnsweredConfirmation || showsNoCommentConfirmation ||
+                            showsNotAcceptedConfirmation {
+                    submitReplyButton.disabled(true)
+                } else {
+                    submitReplyButton
                 }
             }
         }
