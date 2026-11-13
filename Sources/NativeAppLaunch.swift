@@ -2244,8 +2244,8 @@ final class LivePresentationStore {
             serverReportedFinalResponse: serverReportedFinalResponse,
             hasAcceptedOwnSubmission: hasAcceptedOwnSubmission)
         var statusParts: [String] = []
+        if hasAcceptedUpdate(for: request.key) { statusParts.append("Updated") }
         if request.inboxStateIsCurrent {
-            if hasAcceptedUpdate(for: request.key) { statusParts.append("Updated") }
             let lifecycle = retracted ? retractionLabel(for: request) :
                 request.defaultAnswerStatusText ??
                     String(localized: LiveLifecycleTitle(request.lifecycleStatus).label)
@@ -2266,7 +2266,11 @@ final class LivePresentationStore {
             statusParts.append("Cached history · status not refreshed")
         }
         let localStatus: String?
-        if serverReportedFinalResponse || request.answerNotDelivered || hasKnownDeliveryFailure {
+        if serverReportedFinalResponse {
+            localStatus = nil
+        } else if request.answerNotDelivered {
+            localStatus = "Answer not delivered"
+        } else if hasKnownDeliveryFailure {
             localStatus = nil
         } else if let sendStatus = answerOperationStatus(request.intentReceipt) {
             localStatus = sendStatus
