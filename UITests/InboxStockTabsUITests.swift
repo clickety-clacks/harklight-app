@@ -109,12 +109,20 @@ final class InboxStockTabsUITests: XCTestCase {
         XCTAssertTrue(tabBar.exists, app.debugDescription)
         var stationarySwipes = 0
         for _ in 0..<40 {
+            guard lastFilteredResult.exists else {
+                list.swipeUp()
+                stationarySwipes = 0
+                continue
+            }
             let resultFrame = lastFilteredResult.frame
-            if lastFilteredResult.exists && lastFilteredResult.isHittable &&
-                resultFrame.maxY <= tabBar.frame.minY {
+            if lastFilteredResult.isHittable && resultFrame.maxY <= tabBar.frame.minY {
                 break
             }
             list.swipeUp()
+            guard lastFilteredResult.exists else {
+                stationarySwipes = 0
+                continue
+            }
             let nextFrame = lastFilteredResult.frame
             if !resultFrame.isEmpty && !nextFrame.isEmpty &&
                 abs(nextFrame.minY - resultFrame.minY) < 1 {
