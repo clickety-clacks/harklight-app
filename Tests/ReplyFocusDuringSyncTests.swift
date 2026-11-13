@@ -120,8 +120,10 @@ final class ReplyFocusDuringSyncTests: XCTestCase {
         XCTAssertEqual(submission.typedInputs,
                        [.compatibilityText(action: reply.id, text: ExactText("Typed locally"))],
                        "The checkmark commits the selected action and complete Reply text together.")
-        XCTAssertNil(visible.request(for: key)?.submittedAnswer,
-                     "A queued user action is not a server-confirmed answer.")
+        XCTAssertEqual(visible.request(for: key)?.submittedAnswer, session.draft,
+                       "The pending presentation retains the exact committed text.")
+        XCTAssertEqual(visible.request(for: key)?.lifecycleStatus, .pending)
+        XCTAssertNil(committed.remoteStates[key]?.state)
         XCTAssertGreaterThan(persistence.writeCount, writesBeforeEditing,
                              "The checkmark is the first durable write for this Reply.")
     }
@@ -166,8 +168,10 @@ final class ReplyFocusDuringSyncTests: XCTestCase {
                        [.point(input: ExactText("location"), point: point),
                         .text(input: ExactText("note"), text: ExactText("Please check the partition."))],
                        "The checkmark commits every edited sender field together.")
-        XCTAssertNil(visible.request(for: key)?.submittedAnswer,
-                     "The queue retains both fields without inventing server answer state.")
+        XCTAssertEqual(visible.request(for: key)?.submittedAnswer, session.draft,
+                       "The pending presentation retains both fields without claiming confirmation.")
+        XCTAssertEqual(visible.request(for: key)?.lifecycleStatus, .pending)
+        XCTAssertNil(try domain.snapshot(context: context).remoteStates[key]?.state)
         XCTAssertNil(try domain.snapshot(context: context).drafts[key],
                      "Submitting does not leave a resumable Reply draft.")
     }
