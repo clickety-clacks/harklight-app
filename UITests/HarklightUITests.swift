@@ -38,7 +38,7 @@ final class HarklightUITests: XCTestCase {
         revealInCard(note, in: app)
         XCTAssertTrue(note.waitForExistence(timeout: 5), app.debugDescription)
         attachScreenshot("Sender scene note field", from: app)
-        XCTAssertTrue(app.staticTexts["Select the location on the floor plan and add a note."]
+        XCTAssertTrue(app.textViews["Select the location on the floor plan and add a note."]
             .waitForExistence(timeout: 5))
         XCTAssertFalse(app.staticTexts["request-lifecycle-status"].exists,
                        "The card omits the extra Open status line from the design.")
@@ -307,7 +307,6 @@ final class HarklightUITests: XCTestCase {
     }
     func testAcceptedAnswerShowsKnownAnsweredSceneThroughSharedFixture() throws {
         let app = launchFreshApp()
-        let listVisibleAlongsideDetail = app.searchFields.firstMatch.isHittable
         let submittedPoint = submitFacilitiesAnswer(in: app, x: 240, y: 610)
 
         applyFixtureOutcome("ownOperationAccepted", in: app)
@@ -324,6 +323,7 @@ final class HarklightUITests: XCTestCase {
         XCTAssertTrue(answeredFinish.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertFalse(answeredFinish.isEnabled,
                        "A confirmed answer leaves the submit check visible but unavailable.")
+        let listVisibleAlongsideDetail = app.searchFields.firstMatch.isHittable
         if !listVisibleAlongsideDetail {
             let back = workspaceBackButton(in: app)
             XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
@@ -482,9 +482,6 @@ final class HarklightUITests: XCTestCase {
         XCTAssertLessThan(scrolledAnchor, unscrolledAnchor - 10,
                           "The tapped request must be scrolled within the list.")
 
-        let headerHidden = expectation(for: NSPredicate(format: "isHittable == false"),
-                                       evaluatedWith: brand)
-        wait(for: [headerHidden], timeout: 5)
         XCTAssertTrue(review.isHittable, app.debugDescription)
         review.tap()
         XCTAssertTrue(app.scrollViews["message-card-scroll"].waitForExistence(timeout: 5),

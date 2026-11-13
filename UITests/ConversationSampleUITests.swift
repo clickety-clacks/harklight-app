@@ -887,7 +887,7 @@ final class ConversationSampleUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts.matching(NSPredicate(
             format: "label CONTAINS %@", "Replying to: The first option favors speed"
         )).firstMatch.exists)
-        XCTAssertTrue(app.staticTexts["Local example · nothing sent"].exists,
+        XCTAssertTrue(app.staticTexts["Local example · status is simulated; nothing was sent."].exists,
                       "The fixture must keep its local delivery state truthful")
         XCTAssertTrue(app.staticTexts["Agent"].waitForExistence(timeout: 5),
                       "An agent-authored answer must keep its distinct author in the ordinary conversation view")

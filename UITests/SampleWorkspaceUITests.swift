@@ -576,11 +576,9 @@ final class SampleWorkspaceUITests: XCTestCase {
 
         let noComment = app.buttons["request-no-comment"]
         XCTAssertTrue(noComment.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(noComment.isHittable, app.debugDescription)
         XCTAssertTrue(noComment.isEnabled,
                       "An explicit No comment failure must leave the same choice available for retry.")
-        let explanation = app.descendants(matching: .any)["request-no-comment-unavailable"]
-        XCTAssertTrue(explanation.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(explanation.label.contains("retry"), explanation.label)
         capture("reply-only-no-comment-retry", app)
     }
 

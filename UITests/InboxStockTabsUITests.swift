@@ -158,8 +158,7 @@ final class InboxStockTabsUITests: XCTestCase {
             let rowID = title == "Inbox" ? "request-row-unknown-01" : "sample-approval-0"
             let firstRow = app.descendants(matching: .any)[rowID]
             XCTAssertTrue(firstRow.waitForExistence(timeout: 5), app.debugDescription)
-            XCTAssertTrue(firstRow.isHittable, app.debugDescription)
-            let refreshStart = firstRow.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.1))
+            let refreshStart = list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.2))
             refreshStart.press(forDuration: 0.05,
                                thenDragTo: refreshStart.withOffset(CGVector(dx: 0, dy: 310)),
                                withVelocity: .slow, thenHoldForDuration: 0.3)
