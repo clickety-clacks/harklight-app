@@ -46,7 +46,7 @@ final class ConversationFileWireTests: XCTestCase {
         XCTAssertEqual(try wire.fetchRequest(uploaded).url?.path, "/origin/v1/files/" + uploadID)
         XCTAssertThrowsError(try wire.decodeUpload(Data(String(decoding: response, as: UTF8.self).replacingOccurrences(of: "\"size\":4", with: "\"size\":3").utf8), status: 200, original: original))
     }
-    func testFrozenUnknownDiscussionRetriesItsExactOperationAndMixedFileFrame() throws {
+    func testFrozenUnknownDiscussionRetriesItsExactOperationAndMixedFileFrame() async throws {
         let context = context(), persistence = MemoryPendingActionPersistence()
         let store = try ClientRepository(context: context, persistence: persistence)
         let binding = ConversationBinding(request: RequestKey(accountScope: context.identity.personID,
@@ -64,7 +64,18 @@ final class ConversationFileWireTests: XCTestCase {
         let wire = try ConversationWire(profile: context), limits = ConversationFileLimits(inlineDecodedBytes: 262_144, uploadCap: nil)
         let originalFrame = try wire.discussion(frozen, operationID: operation, preparedFiles: [inline, uploaded], limits: limits)
         try store.markDiscussionOutcome(binding, operation: operation, rejection: nil, context: context)
+        let cacheDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: cacheDirectory) }
+        let cacheURL = cacheDirectory.appendingPathComponent("server-cache.json")
+        let cache = FileServerStateCache(identity: context.identity, fileURL: cacheURL)
+        try await cache.save(ServerStateCacheSnapshot.make(identity: context.identity,
+            from: store.snapshot(context: context), conversations: store.conversationSnapshot(context: context)))
+        let cached = try await FileServerStateCache(identity: context.identity, fileURL: cacheURL).load()
         let restored = try ClientRepository(context: context, persistence: persistence)
+        XCTAssertTrue(try restored.conversationSnapshot(context: context).threads.isEmpty,
+                      "Pending inputs alone must not restore server conversation state.")
+        try restored.restoreCachedServerState(try XCTUnwrap(cached).attentionDomainState(for: context.identity),
+                                              context: context)
         XCTAssertEqual(try restored.prepareDiscussion(binding, context: context), operation)
         let retained = try XCTUnwrap(restored.conversationSnapshot(context: context).threads[binding.request]?.drafts[1])
         XCTAssertEqual(try wire.discussion(retained, operationID: operation, preparedFiles: [inline, uploaded], limits: limits), originalFrame)

@@ -11,7 +11,7 @@ final class ConversationJoinTests: XCTestCase {
         let key = RequestKey(accountScope: context.identity.personID, senderID: ExactText("sender"), messageID: ExactText("request"))
         return (context, persistence, domain, key)
     }
-    func testRedactedNewQuestionCannotExposeOrReuseAnEarlierAnswerSelector() throws {
+    func testRedactedNewQuestionCannotExposeOrReuseAnEarlierAnswerSelector() async throws {
         let (context, persistence, domain, key) = try setup()
         let payload = try JSONValue.parse(Data(#"{"title":"First question","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"old","label":"Old choice","kind":"value","value":"old"}]}}"#.utf8))
         try domain.apply(RelayEvent(sequence: 1, body: .delivery(StoredRequest(key: key, originalPayload: payload), .message),
@@ -35,7 +35,18 @@ final class ConversationJoinTests: XCTestCase {
         let archived = try XCTUnwrap(port.inspectAnswerDraft(context: port.context, request: key, revision: 1))
         XCTAssertEqual(archived.draft.compatibility.selectedActionID, ExactText("old"))
         XCTAssertNil(archived.selector)
+        let cacheDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: cacheDirectory) }
+        let cacheURL = cacheDirectory.appendingPathComponent("server-cache.json")
+        let cache = FileServerStateCache(identity: context.identity, fileURL: cacheURL)
+        try await cache.save(ServerStateCacheSnapshot.make(identity: context.identity,
+            from: domain.snapshot(context: context), conversations: domain.conversationSnapshot(context: context)))
+        let cached = try await FileServerStateCache(identity: context.identity, fileURL: cacheURL).load()
         let restored = try ClientRepository(context: context, persistence: persistence)
+        XCTAssertTrue(try restored.conversationSnapshot(context: context).threads.isEmpty,
+                      "Pending inputs alone must not restore server conversation state.")
+        try restored.restoreCachedServerState(try XCTUnwrap(cached).attentionDomainState(for: context.identity),
+                                              context: context)
         let thread = try XCTUnwrap(restored.conversationSnapshot(context: context).threads[key])
         XCTAssertEqual(thread.revisionNumbers, [1, 2])
         XCTAssertTrue(thread.currentContentRedacted)
