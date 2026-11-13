@@ -30,6 +30,28 @@ final class ServerCacheReplacementTests: XCTestCase {
         XCTAssertTrue(state.inboxCandidate?.hasInitialPage == true)
     }
 
+    func testRefreshKeepsCacheUntilServerRespondsThenReplacesItEvenWhenEmpty() throws {
+        let context = context()
+        let cachedKey = key("cached", context: context)
+        let repository = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        _ = try repository.apply(RelayEvent(sequence: 1,
+            body: .delivery(request(cachedKey, title: "Last server value"), .message)), context: context)
+
+        _ = try repository.beginInboxCandidate(startupID: "unanswered-start", since: 1,
+            batches: [], context: context)
+        XCTAssertNotNil(try repository.snapshot(context: context).requests[cachedKey])
+        try repository.discardInboxCandidate(context: context)
+        XCTAssertNotNil(try repository.snapshot(context: context).requests[cachedKey],
+                        "A request without a server response cannot erase cached content.")
+
+        _ = try repository.beginInboxCandidate(startupID: "empty-server-snapshot", since: 1,
+            batches: [], context: context)
+        try repository.saveInboxInitialPage(snapshotID: "empty", highWater: 1,
+            items: [], nextCursor: nil, receiptCursor: nil, context: context)
+        XCTAssertTrue(try repository.snapshot(context: context).requests.isEmpty,
+                      "The server's empty replacement must not fall back to the old cache.")
+    }
+
     func testPendingActionPersistenceDoesNotRestoreServerRequests() throws {
         let context = context()
         let persistence = MemoryPendingActionPersistence()

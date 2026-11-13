@@ -1979,11 +1979,8 @@ public final class ClientRepository: @unchecked Sendable {
         }
         let candidate = InboxPagingCheckpoint(startupID: startupID, since: since, batches: batches)
         var next = state
-        // Disk data is a first-paint cache only. Every new server snapshot
-        // rebuilds the projection, including conversation history. This also
-        // covers server upgrades without depending on an unreported version.
-        next.server = ServerProjectionCache()
-        next.cursor = since
+        // Starting a request is not a server update. Keep the last accepted
+        // cache available if the transport fails before returning a snapshot.
         next.inboxCandidate = candidate
         try commit(next)
         return candidate
@@ -2077,6 +2074,10 @@ public final class ClientRepository: @unchecked Sendable {
             return
         }
         var next = state
+        // The actual server response replaces the disposable projection,
+        // including an empty snapshot. User intents remain in their own queue.
+        next.server = ServerProjectionCache()
+        next.cursor = candidate.since
         do {
             for item in items {
                 try applyInboxSnapshotItem(item, highWater: highWater, restoredTurns: restoredTurns,
