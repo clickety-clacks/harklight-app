@@ -5,6 +5,72 @@ import HarklightNativeRelay
 import Security
 import Observation
 
+/// Shareable error details deliberately exclude response bodies, decoder context,
+/// persistence messages and NSError userInfo, all of which may contain message text.
+struct NativeForegroundConnectErrorDetails: Equatable, Sendable {
+    let type: String
+    let cause: String
+    let description: String
+
+    init(_ error: Error) {
+        type = String(reflecting: Swift.type(of: error))
+        let code: String
+        if let paging = error as? InboxPagingWireError {
+            switch paging {
+            case .invalidFrame: code = "inbox_paging_invalid_frame"
+            case .serverRefused: code = "inbox_paging_server_refused"
+            }
+        } else {
+            code = NativeClientDiagnosticJournal.causeCode(for: error)
+        }
+        cause = code == "unknown_error" ? type : code
+        description = Self.describe(error, cause: code)
+    }
+
+    private static func describe(_ error: Error, cause: String) -> String {
+        if let value = error as? InboxPagingWireError {
+            switch value {
+            case .invalidFrame: return "The inbox paging response was invalid."
+            case .serverRefused: return "The server refused inbox paging (response text omitted)."
+            }
+        }
+        if let value = error as? DecodingError {
+            switch value {
+            case .dataCorrupted: return "Decoding failed because the data was corrupted."
+            case .keyNotFound: return "Decoding failed because a required key was missing."
+            case .typeMismatch: return "Decoding failed because a value had the wrong type."
+            case .valueNotFound: return "Decoding failed because a required value was missing."
+            @unknown default: return "Decoding failed (context omitted)."
+            }
+        }
+        if let value = error as? EncodingError {
+            switch value {
+            case .invalidValue: return "Encoding failed because a value was invalid."
+            @unknown default: return "Encoding failed (context omitted)."
+            }
+        }
+        if let value = error as? AttentionStoreError {
+            switch value {
+            case .persistence: return "Durable state could not be committed (underlying text omitted)."
+            case .missingOriginContent: return "Origin content is missing; the cursor was not advanced."
+            case .competingIntent: return "A different durable intent already owns this request."
+            default: return value.localizedDescription
+            }
+        }
+        let value = error as NSError
+        switch value.domain {
+        case NSURLErrorDomain, NSCocoaErrorDomain, NSPOSIXErrorDomain, "NSOSStatusErrorDomain":
+            // Reconstruct the system description without filenames, URLs, custom
+            // localized text or underlying errors supplied in userInfo.
+            return "\(value.domain) code \(value.code): \(NSError(domain: value.domain, code: value.code).localizedDescription)"
+        default:
+            return cause == "unknown_error"
+                ? "Error code \(value.code); unrecognized error description omitted."
+                : cause.replacingOccurrences(of: "_", with: " ")
+        }
+    }
+}
+
 struct NativeRelayRefreshResult: Equatable, Sendable {
     enum PushRegistration: Equatable, Sendable {
         case notAttempted
@@ -183,6 +249,7 @@ struct NativeForegroundConnectProgress: Equatable, Sendable {
         let nativeSyncReplayRequested: Bool
         let issue: Issue?
         let failureClass: FailureClass?
+        let errorDetails: NativeForegroundConnectErrorDetails?
         let lastCompletedPostAckBoundary: PostAckBoundary
         let postAckRelayRefresh: Validation
         let postAckDrainTransition: NativeDiagnosticTransition?
@@ -233,6 +300,7 @@ struct NativeForegroundConnectProgress: Equatable, Sendable {
     var outcome: Outcome
     var attemptID: UUID? = nil
     var failureClass: FailureClass? = nil
+    var errorDetails: NativeForegroundConnectErrorDetails? = nil
     var observedErrorMessage: String? = nil
     var transportAttemptID: UUID? = nil
     var nativeSyncReplayRequested = false
@@ -440,12 +508,7 @@ struct NativeForegroundConnectDiagnostic: Equatable, Sendable {
         case nil: issue = "none_observed"
         }
         let terminal = progress.terminalReason?.rawValue ?? "none_observed"
-        let failure = progress.failureClass?.diagnosticValue ?? {
-            switch progress.outcome {
-            case .incomplete, .timedOut: "unknown_error_class"
-            case .connecting, .confirmed: "none_observed"
-            }
-        }()
+        let failure = Self.failureValue(progress.failureClass, details: progress.errorDetails)
         let websocket = progress.webSocketOpenObserved ? "yes" : "no"
         var lines = [
             "Harklight connection diagnostics",
@@ -468,7 +531,9 @@ struct NativeForegroundConnectDiagnostic: Equatable, Sendable {
             "native_sync_replay_requested_locally=\(progress.nativeSyncReplayRequested ? "yes" : "no")",
             "websocket_open_observed=\(websocket)",
             "issue=\(issue)",
-            "error_class=\(failure)"
+            "error_class=\(failure)",
+            "error_type=\(progress.errorDetails?.type ?? "none_observed")",
+            "error_description=\(progress.errorDetails?.description ?? "none_observed")"
         ]
         if let previous = progress.previousTransportAttempt {
             lines.append("previous_transport_attempt_id=\(previous.id.uuidString.lowercased())")
@@ -476,7 +541,9 @@ struct NativeForegroundConnectDiagnostic: Equatable, Sendable {
             lines.append("previous_websocket_open_observed=\(previous.webSocketOpenObserved ? "yes" : "no")")
             lines.append("previous_native_sync_replay_requested_locally=\(previous.nativeSyncReplayRequested ? "yes" : "no")")
             lines.append("previous_issue=\(Self.issueValue(previous.issue))")
-            lines.append("previous_error_class=\(previous.failureClass?.diagnosticValue ?? "none_observed")")
+            lines.append("previous_error_class=\(Self.failureValue(previous.failureClass, details: previous.errorDetails))")
+            lines.append("previous_error_type=\(previous.errorDetails?.type ?? "none_observed")")
+            lines.append("previous_error_description=\(previous.errorDetails?.description ?? "none_observed")")
             lines.append("previous_last_completed_post_ack_boundary=\(previous.lastCompletedPostAckBoundary.rawValue)")
             lines.append("previous_post_ack_relay_refresh=\(previous.postAckRelayRefresh.rawValue)")
             lines.append("previous_post_ack_drain=\(previous.postAckDrainTransition?.rawValue ?? "not_started")")
@@ -514,6 +581,12 @@ struct NativeForegroundConnectDiagnostic: Equatable, Sendable {
     private static func escapedIdentifier(_ value: String) -> String {
         let allowed = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
         return value.addingPercentEncoding(withAllowedCharacters: allowed) ?? "unavailable"
+    }
+
+    private static func failureValue(_ failure: NativeForegroundConnectProgress.FailureClass?,
+                                     details: NativeForegroundConnectErrorDetails?) -> String {
+        if failure == .unknown, let details { return details.cause }
+        return failure?.diagnosticValue ?? "none_observed"
     }
 
     private static func issueValue(_ issue: NativeForegroundConnectProgress.Issue?) -> String {
@@ -587,6 +660,7 @@ final class ForegroundConnectDeadline {
                 nativeSyncReplayRequested: progress.nativeSyncReplayRequested,
                 issue: progress.issue,
                 failureClass: progress.failureClass,
+                errorDetails: progress.errorDetails,
                 lastCompletedPostAckBoundary: progress.lastCompletedPostAckBoundary,
                 postAckRelayRefresh: progress.postAckRelayRefresh,
                 postAckDrainTransition: progress.postAckDrainTransition,
@@ -604,6 +678,7 @@ final class ForegroundConnectDeadline {
         progress.nativeSyncReplayRequested = false
         progress.issue = nil
         progress.failureClass = nil
+        progress.errorDetails = nil
         progress.observedErrorMessage = nil
         progress.outcome = .connecting
         progress.lastCompletedPostAckBoundary = .none
@@ -672,6 +747,7 @@ final class ForegroundConnectDeadline {
         let id = UUID()
         progress.attemptID = id
         progress.failureClass = nil
+        progress.errorDetails = nil
         return await withCheckedContinuation { continuation in
             progress.outcome = .connecting
             attempt = Attempt(id: id, continuation: continuation, onProgress: onProgress,
@@ -776,6 +852,7 @@ final class ForegroundConnectDeadline {
     func recordFailure(_ error: Error) {
         guard acceptsEvents, attempt != nil else { return }
         progress.failureClass = NativeForegroundConnectProgress.FailureClass.classify(error)
+        progress.errorDetails = NativeForegroundConnectErrorDetails(error)
         progress.observedErrorMessage = progress.postAckFailureStep == nil
             ? error.localizedDescription : nil
         if progress.failureClass == .cancelled { progress.terminalReason = .cancelled }
@@ -805,6 +882,7 @@ final class ForegroundConnectDeadline {
             progress.lastConfirmedStage = .foregroundConfirmed
             progress.issue = nil
             progress.failureClass = nil
+            progress.errorDetails = nil
             progress.outcome = .confirmed
             progress.terminalReason = .confirmed
             advancePostAckBoundary(.foregroundConfirmed)

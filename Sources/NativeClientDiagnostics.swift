@@ -324,7 +324,7 @@ final class NativeClientDiagnosticJournal {
         return value
     }
 
-    private static func causeCode(for error: Error) -> String {
+    nonisolated static func causeCode(for error: Error) -> String {
         if error is CancellationError { return "cancelled" }
         if let value = error as? DevelopmentAPNsAddressStore.AddressError {
             switch value {

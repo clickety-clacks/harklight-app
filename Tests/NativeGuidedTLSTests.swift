@@ -3356,7 +3356,7 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertTrue(failedSummary.shareText.contains("profile_context_validated=passed"))
         XCTAssertTrue(failedSummary.shareText.contains("relay_context_validated=failed"))
         XCTAssertTrue(failedSummary.shareText.contains("terminal_reason=generation_invalidated"))
-        XCTAssertTrue(failedSummary.shareText.contains("error_class=unknown_error_class"))
+        XCTAssertTrue(failedSummary.shareText.contains("error_class=none_observed"))
 
         let successfulDeadline = ForegroundConnectDeadline()
         let successfulTransportID = UUID()
