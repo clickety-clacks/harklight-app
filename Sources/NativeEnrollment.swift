@@ -265,14 +265,11 @@ struct NativeEnrollmentStore {
     }
 
     static func validateServerStartResponse(approvalCode: String,
-                                            statusSecret: String,
-                                            expiresAt: Int64,
-                                            statusExpiresAt: Int64) throws {
+                                            statusSecret: String) throws {
         guard approvalCode.count == 10,
               approvalCode.allSatisfy({ "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567".contains($0) }),
               statusSecret.count == 64,
-              statusSecret.allSatisfy({ $0.isHexDigit }),
-              statusExpiresAt > expiresAt else {
+              statusSecret.allSatisfy({ $0.isHexDigit }) else {
             throw NativeEnrollmentError.invalidServerResponse
         }
     }
@@ -287,9 +284,7 @@ struct NativeEnrollmentStore {
                                                      port: attempt.enrollmentPort,
                                                      rootDER: attempt.trustedRootDER)
         try Self.validateServerStartResponse(approvalCode: response.approvalCode,
-                                             statusSecret: response.statusSecret,
-                                             expiresAt: response.expiresAt,
-                                             statusExpiresAt: response.statusExpiresAt)
+                                             statusSecret: response.statusSecret)
         return NativeEnrollmentRecord(host: attempt.host,
                                             enrollmentPort: attempt.enrollmentPort,
                                             relayPort: attempt.relayPort,
