@@ -711,7 +711,7 @@ enum SampleSubmissionProgressHook {
         switch sampleID {
         case "sample-approval-0": return InboxRowSubmissionProgress(state: .awaiting, since: launchDate)
         case "sample-textChoice-0":
-            return InboxRowSubmissionProgress(state: .notSent, since: launchDate.addingTimeInterval(-60))
+            return InboxRowSubmissionProgress(state: .notSent(detail: nil), since: launchDate.addingTimeInterval(-60))
         default: return nil
         }
     }

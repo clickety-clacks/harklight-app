@@ -510,10 +510,12 @@ enum InboxResponseReceiptStatus: Equatable {
 /// The view-side state of something the person just sent from a message.
 struct InboxRowSubmissionProgress: Equatable {
     enum State: Equatable {
-        /// Sent or still sending, with no agent reply after it yet.
+        /// Sent or still sending, with no agent reply or server result yet.
         case awaiting
-        /// The send definitively failed.
-        case notSent
+        /// Definitively failed or refused. The detail is the server's state in
+        /// plain words, such as "Not accepted"; without one the mark says
+        /// "Not sent".
+        case notSent(detail: String?)
     }
 
     let state: State
@@ -2873,8 +2875,8 @@ struct InboxSubmissionProgressMark: View {
                 .tint(palette.label)
                 .accessibilityLabel("Waiting for a reply")
                 .accessibilityIdentifier("inbox-awaiting-reply")
-        case .notSent:
-            Label("Not sent", systemImage: "exclamationmark.circle.fill")
+        case let .notSent(detail):
+            Label(detail ?? String(localized: "Not sent"), systemImage: "exclamationmark.circle.fill")
                 .labelStyle(.titleAndIcon)
                 .harklightType(.rowTime)
                 .foregroundStyle(palette.coral)
