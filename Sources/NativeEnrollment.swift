@@ -264,6 +264,19 @@ struct NativeEnrollmentStore {
         return replacement
     }
 
+    static func validateServerStartResponse(approvalCode: String,
+                                            statusSecret: String,
+                                            expiresAt: Int64,
+                                            statusExpiresAt: Int64) throws {
+        guard approvalCode.count == 10,
+              approvalCode.allSatisfy({ "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567".contains($0) }),
+              statusSecret.count == 64,
+              statusSecret.allSatisfy({ $0.isHexDigit }),
+              statusExpiresAt > expiresAt else {
+            throw NativeEnrollmentError.invalidServerResponse
+        }
+    }
+
     private func requestEnrollment(_ attempt: PreparedEnrollment) async throws -> NativeEnrollmentRecord {
         let pem = "-----BEGIN CERTIFICATE-----\n" +
             attempt.certificateDER.base64EncodedString(options: [.lineLength64Characters, .endLineWithLineFeed]) +
@@ -273,14 +286,10 @@ struct NativeEnrollmentStore {
                                                      host: attempt.host,
                                                      port: attempt.enrollmentPort,
                                                      rootDER: attempt.trustedRootDER)
-        guard response.approvalCode.count == 10,
-              response.approvalCode.allSatisfy({ "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567".contains($0) }),
-              response.statusSecret.count == 64,
-              response.statusSecret.allSatisfy({ $0.isHexDigit }),
-              response.expiresAt > Int64(Date().timeIntervalSince1970 * 1000),
-              response.statusExpiresAt > response.expiresAt else {
-            throw NativeEnrollmentError.invalidServerResponse
-        }
+        try Self.validateServerStartResponse(approvalCode: response.approvalCode,
+                                             statusSecret: response.statusSecret,
+                                             expiresAt: response.expiresAt,
+                                             statusExpiresAt: response.statusExpiresAt)
         return NativeEnrollmentRecord(host: attempt.host,
                                             enrollmentPort: attempt.enrollmentPort,
                                             relayPort: attempt.relayPort,
