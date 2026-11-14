@@ -1737,6 +1737,12 @@ public actor NativeRelayCore {
                 diagnose(.conversation, .conversationReadPosition, .rejected,
                          causeCode: "read_position_\(reason.rawValue)",
                          operationID: pending.operationID, request: pending.request)
+                // A stated refusal is definitive for this operation. Retire it
+                // so later drains stop resending it; the Server's own read
+                // position arrives with the next conversation replay.
+                if reason.rawValue != "storage_unavailable" {
+                    try store.retireConversationReadPosition(pending, context: context)
+                }
             case .unresolved:
                 diagnose(.conversation, .conversationReadPosition, .unresolved,
                          operationID: pending.operationID, request: pending.request)

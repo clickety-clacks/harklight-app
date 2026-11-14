@@ -3208,6 +3208,22 @@ public final class ClientRepository: @unchecked Sendable {
         try commit(next)
     }
 
+    /// The Server refused this read-position operation. Stop resending it.
+    public func retireConversationReadPosition(_ pending: PendingConversationReadPosition,
+                                               context suppliedContext: ProfileContext) throws {
+        writerLock.lock()
+        defer { writerLock.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        try validate(pending.request, in: context.identity)
+        var next = state
+        guard var conversation = next.conversation else { return }
+        conversation.retireReadPosition(pending)
+        next.conversation = conversation
+        try commit(next)
+    }
+
     public func appendFixtureDiscussion(_ binding: ConversationBinding, context suppliedContext: ProfileContext,
                                         simulatedAcceptanceObservedAtMilliseconds: UInt64? = nil) throws {
         writerLock.lock()

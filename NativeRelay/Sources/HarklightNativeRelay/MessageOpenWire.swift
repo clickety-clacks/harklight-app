@@ -62,10 +62,12 @@ public struct MessageOpenWire: Sendable {
             if reason == "unknown_type" || reason.contains("unsupported") {
                 return .unsupported
             }
-            if reason == "invalid_field" || reason == "not_found" || reason == "operation_conflict" {
-                return .permanentlyRejected(reason: reason)
-            }
-            return .unresolved
+            // Storage failure is the Server's only retryable reply. Every
+            // other stated reason (forbidden, not_found, invalid_field,
+            // operation_conflict, closed) is definitive: retrying the same
+            // operation cannot change it.
+            if reason == "storage_unavailable" { return .unresolved }
+            return .permanentlyRejected(reason: reason)
         default:
             return .unresolved
         }

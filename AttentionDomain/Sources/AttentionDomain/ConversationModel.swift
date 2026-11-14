@@ -979,6 +979,12 @@ struct ConversationState: Codable, Equatable {
         }
     }
 
+    /// Drops one refused read-position operation without inventing a position.
+    mutating func retireReadPosition(_ pending: PendingConversationReadPosition) {
+        guard pendingChatReadPositions?[pending.request]?.operationID == pending.operationID else { return }
+        pendingChatReadPositions?.removeValue(forKey: pending.request)
+    }
+
     private mutating func mergeReadPosition(_ request: RequestKey, position: UInt64) {
         var positions = chatReadPositions ?? [:]
         positions[request] = position
