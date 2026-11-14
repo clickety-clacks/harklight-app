@@ -128,6 +128,10 @@ public enum IntentDisposition: Equatable, Codable, Sendable {
     /// The relay explicitly rejected this operation. Stop automatic attempts
     /// but retain its identity and payload for an explicit Retry.
     case failed
+    /// The Server definitively closed the request. Never resend this operation;
+    /// replay supplies the specific final state without guessing it locally.
+    case refusedClosed
+    case refusedNotFound
     /// The relay declined the submitted revision and named the current one.
     case staleRevision(currentRevision: UInt64)
     case terminal(state: TerminalState, sequence: UInt64, authorizedAnswer: JSONValue?)
@@ -137,6 +141,9 @@ public enum IntentDisposition: Equatable, Codable, Sendable {
 }
 
 public struct Submission: Equatable, Codable, Sendable {
+    /// Local durable preparation time, for presentation ordering only.
+    /// Nil preserves old receipts without inventing their send time.
+    public let submittedAt: Date?
     public let requestRevision: UInt64?
     public let requestKey: RequestKey
     public let answer: JSONValue
@@ -170,7 +177,9 @@ public struct Submission: Equatable, Codable, Sendable {
                 descriptorFingerprint: String,
                 contentFingerprint: String,
                 disposition: IntentDisposition = .pending,
-                requestRevision: UInt64? = nil) {
+                requestRevision: UInt64? = nil,
+                submittedAt: Date? = nil) {
+        self.submittedAt = submittedAt
         self.requestRevision = requestRevision
         self.requestKey = requestKey
         self.answer = answer
