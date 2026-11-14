@@ -314,8 +314,6 @@ final class HarklightUITests: XCTestCase {
         let detail = app.scrollViews["message-card-scroll"]
         XCTAssertTrue(detail.waitForExistence(timeout: 5),
                       "The pending row is reopened to simulate its later server outcome.")
-        // Measured while the detail is open: on iPad the list stays beside it.
-        let listVisibleAlongsideDetail = listVisibleBesideDetail(in: app)
         XCTAssertTrue(app.descendants(matching: .any)["request-answered"].waitForExistence(timeout: 5),
                       "The reopened detail reflects the accepted answer.")
         XCTAssertTrue(app.descendants(matching: .any)["request-closing-scene"].waitForExistence(timeout: 5),
@@ -325,7 +323,8 @@ final class HarklightUITests: XCTestCase {
         XCTAssertTrue(answeredFinish.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertFalse(answeredFinish.isEnabled,
                        "A confirmed answer leaves the submit check visible but unavailable.")
-        let listVisibleAlongsideDetail = app.searchFields.firstMatch.isHittable
+        // Measure after the later Server outcome: on iPad, the list may remain beside detail.
+        let listVisibleAlongsideDetail = listVisibleBesideDetail(in: app)
         if !listVisibleAlongsideDetail {
             let back = workspaceBackButton(in: app)
             XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)

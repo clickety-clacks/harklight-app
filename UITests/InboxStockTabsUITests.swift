@@ -249,7 +249,7 @@ final class InboxStockTabsUITests: XCTestCase {
             warningButton.tap()
             let warning = app.staticTexts["inbox-warning-message"]
             XCTAssertTrue(warning.waitForExistence(timeout: 5), app.debugDescription)
-            XCTAssertEqual(warning.label, "Waiting for the server. Your pending actions are saved.")
+            XCTAssertEqual(warning.label, "The approved server could not be reached.")
             app.terminate()
         }
     }
