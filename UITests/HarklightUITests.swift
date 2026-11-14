@@ -307,7 +307,6 @@ final class HarklightUITests: XCTestCase {
     }
     func testAcceptedAnswerShowsKnownAnsweredSceneThroughSharedFixture() throws {
         let app = launchFreshApp()
-        let listVisibleAlongsideDetail = listVisibleBesideDetail(in: app)
         let submittedPoint = submitFacilitiesAnswer(in: app, x: 240, y: 610)
 
         applyFixtureOutcome("ownOperationAccepted", in: app)
@@ -315,6 +314,8 @@ final class HarklightUITests: XCTestCase {
         let detail = app.scrollViews["message-card-scroll"]
         XCTAssertTrue(detail.waitForExistence(timeout: 5),
                       "The pending row is reopened to simulate its later server outcome.")
+        // Measured while the detail is open: on iPad the list stays beside it.
+        let listVisibleAlongsideDetail = listVisibleBesideDetail(in: app)
         XCTAssertTrue(app.descendants(matching: .any)["request-answered"].waitForExistence(timeout: 5),
                       "The reopened detail reflects the accepted answer.")
         XCTAssertTrue(app.descendants(matching: .any)["request-closing-scene"].waitForExistence(timeout: 5),
