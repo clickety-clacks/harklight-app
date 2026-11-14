@@ -159,7 +159,7 @@ final class HarklightUITests: XCTestCase {
                       "Reviewing the changed message returns to its answer control.\n\(app.debugDescription)")
     }
 
-    func testConnectionWarningButtonShowsTheObservedError() throws {
+    func testConnectionWarningButtonShowsPendingConnectionStatus() throws {
         let app = launchFreshApp(additionalArguments: ["--harklight-test-connection-warning"])
         let warningButton = app.buttons["inbox-warning-button"]
         let message = app.staticTexts["inbox-warning-message"]
@@ -171,8 +171,8 @@ final class HarklightUITests: XCTestCase {
         XCTAssertTrue(warningButton.isHittable, app.debugDescription)
         warningButton.tap()
         XCTAssertTrue(message.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertEqual(message.label, "The approved server could not be reached.")
-        attachScreenshot("Tapped connection warning shows its error", from: app)
+        XCTAssertEqual(message.label, "Waiting for the server. Your pending actions are saved.")
+        attachScreenshot("Tapped connection warning shows pending status", from: app)
     }
 
     func testVisibleSettingsAndChatTapsOpenTheirPanelsWhileWarningsArePresent() throws {
