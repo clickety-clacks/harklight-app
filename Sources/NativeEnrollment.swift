@@ -324,21 +324,21 @@ struct NativeEnrollmentStore {
               let relayURL = URL(string: "wss://\(record.host):\(record.relayPort)/relay") else {
             throw NativeEnrollmentError.invalidIdentity
         }
-        let identity: SecIdentity
+        let clientIdentity: SecIdentity
         if let namespace = guidedIdentityNamespace(for: record.identityLabel) {
             let installation = try NativeInstallationIdentityStore(namespace: namespace).loadExisting()
             guard installation.label == record.identityLabel,
                   installation.deviceID == record.deviceID else {
                 throw NativeEnrollmentError.invalidIdentity
             }
-            identity = installation.value
+            clientIdentity = installation.value
         } else if let retained = identity(label: record.identityLabel) {
-            identity = retained
+            clientIdentity = retained
         } else {
             throw NativeEnrollmentError.invalidIdentity
         }
         var certificate: SecCertificate?
-        guard SecIdentityCopyCertificate(identity, &certificate) == errSecSuccess,
+        guard SecIdentityCopyCertificate(clientIdentity, &certificate) == errSecSuccess,
               let certificate,
               DeviceCertificateBinding.matches(SecCertificateCopyData(certificate) as Data,
                                                expectedDeviceID: record.deviceID) else {
@@ -350,7 +350,7 @@ struct NativeEnrollmentStore {
                                      transportMode: .relay)
         return NativeInstallationMaterial(context: profile,
                                           relayURL: relayURL,
-                                          keychainIdentity: identity,
+                                          keychainIdentity: clientIdentity,
                                           trustedRootDER: record.trustedRootDER)
     }
 
