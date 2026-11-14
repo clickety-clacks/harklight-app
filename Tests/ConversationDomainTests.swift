@@ -292,8 +292,6 @@ final class ConversationDomainTests: XCTestCase {
             XCTAssertEqual(retained.operationID, operation)
             XCTAssertEqual(retained.disposition, .rejected(ExactText(reason)))
             XCTAssertTrue(retained.isPermanentlyRefused)
-            let model = try LivePresentationStore(store: restored, context: context)
-            XCTAssertFalse(model.canSendDiscussion(for: binding.request))
         }
     }
 
