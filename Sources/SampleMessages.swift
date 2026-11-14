@@ -178,6 +178,7 @@ final class SampleResponse {
             initials: message.initials,
             emphasis: emphasis,
             messageType: message.kind.designMessageType,
+            submissionProgress: SampleSubmissionProgressHook.progress(for: message.id),
             tier: message.tier)
     }
 
@@ -694,4 +695,24 @@ enum SampleCatalog {
         .init(id: "harbor", title: "Harbor", detail: "Still water in the evening."),
         .init(id: "meadow", title: "Meadow", detail: "Open fields in daylight.")
     ]
+}
+
+/// UI-test hook: with --harklight-test-submission-progress, the first
+/// approval sample shows as waiting for a reply and the first text-choice
+/// sample as not sent, so the inbox spinner and not-sent mark can be checked
+/// without a server. Inactive in normal launches.
+enum SampleSubmissionProgressHook {
+    private static let launchDate = Date()
+
+    static func progress(for sampleID: String) -> InboxRowSubmissionProgress? {
+        guard ProcessInfo.processInfo.arguments.contains("--harklight-test-submission-progress") else {
+            return nil
+        }
+        switch sampleID {
+        case "sample-approval-0": return InboxRowSubmissionProgress(state: .awaiting, since: launchDate)
+        case "sample-textChoice-0":
+            return InboxRowSubmissionProgress(state: .notSent, since: launchDate.addingTimeInterval(-60))
+        default: return nil
+        }
+    }
 }

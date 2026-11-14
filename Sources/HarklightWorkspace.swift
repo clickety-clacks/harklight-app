@@ -507,6 +507,20 @@ enum InboxResponseReceiptStatus: Equatable {
     case failed
 }
 
+/// The view-side state of something the person just sent from a message.
+struct InboxRowSubmissionProgress: Equatable {
+    enum State: Equatable {
+        /// Sent or still sending, with no agent reply after it yet.
+        case awaiting
+        /// The send definitively failed.
+        case notSent
+    }
+
+    let state: State
+    /// When the person sent it; orders the item in the New area.
+    let since: Date
+}
+
 struct InboxRequestRow: Identifiable {
     let key: RequestKey
     var requestRevision: UInt64 = 1
@@ -536,6 +550,10 @@ struct InboxRequestRow: Identifiable {
     var initials: String = ""
     var emphasis: InboxRowEmphasis = .standard
     var messageType: HarklightMessageType? = nil
+    /// A prompt or answer the person sent from this message that is still
+    /// waiting on the agent, or that definitively failed to send. Supplied
+    /// by the send queue; nil when nothing is outstanding.
+    var submissionProgress: InboxRowSubmissionProgress? = nil
     var tier: InboxAttentionTier = .middle
     var inboxScore: Double? = nil
     var inboxReplyScores: [UInt64: Double] = [:]
@@ -1526,16 +1544,20 @@ struct InboxList: View {
     private enum NewMessageAreaCombinedRow: Identifiable {
         case message(NewMessageAreaListRow)
         case reply(ReplyItemListRow)
+        /// Something the person just sent, waiting on the agent or not sent.
+        case awaiting(InboxRequestRow)
 
         enum ID: Hashable {
             case message(RequestKey)
             case reply(RequestKey)
+            case awaiting(RequestKey)
         }
 
         var id: ID {
             switch self {
             case let .message(item): .message(item.entry.key)
             case let .reply(item): .reply(item.entry.parent)
+            case let .awaiting(row): .awaiting(row.key)
             }
         }
 
@@ -1543,6 +1565,7 @@ struct InboxList: View {
             switch self {
             case let .message(item): item.entry.receivedAt
             case let .reply(item): item.entry.receivedAt
+            case let .awaiting(row): row.submissionProgress?.since ?? .distantPast
             }
         }
     }
@@ -1654,14 +1677,37 @@ struct InboxList: View {
         }
     }
 
+    /// Messages with something the person just sent, newest first. They
+    /// show in the New area with a spinner until the agent replies, or as not
+    /// sent, and keep their place in the normal list too.
+    private var matchingAwaitingRows: [InboxRequestRow] {
+        guard tab == .inbox else { return [] }
+        let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
+        return rows.compactMap { item -> InboxRequestRow? in
+            guard case let .request(row) = item, row.submissionProgress != nil,
+                  query.isEmpty || item.matchesSearch(query) else { return nil }
+            return row
+        }
+        .sorted { ($0.submissionProgress?.since ?? .distantPast) > ($1.submissionProgress?.since ?? .distantPast) }
+    }
+
     private var combinedNewMessageAreaRows: [NewMessageAreaCombinedRow] {
-        NewMessageAreaRowOrder.merged(
-            messages: matchingNewMessageAreaRows,
+        let awaiting = matchingAwaitingRows
+        let awaitingKeys = Set(awaiting.map(\.key))
+        let existing = NewMessageAreaRowOrder.merged(
+            messages: matchingNewMessageAreaRows.filter { !awaitingKeys.contains($0.entry.key) },
             replies: matchingReplyItemRows,
             messageDate: { $0.entry.receivedAt },
             replyDate: { $0.entry.receivedAt },
             message: NewMessageAreaCombinedRow.message,
             reply: NewMessageAreaCombinedRow.reply)
+        return NewMessageAreaRowOrder.merged(
+            messages: existing,
+            replies: awaiting,
+            messageDate: { $0.receivedAt },
+            replyDate: { $0.submissionProgress?.since ?? .distantPast },
+            message: { $0 },
+            reply: NewMessageAreaCombinedRow.awaiting)
     }
 
     private func updateVisibility(_ token: NewMessageAreaVisibility, isVisible: Bool) {
@@ -2219,7 +2265,35 @@ struct InboxList: View {
             replyItemRow(item, in: tab,
                          selected: selected == selection || lastViewedSelection == selection,
                          using: proxy)
+        case let .awaiting(row):
+            let selection = InboxSelection.request(row.key)
+            awaitingAreaRow(row, in: tab,
+                            selected: selected == selection || lastViewedSelection == selection)
         }
+    }
+
+    @ViewBuilder
+    private func awaitingAreaRow(_ row: InboxRequestRow,
+                                 in tab: InboxWorkspaceTab,
+                                 selected isSelected: Bool) -> some View {
+        NavigationLink(value: InboxSelection.request(row.key)) {
+            InboxRowContent(row: row, selected: isSelected)
+        }
+        .buttonStyle(.plain)
+        .tint(.clear)
+        .navigationLinkIndicatorVisibility(.hidden)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
+        .tag(InboxSelection.request(row.key))
+        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+            messageSwipeActions(for: .request(row), in: tab)
+        }
+        .swipeActions(edge: .leading, allowsFullSwipe: true) {
+            messageSwipeActions(for: .request(row), in: tab)
+        }
+        .id(InboxListRowScrollTarget(tab: tab,
+                                     selection: .request(row.key),
+                                     placement: .newMessageArea))
+        .accessibilityIdentifier("awaiting-reply-area-\(InboxItem.request(row).accessibilityID)")
     }
 
     @ViewBuilder
@@ -2784,6 +2858,31 @@ private struct ReplyItemRowContent: View {
     }
 }
 
+/// A spinner while something the person sent waits on the agent, or a
+/// not-sent mark when it definitively failed. Status, not a control.
+struct InboxSubmissionProgressMark: View {
+    let progress: InboxRowSubmissionProgress
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        let palette = HarklightDesignSystem.palette(for: colorScheme)
+        switch progress.state {
+        case .awaiting:
+            ProgressView()
+                .controlSize(.small)
+                .tint(palette.label)
+                .accessibilityLabel("Waiting for a reply")
+                .accessibilityIdentifier("inbox-awaiting-reply")
+        case .notSent:
+            Label("Not sent", systemImage: "exclamationmark.circle.fill")
+                .labelStyle(.titleAndIcon)
+                .harklightType(.rowTime)
+                .foregroundStyle(palette.coral)
+                .accessibilityIdentifier("inbox-not-sent")
+        }
+    }
+}
+
 struct InboxRowContent: View {
     let row: InboxRequestRow
     var selected = false
@@ -2835,6 +2934,9 @@ struct InboxRowContent: View {
 
     @ViewBuilder
     private var titleTrailingStatus: some View {
+        if let progress = row.submissionProgress {
+            InboxSubmissionProgressMark(progress: progress)
+        }
         // Only a chat with an unread turn is marked; a read chat shows nothing.
         if row.chatUnread == true {
             Image(systemName: "flag.fill")
