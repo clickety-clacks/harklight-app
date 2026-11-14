@@ -50,3 +50,12 @@ func workspaceBackButton(in app: XCUIApplication) -> XCUIElement {
 
     return app.buttons["BackButton"]
 }
+
+/// Whether the inbox list stays visible beside an open message (the iPad
+/// split) rather than being replaced by it. The list has no search field of
+/// its own any more, so this checks the list itself.
+@MainActor
+func listVisibleBesideDetail(in app: XCUIApplication) -> Bool {
+    let list = app.collectionViews.firstMatch
+    return list.exists && list.isHittable
+}

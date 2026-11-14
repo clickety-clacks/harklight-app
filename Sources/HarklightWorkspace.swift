@@ -1545,19 +1545,19 @@ struct InboxList: View {
         case message(NewMessageAreaListRow)
         case reply(ReplyItemListRow)
         /// Something the person just sent, waiting on the agent or not sent.
-        case awaiting(InboxRequestRow)
+        case awaiting(AwaitingAreaItem)
 
         enum ID: Hashable {
             case message(RequestKey)
             case reply(RequestKey)
-            case awaiting(RequestKey)
+            case awaiting(InboxSelection)
         }
 
         var id: ID {
             switch self {
             case let .message(item): .message(item.entry.key)
             case let .reply(item): .reply(item.entry.parent)
-            case let .awaiting(row): .awaiting(row.key)
+            case let .awaiting(item): .awaiting(item.item.id)
             }
         }
 
@@ -1565,7 +1565,7 @@ struct InboxList: View {
             switch self {
             case let .message(item): item.entry.receivedAt
             case let .reply(item): item.entry.receivedAt
-            case let .awaiting(row): row.submissionProgress?.since ?? .distantPast
+            case let .awaiting(item): item.since
             }
         }
     }
@@ -1680,20 +1680,37 @@ struct InboxList: View {
     /// Messages with something the person just sent, newest first. They
     /// show in the New area with a spinner until the agent replies, or as not
     /// sent, and keep their place in the normal list too.
-    private var matchingAwaitingRows: [InboxRequestRow] {
+    /// A message or local example with something the person just sent.
+    private struct AwaitingAreaItem {
+        let item: InboxItem
+        let row: InboxRequestRow
+        var since: Date { row.submissionProgress?.since ?? .distantPast }
+    }
+
+    /// Messages with something the person just sent, newest first. They
+    /// show in the New area with a spinner until the agent replies, or as not
+    /// sent, and keep their place in the normal list too.
+    private var matchingAwaitingRows: [AwaitingAreaItem] {
         guard tab == .inbox else { return [] }
         let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
-        return rows.compactMap { item -> InboxRequestRow? in
-            guard case let .request(row) = item, row.submissionProgress != nil,
+        return rows.compactMap { item -> AwaitingAreaItem? in
+            let row: InboxRequestRow? = switch item {
+            case let .request(request): request
+            case let .example(_, response): response.inboxRow
+            }
+            guard let row, row.submissionProgress != nil,
                   query.isEmpty || item.matchesSearch(query) else { return nil }
-            return row
+            return AwaitingAreaItem(item: item, row: row)
         }
-        .sorted { ($0.submissionProgress?.since ?? .distantPast) > ($1.submissionProgress?.since ?? .distantPast) }
+        .sorted { $0.since > $1.since }
     }
 
     private var combinedNewMessageAreaRows: [NewMessageAreaCombinedRow] {
         let awaiting = matchingAwaitingRows
-        let awaitingKeys = Set(awaiting.map(\.key))
+        let awaitingKeys = Set(awaiting.compactMap { awaitingItem -> RequestKey? in
+            if case let .request(row) = awaitingItem.item { return row.key }
+            return nil
+        })
         let existing = NewMessageAreaRowOrder.merged(
             messages: matchingNewMessageAreaRows.filter { !awaitingKeys.contains($0.entry.key) },
             replies: matchingReplyItemRows,
@@ -1705,7 +1722,7 @@ struct InboxList: View {
             messages: existing,
             replies: awaiting,
             messageDate: { $0.receivedAt },
-            replyDate: { $0.submissionProgress?.since ?? .distantPast },
+            replyDate: { $0.since },
             message: { $0 },
             reply: NewMessageAreaCombinedRow.awaiting)
     }
@@ -2265,35 +2282,35 @@ struct InboxList: View {
             replyItemRow(item, in: tab,
                          selected: selected == selection || lastViewedSelection == selection,
                          using: proxy)
-        case let .awaiting(row):
-            let selection = InboxSelection.request(row.key)
-            awaitingAreaRow(row, in: tab,
+        case let .awaiting(awaitingItem):
+            let selection = awaitingItem.item.id
+            awaitingAreaRow(awaitingItem, in: tab,
                             selected: selected == selection || lastViewedSelection == selection)
         }
     }
 
     @ViewBuilder
-    private func awaitingAreaRow(_ row: InboxRequestRow,
+    private func awaitingAreaRow(_ awaitingItem: AwaitingAreaItem,
                                  in tab: InboxWorkspaceTab,
                                  selected isSelected: Bool) -> some View {
-        NavigationLink(value: InboxSelection.request(row.key)) {
-            InboxRowContent(row: row, selected: isSelected)
+        NavigationLink(value: awaitingItem.item.id) {
+            InboxRowContent(row: awaitingItem.row, selected: isSelected)
         }
         .buttonStyle(.plain)
         .tint(.clear)
         .navigationLinkIndicatorVisibility(.hidden)
         .accessibilityAddTraits(isSelected ? .isSelected : [])
-        .tag(InboxSelection.request(row.key))
+        .tag(awaitingItem.item.id)
         .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-            messageSwipeActions(for: .request(row), in: tab)
+            messageSwipeActions(for: awaitingItem.item, in: tab)
         }
         .swipeActions(edge: .leading, allowsFullSwipe: true) {
-            messageSwipeActions(for: .request(row), in: tab)
+            messageSwipeActions(for: awaitingItem.item, in: tab)
         }
         .id(InboxListRowScrollTarget(tab: tab,
-                                     selection: .request(row.key),
+                                     selection: awaitingItem.item.id,
                                      placement: .newMessageArea))
-        .accessibilityIdentifier("awaiting-reply-area-\(InboxItem.request(row).accessibilityID)")
+        .accessibilityIdentifier("awaiting-reply-area-\(awaitingItem.item.accessibilityID)")
     }
 
     @ViewBuilder
