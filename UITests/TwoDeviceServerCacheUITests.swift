@@ -109,6 +109,45 @@ final class TwoDeviceServerCacheUITests: XCTestCase {
         snapshot("Reply-pending-during-catch-up", app)
     }
 
+    /// One disposable chat send; the holder supplies the expected reply. Keep
+    /// this same panel open through pending display and both Server turns.
+    func testChatUpdatesWithoutReopeningDuringCatchUp() throws {
+        try requireCatchUpRun()
+        let message = try configuredMessage("CHAT")
+        let environment = ProcessInfo.processInfo.environment
+        guard let text = environment["HARKLIGHT_DIAGNOSTIC_CHAT_TEXT"], !text.isEmpty,
+              let reply = environment["HARKLIGHT_DIAGNOSTIC_CHAT_EXPECTED_REPLY"], !reply.isEmpty else {
+            throw Failure.missing("reserved synthetic chat text and expected agent reply")
+        }
+        let app = launchEnrolledApp()
+        defer { collectJournal(app) }
+        try openMessage(message, in: app)
+        try tap(app.buttons["Chat"], stage: "open-chat-once", in: app)
+        let editor = app.descendants(matching: .any)["sample-chat-input-surface"].firstMatch.textViews.firstMatch
+        try tap(editor, stage: "chat-editor", in: app)
+        editor.typeText(text)
+        try requireActiveCatchUp(app, stage: "before-chat-send")
+        attach("submit_time=" + ISO8601DateFormatter().string(from: Date()), named: "chat-send-time")
+        try tap(app.buttons["sample-chat-send"], stage: "chat-send-once", in: app)
+        let history = app.scrollViews["conversation-history-scroll"]
+        guard history.staticTexts[text].firstMatch.waitForExistence(timeout: 5) else {
+            snapshot("chat-own-text-missing", app)
+            throw Failure.missing("own submitted text in the open transcript")
+        }
+        snapshot("chat-own-text-visible", app)
+        guard history.staticTexts[reply].firstMatch.waitForExistence(timeout: observationTimeout) else {
+            snapshot("chat-agent-reply-missing", app)
+            throw Failure.missing("live agent reply without reopening chat")
+        }
+        let serverTurns = history.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "conversation-turn-"))
+        guard serverTurns.containing(.staticText, identifier: text).firstMatch.exists else {
+            snapshot("chat-own-server-turn-missing", app)
+            throw Failure.missing("own Server-backed turn without reopening chat")
+        }
+        snapshot("chat-own-and-agent-turns-live", app)
+    }
+
     private func requireCatchUpRun() throws {
         guard ProcessInfo.processInfo.environment["HARKLIGHT_ACTIVE_CATCHUP_UI"] == "1" else {
             throw XCTSkip("Requires observed active catch-up on the isolated Server and dedicated action rows.")
@@ -270,7 +309,8 @@ final class TwoDeviceServerCacheUITests: XCTestCase {
                            "inbox-warning-button", "request-seen-action", "request-finish-seen",
                            "request-finish", "inbox-mark-seen", "inbox-no-comment",
                            "inbox-list-diagnostics", "request-delivery-warning",
-                           "request-action-error", "request-action-unavailable"] {
+                           "request-action-error", "request-action-unavailable",
+                           "conversation-ui-diagnostics", "conversation-history-diagnostics"] {
             let element = app.descendants(matching: .any)[identifier].firstMatch
             lines.append("\(identifier): exists=\(element.exists)" + (element.exists
                 ? " enabled=\(element.isEnabled) hittable=\(element.isHittable) label=\(element.label)" : ""))

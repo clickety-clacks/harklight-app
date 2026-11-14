@@ -128,7 +128,8 @@ struct ConversationPanel: View {
                 let hasNotAcceptedCard = hasNotAcceptedCardForRetainedAnswer(thread: thread,
                                                                               request: request)
                 ConversationHistoryContent(store: store, key: key, revision: revision,
-                    thread: thread, request: request, sender: sender,
+                    thread: thread, pendingSubmissions: ConversationPendingSubmission.rows(in: thread),
+                    request: request, sender: sender,
                     local: store.isLocalExample,
                     hasNotAcceptedCardForRetainedAnswer: hasNotAcceptedCard,
                     initialScrollTurnID: initialScrollTurnID,
@@ -144,7 +145,6 @@ struct ConversationPanel: View {
                     Label(thread.isRetracted ? store.retractionLabel(key) : "Request \(terminal.rawValue)", systemImage: "checkmark.circle")
                         .font(.caption).padding(8)
                 }
-                ConversationDraftStatus(disposition: draft.disposition)
                 ConversationUploadCleanupStatus(store: store, key: key, revision: revision)
                 if let error = store.conversationError {
                     Text(error).font(.caption).foregroundStyle(.hkSecondary).padding(.horizontal)
@@ -162,12 +162,14 @@ struct ConversationPanel: View {
                         .padding(.horizontal)
                         .accessibilityIdentifier("conversation-read-only-reason")
                 } else if store.isReadOnly {
-                    ReadOnlyConversationDraftView(draft: draft) { file in
-                        fileError = nil
-                        inspectedFile = file
-                        inspectedFileRevision = revision
+                    if case .saved = draft.disposition {
+                        ReadOnlyConversationDraftView(draft: draft) { file in
+                            fileError = nil
+                            inspectedFile = file
+                            inspectedFileRevision = revision
+                        }
+                            .padding(verticalSizeClass == .compact ? 4 : 12)
                     }
-                        .padding(verticalSizeClass == .compact ? 4 : 12)
                 } else {
                     ConversationAvailabilityNotice(
                         observation: thread.latestReportedAvailabilityObservation)
@@ -304,6 +306,7 @@ private struct ConversationHistoryContent: View, Equatable {
     let key: RequestKey
     let revision: UInt64
     let thread: ConversationThread
+    let pendingSubmissions: [ConversationPendingSubmission]
     let request: PresentedRequest?
     let sender: String
     let local: Bool
@@ -324,6 +327,7 @@ private struct ConversationHistoryContent: View, Equatable {
         lhs.thread.currentRevision == rhs.thread.currentRevision &&
         lhs.thread.revisions == rhs.thread.revisions &&
         lhs.thread.turns == rhs.thread.turns &&
+        lhs.pendingSubmissions == rhs.pendingSubmissions &&
         lhs.thread.facts == rhs.thread.facts &&
         lhs.thread.answerDrafts == rhs.thread.answerDrafts &&
         lhs.thread.latestReportedAvailabilityObservation == rhs.thread.latestReportedAvailabilityObservation &&
@@ -390,12 +394,22 @@ private struct ConversationHistoryContent: View, Equatable {
                                 }
                             }
                     }
+                    ForEach(pendingSubmissions) { pending in
+                        ConversationPendingSubmissionView(submission: pending,
+                            retryEnabled: !store.isReadOnly && !store.isSendingDiscussion(for: key, revision: pending.revision),
+                            retry: { store.sendDiscussion(for: key, revision: pending.revision) },
+                            edit: { store.editRejectedDiscussion(for: key, revision: pending.revision) },
+                            inspect: { file in inspect(file, pending.revision) })
+                        .id(pending.id)
+                    }
                 }.padding(.horizontal)
             }
             // Room under the sheet's grabber, inside the history so a drag from
             // its top still reaches the chat's dismissal gesture.
             .contentMargins(.top, 20, for: .scrollContent)
             .accessibilityIdentifier("conversation-history-scroll")
+            .uiDiagnostics("conversation-history-diagnostics",
+                "renderedTurns=\(thread.turns.count) pending=\(pendingSubmissions.count) latestTurn=\(thread.turns.last?.id.rawValue ?? "nil")")
             .background {
                 GeometryReader { geometry in
                     Color.clear.preference(
@@ -455,6 +469,9 @@ private struct ConversationHistoryContent: View, Equatable {
             }
             .onChange(of: thread.turns.count) { _, _ in
                 if let last = thread.turns.last { proxy.scrollTo(last.id, anchor: .bottom) }
+            }
+            .onChange(of: pendingSubmissions.map(\.id)) { _, ids in
+                if let last = ids.last { proxy.scrollTo(last, anchor: .bottom) }
             }
             .onChange(of: initialScrollTurnID, initial: true) { _, target in
                 guard let target, turnIDs.contains(target) else { return }
@@ -521,6 +538,78 @@ private struct ReadOnlyConversationDraftView: View {
     }
 }
 
+/// Local accepted work is visible in the transcript without pretending it is
+/// a Server turn. Its operation identity joins it to exactly one replayed turn.
+struct ConversationPendingSubmission: Identifiable, Equatable {
+    let id: UUID
+    let revision: UInt64
+    let text: ExactText
+    let files: [ConversationFile]
+    let disposition: ConversationDraft.Disposition
+
+    static func rows(in thread: ConversationThread) -> [Self] {
+        let replayedOperations = Set(thread.turns.compactMap(\.operationID))
+        let replayedTurns = Set(thread.turns.map(\.id))
+        return thread.drafts.values.compactMap { draft -> Self? in
+            let operation: UUID
+            switch draft.disposition {
+            case .saved: return nil
+            case let .submitting(id), let .outcomeUnknown(id): operation = id
+            case let .acceptedPendingReplay(id, turn):
+                guard !replayedTurns.contains(turn) else { return nil }
+                operation = id
+            case .rejected:
+                guard let id = draft.operationID else { return nil }
+                operation = id
+            }
+            guard !replayedOperations.contains(operation) else { return nil }
+            return Self(id: operation, revision: draft.binding.revision, text: draft.text,
+                        files: draft.files, disposition: draft.disposition)
+        }.sorted { $0.revision < $1.revision }
+    }
+}
+
+private struct ConversationPendingSubmissionView: View {
+    let submission: ConversationPendingSubmission
+    let retryEnabled: Bool
+    let retry: () -> Void
+    let edit: () -> Void
+    let inspect: (ConversationFile) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("You").font(.caption).foregroundStyle(.hkSecondary)
+            if !submission.text.rawValue.isEmpty {
+                Text(submission.text.rawValue)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .textSelection(.enabled)
+            }
+            ForEach(submission.files) { file in
+                Button { inspect(file) } label: {
+                    Label(file.name.rawValue, systemImage: "paperclip")
+                }
+                .buttonStyle(.plain)
+            }
+            ConversationDraftStatus(disposition: submission.disposition)
+            if case let .rejected(reason) = submission.disposition {
+                HStack {
+                    Button("Retry", action: retry)
+                        .disabled(!retryEnabled || ["closed", "not_found", "unknown_message"].contains(reason.rawValue))
+                        .accessibilityIdentifier("conversation-pending-retry")
+                    Button("Edit", action: edit)
+                        .disabled(!retryEnabled)
+                        .accessibilityIdentifier("conversation-pending-edit")
+                }
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.quaternary, in: RoundedRectangle(cornerRadius: 12))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("conversation-pending-" + submission.id.uuidString.lowercased())
+    }
+}
+
 enum ConversationDraftPresentationText {
     static let readOnlyHeading: LocalizedStringResource = "Saved discussion draft"
 
@@ -529,6 +618,16 @@ enum ConversationDraftPresentationText {
         case outcomeUnknown
         case acceptedPendingReplay
         case rejected(ExactText)
+    }
+
+    static func rejectionMessage(_ reason: ExactText) -> String {
+        switch reason.rawValue {
+        case "closed": "This request was already closed. Your message is saved."
+        case "not_found": "This request is no longer available. Your message is saved."
+        case "forbidden": "The server did not allow this message. Your message is saved."
+        case "stale_revision": "This request changed before the message was sent. Your message is saved."
+        default: "Message not sent. Your text and files are saved."
+        }
     }
 
     static func status(for disposition: ConversationDraft.Disposition) -> Status? {
@@ -543,6 +642,14 @@ enum ConversationDraftPresentationText {
 }
 
 enum ConversationSubmittedText {
+    static func composerText(for draft: ConversationDraft) -> String {
+        switch draft.disposition {
+        case .saved: return draft.text.rawValue
+        case .rejected where draft.operationID == nil: return draft.text.rawValue
+        default: return ""
+        }
+    }
+
     static func afterResult(accepted: Bool, submitted: String, submittedEdit: UInt64,
                             current: String, currentEdit: UInt64) -> String {
         accepted && currentEdit == submittedEdit && current == submitted ? "" : current
@@ -635,14 +742,18 @@ private struct ConversationComposer: View {
     private var thread: ConversationThread? { store.conversation(for: key) }
     private var draft: ConversationDraft { store.conversationDraft(for: key, revision: revision) }
     private var allowsDraftEditing: Bool { store.canEditDiscussionDraft(for: key) }
-    private var allowsDiscussion: Bool { store.canSendDiscussion(for: key) }
+    private var allowsDiscussion: Bool { !frozen && store.canSendDiscussion(for: key) }
     private var frozen: Bool {
-        switch draft.disposition { case .submitting, .outcomeUnknown, .acceptedPendingReplay: return true; default: return false }
+        switch draft.disposition {
+        case .saved: return false
+        case .rejected where draft.operationID == nil: return false
+        default: return true
+        }
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-        if !draft.files.isEmpty {
+        if !frozen && !draft.files.isEmpty {
             ScrollView(.horizontal) {
                 HStack(spacing: 10) {
                     ForEach(draft.files) { file in
@@ -735,25 +846,21 @@ private struct ConversationComposer: View {
                 textSession.savedText = current.text.rawValue
                 return
             }
-            // A confirmed send can await replay while its exact operation stays durable.
-            if case .acceptedPendingReplay = current.disposition {
-                textSession.stagedText = ""
-                textSession.savedText = ""
-            } else {
-                textSession.stagedText = current.text.rawValue
-                textSession.savedText = textSession.stagedText
-            }
+            textSession.stagedText = ConversationSubmittedText.composerText(for: current)
+            textSession.savedText = textSession.stagedText
         }
         .onChange(of: draft.text) { old, new in
-            guard textSession.stagedText == textSession.savedText else { return }
+            guard case .saved = draft.disposition,
+                  textSession.stagedText == textSession.savedText else { return }
             if old != new {
                 textSession.stagedText = new.rawValue
                 textSession.savedText = textSession.stagedText
             }
         }
-        .onChange(of: draft.disposition) { _, disposition in
-            if case .saved = disposition, textSession.stagedText != textSession.savedText { scheduleTextSave() }
-            if case .rejected = disposition, textSession.stagedText != textSession.savedText { scheduleTextSave() }
+        .onChange(of: draft.disposition) { _, _ in
+            textSession.textSaveTask?.cancel()
+            textSession.stagedText = ConversationSubmittedText.composerText(for: draft)
+            textSession.savedText = textSession.stagedText
         }
         .onDisappear {
             textSession.textSaveTask?.cancel()
@@ -807,16 +914,16 @@ private struct ConversationComposer: View {
         guard persistStagedText(), let binding = textSession.stagedBinding else { return }
         let submittedText = textSession.stagedText
         let submittedEdit = textSession.textEditRevision
-        store.sendDiscussion(for: binding.request, revision: binding.revision) { accepted in
+        store.sendDiscussion(for: binding.request, revision: binding.revision, onQueued: {
             guard textSession.stagedBinding == binding else { return }
             let remaining = ConversationSubmittedText.afterResult(
-                accepted: accepted, submitted: submittedText, submittedEdit: submittedEdit,
+                accepted: true, submitted: submittedText, submittedEdit: submittedEdit,
                 current: textSession.stagedText, currentEdit: textSession.textEditRevision)
             if remaining != textSession.stagedText {
                 textSession.stagedText = remaining
                 textSession.savedText = remaining
             }
-        }
+        })
     }
 
 
@@ -881,11 +988,12 @@ private struct ConversationDraftStatus: View {
             case .submitting:
                 Text("Sending").font(.caption).foregroundStyle(.hkSecondary)
             case .outcomeUnknown:
-                Text("Submission unconfirmed · saved draft retained").font(.caption).foregroundStyle(.hkSecondary)
+                Text("Pending · your message is saved").font(.caption).foregroundStyle(.hkSecondary)
             case .acceptedPendingReplay:
-                Text("Sent").font(.caption).foregroundStyle(.hkSecondary)
+                Text("Delivered").font(.caption).foregroundStyle(.hkSecondary)
             case let .rejected(reason):
-                Text(reason.rawValue).font(.caption).foregroundStyle(.hkSecondary)
+                Text("Not sent").font(.caption).foregroundStyle(.hkSecondary)
+                Text(ConversationDraftPresentationText.rejectionMessage(reason)).font(.caption).foregroundStyle(.hkSecondary)
             }
         }
     }
@@ -1136,6 +1244,7 @@ private struct ConversationTurnView: View {
                     hasReply: hasReply, conversationAgentName: sender, local: local)
             }
         }
+        .accessibilityIdentifier("conversation-turn-" + turn.id.rawValue)
         .padding(.horizontal, isOwnTurn ? 12 : 12)
         .padding(.vertical, isOwnTurn ? 12 : 0)
         .frame(maxWidth: .infinity, alignment: .leading)
