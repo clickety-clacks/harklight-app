@@ -227,7 +227,11 @@ final class InboxStockTabsUITests: XCTestCase {
                 let back = workspaceBackButton(in: app)
                 XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
                 back.tap()
-                leaveWorkspaceSearch(in: app)
+                // Search remains the selected tab after returning from its
+                // detail. Select Inbox to leave Search before opening Replied.
+                let inboxTab = workspaceTab("Inbox", in: app)
+                XCTAssertTrue(inboxTab.waitForExistence(timeout: 5), app.debugDescription)
+                inboxTab.tap()
             }
 
             let tab = workspaceTab(title, in: app)
