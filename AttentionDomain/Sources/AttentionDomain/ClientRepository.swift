@@ -3818,7 +3818,9 @@ public final class ClientRepository: @unchecked Sendable {
         next.intentByRequest.removeValue(forKey: key)
         next.outboxOrder.removeAll { ids.contains($0) }
         next.drafts.removeValue(forKey: key)
-        next.pendingConversations[key]?.answerDrafts = nil
+        if next.conversation?.threads[key]?.isRetracted != true {
+            next.pendingConversations[key]?.answerDrafts = nil
+        }
     }
 
     private func dropAnswersInvalidatedBySnapshot(_ checkpoint: InboxPagingCheckpoint,
