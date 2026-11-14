@@ -132,11 +132,6 @@ public indirect enum JSONValue: Equatable, Codable, Sendable {
     }
 
     public static func parse(_ data: Data) throws -> JSONValue {
-        // A relay delivery can wrap a server-admitted 2 MiB request in its
-        // event envelope. Match the server's bounded response-frame ceiling.
-        guard data.count <= 2 * (2 * 1024 * 1024) + 16_384 else {
-            throw JSONParseError.documentTooLarge
-        }
         var parser = ExactJSONParser(bytes: Array(data))
         return try parser.parseDocument()
     }
@@ -284,8 +279,6 @@ private extension String {
 }
 
 private enum JSONParseError: Error {
-    case documentTooLarge
-    case nestingTooDeep
     case unexpectedEnd
     case unexpectedToken
     case invalidString
@@ -299,20 +292,19 @@ private struct ExactJSONParser {
 
     mutating func parseDocument() throws -> JSONValue {
         skipWhitespace()
-        let result = try parseValue(depth: 1)
+        let result = try parseValue()
         skipWhitespace()
         guard index == bytes.count else { throw JSONParseError.trailingData }
         return result
     }
 
-    private mutating func parseValue(depth: Int) throws -> JSONValue {
-        guard depth <= 128 else { throw JSONParseError.nestingTooDeep }
+    private mutating func parseValue() throws -> JSONValue {
         guard let byte = peek() else { throw JSONParseError.unexpectedEnd }
         switch byte {
         case 0x7b:
-            return try parseObject(depth: depth)
+            return try parseObject()
         case 0x5b:
-            return try parseArray(depth: depth)
+            return try parseArray()
         case 0x22:
             return .string(try parseString())
         case 0x74:
@@ -331,7 +323,7 @@ private struct ExactJSONParser {
         }
     }
 
-    private mutating func parseObject(depth: Int) throws -> JSONValue {
+    private mutating func parseObject() throws -> JSONValue {
         _ = consume(0x7b)
         skipWhitespace()
         if consume(0x7d) { return .object([]) }
@@ -343,7 +335,7 @@ private struct ExactJSONParser {
             skipWhitespace()
             guard consume(0x3a) else { throw JSONParseError.unexpectedToken }
             skipWhitespace()
-            members.append(JSONMember(key: key, value: try parseValue(depth: depth + 1)))
+            members.append(JSONMember(key: key, value: try parseValue()))
             skipWhitespace()
             if consume(0x7d) { return .object(members) }
             guard consume(0x2c) else { throw JSONParseError.unexpectedToken }
@@ -351,14 +343,14 @@ private struct ExactJSONParser {
         }
     }
 
-    private mutating func parseArray(depth: Int) throws -> JSONValue {
+    private mutating func parseArray() throws -> JSONValue {
         _ = consume(0x5b)
         skipWhitespace()
         if consume(0x5d) { return .array([]) }
 
         var values: [JSONValue] = []
         while true {
-            values.append(try parseValue(depth: depth + 1))
+            values.append(try parseValue())
             skipWhitespace()
             if consume(0x5d) { return .array(values) }
             guard consume(0x2c) else { throw JSONParseError.unexpectedToken }
