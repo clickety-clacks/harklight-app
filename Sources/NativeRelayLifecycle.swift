@@ -1837,6 +1837,10 @@ final class NativeRelayLifecycle {
     private func performRefreshAttempt(generation: UUID,
                                        checkBlockedPush: Bool) async -> NativeRelayRefreshResult {
         var needsReconnect = false
+        // Set after discarding saved Server state, cleared by the next socket
+        // interruption. It stops back-to-back rebuilds when a fresh rebuild
+        // fails again, so that failure is reported instead of looping.
+        var rebuiltSavedServerState = false
         while refreshGeneration == generation && !Task.isCancelled {
             do {
                 if needsReconnect { try await reconnect(generation: generation) }
@@ -1851,6 +1855,14 @@ final class NativeRelayLifecycle {
                 guard refreshGeneration == generation, !Task.isCancelled else { return .unavailable }
                 foregroundProgress.recordFailure(error)
                 confirmedRelayContext = nil
+                if !rebuiltSavedServerState, NativeRelayCoreError.isInvalidSavedServerState(error),
+                   discardSavedServerState(after: error) {
+                    // Saved Server state is a cache. Report it, drop it, and
+                    // rebuild from the Server on a fresh connection.
+                    rebuiltSavedServerState = true
+                    needsReconnect = true
+                    continue
+                }
                 guard Self.isInterruptedConnection(error) else {
                     recordDiagnostic(.relay, .projectionRefresh, .failed, error: error,
                                      attemptID: activeTransportAttemptID)
@@ -1861,10 +1873,31 @@ final class NativeRelayLifecycle {
                 // prefix. There is no elapsed-time or retry-count cutoff.
                 recordDiagnostic(.relay, .projectionRefresh, .retrying, error: error,
                                  attemptID: activeTransportAttemptID)
+                rebuiltSavedServerState = false
                 needsReconnect = true
             }
         }
         return .unavailable
+    }
+
+    /// Records the validation failure and discards saved Server-owned inbox
+    /// state, keeping the person's unsent queue. Returns false only when the
+    /// discard itself cannot be committed.
+    private func discardSavedServerState(after error: Error) -> Bool {
+        guard let expected = context, let configuration else { return false }
+        recordDiagnostic(.localStore, .projectionRefresh, .retrying, error: error,
+                         attemptID: activeTransportAttemptID)
+        do {
+            try configuration.store.discardServerInboxState(context: expected)
+        } catch {
+            recordDiagnostic(.localStore, .projectionRefresh, .failed, error: error,
+                             attemptID: activeTransportAttemptID)
+            return false
+        }
+        recordDiagnostic(.localStore, .projectionRefresh, .completed,
+                         causeCode: "saved_server_state_rebuilt",
+                         attemptID: activeTransportAttemptID)
+        return true
     }
 
     static func isInterruptedConnection(_ error: Error) -> Bool {

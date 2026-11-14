@@ -117,6 +117,25 @@ public enum NativeRelayCoreError: Error, Equatable {
     case mismatchedOperationResult
     case inboxPagingUnavailable
     case inboxPagingBusy
+
+    /// True when saved Server-owned state (cursor, checkpoint, receipts,
+    /// replay barrier or cached projection) failed local validation. That
+    /// state is only a cache: discard it and rebuild from the Server rather
+    /// than refusing to connect. Transport failures, Server refusals and
+    /// errors about the person's own input are not in this class.
+    public static func isInvalidSavedServerState(_ error: any Error) -> Bool {
+        if let error = error as? NativeRelayCoreError { return error == .invalidReplay || error == .eventRejected }
+        guard let error = error as? AttentionStoreError else { return false }
+        switch error {
+        case .eventGap, .missingOriginContent, .replayAlreadyActive, .replayNotActive,
+             .replayIncomplete, .missingAcceptanceOrder, .duplicateAcceptanceOrder,
+             .inboxCheckpointPending, .inboxCheckpointIncomplete, .inboxPageConflict,
+             .inboxStateUnrefreshed:
+            return true
+        default:
+            return false
+        }
+    }
 }
 
 /// The first native relay seam. C is the only durable owner of events, cursor,

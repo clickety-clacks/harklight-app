@@ -1859,6 +1859,85 @@ final class NativeRelayCoreTests: XCTestCase {
         XCTAssertEqual(session.sent.count, 2, "An accepted operation is not sent again while awaiting its terminal.")
     }
 
+    func testInvalidSavedInboxStateIsRebuiltFromServerKeepingOnlyTheUnsentAnswer() async throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                                       personID: ExactText("person-rebuild"),
+                                       deviceID: ExactText("installation-rebuild"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let persistence = MemoryPendingActionPersistence()
+        let store = try ClientRepository(context: context, persistence: persistence)
+        let unsentKey = RequestKey(accountScope: identity.personID,
+                                   senderID: ExactText("sender"), messageID: ExactText("unsent"))
+        let acceptedKey = RequestKey(accountScope: identity.personID,
+                                     senderID: ExactText("sender"), messageID: ExactText("accepted"))
+        let payload = try JSONValue.parse(data(#"{"title":"Question","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"yes","label":"Yes","kind":"value","value":{"ok":true}}]}}"#))
+        _ = try store.apply(RelayEvent(sequence: 1,
+            body: .delivery(StoredRequest(key: unsentKey, originalPayload: payload), .message)), context: context)
+        _ = try store.apply(RelayEvent(sequence: 2,
+            body: .delivery(StoredRequest(key: acceptedKey, originalPayload: payload), .message)), context: context)
+        let port = AttentionDomainPort(store: store)
+        func submit(_ key: RequestKey) throws -> IntentReceipt {
+            let selector = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first?.selector)
+            return try port.submit(SubmitIntent(context: port.context, selector: selector,
+                intentID: UUID(), inputs: [.compatibilityValue(action: ExactText("yes"))]))
+        }
+        let unsent = try submit(unsentKey)
+        let accepted = try submit(acceptedKey)
+        try store.recordAcceptedOperation(accepted.intentID, operationID: accepted.opID,
+                                          terminalSequence: 3, context: context)
+
+        // A saved cursor past the Server's history: the bounded checkpoint can
+        // never validate against it, on this launch or any later one.
+        let corrupt = ServerStateCacheSnapshot.make(identity: identity,
+            from: try store.serverCacheSnapshot(context: context),
+            conversations: try store.conversationSnapshot(context: context), cursorOverride: 50)
+        try store.restoreCachedServerState(corrupt.attentionDomainState(for: identity), context: context)
+
+        let session = Session(identity)
+        session.snapshotHighWater = 10
+        session.initialItems = [snapshotItem(unsentKey, payload: payload, sequence: 1),
+                                snapshotItem(acceptedKey, payload: payload, sequence: 2)]
+        session.frames = [data(#"{"v":1,"type":"resynced","seq":10}"#)]
+        let cacheURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".json")
+        defer { try? FileManager.default.removeItem(at: cacheURL) }
+        let cache = FileServerStateCache(identity: identity, fileURL: cacheURL)
+
+        let stuck = try NativeRelayCore(store: store, context: context, session: session, serverStateCache: cache)
+        do {
+            _ = try await stuck.resyncAndDrainOutbox()
+            XCTFail("The saved cursor cannot validate against the Server checkpoint.")
+        } catch {
+            XCTAssertTrue(NativeRelayCoreError.isInvalidSavedServerState(error),
+                          "Bad saved Server state is classified for rebuild, not reported as a dead end: \(error)")
+        }
+        XCTAssertTrue(session.sent.isEmpty)
+
+        try store.discardServerInboxState(context: context)
+        let discarded = try store.snapshot(context: context)
+        XCTAssertEqual(discarded.cursor, 0, "The rebuild starts from the Server, not the bad cursor.")
+        XCTAssertNil(discarded.inboxCandidate)
+        XCTAssertEqual(discarded.intents[unsent.intentID]?.operationID, unsent.opID,
+                       "The unsent answer keeps its original operation ID.")
+        XCTAssertNil(discarded.intents[accepted.intentID],
+                     "An accepted receipt is Server truth and returns with the rebuilt projection.")
+        let restartedStore = try ClientRepository(context: context, persistence: persistence)
+        XCTAssertEqual(try restartedStore.snapshot(context: context).intents.keys.sorted { $0.uuidString < $1.uuidString },
+                       [unsent.intentID], "A relaunch after the discard keeps only the unsent queue.")
+
+        let rebuilt = try NativeRelayCore(store: store, context: context, session: session, serverStateCache: cache)
+        let high = try await rebuilt.resyncAndDrainOutbox()
+        XCTAssertEqual(high, 10)
+        let settled = try store.snapshot(context: context)
+        XCTAssertEqual(settled.cursor, 10)
+        XCTAssertEqual(Set(settled.requests.keys), [unsentKey, acceptedKey])
+        let inboxStarts = session.requests.map { String(decoding: $0, as: UTF8.self) }
+            .filter { $0.contains("\"type\":\"inbox_start\"") }
+        XCTAssertTrue(inboxStarts.last?.contains("\"since\":0") == true,
+                      "The rebuild asks the Server for its whole current inbox.")
+        XCTAssertEqual(session.sent.map(\.1), [unsent.opID],
+                       "Only the unsent answer is resent, under its original operation ID.")
+    }
+
     func testAcceptedAnswerRemainsInReceiptInventoryWithoutOrdinaryResend() throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
                                        personID: ExactText("person-accepted-cache"),

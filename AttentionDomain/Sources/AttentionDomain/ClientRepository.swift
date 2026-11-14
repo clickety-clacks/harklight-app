@@ -249,6 +249,44 @@ public final class ClientRepository: @unchecked Sendable {
         acceptedAwaitingTerminalReplay = Self.acceptedAwaitingTerminalReplay(in: state)
     }
 
+    /// Saved inbox state failed validation. It is a cache of Server truth, so
+    /// discard it and let the next connection rebuild it from the Server.
+    /// Only the person's unsent answers survive, under their original operation
+    /// IDs so the Server deduplicates a resend. Accepted, refused and settled
+    /// receipts are Server facts and return with the rebuilt projection.
+    /// Message opens, Chat drafts and read positions stay queued.
+    public func discardServerInboxState(context suppliedContext: ProfileContext) throws {
+        writerLock.lock()
+        defer { writerLock.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard suppliedContext.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
+        var next = state
+        let conversation = next.server.conversation
+        next.server = ServerProjectionCache()
+        next.server.conversation = conversation
+        next.replayPublishedIntents = nil
+        var unsent: [UUID: Submission] = [:]
+        for id in state.intentByRequest.values {
+            guard var operation = state.intents[id] else { continue }
+            switch operation.disposition {
+            case .pending, .lost:
+                operation.disposition = .pending
+                unsent[id] = operation
+            default:
+                continue
+            }
+        }
+        next.intents = unsent
+        next.intentByRequest = state.intentByRequest.filter { unsent[$0.value] != nil }
+        next.outboxOrder = state.outboxOrder.filter { unsent[$0] != nil }
+        let unsentKeys = Set(unsent.values.map(\.requestKey))
+        next.drafts = state.drafts.filter { $0.value.hasEdits || unsentKeys.contains($0.key) }
+        try commit(next)
+        acceptedAwaitingTerminalReplay = Self.acceptedAwaitingTerminalReplay(in: state)
+    }
+
     public func invalidate() {
         writerLock.lock()
         defer { writerLock.unlock() }
