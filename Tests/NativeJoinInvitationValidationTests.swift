@@ -53,6 +53,26 @@ final class NativeJoinInvitationValidationTests: XCTestCase {
         XCTAssertEqual(try NativeJoinInvitation.decode(url), invitation)
     }
 
+    func testEmptySavedAccountNameCanUseTheDisplayFallback() {
+        let record = NativeEnrollmentRecord(host: "relay.example.test",
+                                            enrollmentPort: 18444,
+                                            relayPort: 18443,
+                                            trustedRootDER: Data(),
+                                            identityLabel: "identity",
+                                            deviceID: "device",
+                                            approvalCode: "ABCDEFGH",
+                                            statusSecret: "secret",
+                                            expiresAt: 1,
+                                            statusExpiresAt: 2,
+                                            personID: "person",
+                                            accountDisplayName: "")
+        XCTAssertNil(record.savedAccountName)
+
+        var namedRecord = record
+        namedRecord.accountDisplayName = "Person"
+        XCTAssertEqual(namedRecord.savedAccountName, "Person")
+    }
+
     private func deleteIdentity(namespace: String, certificateLabel: String) {
         SecItemDelete([kSecClass as String: kSecClassGenericPassword,
                        kSecAttrService as String: namespace] as CFDictionary)
