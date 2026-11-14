@@ -405,6 +405,8 @@ private struct ConversationHistoryContent: View, Equatable {
             // its top still reaches the chat's dismissal gesture.
             .contentMargins(.top, 20, for: .scrollContent)
             .accessibilityIdentifier("conversation-history-scroll")
+            .uiDiagnostics("conversation-history-diagnostics",
+                "renderedTurns=\(thread.turns.count) pending=\(pendingSubmissions.count) latestTurn=\(thread.turns.last?.id.rawValue ?? "nil")")
             .background {
                 GeometryReader { geometry in
                     Color.clear.preference(
@@ -1217,6 +1219,7 @@ private struct ConversationTurnView: View {
                     hasReply: hasReply, conversationAgentName: sender, local: local)
             }
         }
+        .accessibilityIdentifier("conversation-turn-" + turn.id.rawValue)
         .padding(.horizontal, isOwnTurn ? 12 : 12)
         .padding(.vertical, isOwnTurn ? 12 : 0)
         .frame(maxWidth: .infinity, alignment: .leading)
