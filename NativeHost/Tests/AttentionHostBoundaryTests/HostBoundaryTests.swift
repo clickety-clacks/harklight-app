@@ -3,18 +3,7 @@ import XCTest
 
 private final class TestSources: @unchecked Sendable {
     private let lock = NSLock()
-    private var time: TimeInterval = 100
     private var sequence: UInt8 = 1
-
-    func now() -> TimeInterval {
-        lock.lock(); defer { lock.unlock() }
-        return time
-    }
-
-    func advance(_ seconds: TimeInterval) {
-        lock.lock(); defer { lock.unlock() }
-        time += seconds
-    }
 
     func bytes(_ count: Int) -> Data {
         lock.lock(); defer { lock.unlock() }
@@ -29,10 +18,10 @@ final class HostBoundaryTests: XCTestCase {
     private let accountB = HostAccount(scope: "relay-B/person-1", deviceGeneration: "device-1")
 
     private func gate(_ sources: TestSources) throws -> HostSessionGate {
-        try HostSessionGate(now: { sources.now() }, random: { sources.bytes($0) })
+        try HostSessionGate(random: { sources.bytes($0) })
     }
 
-    func testPairingSingleUseAttemptLimitExpiryAndSessionFences() throws {
+    func testPairingSingleUseAndSessionFences() throws {
         let sources = TestSources()
         let gate = try gate(sources)
         try gate.activate(accountA)
@@ -51,15 +40,9 @@ final class HostBoundaryTests: XCTestCase {
 
         let second = try gate.issuePairSecret(for: accountA)
         for _ in 0..<5 { XCTAssertThrowsError(try gate.pair(secret: "wrong", account: accountA)) }
-        XCTAssertThrowsError(try gate.pair(secret: second, account: accountA))
-        let third = try gate.issuePairSecret(for: accountA)
-        sources.advance(300)
-        XCTAssertThrowsError(try gate.pair(secret: third, account: accountA))
-        let fourth = try gate.issuePairSecret(for: accountA)
-        let expiring = try gate.pair(secret: fourth, account: accountA)
-        sources.advance(12 * 60 * 60)
-        XCTAssertFalse(gate.authorize(token: expiring.token, account: accountA,
-                                      hostGeneration: expiring.hostGeneration))
+        let afterWrongAttempts = try gate.pair(secret: second, account: accountA)
+        XCTAssertTrue(gate.authorize(token: afterWrongAttempts.token, account: accountA,
+                                     hostGeneration: afterWrongAttempts.hostGeneration))
     }
 
     func testAccountSwitchAndHostRestartFenceOldPages() throws {
@@ -82,32 +65,34 @@ final class HostBoundaryTests: XCTestCase {
                                       hostGeneration: afterRestart.hostGeneration))
     }
 
-    func testExactPostOriginHostAndNoCredentialFallback() throws {
+    func testAPIRequestShapeAndBearerAuthenticationDoNotDependOnHostOrOrigin() throws {
         let boundary = HostHTTPBoundary(port: 43123)
-        let valid = HTTPRequestHead(method: "POST", path: "/api/inspect", headers: [
-            "Host": ["127.0.0.1:43123"], "Origin": ["http://127.0.0.1:43123"],
-            "Content-Type": ["application/json"], "Authorization": ["Bearer abc"]
-        ])
-        XCTAssertNoThrow(try boundary.validateAPI(valid))
-        XCTAssertEqual(try boundary.bearerToken(valid), "abc")
-        for headers in [
-            ["Host": ["localhost:43123"], "Origin": [boundary.origin], "Content-Type": ["application/json"]],
-            ["Host": [boundary.host], "Content-Type": ["application/json"]],
-            ["Host": [boundary.host], "Origin": ["null"], "Content-Type": ["application/json"]],
-            ["Host": [boundary.host], "Origin": [boundary.origin, boundary.origin], "Content-Type": ["application/json"]],
-            ["Host": [boundary.host], "Origin": [boundary.origin], "Content-Type": ["text/plain"]]
-        ] {
-            XCTAssertThrowsError(try boundary.validateAPI(
-                HTTPRequestHead(method: "POST", path: "/api/inspect", headers: headers)))
+        let acceptedHeaders = [
+            ["Content-Type": ["application/json"], "Authorization": ["Bearer abc"]],
+            ["Host": ["localhost:43123"], "Origin": ["http://example.invalid"],
+             "Content-Type": ["application/json"], "Authorization": ["Bearer abc"]],
+            ["Host": ["localhost:43123", boundary.host], "Origin": ["null", "http://example.invalid"],
+             "Content-Type": ["application/json"], "Authorization": ["Bearer abc"]]
+        ]
+        for headers in acceptedHeaders {
+            let request = HTTPRequestHead(method: "POST", path: "/api/inspect", headers: headers)
+            XCTAssertNoThrow(try boundary.validateAPI(request))
+            XCTAssertEqual(try boundary.bearerToken(request), "abc")
         }
         XCTAssertThrowsError(try boundary.validateAPI(
-            HTTPRequestHead(method: "GET", path: "/api/inspect", headers: valid.headers)))
+            HTTPRequestHead(method: "GET", path: "/api/inspect", headers: acceptedHeaders[0])))
         XCTAssertThrowsError(try boundary.validateAPI(
-            HTTPRequestHead(method: "POST", path: "/api/inspect?token=abc", headers: valid.headers)))
+            HTTPRequestHead(method: "POST", path: "/api/inspect?token=abc", headers: acceptedHeaders[0])))
+        let unauthenticated = HTTPRequestHead(method: "POST", path: "/api/inspect",
+                                              headers: ["Content-Type": ["application/json"]])
+        XCTAssertNoThrow(try boundary.validateAPI(unauthenticated))
+        XCTAssertThrowsError(try boundary.bearerToken(unauthenticated))
         XCTAssertNoThrow(try boundary.validateStatic(
-            HTTPRequestHead(method: "GET", path: "/", headers: ["Host": [boundary.host]])))
+            HTTPRequestHead(method: "GET", path: "/", headers: ["Host": ["localhost:43123"]])))
+        XCTAssertNoThrow(try boundary.validateStatic(
+            HTTPRequestHead(method: "GET", path: "/", headers: [:])))
         XCTAssertThrowsError(try boundary.validateStatic(
-            HTTPRequestHead(method: "GET", path: "/api/inspect", headers: ["Host": [boundary.host]])))
+            HTTPRequestHead(method: "GET", path: "/api/inspect", headers: [:])))
     }
 
     func testSingleRequestFramingRejectsAmbiguousBodyAndDuplicateHeaders() throws {
@@ -128,7 +113,19 @@ final class HostBoundaryTests: XCTestCase {
         }
         let doubleOrigin = valid.replacingOccurrences(of: "Origin: \(origin)",
             with: "Origin: \(origin)\r\nOrigin: \(origin)")
-        XCTAssertThrowsError(try HostHTTPBoundary(port: 43123).validateAPI(
+        XCTAssertNoThrow(try HostHTTPBoundary(port: 43123).validateAPI(
             HTTPRequestParser.parse(Data(doubleOrigin.utf8)).head))
+    }
+
+    func testHTTPParserAcceptsHeadersAndBodiesBeyondFormerSizeCaps() throws {
+        let origin = "http://127.0.0.1:43123"
+        let largeHeader = String(repeating: "h", count: 16_385)
+        let body = Data(repeating: 120, count: 1_048_577)
+        let head = "POST /api/inspect HTTP/1.1\r\nHost: 127.0.0.1:43123\r\n" +
+            "Origin: \(origin)\r\nContent-Type: application/json\r\n" +
+            "X-Long: \(largeHeader)\r\nContent-Length: \(body.count)\r\n\r\n"
+        let parsed = try HTTPRequestParser.parse(Data(head.utf8) + body)
+        XCTAssertEqual(parsed.head.soleHeader("X-Long"), largeHeader)
+        XCTAssertEqual(parsed.body, body)
     }
 }

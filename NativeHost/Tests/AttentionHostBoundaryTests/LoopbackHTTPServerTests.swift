@@ -74,13 +74,13 @@ final class LoopbackHTTPServerTests: XCTestCase {
         XCTAssertEqual(script.0, 200)
         let unavailable = try await request(origin + "/api/pair", method: "POST", origin: origin)
         XCTAssertEqual(unavailable.0, 503)
-        let forbidden = try await request(origin + "/api/pair", method: "POST", origin: nil)
-        XCTAssertEqual(forbidden.0, 403)
+        let unavailableWithoutOrigin = try await request(origin + "/api/pair", method: "POST", origin: nil)
+        XCTAssertEqual(unavailableWithoutOrigin.0, 503)
         let hidden = try await request(origin + "/api/observe", method: "GET", origin: nil)
         XCTAssertEqual(hidden.0, 403)
     }
 
-    func testRealLoopbackPostBoundaryAndStaticAsset() async throws {
+    func testRealLoopbackAllowsArbitraryOriginButKeepsRequestShapeChecks() async throws {
         let server = LoopbackHTTPServer { request, boundary in
             if request.head.path == "/" {
                 guard (try? boundary.validateStatic(request.head)) != nil else {
@@ -109,10 +109,52 @@ final class LoopbackHTTPServerTests: XCTestCase {
         let foreign = try await request(origin + "/api/inspect", method: "POST",
                                         origin: "http://localhost:\(port)")
         let get = try await request(origin + "/api/inspect", method: "GET", origin: nil)
-        XCTAssertEqual(missing.0, 403)
-        XCTAssertEqual(null.0, 403)
-        XCTAssertEqual(foreign.0, 403)
+        XCTAssertEqual(missing.0, 200)
+        XCTAssertEqual(null.0, 200)
+        XCTAssertEqual(foreign.0, 200)
         XCTAssertEqual(get.0, 403)
+    }
+
+    func testPostBodyMayArriveAfterTheConnectionWaitsMoreThanFiveSeconds() async throws {
+        let server = LoopbackHTTPServer { request, boundary in
+            guard request.head.path == "/api/inspect",
+                  (try? boundary.validateAPI(request.head)) != nil,
+                  request.body == Data("{}".utf8) else {
+                return HTTPReply(status: 400, body: Data("{}".utf8))
+            }
+            return HTTPReply(status: 200, body: Data("{\"ok\":true}".utf8))
+        }
+        let port = try server.start()
+        defer { server.stop() }
+        let socket = Darwin.socket(AF_INET, SOCK_STREAM, 0)
+        XCTAssertGreaterThanOrEqual(socket, 0)
+        defer { Darwin.close(socket) }
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_port = port.bigEndian
+        _ = "127.0.0.1".withCString { inet_pton(AF_INET, $0, &address.sin_addr) }
+        let connected = withUnsafePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.connect(socket, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        XCTAssertEqual(connected, 0)
+        let origin = "http://127.0.0.1:\(port)"
+        let head = "POST /api/inspect HTTP/1.1\r\nHost: 127.0.0.1:\(port)\r\n" +
+            "Origin: \(origin)\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n"
+        _ = head.withCString { Darwin.send(socket, $0, head.utf8.count, 0) }
+        try await Task.sleep(nanoseconds: 6_000_000_000)
+        _ = "{}".withCString { Darwin.send(socket, $0, 2, 0) }
+        var received = Data()
+        while !String(decoding: received, as: UTF8.self).contains("\r\n\r\n") {
+            var chunk = [UInt8](repeating: 0, count: 1024)
+            let count = Darwin.recv(socket, &chunk, chunk.count, 0)
+            XCTAssertGreaterThan(count, 0)
+            if count <= 0 { break }
+            received.append(contentsOf: chunk[..<count])
+        }
+        XCTAssertTrue(String(decoding: received, as: UTF8.self).hasPrefix("HTTP/1.1 200 OK"))
     }
 
     private func request(_ address: String, method: String, origin: String?,

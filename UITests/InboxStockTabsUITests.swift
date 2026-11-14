@@ -7,6 +7,60 @@ final class InboxStockTabsUITests: XCTestCase {
         XCUIDevice.shared.orientation = .portrait
     }
 
+    func testOrdinaryLaunchAndRelaunchShowInboxWithoutOpeningTheLastMessage() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
+        app.launch()
+        let inbox = workspaceTab("Inbox", in: app)
+        let row = app.descendants(matching: .any)["request-row-facilities-01"]
+        let detail = app.scrollViews["message-card-scroll"]
+        XCTAssertTrue(inbox.waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(inbox.isSelected)
+        XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(row.isHittable, "Compact launch must show the list column.")
+        XCTAssertFalse(detail.exists, "No message was tapped on this launch.")
+        row.tap()
+        XCTAssertTrue(detail.waitForExistence(timeout: 5), app.debugDescription)
+        attachScreenshot("Explicitly opened detail before ordinary relaunch", from: app)
+
+        app.terminate()
+        app.launchArguments = ["--harklight-samples"]
+        app.launch()
+        XCTAssertTrue(inbox.waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(inbox.isSelected)
+        XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(row.isHittable, app.debugDescription)
+        XCTAssertFalse(detail.exists, "Ordinary relaunch must not restore the last detail.")
+        attachScreenshot("Ordinary relaunch remains in the Inbox list", from: app)
+    }
+
+    func testSearchStartsUnselectedAndExplicitOpenAndBackChooseTheCorrectColumn() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
+        app.launch()
+        let search = app.tabBars.buttons["Search"]
+        XCTAssertTrue(search.waitForExistence(timeout: 10), app.debugDescription)
+        search.tap()
+        let field = app.searchFields.firstMatch
+        XCTAssertTrue(field.waitForExistence(timeout: 5), app.debugDescription)
+        field.tap()
+        field.typeText("Archive\n")
+        let row = app.descendants(matching: .any)["sample-approval-0"]
+        let detail = app.scrollViews["message-card-scroll"]
+        XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(row.isHittable)
+        XCTAssertFalse(detail.exists, "Search must not pick its first matching message.")
+        row.tap()
+        XCTAssertTrue(detail.waitForExistence(timeout: 5), app.debugDescription)
+        let back = workspaceBackButton(in: app)
+        XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
+        back.tap()
+        XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(row.isHittable, "Back must restore the searchable list column.")
+        XCTAssertFalse(detail.exists)
+        attachScreenshot("Search list after leaving explicitly opened detail", from: app)
+    }
+
     func testNativeHeaderMinimizesOnDownScrollAndRestoresOnUpScroll() {
         let app = XCUIApplication()
         app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
@@ -53,6 +107,33 @@ final class InboxStockTabsUITests: XCTestCase {
         wait(for: [restored], timeout: 5)
         XCTAssertTrue(settings.isHittable, "Settings returns with the native title.")
         attachScreenshot("Native header restored at top", from: app)
+    }
+
+    /// Something the person just sent shows in the New area at the top of
+    /// Inbox with a spinner, and its row in the normal list shows the spinner
+    /// too. A definitive failure shows as not sent instead.
+    func testSentItemsShowASpinnerInTheNewAreaAndTheNormalList() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--reset-attention-fixture", "--harklight-samples",
+                               "--harklight-test-submission-progress"]
+        app.launch()
+
+        let awaitingArea = app.descendants(matching: .any)["awaiting-reply-area-sample-approval-0"]
+        XCTAssertTrue(awaitingArea.waitForExistence(timeout: 15), app.debugDescription)
+        XCTAssertTrue(awaitingArea.label.contains("Waiting for a reply"), awaitingArea.label)
+
+        let notSentArea = app.descendants(matching: .any)["awaiting-reply-area-sample-textChoice-0"]
+        XCTAssertTrue(notSentArea.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(notSentArea.label.contains("Not sent"), notSentArea.label)
+        XCTAssertLessThan(awaitingArea.frame.minY, notSentArea.frame.minY,
+                          "The more recently sent item is first in the New area.")
+
+        let normalRow = app.descendants(matching: .any)["sample-approval-0"]
+        let list = app.collectionViews.firstMatch
+        for _ in 0..<10 where !(normalRow.exists && normalRow.isHittable) { list.swipeUp() }
+        XCTAssertTrue(normalRow.exists && normalRow.isHittable, app.debugDescription)
+        XCTAssertTrue(normalRow.label.contains("Waiting for a reply"),
+                      "The same message keeps its normal-list row, with the spinner. \(normalRow.label)")
     }
 
     func testSearchTabSearchesTheListItWasOpenedFrom() {
@@ -173,7 +254,10 @@ final class InboxStockTabsUITests: XCTestCase {
         }
     }
 
-    func testNativeSearchFieldStaysInMasterBesideDetail() throws {
+    /// On iPad the design puts search in the tab bar at the top, so the list
+    /// panel beside an open message has no search field of its own, and the
+    /// Search tab stays available.
+    func testSearchTabStaysAvailableBesideDetailWithNoListSearchField() throws {
         let app = XCUIApplication()
         app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
         app.launch()
@@ -188,15 +272,13 @@ final class InboxStockTabsUITests: XCTestCase {
                       "The detail is visible beside the master list.")
 
         let list = app.collectionViews.firstMatch
-        let field = app.searchFields.firstMatch
         XCTAssertTrue(list.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(field.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(list.isHittable, "The master list remains usable beside the detail.")
-        XCTAssertGreaterThan(field.frame.width, 180,
-                             "Search is a full native field while the master list is visible.")
-        XCTAssertGreaterThanOrEqual(field.frame.minX, list.frame.minX - 8)
-        XCTAssertLessThanOrEqual(field.frame.maxX, list.frame.maxX + 8)
-        attachScreenshot("Native Search in master beside detail", from: app)
+        XCTAssertEqual(list.searchFields.count, 0,
+                       "The list panel has no search field; search is the Search tab.")
+        XCTAssertTrue(workspaceTab("Search", in: app).waitForExistence(timeout: 5),
+                      "The Search tab stays available beside the detail.\n\(app.debugDescription)")
+        attachScreenshot("Search tab beside detail", from: app)
     }
 
     func testNotificationRouteClearsListSearchAndOpensTheTargetRequest() {

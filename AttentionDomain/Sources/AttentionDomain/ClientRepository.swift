@@ -451,7 +451,8 @@ public final class ClientRepository: @unchecked Sendable {
                                    opaqueSubmissionID: selector.opaqueSubmissionID,
                                    descriptorFingerprint: descriptorFingerprint,
                                    contentFingerprint: contentFingerprint,
-                                   requestRevision: selector.requestRevision)
+                                   requestRevision: selector.requestRevision,
+                                   submittedAt: Date())
 
         var next = state
         if persistAnswerDraft {
@@ -538,7 +539,8 @@ public final class ClientRepository: @unchecked Sendable {
                                     opaqueSubmissionID: selector.opaqueSubmissionID,
                                     descriptorFingerprint: descriptorFingerprint,
                                     contentFingerprint: contentFingerprint,
-                                    requestRevision: requestRevision)
+                                    requestRevision: requestRevision,
+                                    submittedAt: Date())
         var next = state
         next.intents[intentID] = submission
         next.intentByRequest[request.key] = intentID
@@ -815,6 +817,37 @@ public final class ClientRepository: @unchecked Sendable {
         var next = state
         next.intents[intentID] = intent
         next.outboxOrder.removeAll(where: { $0 == intentID })
+        if var published = next.replayPublishedIntents {
+            published[intentID] = intent
+            next.replayPublishedIntents = published
+        }
+        try commit(next)
+    }
+
+    /// A definitive closure is not a lost response. Keep the receipt, remove
+    /// transport work, and await replay for the specific Server final state.
+    public func recordAnswerRefusedClosed(_ intentID: UUID,
+                                          operationID: UUID,
+                                          requestNotFound: Bool = false,
+                                          context suppliedContext: ProfileContext) throws {
+        writerLock.lock()
+        defer { writerLock.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard suppliedContext.transportMode == .relay,
+              var intent = state.intents[intentID], intent.operationID == operationID,
+              state.intentByRequest[intent.requestKey] == intentID else {
+            throw AttentionStoreError.intentConflict
+        }
+        switch intent.disposition {
+        case .pending, .lost: intent.disposition = requestNotFound ? .refusedNotFound : .refusedClosed
+        case .refusedClosed, .refusedNotFound: return
+        default: throw AttentionStoreError.intentConflict
+        }
+        var next = state
+        next.intents[intentID] = intent
+        next.outboxOrder.removeAll { $0 == intentID }
         if var published = next.replayPublishedIntents {
             published[intentID] = intent
             next.replayPublishedIntents = published
@@ -1804,9 +1837,15 @@ public final class ClientRepository: @unchecked Sendable {
     }
 
     private static func recordInboxOperationFailure(_ submission: Submission,
+                                                    reason: String? = nil,
                                                     in state: inout ClientSessionState) {
         var failed = submission
-        failed.disposition = .failed
+        switch submission.disposition {
+        case .refusedClosed, .refusedNotFound: break
+        default:
+            failed.disposition = reason == "closed" ? .refusedClosed :
+                reason == "not_found" ? .refusedNotFound : .failed
+        }
         state.intents[submission.intentID] = failed
         state.outboxOrder.removeAll(where: { $0 == submission.intentID })
         if var published = state.replayPublishedIntents {
@@ -2422,7 +2461,7 @@ public final class ClientRepository: @unchecked Sendable {
                       !Self.isAccepted(submission) else {
                     throw AttentionStoreError.inboxPageConflict
                 }
-                Self.recordInboxOperationFailure(submission, in: &next)
+                Self.recordInboxOperationFailure(submission, reason: reason, in: &next)
             }
         }
         candidate.batches[index].results = results
@@ -2974,7 +3013,7 @@ public final class ClientRepository: @unchecked Sendable {
 
     private func preservesOperationResult(_ disposition: IntentDisposition) -> Bool {
         switch disposition {
-        case .accepted, .refusedByRetraction, .staleRevision: true
+        case .accepted, .refusedByRetraction, .refusedClosed, .refusedNotFound, .staleRevision: true
         default: false
         }
     }
@@ -3005,6 +3044,7 @@ public final class ClientRepository: @unchecked Sendable {
         // An edited draft is a new submission, never new bytes under an old ID.
         draft.operationID = nil
         draft.wireFrame = nil
+        draft.submittedAt = nil
         try validateConversationFiles(draft.files)
         thread.drafts[draft.binding.revision] = draft
         conversation.threads[draft.binding.request] = thread
@@ -3043,6 +3083,7 @@ public final class ClientRepository: @unchecked Sendable {
         draft.disposition = .saved
         draft.operationID = nil
         draft.wireFrame = nil
+        draft.submittedAt = nil
         thread.drafts[binding.revision] = draft
         conversation.threads[binding.request] = thread
         next.conversation = conversation
@@ -3140,7 +3181,7 @@ public final class ClientRepository: @unchecked Sendable {
         var next = state
         guard var conversation = next.conversation, let thread = conversation.threads[binding.request],
               let draft = thread.drafts[binding.revision] else { throw ConversationError.missingRequest }
-        guard thread.allowsDiscussion else { throw ConversationError.closed }
+        guard thread.allowsDiscussion, !draft.isPermanentlyRefused else { throw ConversationError.closed }
         guard !draft.text.rawValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !draft.files.isEmpty else {
             throw ConversationError.emptyDraft
         }
@@ -3223,6 +3264,7 @@ public final class ClientRepository: @unchecked Sendable {
             draft.disposition = .submitting(operation)
         }
         draft.operationID = operation
+        if draft.submittedAt == nil { draft.submittedAt = Date() }
         // Register planned upload-tier files before awaiting limits or disk/HTTP.
         // Departure during that preparation must fence this original operation too.
         let tiers = try ConversationFileLimits(inlineDecodedBytes: 262_144, uploadCap: nil).tiers(for: draft.files)
@@ -3418,6 +3460,7 @@ public final class ClientRepository: @unchecked Sendable {
         default: throw ConversationError.conflict
         }
         var facts = thread.facts[turn] ?? ConversationTurnFacts()
+        if facts.submittedAt == nil { facts.submittedAt = draft.submittedAt }
         if facts.acceptedAtMilliseconds == nil {
             let observedAt = acceptanceObservedAtMilliseconds ??
                 UInt64(max(0, Date().timeIntervalSince1970 * 1_000))
@@ -3682,7 +3725,8 @@ public final class ClientRepository: @unchecked Sendable {
         using references: (any ConversationFileReferenceStore)?, allowInlinePersistence: Bool) throws -> ConversationDraft {
         ConversationDraft(binding: draft.binding, text: draft.text,
             files: try draft.files.map { try externalizingConversationFiles(in: $0, using: references, allowInlinePersistence: allowInlinePersistence) },
-            disposition: draft.disposition, operationID: draft.operationID, wireFrame: draft.wireFrame)
+            disposition: draft.disposition, operationID: draft.operationID, wireFrame: draft.wireFrame,
+            submittedAt: draft.submittedAt)
     }
 
     private static func externalizingConversationFiles(in event: ConversationEvent,
@@ -4203,7 +4247,7 @@ private struct PersistedPendingActions: Codable {
         let pending = state.intents.filter { id, operation in
             guard state.intentByRequest[operation.requestKey] == id else { return false }
             switch operation.disposition {
-            case .pending, .lost, .accepted, .failed, .unsupported: return true
+            case .pending, .lost, .accepted, .failed, .unsupported, .refusedClosed, .refusedNotFound: return true
             default: return false
             }
         }

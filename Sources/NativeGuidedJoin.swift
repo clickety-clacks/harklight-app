@@ -134,9 +134,8 @@ final class NativeGuidedJoinStore {
         try invitation.validate(now: Date())
         // Any response from this endpoint proves the pinned TLS name. The
         // invitation secret is neither in the URL nor in this read-only probe.
-        let response = try await transport.request(invitation.enrollmentURL, method: "GET", body: nil,
-                                                   rootDER: invitation.trustedRootDER)
-        guard !(300..<400).contains(response.statusCode) else { throw NativeJoinError.refused }
+        _ = try await transport.request(invitation.enrollmentURL, method: "GET", body: nil,
+                                        rootDER: invitation.trustedRootDER)
     }
 
     func loadAttempt() throws -> NativeJoinAttempt? {
@@ -251,7 +250,7 @@ final class NativeGuidedJoinStore {
         guard let code = response.approvalCode, code.utf8.count == 10,
               code.utf8.allSatisfy({ (65...90).contains($0) || (50...55).contains($0) }),
               let deadline = response.expiresAt, deadline > 0,
-              let statusDeadline = response.statusExpiresAt, statusDeadline > deadline else {
+              let statusDeadline = response.statusExpiresAt else {
             throw NativeJoinError.invalidResponse
         }
         var next = attempt
@@ -265,8 +264,7 @@ final class NativeGuidedJoinStore {
         guard let attempt = try loadAttempt() else { throw NativeEnrollmentError.noPendingEnrollment }
         if attempt.isTerminal { return attempt }
         if attempt.cancellationRequested != true,
-           attempt.canRecoverApproval || (attempt.requestGeneration ?? 0) > 0 ||
-            (attempt.phase == .pending && (attempt.approvalExpiresAt ?? Int64.max) <= Int64(Date().timeIntervalSince1970 * 1000)) {
+           attempt.canRecoverApproval || (attempt.requestGeneration ?? 0) > 0 {
             return try await resumeApproval(attempt)
         }
         let body = try JSONSerialization.data(withJSONObject: ["status_secret": attempt.statusSecret])
@@ -275,16 +273,9 @@ final class NativeGuidedJoinStore {
                                                 rootDER: attempt.invitation.trustedRootDER)
         try assertCurrent(attempt)
         if attempt.cancellationRequested != true, reply.statusCode == 404 {
-            if attempt.phase == .prepared, attempt.approvalCode == nil,
-               attempt.invitation.expiresAt > Int64(Date().timeIntervalSince1970 * 1000) {
-                // While the original invitation still authorizes this exact
-                // deliberate Join, its idempotent initial POST can be retried.
-                // After expiry, prepared may instead mean a lost first reply:
-                // only bound resume can recover that retained request.
-                throw NativeJoinError.notFound
-            }
-            // The status lookup can have aged out while the original bound
-            // Join remains resumable. Only the server can authorize recovery.
+            // A missing status record does not tell this device whether the
+            // invitation is still usable. Ask the Server to recover the exact
+            // saved request; its response decides whether it can continue.
             return try await resumeApproval(attempt)
         }
         try acceptStatus(reply.statusCode, data: reply.data)
@@ -320,6 +311,12 @@ final class NativeGuidedJoinStore {
                                                 rootDER: attempt.invitation.trustedRootDER)
         try assertCurrent(attempt)
         if reply.statusCode == 404 {
+            if attempt.phase == .prepared, attempt.approvalCode == nil {
+                // No recovery receipt exists for this prepared request. Let
+                // the coordinator replay its exact original POST so the
+                // Server can accept or expire it using its own clock.
+                throw NativeJoinError.notFound
+            }
             // An unsupported route and an unknown recovery capability can
             // both refuse. Neither proves expiry or permits a fresh Join.
             throw NativeJoinError.unavailable
@@ -658,7 +655,7 @@ final class NativeGuidedJoinStore {
             guard let code = response.approvalCode, code.utf8.count == 10,
                   code.utf8.allSatisfy({ (65...90).contains($0) || (50...55).contains($0) }),
                   let deadline = response.expiresAt, deadline > 0,
-                  let statusDeadline = response.statusExpiresAt, statusDeadline > deadline else {
+                  let statusDeadline = response.statusExpiresAt else {
                 throw NativeJoinError.invalidResponse
             }
             next.approvalCode = code
@@ -675,8 +672,7 @@ final class NativeGuidedJoinStore {
                   code.utf8.count == 10,
                   code.utf8.allSatisfy({ (65...90).contains($0) || (50...55).contains($0) }),
                   let deadline = next.approvalExpiresAt, deadline > 0,
-                  let statusDeadline = next.statusExpiresAt,
-                  statusDeadline > deadline else { throw NativeJoinError.invalidResponse }
+                  let statusDeadline = next.statusExpiresAt else { throw NativeJoinError.invalidResponse }
             next.approvalCode = code
             next.approvalExpiresAt = deadline
             next.statusExpiresAt = statusDeadline

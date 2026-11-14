@@ -84,7 +84,10 @@ struct NativeEnrollmentRecord: Codable, Equatable {
     /// The invitation's person label, when it supplied one. Earlier builds saved
     /// the join screen's placeholder when the label was absent; that is not a name.
     var savedAccountName: String? {
-        accountDisplayName == NativeJoinInvitation.unnamedAccountPlaceholder ? nil : accountDisplayName
+        guard let accountDisplayName,
+              !accountDisplayName.isEmpty,
+              accountDisplayName != NativeJoinInvitation.unnamedAccountPlaceholder else { return nil }
+        return accountDisplayName
     }
     var profileAuthority: String { localProfileAuthority ?? host }
 }
@@ -264,6 +267,16 @@ struct NativeEnrollmentStore {
         return replacement
     }
 
+    static func validateServerStartResponse(approvalCode: String,
+                                            statusSecret: String) throws {
+        guard approvalCode.count == 10,
+              approvalCode.allSatisfy({ "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567".contains($0) }),
+              statusSecret.count == 64,
+              statusSecret.allSatisfy({ $0.isHexDigit }) else {
+            throw NativeEnrollmentError.invalidServerResponse
+        }
+    }
+
     private func requestEnrollment(_ attempt: PreparedEnrollment) async throws -> NativeEnrollmentRecord {
         let pem = "-----BEGIN CERTIFICATE-----\n" +
             attempt.certificateDER.base64EncodedString(options: [.lineLength64Characters, .endLineWithLineFeed]) +
@@ -273,14 +286,8 @@ struct NativeEnrollmentStore {
                                                      host: attempt.host,
                                                      port: attempt.enrollmentPort,
                                                      rootDER: attempt.trustedRootDER)
-        guard response.approvalCode.count == 10,
-              response.approvalCode.allSatisfy({ "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567".contains($0) }),
-              response.statusSecret.count == 64,
-              response.statusSecret.allSatisfy({ $0.isHexDigit }),
-              response.expiresAt > Int64(Date().timeIntervalSince1970 * 1000),
-              response.statusExpiresAt > response.expiresAt else {
-            throw NativeEnrollmentError.invalidServerResponse
-        }
+        try Self.validateServerStartResponse(approvalCode: response.approvalCode,
+                                             statusSecret: response.statusSecret)
         return NativeEnrollmentRecord(host: attempt.host,
                                             enrollmentPort: attempt.enrollmentPort,
                                             relayPort: attempt.relayPort,
@@ -321,12 +328,24 @@ struct NativeEnrollmentStore {
     func material(from record: NativeEnrollmentRecord) throws -> NativeInstallationMaterial {
         guard let personID = record.personID,
               !personID.isEmpty,
-              let identity = identity(label: record.identityLabel),
               let relayURL = URL(string: "wss://\(record.host):\(record.relayPort)/relay") else {
             throw NativeEnrollmentError.invalidIdentity
         }
+        let clientIdentity: SecIdentity
+        if let namespace = guidedIdentityNamespace(for: record.identityLabel) {
+            let installation = try NativeInstallationIdentityStore(namespace: namespace).loadExisting()
+            guard installation.label == record.identityLabel,
+                  installation.deviceID == record.deviceID else {
+                throw NativeEnrollmentError.invalidIdentity
+            }
+            clientIdentity = installation.value
+        } else if let retained = identity(label: record.identityLabel) {
+            clientIdentity = retained
+        } else {
+            throw NativeEnrollmentError.invalidIdentity
+        }
         var certificate: SecCertificate?
-        guard SecIdentityCopyCertificate(identity, &certificate) == errSecSuccess,
+        guard SecIdentityCopyCertificate(clientIdentity, &certificate) == errSecSuccess,
               let certificate,
               DeviceCertificateBinding.matches(SecCertificateCopyData(certificate) as Data,
                                                expectedDeviceID: record.deviceID) else {
@@ -338,8 +357,14 @@ struct NativeEnrollmentStore {
                                      transportMode: .relay)
         return NativeInstallationMaterial(context: profile,
                                           relayURL: relayURL,
-                                          keychainIdentity: identity,
+                                          keychainIdentity: clientIdentity,
                                           trustedRootDER: record.trustedRootDER)
+    }
+
+    private func guidedIdentityNamespace(for label: String) -> String? {
+        let certificateSuffix = ".certificate"
+        guard label.hasPrefix(service + ".key."), label.hasSuffix(certificateSuffix) else { return nil }
+        return String(label.dropLast(certificateSuffix.count))
     }
 
     func retainApprovedGuided(_ record: NativeEnrollmentRecord,

@@ -102,6 +102,8 @@ public enum OriginalOperationResult: Equatable, Sendable {
     case staleRevision(operationID: UUID, currentRevision: UInt64)
     case unsupported(operationID: UUID)
     case failed(operationID: UUID)
+    case refusedClosed(operationID: UUID)
+    case refusedNotFound(operationID: UUID)
     case unresolved
 }
 
@@ -133,6 +135,11 @@ public actor NativeRelayCore {
         let continuation: CheckedContinuation<Void, any Error>
     }
 
+    private struct RefreshWaiter {
+        let id: UUID
+        let continuation: CheckedContinuation<Void, any Error>
+    }
+
     private let store: ClientRepository
     private let context: ProfileContext
     private let session: any AuthenticatedInstallationSession
@@ -147,6 +154,7 @@ public actor NativeRelayCore {
     private let attemptID: UUID?
     private var active = true
     private var busy = false
+    private var refreshWaiters: [RefreshWaiter] = []
     private var postAckFailureDetails: NativePostAckFailureDetails?
     private var activeInboxReplay: ReplayProgress?
     private var inboxBootstrapped = false
@@ -469,6 +477,11 @@ public actor NativeRelayCore {
 
     public func deactivate() {
         active = false
+        let waitingRefreshes = refreshWaiters
+        refreshWaiters.removeAll()
+        for waiter in waitingRefreshes {
+            waiter.continuation.resume(throwing: NativeRelayCoreError.inactive)
+        }
         inboxViewNoticeTask?.cancel()
         inboxViewNoticeTask = nil
         latestInboxViewNotice = nil
@@ -494,10 +507,10 @@ public actor NativeRelayCore {
     /// cursor. A server reply is never itself a durable cursor or ACK.
     @discardableResult
     public func resyncAndDrainOutbox() async throws -> UInt64 {
-        guard !busy else { throw NativeRelayCoreError.inactive }
-        postAckFailureDetails = nil
-        busy = true
+        try await acquireRefreshOwnership()
         defer { releaseBusy() }
+        try Task.checkCancellation()
+        postAckFailureDetails = nil
         try validate()
         try throwPostCheckpointInboxFailureIfPresent()
         guard let pagingSession = session as? any AuthenticatedInboxPagingSession else {
@@ -2118,7 +2131,42 @@ public actor NativeRelayCore {
         return await drainPendingMessageOpens(using: pagingSession)
     }
 
+    /// Live replay and foreground refresh share this connection. Another
+    /// operation owning it does not mean the authenticated core is inactive.
+    private func acquireRefreshOwnership() async throws {
+        try Task.checkCancellation()
+        try validate()
+        if !busy {
+            busy = true
+            return
+        }
+        let id = UUID()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
+                if Task.isCancelled {
+                    continuation.resume(throwing: CancellationError())
+                } else {
+                    refreshWaiters.append(RefreshWaiter(id: id, continuation: continuation))
+                    diagnose(.relay, .projectionRefresh, .observed, causeCode: "relay_refresh_waiting")
+                }
+            }
+        } onCancel: {
+            Task { await self.cancelWaitingRefresh(id) }
+        }
+    }
+
+    private func cancelWaitingRefresh(_ id: UUID) {
+        guard let index = refreshWaiters.firstIndex(where: { $0.id == id }) else { return }
+        refreshWaiters.remove(at: index).continuation.resume(throwing: CancellationError())
+    }
+
     private func releaseBusy() {
+        if active, !refreshWaiters.isEmpty {
+            // Transfer ownership before resuming the caller so another live
+            // signal cannot take the connection between the check and refresh.
+            refreshWaiters.removeFirst().continuation.resume()
+            return
+        }
         busy = false
         if pendingLiveConversationReplay {
             pendingLiveConversationReplay = false
@@ -2309,6 +2357,26 @@ public actor NativeRelayCore {
                          causeCode: "no_comment_unsupported", operationID: operationID,
                          request: submission.requestKey, revision: submission.requestRevision,
                          receipt: .pendingUnconfirmed)
+            case let .refusedNotFound(operationID):
+                guard operationID == submission.operationID else {
+                    throw NativeRelayCoreError.mismatchedOperationResult
+                }
+                try store.recordAnswerRefusedClosed(submission.intentID,
+                    operationID: operationID, requestNotFound: true, context: context)
+                diagnose(.answer, .originalOperationDelivery, .rejected,
+                         causeCode: NativeDiagnosticCauseCode.serverReason("not_found"),
+                         operationID: operationID, request: submission.requestKey,
+                         revision: submission.requestRevision, receipt: .terminal)
+            case let .refusedClosed(operationID):
+                guard operationID == submission.operationID else {
+                    throw NativeRelayCoreError.mismatchedOperationResult
+                }
+                try store.recordAnswerRefusedClosed(submission.intentID,
+                    operationID: operationID, context: context)
+                diagnose(.answer, .originalOperationDelivery, .rejected,
+                         causeCode: NativeDiagnosticCauseCode.serverReason("closed"),
+                         operationID: operationID, request: submission.requestKey,
+                         revision: submission.requestRevision, receipt: .terminal)
             case let .failed(operationID):
                 guard operationID == submission.operationID else {
                     diagnose(.answer, .originalOperationDelivery, .unresolved,
@@ -2360,7 +2428,7 @@ public actor NativeRelayCore {
                     applied = .completed
                     receipt = .acceptedAwaitingReplay
                     terminalSequence = sequence
-                case .refusedByRetraction, .staleRevision, .failed:
+                case .refusedByRetraction, .refusedClosed, .refusedNotFound, .staleRevision, .failed:
                     applied = .rejected
                     receipt = .terminal
                     terminalSequence = nil

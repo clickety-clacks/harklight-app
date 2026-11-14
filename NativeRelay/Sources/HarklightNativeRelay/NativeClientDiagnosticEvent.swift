@@ -316,7 +316,7 @@ public enum NativeDiagnosticCauseCode {
         "native_sync_error", "relay_redirect_refused", "notification_permission_not_granted", "application_support_unavailable",
         "unsupported_journal_version", "invalid_acceptance_sequence", "unexpected_relay_frame",
         "saved_operation_frame_mismatch", "relay_server_rejected", "conversations_unavailable", "relay_acknowledgement_behind",
-        "relay_inbox_paging_unavailable", "relay_inbox_paging_busy",
+        "relay_inbox_paging_unavailable", "relay_inbox_paging_busy", "relay_refresh_waiting",
         "unknown_update_kind",
         "invalid_chat_read_positions",
         "message_open_unsupported", "message_open_confirmation_unresolved",

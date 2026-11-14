@@ -71,7 +71,7 @@ final class HarklightUITests: XCTestCase {
         let finish = app.buttons["request-finish"]
         XCTAssertTrue(finish.waitForExistence(timeout: 5))
         XCTAssertTrue(finish.isEnabled, "A valid point and note should enable the shared answer action.")
-        let listVisibleAlongsideDetail = app.searchFields.firstMatch.isHittable
+        let listVisibleAlongsideDetail = listVisibleBesideDetail(in: app)
         finish.tap()
         let lifecycle = app.staticTexts["request-lifecycle-status"]
         let detail = app.scrollViews["message-card-scroll"]
@@ -107,10 +107,10 @@ final class HarklightUITests: XCTestCase {
         let brand = app.descendants(matching: .any)["inbox-brand"]
         XCTAssertTrue(brand.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertEqual(refreshing.frame.midY, brand.frame.midY, accuracy: 1,
-                       "The refresh badge stays in the title row.")
+                       "The refresh spinner stays in the title row.")
         XCTAssertGreaterThanOrEqual(refreshing.frame.minX, brand.frame.maxX)
         XCTAssertLessThan(refreshing.frame.minX - brand.frame.maxX, 16,
-                          "The refresh badge sits immediately to the right of the title.")
+                          "The refresh spinner sits immediately to the right of the title.")
         attachScreenshot("Inbox badge while refreshing", from: app)
 
         selectFacilitiesRequest(in: app)
@@ -125,7 +125,7 @@ final class HarklightUITests: XCTestCase {
         XCTAssertTrue(finish.isEnabled,
                       "A refresh must not dim or disable the visible answer action.")
         attachScreenshot("Answer available while inbox is refreshing", from: app)
-        let listVisibleAlongsideDetail = app.searchFields.firstMatch.isHittable
+        let listVisibleAlongsideDetail = listVisibleBesideDetail(in: app)
         finish.tap()
 
         let lifecycle = app.staticTexts["request-lifecycle-status"]
@@ -314,6 +314,8 @@ final class HarklightUITests: XCTestCase {
         let detail = app.scrollViews["message-card-scroll"]
         XCTAssertTrue(detail.waitForExistence(timeout: 5),
                       "The pending row is reopened to simulate its later server outcome.")
+        // Measured while the detail is open: on iPad the list stays beside it.
+        let listVisibleAlongsideDetail = listVisibleBesideDetail(in: app)
         XCTAssertTrue(app.descendants(matching: .any)["request-answered"].waitForExistence(timeout: 5),
                       "The reopened detail reflects the accepted answer.")
         XCTAssertTrue(app.descendants(matching: .any)["request-closing-scene"].waitForExistence(timeout: 5),
@@ -848,7 +850,7 @@ final class HarklightUITests: XCTestCase {
         let finish = app.buttons["request-finish"]
         XCTAssertTrue(finish.waitForExistence(timeout: 5))
         XCTAssertTrue(finish.isEnabled)
-        let listVisibleAlongsideDetail = app.searchFields.firstMatch.isHittable
+        let listVisibleAlongsideDetail = listVisibleBesideDetail(in: app)
         finish.tap()
         let status = app.staticTexts["request-lifecycle-status"]
         let detail = app.scrollViews["message-card-scroll"]

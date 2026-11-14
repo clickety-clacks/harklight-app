@@ -12,8 +12,8 @@ DEVICE_ID=${HARKLIGHT_SIMULATOR_ID:-}
 BUNDLE_ID=co.clicketyclacks.Harklight
 
 case "$ACTION" in
-    build|test|test-guided-tls|run|host-test|host-run|native-host-test) ;;
-    *) fail "Usage: Scripts/verify.sh [build|test|test-guided-tls|run|host-test|host-run|native-host-test]" ;;
+    build|build-for-testing|test|test-guided-tls|run|host-test|host-run|native-host-test) ;;
+    *) fail "Usage: Scripts/verify.sh [build|build-for-testing|test|test-guided-tls|run|host-test|host-run|native-host-test]" ;;
 esac
 
 if [ "$ACTION" = native-host-test ]; then
@@ -35,10 +35,10 @@ if [ "$ACTION" = host-test ] || [ "$ACTION" = host-run ]; then
     fi
     exec python3 "$ROOT/HostFixture/host.py" --port "${ATTENTION_FIXTURE_PORT:-0}"
 fi
-if [ "$ACTION" = test ] || [ "$ACTION" = test-guided-tls ]; then
+if [ "$ACTION" = test ] || [ "$ACTION" = test-guided-tls ] || [ "$ACTION" = build-for-testing ]; then
     "$ROOT/Scripts/prepare-test-tls.sh"
 fi
-if [ -z "$DEVICE_ID" ]; then
+if [ "$ACTION" != build-for-testing ] && [ -z "$DEVICE_ID" ]; then
     DEVICE_ID=$(xcrun simctl list devices available --json | python3 -c '
 import json, re, sys
 devices = []
@@ -57,9 +57,19 @@ fi
 PROJECT="$ROOT/Harklight.xcodeproj"
 SCHEME=Harklight
 DESTINATION="platform=iOS Simulator,id=$DEVICE_ID"
+if [ "$ACTION" = build-for-testing ]; then
+    DESTINATION="generic/platform=iOS Simulator"
+fi
 DERIVED_DATA="$ROOT/DerivedData"
 
 case "$ACTION" in
+    build-for-testing)
+        # Compile every scheme test target and the separate NativeHost package without running tests.
+        xcodebuild -project "$PROJECT" -scheme "$SCHEME" -destination "$DESTINATION" \
+            -derivedDataPath "$DERIVED_DATA" CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- build-for-testing
+        cd "$ROOT/NativeHost"
+        exec xcrun swift build --build-tests
+        ;;
     build)
         exec xcodebuild -project "$PROJECT" -scheme "$SCHEME" -destination "$DESTINATION" \
             -derivedDataPath "$DERIVED_DATA" CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- build

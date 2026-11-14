@@ -124,13 +124,6 @@ public final class LoopbackHTTPServer: @unchecked Sendable {
         var noSignal: Int32 = 1
         _ = Darwin.setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSignal,
                               socklen_t(MemoryLayout<Int32>.size))
-        var timeout = timeval(tv_sec: 5, tv_usec: 0)
-        _ = withUnsafePointer(to: &timeout) {
-            Darwin.setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, $0, socklen_t(MemoryLayout<timeval>.size))
-        }
-        _ = withUnsafePointer(to: &timeout) {
-            Darwin.setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, $0, socklen_t(MemoryLayout<timeval>.size))
-        }
         let reply: HTTPReply
         if let request = try? Self.readOne(fd) {
             reply = handler(request, HostHTTPBoundary(port: port))
@@ -175,17 +168,15 @@ public final class LoopbackHTTPServer: @unchecked Sendable {
     private static func readOne(_ fd: Int32) throws -> ParsedHTTPRequest {
         var bytes = Data()
         let separator = Data("\r\n\r\n".utf8)
-        while bytes.count <= HTTPRequestParser.maxHeaderBytes + HTTPRequestParser.maxBodyBytes {
+        while true {
             var chunk = [UInt8](repeating: 0, count: 4096)
             let count = Darwin.recv(fd, &chunk, chunk.count, 0)
             guard count > 0 else { throw HostBoundaryError.rejected }
             bytes.append(contentsOf: chunk[..<count])
             guard let range = bytes.range(of: separator) else {
-                if bytes.count > HTTPRequestParser.maxHeaderBytes { throw HostBoundaryError.rejected }
                 continue
             }
-            guard range.lowerBound <= HTTPRequestParser.maxHeaderBytes,
-                  let text = String(data: bytes[..<range.lowerBound], encoding: .utf8) else {
+            guard let text = String(data: bytes[..<range.lowerBound], encoding: .utf8) else {
                 throw HostBoundaryError.rejected
             }
             let first = text.components(separatedBy: "\r\n").first ?? ""
@@ -200,15 +191,15 @@ public final class LoopbackHTTPServer: @unchecked Sendable {
                     }
                     return Int(line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces))
                 }
-                guard values.count == 1, values[0] >= 0,
-                      values[0] <= HTTPRequestParser.maxBodyBytes else {
+                guard values.count == 1, values[0] >= 0 else {
                     throw HostBoundaryError.rejected
                 }
                 length = values[0]
             } else {
                 length = 0
             }
-            let expected = range.upperBound + length
+            let (expected, overflow) = range.upperBound.addingReportingOverflow(length)
+            guard !overflow else { throw HostBoundaryError.rejected }
             if bytes.count < expected { continue }
             guard bytes.count == expected else { throw HostBoundaryError.rejected }
             return try HTTPRequestParser.parse(bytes)

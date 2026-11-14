@@ -830,6 +830,27 @@ final class NativeRelayCoreTests: XCTestCase {
         XCTAssertEqual(receipt.terminal?.sequence, 11)
     }
 
+    func testClosedRefusalStopsOriginalOperationRecoveryWithoutInventingTerminal() async throws {
+        let (context, store, session) = try setup()
+        let key = RequestKey(accountScope: context.identity.personID,
+                             senderID: ExactText("sender"), messageID: ExactText("closed-answer"))
+        let payload = try JSONValue.parse(data(#"{"title":"Closed request"}"#))
+        _ = try store.apply(RelayEvent(sequence: 1,
+            body: .delivery(StoredRequest(key: key, originalPayload: payload), .message)), context: context)
+        let port = AttentionDomainPort(store: store)
+        let selector = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first?.selector)
+        let receipt = try port.submitNoComment(context: port.context, selector: selector, intentID: UUID())
+        session.result = .refusedClosed(operationID: receipt.opID)
+        let core = try NativeRelayCore(store: store, context: context, session: session)
+        try await core.sendOriginalOperationForUserTap(receipt.intentID)
+        try store.queueRecoverableOperations(context: context)
+        XCTAssertEqual(session.sent.map(\.1), [receipt.opID])
+        XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty)
+        XCTAssertEqual(try store.lookupIntent(receipt.intentID, context: context)?.disposition, .refusedClosed)
+        XCTAssertNil(try store.snapshot(context: context).remoteStates[key]?.state)
+        XCTAssertThrowsError(try store.queueOriginalOperationForUserTap(receipt.intentID, context: context))
+    }
+
     func testStaleAnswerDeclineReleasesTheRequestForItsCurrentRevision() async throws {
         let (context, store, session) = try setup()
         let key = RequestKey(accountScope: context.identity.personID,
@@ -1228,6 +1249,181 @@ final class NativeRelayCoreTests: XCTestCase {
         let visible = try port.observe(context: port.context)
         XCTAssertEqual(visible.requests.first?.body?.rawValue, body)
         XCTAssertEqual(session.acknowledgements.count, 1)
+    }
+
+    private actor LiveReplayControl {
+        let listening: XCTestExpectation
+        let replayHeld: XCTestExpectation
+        let replayFinished: XCTestExpectation
+        let release = AsyncSignal()
+        private var signalWaiter: CheckedContinuation<LiveConversationSignal, Error>?
+        private var ended = false
+        private(set) var starts: [UInt64] = []
+
+        init(listening: XCTestExpectation, replayHeld: XCTestExpectation,
+             replayFinished: XCTestExpectation) {
+            self.listening = listening
+            self.replayHeld = replayHeld
+            self.replayFinished = replayFinished
+        }
+
+        func nextSignal() async throws -> LiveConversationSignal {
+            if ended { throw CancellationError() }
+            return try await withCheckedThrowingContinuation { continuation in
+                signalWaiter = continuation
+                listening.fulfill()
+            }
+        }
+
+        func push() {
+            let waiter = signalWaiter
+            signalWaiter = nil
+            waiter?.resume(returning: LiveConversationSignal(replyArrivals: []))
+        }
+
+        func open(since: UInt64) async -> Int {
+            starts.append(since)
+            let call = starts.count
+            if call == 2 {
+                replayHeld.fulfill()
+                await release.wait()
+            }
+            return call
+        }
+
+        func finished(_ call: Int) {
+            if call == 2 { replayFinished.fulfill() }
+        }
+
+        func finish() {
+            ended = true
+            let waiter = signalWaiter
+            signalWaiter = nil
+            waiter?.resume(throwing: CancellationError())
+            release.signal()
+        }
+    }
+
+    private final class HeldLiveReplaySession: Session, AuthenticatedConversationEventSession, @unchecked Sendable {
+        let control: LiveReplayControl
+        init(_ identity: ProfileIdentity, control: LiveReplayControl) {
+            self.control = control
+            super.init(identity)
+        }
+        func nextLiveConversationSignal() async throws -> LiveConversationSignal {
+            try await control.nextSignal()
+        }
+        func openConversation(_ request: Data, consume: @Sendable (Data) async throws -> Void) async throws {
+            let value = try JSONValue.parse(request)
+            let since = UInt64(try XCTUnwrap(value.uniqueValue(named: "since")?.integerValue))
+            let call = await control.open(since: since)
+            do {
+                try await consume(Data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#.utf8))
+                if call == 2 {
+                    try await consume(Data(#"{"v":1,"type":"conversation","conversation_seq":1,"sender_id":"sender","message_id":"conversation","request_revision":1,"origin":"origin","session_handle":"session","kind":"reply","author":"origin","event_id":"live-reply","text":"A live reply"}"#.utf8))
+                }
+                let high: UInt64 = call == 1 ? 0 : 1
+                try await consume(Data("{\"v\":1,\"type\":\"conversation_resynced\",\"conversation_seq\":\(high)}".utf8))
+                await control.finished(call)
+            } catch {
+                await control.finished(call)
+                throw error
+            }
+        }
+        func acknowledgeConversation(_ request: Data) async throws {}
+    }
+
+    private static func refreshResult(_ core: NativeRelayCore) async -> Result<UInt64, Error> {
+        do { return .success(try await core.resyncAndDrainOutbox()) }
+        catch { return .failure(error) }
+    }
+
+    private func heldLiveReplay(refreshWaiting: XCTestExpectation) async throws -> (NativeRelayCore, LiveReplayControl, ClientRepository, ProfileContext) {
+        let context = ProfileContext(identity: ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+            personID: ExactText(UUID().uuidString), deviceID: ExactText("device")), transportMode: .relay)
+        let store = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        let listening = expectation(description: "live conversation listener installed")
+        listening.assertForOverFulfill = false
+        let held = expectation(description: "live replay owns the connection")
+        let finished = expectation(description: "held replay finishes")
+        let control = LiveReplayControl(listening: listening, replayHeld: held, replayFinished: finished)
+        let session = HeldLiveReplaySession(context.identity, control: control)
+        session.frames = [
+            data(#"{"v":1,"type":"delivery","seq":1,"sender_id":"sender","message_id":"conversation","origin":"origin","as":"message","message":{"title":"Conversation"},"request_revision":1,"session_handle":"session","event_id":"request"}"#),
+            data(#"{"v":1,"type":"resynced","seq":1}"#)
+        ]
+        let core = try NativeRelayCore(store: store, context: context, session: session,
+            onDiagnostic: { event in
+                if event.causeCode == "relay_refresh_waiting" { refreshWaiting.fulfill() }
+            })
+        _ = try await core.resyncAndDrainOutbox()
+        await fulfillment(of: [listening], timeout: 2)
+        await control.push()
+        await fulfillment(of: [held], timeout: 2)
+        return (core, control, store, context)
+    }
+
+    func testForegroundRefreshWaitsForLiveReplayAndContinuesFromItsDurableCursor() async throws {
+        let waiting = expectation(description: "foreground refresh waits for live replay")
+        let (core, control, store, context) = try await heldLiveReplay(refreshWaiting: waiting)
+        let refresh = Task { await Self.refreshResult(core) }
+        await fulfillment(of: [waiting], timeout: 2)
+        await control.release.signal()
+        let result = await refresh.value
+        let starts = await control.starts
+        await core.deactivate()
+        await control.finish()
+        XCTAssertEqual(try result.get(), 1)
+        XCTAssertEqual(starts, [0, 0, 1], "Foreground replay starts after the live replay's durable boundary.")
+        let conversations = try store.conversationSnapshot(context: context)
+        XCTAssertEqual(conversations.cursor, 1)
+        XCTAssertEqual(conversations.threads.values.flatMap(\.turns).filter { $0.id == ExactText("live-reply") }.count, 1)
+    }
+
+    func testCancelledForegroundRefreshDoesNotCancelLiveReplayOrRetainTheConnection() async throws {
+        let waiting = expectation(description: "foreground refresh has queued behind live replay")
+        waiting.assertForOverFulfill = false
+        let (core, control, _, _) = try await heldLiveReplay(refreshWaiting: waiting)
+        let completed = expectation(description: "cancelled refresh completes while live replay remains held")
+        let refresh = Task {
+            defer { completed.fulfill() }
+            return await Self.refreshResult(core)
+        }
+        await fulfillment(of: [waiting], timeout: 2)
+        refresh.cancel()
+        await fulfillment(of: [completed], timeout: 2)
+        switch await refresh.value {
+        case .failure(is CancellationError): break
+        default: XCTFail("Cancellation is not a relay-inactive error.")
+        }
+        await control.release.signal()
+        let finished = await control.replayFinished
+        await fulfillment(of: [finished], timeout: 2)
+        let cursor = try await core.resyncAndDrainOutbox()
+        XCTAssertEqual(cursor, 1)
+        await core.deactivate()
+        await control.finish()
+    }
+
+    func testDeactivationReleasesForegroundRefreshWaitingOnLiveReplay() async throws {
+        let waiting = expectation(description: "foreground refresh has queued behind live replay")
+        waiting.assertForOverFulfill = false
+        let (core, control, _, _) = try await heldLiveReplay(refreshWaiting: waiting)
+        let completed = expectation(description: "deactivation releases refresh without waiting for transport")
+        let refresh = Task {
+            defer { completed.fulfill() }
+            return await Self.refreshResult(core)
+        }
+        await fulfillment(of: [waiting], timeout: 2)
+        await core.deactivate()
+        await fulfillment(of: [completed], timeout: 2)
+        switch await refresh.value {
+        case .failure(let error): XCTAssertEqual(error as? NativeRelayCoreError, .inactive)
+        case .success: XCTFail("Actual deactivation must still fail the refresh.")
+        }
+        await control.finish()
+        let finished = await control.replayFinished
+        await fulfillment(of: [finished], timeout: 2)
     }
 
     private final class CacheScaleSession: Session, AuthenticatedConversationSession, @unchecked Sendable {

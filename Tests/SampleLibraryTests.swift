@@ -54,6 +54,7 @@ final class SampleLibraryTests: XCTestCase {
         let payload = try JSONValue.parse(Data(#"{"sender_id":"sender","message_id":"real-message","created_at":1,"title":"Keep this real message"}"#.utf8))
         _ = try domain.apply(RelayEvent(sequence: 1, body: .delivery(StoredRequest(key: key, originalPayload: payload), .message)), context: context)
         let presentation = try LivePresentationStore(store: domain, context: context)
+        presentation.selectRequest(key)
         let before = presentation.presentation
         let library = SampleLibrary()
         library.populate()

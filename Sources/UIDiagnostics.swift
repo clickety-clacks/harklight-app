@@ -85,6 +85,7 @@ extension LivePresentationStore {
         let files = draft.files.map { "\($0.id.rawValue):reselect=\(uploadNeedsReselection($0, for: key, revision: revision))" }
         return [
             "request=\(UIDiagnostics.describe(key)) revision=\(revision) currentRevision=\(thread.map { String($0.currentRevision) } ?? "nil")",
+            "modelRevision=\(presentation.revision) turns=\(thread?.turns.count ?? 0) latestTurn=\(thread?.turns.last?.id.rawValue ?? "nil")",
             "readOnly=\(isReadOnly) local=\(isLocalExample) error=\(conversationError ?? "nil")",
             "draft text=\(draft.text.rawValue.count) disposition=\(draft.disposition) files=\(files)",
             "pendingCleanup=\(hasPendingUploadCleanup(for: key, revision: revision)) unreadyUpload=\(hasUnreadyUploadReference(for: key, revision: revision)) abandoned=\(hasAbandonedDiscussion(for: key, revision: revision))",

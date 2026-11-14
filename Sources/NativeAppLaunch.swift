@@ -1241,6 +1241,7 @@ private struct PreparedLivePresentationInitialState: Sendable {
     let port: AttentionDomainPort
     let snapshot: PresentationSnapshot
     let conversationThreads: [RequestKey: ConversationThread]
+    let submissionProgress: [RequestKey: InboxSubmissionProgress]
     let conversationFiles: ConversationFileStorage?
     let messageLedger: NewMessageAreaLedger
     let replyLedger: ReplyItemLedger
@@ -1262,6 +1263,7 @@ private struct VersionedPreparedReplyItemAreaReconciliation: Sendable {
 
 private struct PreparedLivePresentationUpdate: Sendable {
     let conversationThreads: [RequestKey: ConversationThread]
+    let submissionProgress: [RequestKey: InboxSubmissionProgress]
     let messageArea: VersionedPreparedNewMessageAreaReconciliation?
     let replyItemArea: VersionedPreparedReplyItemAreaReconciliation?
     let failedResponseWarnings: [RequestKey: LivePresentationStore.FailedResponseWarning]
@@ -1269,7 +1271,6 @@ private struct PreparedLivePresentationUpdate: Sendable {
     let noReplyRoutingChanges: [PreparedNoReplyRoutingChange]
     let staleAnswerDialog: StaleAnswerDialog?
     let requestKeys: Set<RequestKey>
-    let firstRequestKey: RequestKey?
     let actionErrorRequest: RequestKey?
     let shouldClearActionError: Bool
 }
@@ -1319,6 +1320,7 @@ final class LivePresentationStore {
         let turnID: ExactText
     }
 
+    private(set) var submissionProgress: [RequestKey: InboxSubmissionProgress] = [:]
     private(set) var conversationThreads: [RequestKey: ConversationThread]
     @ObservationIgnored private var pendingConversationTextByBinding: [ConversationBinding: String] = [:]
     private(set) var conversationError: String?
@@ -1433,7 +1435,9 @@ final class LivePresentationStore {
         return conversationThreads[key]?.allowsDiscussion == true
     }
     func canSendDiscussion(for key: RequestKey) -> Bool {
-        canSendToCurrentServer && conversationThreads[key]?.allowsDiscussion == true
+        guard canSendToCurrentServer, let thread = conversationThreads[key],
+              thread.allowsDiscussion else { return false }
+        return thread.drafts[thread.currentRevision]?.isPermanentlyRefused != true
     }
     @ObservationIgnored var notificationProjectionDidChange: (() -> Void)?
     @ObservationIgnored var confirmedRelayRefresh: (() -> Void)?
@@ -1544,6 +1548,8 @@ final class LivePresentationStore {
                 ConversationFileStorage(identity: context.identity)
             return PreparedLivePresentationInitialState(
                 port: port, snapshot: snapshot, conversationThreads: conversationThreads,
+                submissionProgress: InboxSubmissionProgress.project(
+                    snapshot: attentionSnapshot, threads: conversationThreads),
                 conversationFiles: conversationFiles,
                 messageLedger: messageLedger, replyLedger: replyLedger,
                 preparedMessageArea: preparedMessageArea, preparedReplyArea: preparedReplyArea,
@@ -1606,9 +1612,12 @@ final class LivePresentationStore {
         self.attentionStore = store
         self.presentation = snapshot
         self.conversationThreads = conversationThreads
+        self.submissionProgress = try preparedInitialState?.submissionProgress ??
+            InboxSubmissionProgress.project(snapshot: store.snapshot(context: context),
+                                            threads: conversationThreads)
         self.conversationProjectionRevision = snapshot.revision
         self.conversationFiles = conversationFiles
-        self.selectedRequestKey = snapshot.requests.first?.key
+        self.selectedRequestKey = nil
         if let preparedInitialState {
             _ = areaStore?.applyPreparedReconciliation(preparedInitialState.preparedMessageArea,
                                                         basedOn: 0)
@@ -2026,6 +2035,7 @@ final class LivePresentationStore {
     }
 
     func sendDiscussion(for key: RequestKey, revision: UInt64,
+                        onQueued: (() -> Void)? = nil,
                         onResult: ((Bool) -> Void)? = nil) {
         guard !isReadOnly, conversationUnavailableMessage == nil,
               canSendDiscussion(for: key) else { return }
@@ -2040,6 +2050,7 @@ final class LivePresentationStore {
                 guard !sendingDiscussionBindings.contains(binding), let files = conversationFiles else { return }
                 _ = try attentionStore.prepareDiscussion(binding, context: profileContext)
                 try refreshFromDurableStore()
+                onQueued?()
                 sendingDiscussionBindings.insert(binding)
                 conversationError = nil
                 Task { [weak self] in
@@ -2059,7 +2070,7 @@ final class LivePresentationStore {
                             conversationError = nil
                             onResult?(true)
                         case let .rejected(reason):
-                            conversationError = "Not delivered: " + reason.rawValue + ". Draft and files retained."
+                            conversationError = ConversationDraftPresentationText.rejectionMessage(reason)
                             onResult?(false)
                         case .unresolved:
                             conversationError = "Sending… Your text and files are saved."
@@ -2086,6 +2097,7 @@ final class LivePresentationStore {
             }
             try port.appendFixtureDiscussion(binding, context: port.context)
             try refreshFromDurableStore()
+            onQueued?()
             conversationError = nil
             onResult?(true)
         } catch {
@@ -2093,6 +2105,22 @@ final class LivePresentationStore {
             diagnose(.conversation, .discussionSubmission, .failed, error: error,
                      operationID: discussionOperationID(for: key, revision: revision),
                      request: key, revision: revision, receiptState: .unknown)
+        }
+    }
+
+    func editRejectedDiscussion(for key: RequestKey, revision: UInt64) {
+        guard !isReadOnly else { return }
+        var draft = conversationDraft(for: key, revision: revision)
+        guard case .rejected = draft.disposition else { return }
+        do {
+            draft.disposition = .saved
+            // The repository clears the failed operation's frozen identity.
+            // Retry retains that identity; Edit begins a different submission.
+            try port.saveConversationDraft(draft, context: port.context)
+            try refreshFromDurableStore()
+            conversationError = nil
+        } catch {
+            conversationError = "Your message could not be opened for editing. It is still saved."
         }
     }
 
@@ -2313,6 +2341,11 @@ final class LivePresentationStore {
             hasMessageLoadWarning: hasMessageLoadWarning,
             isRetracted: retracted,
             chatUnread: listChatUnread(request.key),
+            submissionProgress: submissionProgress[request.key].map { progress in
+                InboxRowSubmissionProgress(
+                    state: progress.state == .awaiting ? .awaiting : .notSent(detail: progress.detail),
+                    since: progress.since)
+            },
             tier: .middle,
             inboxScore: request.inboxScore,
             inboxReplyScores: request.inboxReplyScores,
@@ -2360,6 +2393,8 @@ final class LivePresentationStore {
         case .refusedByRetraction: "Answer refused · request retracted"
         case .terminalUnconfirmed: "Submission unconfirmed · saved draft retained"
         case .notDelivered: "Answer not delivered"
+        case .refusedClosed: "This request was already closed"
+        case .refusedNotFound: "This request is no longer available"
         case .unsupported: "No comment was not accepted"
         case .repairRequired: "Answer needs recovery"
         }
@@ -3269,6 +3304,9 @@ final class LivePresentationStore {
         if !locallyReconciledRead {
             do {
                 conversationThreads = try port.conversations(context: port.context).threads
+                submissionProgress = InboxSubmissionProgress.project(
+                    snapshot: try attentionStore.snapshot(context: profileContext),
+                    threads: conversationThreads)
                 conversationProjectionRevision = snapshot.revision
             }
             catch {
@@ -3290,9 +3328,7 @@ final class LivePresentationStore {
         }
         if let selectedRequestKey,
            !snapshot.requests.contains(where: { $0.key == selectedRequestKey }) {
-            self.selectedRequestKey = snapshot.requests.first?.key
-        } else if selectedRequestKey == nil {
-            self.selectedRequestKey = snapshot.requests.first?.key
+            self.selectedRequestKey = nil
         }
         notificationProjectionDidChange?()
     }
@@ -3366,13 +3402,14 @@ final class LivePresentationStore {
                 } ?? false
                 return PreparedLivePresentationUpdate(
                     conversationThreads: conversationThreads,
+                    submissionProgress: InboxSubmissionProgress.project(
+                        snapshot: attentionSnapshot, threads: conversationThreads),
                     messageArea: messageArea, replyItemArea: replyItemArea,
                     failedResponseWarnings: failedResponseWarnings,
                     warningGeneration: warningGeneration,
                     noReplyRoutingChanges: noReplyRoutingChanges,
                     staleAnswerDialog: staleAnswerDialog,
                     requestKeys: Set(updateSnapshot.requests.map(\.key)),
-                    firstRequestKey: updateSnapshot.requests.first?.key,
                     actionErrorRequest: capturedActionErrorRequest,
                     shouldClearActionError: shouldClearActionError)
             }
@@ -3415,6 +3452,7 @@ final class LivePresentationStore {
                 locallyReconciledConversationReadRevisions.remove(snapshot.revision)
             } else {
                 conversationThreads = prepared.conversationThreads
+                submissionProgress = prepared.submissionProgress
                 conversationProjectionRevision = snapshot.revision
             }
             locallyReconciledConversationReadRevisions = Set(
@@ -3432,7 +3470,7 @@ final class LivePresentationStore {
                 clearActionError()
             }
             if selectedRequestKey.map(prepared.requestKeys.contains) != true {
-                selectedRequestKey = prepared.firstRequestKey
+                selectedRequestKey = nil
             }
             notificationProjectionDidChange?()
             mainActorWorkNanoseconds += DispatchTime.now().uptimeNanoseconds - mainActorSegmentStartedAt

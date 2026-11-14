@@ -758,7 +758,32 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertEqual(app.notificationNavigationMessage, "The sender retracted this message.")
     }
 
-    func testColdPendingNotificationWaitsForOrdinaryLoadingAndRejectsSequenceOrGenerationChange() throws {
+    func testPreviousLaunchNotificationIsDiscardedButCurrentTapCanOpen() throws {
+        let namespace = "Harklight.notification-launch." + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: namespace))
+        defer { defaults.removePersistentDomain(forName: namespace) }
+        let oldIntent = NativeNotificationIntent(serial: 41,
+            locator: try XCTUnwrap(NativeNotificationLocator(notificationPayload(message: "old"))),
+            profile: nil)
+        defaults.set(try JSONEncoder().encode(oldIntent), forKey: "harklight.notification.navigation")
+        defaults.set("42", forKey: "harklight.notification.navigation.serial")
+
+        let router = NativeNotificationRouter(defaults: defaults)
+        XCTAssertNil(router.intent, "Ordinary launch must not replay an unfinished tap from disk.")
+        XCTAssertNil(defaults.data(forKey: "harklight.notification.navigation"))
+        router.receive(try notificationPayload(message: "foreground"), opened: false)
+        XCTAssertNil(router.intent, "Receipt without a tap must leave Inbox unselected.")
+        DevelopmentPushRegistration.routeNotificationPayload(
+            try notificationPayload(message: "current"), to: router)
+        XCTAssertEqual(router.intent?.locator?.request.messageID, ExactText("current"))
+        XCTAssertEqual(router.intent?.serial, 43)
+        XCTAssertNil(defaults.data(forKey: "harklight.notification.navigation"),
+                     "A current tap must not become next launch's navigation.")
+        router.consumed()
+        XCTAssertNil(router.intent)
+    }
+
+    func testCurrentNotificationWaitsForLoadingAndRejectsSequenceOrGenerationChange() throws {
         let namespace = "Harklight.notification-cold." + UUID().uuidString
         let defaults = try XCTUnwrap(UserDefaults(suiteName: namespace))
         defer { defaults.removePersistentDomain(forName: namespace) }
@@ -770,7 +795,8 @@ final class NativeGuidedTLSTests: XCTestCase {
         let first = NativeNotificationRouter(defaults: defaults)
         first.receive(try notificationPayload(), opened: true)
         let cold = NativeNotificationRouter(defaults: defaults)
-        XCTAssertNotNil(cold.intent)
+        XCTAssertNil(cold.intent, "An ordinary cold launch does not replay an earlier tap.")
+        cold.receive(try notificationPayload(), opened: true)
         XCTAssertNil(cold.resolve(records: [record], context: context, requests: [], synchronized: true))
         XCTAssertNotNil(cold.intent?.locator, "An unloaded target remains pending without a page request")
         try domain.apply(RelayEvent(sequence: 1, body: .delivery(StoredRequest(key: key, originalPayload: payload), .message)), context: context)
@@ -788,8 +814,9 @@ final class NativeGuidedTLSTests: XCTestCase {
         let afterRestart = NativeNotificationRouter(defaults: defaults)
         var replacedRecord = record
         replacedRecord.notificationProfileGeneration = UUID()
-        XCTAssertNil(afterRestart.resolve(records: [replacedRecord], context: context, requests: requests, synchronized: true))
-        XCTAssertNil(afterRestart.intent?.locator, "A replacement saved generation cannot inherit cold intent")
+        XCTAssertNil(afterRestart.intent)
+        XCTAssertNil(first.resolve(records: [replacedRecord], context: context, requests: requests, synchronized: true))
+        XCTAssertNil(first.intent?.locator, "A replacement saved generation cannot inherit a pending tap")
         XCTAssertTrue(try domain.snapshot(context: context).outbox.isEmpty)
         XCTAssertTrue(try domain.snapshot(context: context).intents.isEmpty)
     }
@@ -856,8 +883,9 @@ final class NativeGuidedTLSTests: XCTestCase {
             userInfo: userInfo))
         DevelopmentPushRegistration.routeNotificationPayload(openedPayload, to: responseRouter)
 
-        // Recreate the router as a cold launch would, after the response handoff persisted its intent.
-        let coldRouter = NativeNotificationRouter(defaults: defaults)
+        // A launch tap is delivered to the shared router in this process.
+        // It remains pending while the app restores, without replaying old disk state.
+        let coldRouter = responseRouter
         XCTAssertEqual(coldRouter.intent?.locator?.request, target)
         var pageFetches = 0
         let app = NativeAppLaunch(arguments: [],
@@ -1553,6 +1581,45 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertEqual(endpoint?.absoluteString, "https://localhost:9443/origin/v1")
         XCTAssertEqual(requests.types, ["conversation_open"])
         XCTAssertEqual(try JSONValue.parse(XCTUnwrap(requests.snapshot().first)).uniqueValue(named: "since")?.integerValue, 41)
+    }
+
+    func testClosedSeenReplyAndNoCommentResponsesAreDefinitiveRefusals() async throws {
+        let namespace = "Harklight.closed-operation-test." + UUID().uuidString
+        let identity = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
+        defer {
+            SecItemDelete([kSecClass as String: kSecClassCertificate,
+                           kSecAttrLabel as String: identity.label] as CFDictionary)
+            SecItemDelete([kSecClass as String: kSecClassKey,
+                           kSecAttrApplicationTag as String: Data(namespace.utf8)] as CFDictionary)
+        }
+        let relay = try LocalRelayWebSocket(expectedDevice: identity.deviceID) { text in
+            guard text.contains("\"type\":\"answer\"") ||
+                  text.contains("\"type\":\"answer_no_comment\"") else { return [] }
+            let missingReason = text.contains("\"type\":\"answer_no_comment\"") ? "not_found" : "unknown_message"
+            let reason = text.contains("missing-request") ? missingReason : "closed"
+            return [#"{"v":1,"type":"error","reason":"\#(reason)"}"# + "\n"]
+        }
+        defer { relay.close() }
+        let port = try await relay.start()
+        let context = ProfileContext(identity: ProfileIdentity(
+            trustedRelayAuthority: ExactText("localhost"), personID: ExactText("test-person"),
+            deviceID: ExactText(identity.deviceID)), transportMode: .relay)
+        for reason in ["closed", "not_found"] {
+            for (kind, answer) in [("answer", "null"), ("answer", "true"), ("answer_no_comment", "null")] {
+              let session = try URLSessionInstallationSession(
+                  profile: context, relayURL: XCTUnwrap(URL(string: "wss://localhost:\(port)/relay")),
+                  clientIdentity: TrustedKeychainIdentity(identity.value), trustedRootDER: relay.rootDER)
+              let operationID = UUID()
+              let requestID = reason == "not_found" ? "missing-request" : "request"
+              let answerField = kind == "answer_no_comment" ? "" : #","answer":\#(answer)"#
+              let frame = #"{"v":1,"type":"\#(kind)","op_id":"\#(operationID.uuidString.lowercased())","sender_id":"sender","request_id":"\#(requestID)","request_revision":1\#(answerField)}"#
+              let result = try await session.sendOriginalOperation(Data((frame + "\n").utf8),
+                                                                   operationID: operationID)
+              await session.close()
+              XCTAssertEqual(result, reason == "closed" ? .refusedClosed(operationID: operationID) :
+                  .refusedNotFound(operationID: operationID))
+            }
+        }
     }
 
     func testOlderRelayUnsupportedVersionResponseMarksNoCommentUnsupported() async throws {
