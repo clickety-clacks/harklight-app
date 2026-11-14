@@ -19,12 +19,25 @@ struct NativeInstallationIdentity {
 struct NativeInstallationIdentityStore {
     let namespace: String
 
+    // Last second representable by X.509 GeneralizedTime: 9999-12-31T23:59:59Z.
+    private static let certificateNotAfter = Date(timeIntervalSince1970: 253_402_300_799)
+
     init(namespace: String = "co.clicketyclacks.Harklight.guided-installation") {
         self.namespace = namespace
     }
 
     func loadOrCreate() throws -> NativeInstallationIdentity {
-        let privateKey = try retainedPrivateKey()
+        try load(creatingIfMissing: true)
+    }
+
+    /// Loads the enrolled key and renews its certificate when needed without
+    /// creating a replacement key or identity for an existing installation.
+    func loadExisting() throws -> NativeInstallationIdentity {
+        try load(creatingIfMissing: false)
+    }
+
+    private func load(creatingIfMissing: Bool) throws -> NativeInstallationIdentity {
+        let privateKey = try retainedPrivateKey(creatingIfMissing: creatingIfMissing)
         guard let publicKey = SecKeyCopyPublicKey(privateKey),
               let publicDER = SecKeyCopyExternalRepresentation(publicKey, nil) as Data? else {
             throw NativeEnrollmentError.invalidIdentity
@@ -41,23 +54,21 @@ struct NativeInstallationIdentityStore {
         let status = SecItemCopyMatching(query as CFDictionary, &result)
         if status == errSecSuccess, let result,
            CFGetTypeID(result) == SecCertificateGetTypeID() {
-            certificate = result as! SecCertificate
+            let retained = result as! SecCertificate
+            if Self.hasCurrentNotAfter(retained) {
+                certificate = retained
+            } else {
+                certificate = try retainCertificate(publicKeyDER: publicDER,
+                                                     privateKey: privateKey,
+                                                     label: label,
+                                                     replacingExisting: true)
+            }
         } else if status == errSecItemNotFound {
-            let der = try Self.selfSignedCertificate(publicKeyDER: publicDER, privateKey: privateKey)
-            guard let created = SecCertificateCreateWithData(nil, der as CFData) else {
-                throw NativeEnrollmentError.invalidIdentity
-            }
-            let attributes: [String: Any] = [
-                kSecClass as String: kSecClassCertificate,
-                kSecValueRef as String: created,
-                kSecAttrLabel as String: label,
-                kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-            ]
-            let added = SecItemAdd(attributes as CFDictionary, nil)
-            guard added == errSecSuccess else {
-                throw InstallationIdentityFailure.keychain(operation: "retain certificate", status: added)
-            }
-            certificate = created
+            guard creatingIfMissing else { throw NativeEnrollmentError.invalidIdentity }
+            certificate = try retainCertificate(publicKeyDER: publicDER,
+                                                 privateKey: privateKey,
+                                                 label: label,
+                                                 replacingExisting: false)
         } else {
             throw InstallationIdentityFailure.keychain(operation: "load certificate", status: status)
         }
@@ -95,7 +106,45 @@ struct NativeInstallationIdentityStore {
                                           deviceID: deviceID, label: label)
     }
 
-    private func retainedPrivateKey() throws -> SecKey {
+    private func retainCertificate(publicKeyDER: Data,
+                                   privateKey: SecKey,
+                                   label: String,
+                                   replacingExisting: Bool) throws -> SecCertificate {
+        let der = try Self.selfSignedCertificate(publicKeyDER: publicKeyDER,
+                                                 privateKey: privateKey,
+                                                 notAfter: Self.certificateNotAfter)
+        guard let created = SecCertificateCreateWithData(nil, der as CFData) else {
+            throw NativeEnrollmentError.invalidIdentity
+        }
+        if replacingExisting {
+            let query: [String: Any] = [
+                kSecClass as String: kSecClassCertificate,
+                kSecAttrLabel as String: label
+            ]
+            let deleted = SecItemDelete(query as CFDictionary)
+            guard deleted == errSecSuccess else {
+                throw InstallationIdentityFailure.keychain(operation: "replace certificate", status: deleted)
+            }
+        }
+        let attributes: [String: Any] = [
+            kSecClass as String: kSecClassCertificate,
+            kSecValueRef as String: created,
+            kSecAttrLabel as String: label,
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        ]
+        let added = SecItemAdd(attributes as CFDictionary, nil)
+        guard added == errSecSuccess else {
+            throw InstallationIdentityFailure.keychain(operation: "retain certificate", status: added)
+        }
+        return created
+    }
+
+    private static func hasCurrentNotAfter(_ certificate: SecCertificate) -> Bool {
+        let certificateDER = SecCertificateCopyData(certificate) as Data
+        return certificateDER.range(of: DER.time(certificateNotAfter)) != nil
+    }
+
+    private func retainedPrivateKey(creatingIfMissing: Bool) throws -> SecKey {
         let tag = Data(namespace.utf8)
         let query: [String: Any] = [
             kSecClass as String: kSecClassKey,
@@ -113,6 +162,7 @@ struct NativeInstallationIdentityStore {
         guard status == errSecItemNotFound else {
             throw InstallationIdentityFailure.keychain(operation: "load private key", status: status)
         }
+        guard creatingIfMissing else { throw NativeEnrollmentError.invalidIdentity }
         let attributes: [String: Any] = [
             kSecAttrKeyType as String: kSecAttrKeyTypeRSA,
             kSecAttrKeySizeInBits as String: 2048,
@@ -130,7 +180,9 @@ struct NativeInstallationIdentityStore {
         return key
     }
 
-    private static func selfSignedCertificate(publicKeyDER: Data, privateKey: SecKey) throws -> Data {
+    static func selfSignedCertificate(publicKeyDER: Data,
+                                      privateKey: SecKey,
+                                      notAfter: Date) throws -> Data {
         // RSA/SHA-256 and clientAuth match the server's device-certificate path.
         // SecCertificateCreateWithData parses DER; it does not issue a certificate.
         let rsa = DER.sequence(DER.oid([0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 1, 1, 1]), DER.null)
@@ -144,7 +196,7 @@ struct NativeInstallationIdentityStore {
         serial[0] |= 1
         let now = Date()
         let validity = DER.sequence(DER.time(now.addingTimeInterval(-300)),
-                                    DER.time(now.addingTimeInterval(365 * 24 * 60 * 60)))
+                                    DER.time(notAfter))
         let spki = DER.sequence(rsa, DER.bitString(publicKeyDER))
         let constraints = DER.sequence(DER.oid([0x55, 0x1d, 0x13]), DER.value(1, Data([0xff])),
                                        DER.value(4, DER.sequence()))
