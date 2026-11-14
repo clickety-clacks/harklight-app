@@ -1435,7 +1435,8 @@ final class LivePresentationStore {
         return conversationThreads[key]?.allowsDiscussion == true
     }
     func canSendDiscussion(for key: RequestKey) -> Bool {
-        guard canSendToCurrentServer, let thread = conversationThreads[key],
+        guard (canSendToCurrentServer || isLocalExample) && !isReadOnly,
+              let thread = conversationThreads[key],
               thread.allowsDiscussion else { return false }
         return thread.drafts[thread.currentRevision]?.isPermanentlyRefused != true
     }
