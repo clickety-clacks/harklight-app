@@ -156,6 +156,26 @@ final class NativeGuidedJoinTests: XCTestCase {
         XCTAssertEqual(saved.approvalExpiresAt, renewedDeadline)
     }
 
+    func testPendingReplyDoesNotRequireStatusWindowToOutlastApprovalWindow() async throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanup() }
+        let transport = FakeTransport()
+        let store = NativeGuidedJoinStore(namespace: fixture.namespace, transport: transport)
+        let approvalDeadline = Int64(Date().timeIntervalSince1970 * 1000) + 60_000
+        let statusDeadline = approvalDeadline - 1_000
+        transport.handler = { _, _, _ in
+            try response(["state": "pending", "approval_code": "ABCDEF2345",
+                          "expires_at": approvalDeadline, "status_expires_at": statusDeadline])
+        }
+
+        let attempt = try await store.submit()
+
+        XCTAssertEqual(attempt.phase, .pending)
+        XCTAssertEqual(attempt.approvalExpiresAt, approvalDeadline)
+        XCTAssertEqual(attempt.statusExpiresAt, statusDeadline)
+        XCTAssertEqual(try store.loadAttempt(), attempt)
+    }
+
     func testPendingApprovalCodeRemainsAvailableWhenClientClockIsAhead() async throws {
         let fixture = try Fixture()
         defer { fixture.cleanup() }
