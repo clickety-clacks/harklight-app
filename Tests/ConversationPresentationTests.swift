@@ -110,6 +110,62 @@ final class ConversationPresentationTests: XCTestCase {
         XCTAssertEqual(withReply.turns.map(\.text), [restored.text, agentReply.text])
     }
 
+    func testOpenChatModelPublishesPendingAndLiveTurnsWithoutReopening() async throws {
+        let context = ProfileContext(identity: ProfileIdentity(
+            trustedRelayAuthority: ExactText("relay.example"), personID: ExactText("person"),
+            deviceID: ExactText("device")), transportMode: .relay)
+        let key = RequestKey(accountScope: context.identity.personID,
+                             senderID: ExactText("sender"), messageID: ExactText("chat"))
+        let binding = ConversationBinding(request: key, revision: 1)
+        let domain = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        let payload = try JSONValue.parse(Data(#"{"title":"Chat"}"#.utf8))
+        _ = try domain.apply(RelayEvent(sequence: 1,
+            body: .delivery(StoredRequest(key: key, originalPayload: payload), .message),
+            conversation: RelayConversationMetadata(revision: 1, sessionHandle: ExactText("session"))),
+            context: context)
+        try domain.applyConversation(ConversationEvent(sequence: 1, binding: binding,
+            fact: .request(sessionHandle: ExactText("session"), payload: payload)), context: context)
+        let model = try LivePresentationStore(store: domain, context: context)
+        model.startObserving()
+        defer { model.stopObserving() }
+        let pendingShown = expectation(description: "open model shows submitted text before Server response")
+        var pendingObserved = false
+        model.notificationProjectionDidChange = {
+            guard !pendingObserved, let thread = model.conversation(for: key),
+                  ConversationPendingSubmission.rows(in: thread).first?.text == ExactText("Own chat") else { return }
+            pendingObserved = true
+            pendingShown.fulfill()
+        }
+        try domain.saveConversationDraft(ConversationDraft(binding: binding,
+            text: ExactText("Own chat")), context: context)
+        let operation = try domain.prepareDiscussion(binding, context: context)
+        await fulfillment(of: [pendingShown], timeout: 5)
+
+        let turnID = ExactText("own-turn")
+        try domain.markDiscussionAccepted(binding, operation: operation, turn: turnID, context: context)
+        let replyShown = expectation(description: "same open model receives own turn and agent reply")
+        var replyObserved = false
+        model.notificationProjectionDidChange = {
+            guard !replyObserved, let thread = model.conversation(for: key),
+                  thread.turns.map(\.text) == [ExactText("Own chat"), ExactText("Live reply")] else { return }
+            replyObserved = true
+            replyShown.fulfill()
+        }
+        let own = ConversationTurn(id: turnID, binding: binding, author: .person,
+            sessionHandle: ExactText("session"), text: ExactText("Own chat"), operationID: operation,
+            kind: .discussion)
+        let reply = ConversationTurn(id: ExactText("reply-turn"), binding: binding, author: .agent,
+            sessionHandle: ExactText("session"), text: ExactText("Live reply"), inReplyTo: turnID, kind: .reply)
+        try domain.applyConversation(ConversationEvent(sequence: 2, binding: binding,
+            fact: .turn(own)), context: context)
+        try domain.applyConversation(ConversationEvent(sequence: 3, binding: binding,
+            fact: .turn(reply)), context: context)
+        await fulfillment(of: [replyShown], timeout: 5)
+        let updated = try XCTUnwrap(model.conversation(for: key))
+        XCTAssertTrue(ConversationPendingSubmission.rows(in: updated).isEmpty)
+        XCTAssertEqual(updated.turns.map(\.id), [own.id, reply.id])
+    }
+
     func testRejectedChatKeepsItsTextVisibleWithoutPublishingAnUnsentEditor() throws {
         let context = ProfileContext(identity: ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
             personID: ExactText("person"), deviceID: ExactText("device")), transportMode: .relay)
