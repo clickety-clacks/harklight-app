@@ -26,6 +26,8 @@ final class LiveMessageLookupTests: XCTestCase {
         let model = try await LivePresentationStore.makeForActivation(
             store: domain, context: context).presentation
         XCTAssertEqual(model.request(for: key)?.title, ExactText("Original wording"))
+        XCTAssertNil(model.selectedRequest, "Activation leaves the inbox unselected.")
+        model.selectRequest(key)
         XCTAssertEqual(model.selectedRequest?.key, key)
         XCTAssertNil(model.request(for: laterKey))
 
