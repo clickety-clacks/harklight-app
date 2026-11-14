@@ -117,14 +117,17 @@ final class ConversationSampleUITests: XCTestCase {
                     XCTAssertEqual(duePhrase.label, "Due tomorrow at 9:00 AM", duePhrase.debugDescription)
                 }
                 if state.name == "acceptedNewMessage" {
-                    let header = app.descendants(matching: .any)["new-message-area-header"]
+                    let header = app.staticTexts["new-message-area-header"]
                     XCTAssertTrue(header.waitForExistence(timeout: 5), app.debugDescription)
-                    XCTAssertTrue(header.isHittable, app.debugDescription)
+                    XCTAssertTrue(header.label.contains("New"), header.debugDescription)
+                    let visibleHeaderFrame = header.frame.intersection(list.frame)
+                    XCTAssertEqual(visibleHeaderFrame.width, header.frame.width, accuracy: 1,
+                                   "The new-message heading remains visible across the list column.\n\(app.debugDescription)")
+                    XCTAssertEqual(visibleHeaderFrame.height, header.frame.height, accuracy: 1,
+                                   "The new-message heading remains visible across the list column.\n\(app.debugDescription)")
                 }
                 if state.name == "replyItem" || state.name == "replyItemFullWidth" {
-                    let unseenCount = app.descendants(matching: .any)["reply-item-unseen-count"]
-                    XCTAssertTrue(unseenCount.waitForExistence(timeout: 5), app.debugDescription)
-                    XCTAssertTrue(unseenCount.label.contains("2 new"), unseenCount.debugDescription)
+                    XCTAssertTrue(row.label.contains("2 new"), row.debugDescription)
                     let badge = app.descendants(matching: .any)["reply-item-priority-now"]
                     XCTAssertTrue(badge.waitForExistence(timeout: 5), app.debugDescription)
                     let normalReply = app.descendants(matching: .any)[
