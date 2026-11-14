@@ -249,6 +249,8 @@ struct ConversationValidationRejectionError: Error, Sendable {
 }
 
 public struct ConversationTurnFacts: Equatable, Codable, Sendable {
+    /// Preserved from this device's durable send when its own turn replays.
+    public var submittedAt: Date?
     public var delivered = false
     public var actedBy: ExactText?
     /// Client time when the Server's accepted response was observed. Older
@@ -278,6 +280,15 @@ public struct ConversationDraft: Equatable, Codable, Sendable {
     /// including a rejected intent offered for Retry. They are not Server state.
     public var operationID: UUID?
     public var wireFrame: Data?
+    /// Set once when saved for sending; Retry preserves it and Edit clears it.
+    public var submittedAt: Date?
+
+    /// The original request cannot accept another attempt after these
+    /// authoritative refusals. Keep its text available without resending it.
+    public var isPermanentlyRefused: Bool {
+        guard case let .rejected(reason) = disposition else { return false }
+        return reason.rawValue == "closed" || reason.rawValue == "not_found"
+    }
 
     public enum Disposition: Equatable, Codable, Sendable {
         case saved
@@ -289,13 +300,15 @@ public struct ConversationDraft: Equatable, Codable, Sendable {
 
     public init(binding: ConversationBinding, text: ExactText = ExactText(""),
                 files: [ConversationFile] = [], disposition: Disposition = .saved,
-                operationID: UUID? = nil, wireFrame: Data? = nil) {
+                operationID: UUID? = nil, wireFrame: Data? = nil,
+                submittedAt: Date? = nil) {
         self.binding = binding
         self.text = text
         self.files = files
         self.disposition = disposition
         self.operationID = operationID
         self.wireFrame = wireFrame
+        self.submittedAt = submittedAt
     }
 }
 
@@ -1053,6 +1066,10 @@ struct ConversationState: Codable, Equatable {
                 case let .submitting(savedID) where savedID == operationID,
                      let .outcomeUnknown(savedID) where savedID == operationID,
                      let .acceptedPendingReplay(savedID, _) where savedID == operationID:
+                    // A legacy local send has no date; the sentinel keeps it
+                    // visibly pending without inventing a fresh send time.
+                    thread.facts[turn.id, default: ConversationTurnFacts()].submittedAt =
+                        draft.submittedAt ?? .distantPast
                     thread.drafts.removeValue(forKey: binding.revision)
                 default: break
                 }

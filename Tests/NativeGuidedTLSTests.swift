@@ -1583,6 +1583,45 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertEqual(try JSONValue.parse(XCTUnwrap(requests.snapshot().first)).uniqueValue(named: "since")?.integerValue, 41)
     }
 
+    func testClosedSeenReplyAndNoCommentResponsesAreDefinitiveRefusals() async throws {
+        let namespace = "Harklight.closed-operation-test." + UUID().uuidString
+        let identity = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
+        defer {
+            SecItemDelete([kSecClass as String: kSecClassCertificate,
+                           kSecAttrLabel as String: identity.label] as CFDictionary)
+            SecItemDelete([kSecClass as String: kSecClassKey,
+                           kSecAttrApplicationTag as String: Data(namespace.utf8)] as CFDictionary)
+        }
+        let relay = try LocalRelayWebSocket(expectedDevice: identity.deviceID) { text in
+            guard text.contains("\"type\":\"answer\"") ||
+                  text.contains("\"type\":\"answer_no_comment\"") else { return [] }
+            let missingReason = text.contains("\"type\":\"answer_no_comment\"") ? "not_found" : "unknown_message"
+            let reason = text.contains("missing-request") ? missingReason : "closed"
+            return [#"{"v":1,"type":"error","reason":"\#(reason)"}"# + "\n"]
+        }
+        defer { relay.close() }
+        let port = try await relay.start()
+        let context = ProfileContext(identity: ProfileIdentity(
+            trustedRelayAuthority: ExactText("localhost"), personID: ExactText("test-person"),
+            deviceID: ExactText(identity.deviceID)), transportMode: .relay)
+        for reason in ["closed", "not_found"] {
+            for (kind, answer) in [("answer", "null"), ("answer", "true"), ("answer_no_comment", "null")] {
+              let session = try URLSessionInstallationSession(
+                  profile: context, relayURL: XCTUnwrap(URL(string: "wss://localhost:\(port)/relay")),
+                  clientIdentity: TrustedKeychainIdentity(identity.value), trustedRootDER: relay.rootDER)
+              let operationID = UUID()
+              let requestID = reason == "not_found" ? "missing-request" : "request"
+              let answerField = kind == "answer_no_comment" ? "" : #","answer":\#(answer)"#
+              let frame = #"{"v":1,"type":"\#(kind)","op_id":"\#(operationID.uuidString.lowercased())","sender_id":"sender","request_id":"\#(requestID)","request_revision":1\#(answerField)}"#
+              let result = try await session.sendOriginalOperation(Data((frame + "\n").utf8),
+                                                                   operationID: operationID)
+              await session.close()
+              XCTAssertEqual(result, reason == "closed" ? .refusedClosed(operationID: operationID) :
+                  .refusedNotFound(operationID: operationID))
+            }
+        }
+    }
+
     func testOlderRelayUnsupportedVersionResponseMarksNoCommentUnsupported() async throws {
         let namespace = "Harklight.no-comment-compatibility-test." + UUID().uuidString
         let identity = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()

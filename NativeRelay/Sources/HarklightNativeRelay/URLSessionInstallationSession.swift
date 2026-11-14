@@ -565,9 +565,20 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
                     close()
                     return .unresolved
                 }
-                if reason == "closed" || reason == nil {
-                    // Closed can follow an earlier accepted send whose reply
-                    // was lost. Keep the original operation pending until replay.
+                if reason == "not_found" || (!isNoCommentOperation && reason == "unknown_message") {
+                    diagnose(.answer, .originalOperationDelivery, .rejected,
+                             causeCode: NativeDiagnosticCauseCode.serverReason(reason),
+                             operationID: operationID, receipt: .terminal)
+                    return .refusedNotFound(operationID: operationID)
+                }
+                if reason == "closed" {
+                    diagnose(.answer, .originalOperationDelivery, .rejected,
+                             causeCode: NativeDiagnosticCauseCode.serverReason(reason),
+                             operationID: operationID, receipt: .terminal)
+                    return .refusedClosed(operationID: operationID)
+                }
+                if reason == nil {
+                    // A missing reason does not prove a definitive refusal.
                     diagnose(.answer, .originalOperationDelivery, .unresolved,
                              causeCode: NativeDiagnosticCauseCode.serverReason(reason),
                              operationID: operationID, receipt: .unknown)

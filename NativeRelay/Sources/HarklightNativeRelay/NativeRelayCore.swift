@@ -102,6 +102,8 @@ public enum OriginalOperationResult: Equatable, Sendable {
     case staleRevision(operationID: UUID, currentRevision: UInt64)
     case unsupported(operationID: UUID)
     case failed(operationID: UUID)
+    case refusedClosed(operationID: UUID)
+    case refusedNotFound(operationID: UUID)
     case unresolved
 }
 
@@ -2309,6 +2311,26 @@ public actor NativeRelayCore {
                          causeCode: "no_comment_unsupported", operationID: operationID,
                          request: submission.requestKey, revision: submission.requestRevision,
                          receipt: .pendingUnconfirmed)
+            case let .refusedNotFound(operationID):
+                guard operationID == submission.operationID else {
+                    throw NativeRelayCoreError.mismatchedOperationResult
+                }
+                try store.recordAnswerRefusedClosed(submission.intentID,
+                    operationID: operationID, requestNotFound: true, context: context)
+                diagnose(.answer, .originalOperationDelivery, .rejected,
+                         causeCode: NativeDiagnosticCauseCode.serverReason("not_found"),
+                         operationID: operationID, request: submission.requestKey,
+                         revision: submission.requestRevision, receipt: .terminal)
+            case let .refusedClosed(operationID):
+                guard operationID == submission.operationID else {
+                    throw NativeRelayCoreError.mismatchedOperationResult
+                }
+                try store.recordAnswerRefusedClosed(submission.intentID,
+                    operationID: operationID, context: context)
+                diagnose(.answer, .originalOperationDelivery, .rejected,
+                         causeCode: NativeDiagnosticCauseCode.serverReason("closed"),
+                         operationID: operationID, request: submission.requestKey,
+                         revision: submission.requestRevision, receipt: .terminal)
             case let .failed(operationID):
                 guard operationID == submission.operationID else {
                     diagnose(.answer, .originalOperationDelivery, .unresolved,
@@ -2360,7 +2382,7 @@ public actor NativeRelayCore {
                     applied = .completed
                     receipt = .acceptedAwaitingReplay
                     terminalSequence = sequence
-                case .refusedByRetraction, .staleRevision, .failed:
+                case .refusedByRetraction, .refusedClosed, .refusedNotFound, .staleRevision, .failed:
                     applied = .rejected
                     receipt = .terminal
                     terminalSequence = nil

@@ -55,6 +55,33 @@ final class InboxStockTabsUITests: XCTestCase {
         attachScreenshot("Native header restored at top", from: app)
     }
 
+    /// Something the person just sent shows in the New area at the top of
+    /// Inbox with a spinner, and its row in the normal list shows the spinner
+    /// too. A definitive failure shows as not sent instead.
+    func testSentItemsShowASpinnerInTheNewAreaAndTheNormalList() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--reset-attention-fixture", "--harklight-samples",
+                               "--harklight-test-submission-progress"]
+        app.launch()
+
+        let awaitingArea = app.descendants(matching: .any)["awaiting-reply-area-request-row-sample-approval-0"]
+        XCTAssertTrue(awaitingArea.waitForExistence(timeout: 15), app.debugDescription)
+        XCTAssertTrue(awaitingArea.label.contains("Waiting for a reply"), awaitingArea.label)
+
+        let notSentArea = app.descendants(matching: .any)["awaiting-reply-area-request-row-sample-textChoice-0"]
+        XCTAssertTrue(notSentArea.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(notSentArea.label.contains("Not sent"), notSentArea.label)
+        XCTAssertLessThan(awaitingArea.frame.minY, notSentArea.frame.minY,
+                          "The more recently sent item is first in the New area.")
+
+        let normalRow = app.descendants(matching: .any)["request-row-sample-approval-0"]
+        let list = app.collectionViews.firstMatch
+        for _ in 0..<10 where !(normalRow.exists && normalRow.isHittable) { list.swipeUp() }
+        XCTAssertTrue(normalRow.exists && normalRow.isHittable, app.debugDescription)
+        XCTAssertTrue(normalRow.label.contains("Waiting for a reply"),
+                      "The same message keeps its normal-list row, with the spinner. \(normalRow.label)")
+    }
+
     func testSearchTabSearchesTheListItWasOpenedFrom() {
         let app = XCUIApplication()
         app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
