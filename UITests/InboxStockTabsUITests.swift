@@ -118,17 +118,17 @@ final class InboxStockTabsUITests: XCTestCase {
                                "--harklight-test-submission-progress"]
         app.launch()
 
-        let awaitingArea = app.descendants(matching: .any)["awaiting-reply-area-request-row-sample-approval-0"]
+        let awaitingArea = app.descendants(matching: .any)["awaiting-reply-area-sample-approval-0"]
         XCTAssertTrue(awaitingArea.waitForExistence(timeout: 15), app.debugDescription)
         XCTAssertTrue(awaitingArea.label.contains("Waiting for a reply"), awaitingArea.label)
 
-        let notSentArea = app.descendants(matching: .any)["awaiting-reply-area-request-row-sample-textChoice-0"]
+        let notSentArea = app.descendants(matching: .any)["awaiting-reply-area-sample-textChoice-0"]
         XCTAssertTrue(notSentArea.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(notSentArea.label.contains("Not sent"), notSentArea.label)
         XCTAssertLessThan(awaitingArea.frame.minY, notSentArea.frame.minY,
                           "The more recently sent item is first in the New area.")
 
-        let normalRow = app.descendants(matching: .any)["request-row-sample-approval-0"]
+        let normalRow = app.descendants(matching: .any)["sample-approval-0"]
         let list = app.collectionViews.firstMatch
         for _ in 0..<10 where !(normalRow.exists && normalRow.isHittable) { list.swipeUp() }
         XCTAssertTrue(normalRow.exists && normalRow.isHittable, app.debugDescription)
