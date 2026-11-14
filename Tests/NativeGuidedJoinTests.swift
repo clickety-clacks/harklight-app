@@ -156,6 +156,62 @@ final class NativeGuidedJoinTests: XCTestCase {
         XCTAssertEqual(saved.approvalExpiresAt, renewedDeadline)
     }
 
+    func testPendingReplyDoesNotRequireStatusWindowToOutlastApprovalWindow() async throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanup() }
+        let transport = FakeTransport()
+        let store = NativeGuidedJoinStore(namespace: fixture.namespace, transport: transport)
+        let prepared = try store.prepare(fixture.invitation, deviceLabel: "My phone")
+        fixture.retainForCleanup(prepared)
+        let approvalDeadline = Int64(Date().timeIntervalSince1970 * 1000) + 60_000
+        let statusDeadline = approvalDeadline - 1_000
+        let renewedApprovalDeadline = approvalDeadline + 60_000
+        let renewedStatusDeadline = renewedApprovalDeadline - 1_000
+        var statusRequests = 0
+        var resumeRequests = 0
+        transport.handler = { url, _, _ in
+            switch url.path {
+            case "/enroll":
+                return try response(["state": "pending", "approval_code": "ABCDEF2345",
+                                     "expires_at": approvalDeadline, "status_expires_at": statusDeadline])
+            case "/enroll/status":
+                statusRequests += 1
+                return try response(["state": "pending", "approval_code": "ABCDEF2345",
+                                     "expires_at": approvalDeadline, "status_expires_at": statusDeadline])
+            case "/enroll/resume":
+                resumeRequests += 1
+                return try response(["state": "pending", "person_id": fixture.invitation.personID,
+                                     "device_id": prepared.deviceID, "approval_code": "FGHIJK2345",
+                                     "expires_at": renewedApprovalDeadline,
+                                     "status_expires_at": renewedStatusDeadline, "request_generation": 1])
+            default:
+                XCTFail("Unexpected guided-join request: \(url.path)")
+                throw NativeJoinError.invalidResponse
+            }
+        }
+
+        let attempt = try await store.submit()
+        XCTAssertEqual(attempt.phase, .pending)
+        XCTAssertEqual(attempt.approvalExpiresAt, approvalDeadline)
+        XCTAssertEqual(attempt.statusExpiresAt, statusDeadline)
+        XCTAssertEqual(try store.loadAttempt(), attempt)
+
+        let checked = try await store.checkApproval()
+        XCTAssertEqual(checked.phase, .pending)
+        XCTAssertEqual(checked.approvalExpiresAt, approvalDeadline)
+        XCTAssertEqual(checked.statusExpiresAt, statusDeadline)
+
+        var expired = checked
+        expired.phase = .expired
+        try fixture.saveLegacyAttempt(expired)
+        let resumed = try await store.checkApproval()
+        XCTAssertEqual(resumed.phase, .pending)
+        XCTAssertEqual(resumed.approvalExpiresAt, renewedApprovalDeadline)
+        XCTAssertEqual(resumed.statusExpiresAt, renewedStatusDeadline)
+        XCTAssertEqual(statusRequests, 1)
+        XCTAssertEqual(resumeRequests, 1)
+    }
+
     func testPendingApprovalCodeRemainsAvailableWhenClientClockIsAhead() async throws {
         let fixture = try Fixture()
         defer { fixture.cleanup() }

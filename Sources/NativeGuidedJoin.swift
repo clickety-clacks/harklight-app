@@ -250,7 +250,7 @@ final class NativeGuidedJoinStore {
         guard let code = response.approvalCode, code.utf8.count == 10,
               code.utf8.allSatisfy({ (65...90).contains($0) || (50...55).contains($0) }),
               let deadline = response.expiresAt, deadline > 0,
-              let statusDeadline = response.statusExpiresAt, statusDeadline > deadline else {
+              let statusDeadline = response.statusExpiresAt else {
             throw NativeJoinError.invalidResponse
         }
         var next = attempt
@@ -655,7 +655,7 @@ final class NativeGuidedJoinStore {
             guard let code = response.approvalCode, code.utf8.count == 10,
                   code.utf8.allSatisfy({ (65...90).contains($0) || (50...55).contains($0) }),
                   let deadline = response.expiresAt, deadline > 0,
-                  let statusDeadline = response.statusExpiresAt, statusDeadline > deadline else {
+                  let statusDeadline = response.statusExpiresAt else {
                 throw NativeJoinError.invalidResponse
             }
             next.approvalCode = code
@@ -672,8 +672,7 @@ final class NativeGuidedJoinStore {
                   code.utf8.count == 10,
                   code.utf8.allSatisfy({ (65...90).contains($0) || (50...55).contains($0) }),
                   let deadline = next.approvalExpiresAt, deadline > 0,
-                  let statusDeadline = next.statusExpiresAt,
-                  statusDeadline > deadline else { throw NativeJoinError.invalidResponse }
+                  let statusDeadline = next.statusExpiresAt else { throw NativeJoinError.invalidResponse }
             next.approvalCode = code
             next.approvalExpiresAt = deadline
             next.statusExpiresAt = statusDeadline

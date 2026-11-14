@@ -84,7 +84,10 @@ struct NativeEnrollmentRecord: Codable, Equatable {
     /// The invitation's person label, when it supplied one. Earlier builds saved
     /// the join screen's placeholder when the label was absent; that is not a name.
     var savedAccountName: String? {
-        accountDisplayName == NativeJoinInvitation.unnamedAccountPlaceholder ? nil : accountDisplayName
+        guard let accountDisplayName,
+              !accountDisplayName.isEmpty,
+              accountDisplayName != NativeJoinInvitation.unnamedAccountPlaceholder else { return nil }
+        return accountDisplayName
     }
     var profileAuthority: String { localProfileAuthority ?? host }
 }

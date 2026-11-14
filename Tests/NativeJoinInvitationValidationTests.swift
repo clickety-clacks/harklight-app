@@ -5,7 +5,7 @@ import XCTest
 @testable import Harklight
 
 final class NativeJoinInvitationValidationTests: XCTestCase {
-    func testInvitationPayloadSizeAndLocalClockDoNotRefuseServerInvitation() throws {
+    func testInvitationPayloadSizeLocalClockAndEmptyLabelsDoNotRefuseServerInvitation() throws {
         let namespace = "Harklight.invitation-validation-test." + UUID().uuidString
         let identity = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
         defer { deleteIdentity(namespace: namespace, certificateLabel: identity.label) }
@@ -36,6 +36,14 @@ final class NativeJoinInvitationValidationTests: XCTestCase {
         XCTAssertEqual(invitation.inviterName?.utf8.count, 300)
         XCTAssertNoThrow(try invitation.validate(now: .distantFuture))
 
+        var emptyLabels = payload
+        emptyLabels["person_label"] = ""
+        emptyLabels["inviter_label"] = ""
+        let unlabeledInvitation = try NativeJoinInvitation.decodePayload(
+            JSONSerialization.data(withJSONObject: emptyLabels))
+        XCTAssertEqual(unlabeledInvitation.claimedAccountLabel, NativeJoinInvitation.unnamedAccountPlaceholder)
+        XCTAssertEqual(unlabeledInvitation.approvingOwnerLabel, "The server owner")
+
         let encoded = data.base64EncodedString()
             .replacingOccurrences(of: "+", with: "-")
             .replacingOccurrences(of: "/", with: "_")
@@ -43,6 +51,26 @@ final class NativeJoinInvitationValidationTests: XCTestCase {
         XCTAssertGreaterThan(encoded.utf8.count, 90_000)
         let url = try XCTUnwrap(URL(string: "harklight://join#" + encoded))
         XCTAssertEqual(try NativeJoinInvitation.decode(url), invitation)
+    }
+
+    func testEmptySavedAccountNameCanUseTheDisplayFallback() {
+        let record = NativeEnrollmentRecord(host: "relay.example.test",
+                                            enrollmentPort: 18444,
+                                            relayPort: 18443,
+                                            trustedRootDER: Data(),
+                                            identityLabel: "identity",
+                                            deviceID: "device",
+                                            approvalCode: "ABCDEFGH",
+                                            statusSecret: "secret",
+                                            expiresAt: 1,
+                                            statusExpiresAt: 2,
+                                            personID: "person",
+                                            accountDisplayName: "")
+        XCTAssertNil(record.savedAccountName)
+
+        var namedRecord = record
+        namedRecord.accountDisplayName = "Person"
+        XCTAssertEqual(namedRecord.savedAccountName, "Person")
     }
 
     private func deleteIdentity(namespace: String, certificateLabel: String) {

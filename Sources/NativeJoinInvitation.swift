@@ -42,8 +42,14 @@ struct NativeJoinInvitation: Codable, Equatable {
     }
 
     static let unnamedAccountPlaceholder = "The account in this invitation"
-    var claimedAccountLabel: String { personName ?? Self.unnamedAccountPlaceholder }
-    var approvingOwnerLabel: String { inviterName ?? "The server owner" }
+    var claimedAccountLabel: String {
+        guard let personName, !personName.isEmpty else { return Self.unnamedAccountPlaceholder }
+        return personName
+    }
+    var approvingOwnerLabel: String {
+        guard let inviterName, !inviterName.isEmpty else { return "The server owner" }
+        return inviterName
+    }
 
     static func decode(_ url: URL) throws -> NativeJoinInvitation {
         guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
@@ -86,8 +92,7 @@ struct NativeJoinInvitation: Codable, Equatable {
               caPEM.components(separatedBy: "-----END CERTIFICATE-----").count == 2,
               let root = NativeEnrollmentSettings.certificateDER(from: caPEM),
               SecCertificateCreateWithData(nil, root as CFData) != nil,
-              SHA256.hash(data: root).map({ String(format: "%02x", $0) }).joined() == caSHA256,
-              [personName, inviterName].allSatisfy({ $0.map { !$0.isEmpty } ?? true }) else {
+              SHA256.hash(data: root).map({ String(format: "%02x", $0) }).joined() == caSHA256 else {
             throw NativeJoinInvitationError.invalid
         }
     }
