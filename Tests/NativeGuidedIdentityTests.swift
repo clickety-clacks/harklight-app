@@ -96,3 +96,25 @@ final class NativeGuidedIdentityTests: XCTestCase {
                        kSecAttrApplicationTag as String: Data(namespace.utf8)] as CFDictionary)
     }
 }
+
+final class NativeEnrollmentResponseTests: XCTestCase {
+    func testExpiryIsServerControlledWhileTheStatusWindowOrderIsRequired() throws {
+        let now = Int64(Date().timeIntervalSince1970 * 1_000)
+        XCTAssertNoThrow(try NativeEnrollmentStore.validateServerStartResponse(
+            approvalCode: "ABCDEF2345",
+            statusSecret: String(repeating: "a", count: 64),
+            expiresAt: now - 60_000,
+            statusExpiresAt: now + 86_400_000))
+
+        XCTAssertThrowsError(try NativeEnrollmentStore.validateServerStartResponse(
+            approvalCode: "ABCDEF2345",
+            statusSecret: String(repeating: "a", count: 64),
+            expiresAt: now,
+            statusExpiresAt: now)) { error in
+                guard case NativeEnrollmentError.invalidServerResponse = error else {
+                    XCTFail("Expected the Server's status-window ordering invariant to remain enforced")
+                    return
+                }
+            }
+    }
+}
