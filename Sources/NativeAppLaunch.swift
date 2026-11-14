@@ -1241,6 +1241,7 @@ private struct PreparedLivePresentationInitialState: Sendable {
     let port: AttentionDomainPort
     let snapshot: PresentationSnapshot
     let conversationThreads: [RequestKey: ConversationThread]
+    let submissionProgress: [RequestKey: InboxSubmissionProgress]
     let conversationFiles: ConversationFileStorage?
     let messageLedger: NewMessageAreaLedger
     let replyLedger: ReplyItemLedger
@@ -1262,6 +1263,7 @@ private struct VersionedPreparedReplyItemAreaReconciliation: Sendable {
 
 private struct PreparedLivePresentationUpdate: Sendable {
     let conversationThreads: [RequestKey: ConversationThread]
+    let submissionProgress: [RequestKey: InboxSubmissionProgress]
     let messageArea: VersionedPreparedNewMessageAreaReconciliation?
     let replyItemArea: VersionedPreparedReplyItemAreaReconciliation?
     let failedResponseWarnings: [RequestKey: LivePresentationStore.FailedResponseWarning]
@@ -1319,6 +1321,7 @@ final class LivePresentationStore {
         let turnID: ExactText
     }
 
+    private(set) var submissionProgress: [RequestKey: InboxSubmissionProgress] = [:]
     private(set) var conversationThreads: [RequestKey: ConversationThread]
     @ObservationIgnored private var pendingConversationTextByBinding: [ConversationBinding: String] = [:]
     private(set) var conversationError: String?
@@ -1546,6 +1549,8 @@ final class LivePresentationStore {
                 ConversationFileStorage(identity: context.identity)
             return PreparedLivePresentationInitialState(
                 port: port, snapshot: snapshot, conversationThreads: conversationThreads,
+                submissionProgress: InboxSubmissionProgress.project(
+                    snapshot: attentionSnapshot, threads: conversationThreads),
                 conversationFiles: conversationFiles,
                 messageLedger: messageLedger, replyLedger: replyLedger,
                 preparedMessageArea: preparedMessageArea, preparedReplyArea: preparedReplyArea,
@@ -1608,6 +1613,9 @@ final class LivePresentationStore {
         self.attentionStore = store
         self.presentation = snapshot
         self.conversationThreads = conversationThreads
+        self.submissionProgress = try preparedInitialState?.submissionProgress ??
+            InboxSubmissionProgress.project(snapshot: store.snapshot(context: context),
+                                            threads: conversationThreads)
         self.conversationProjectionRevision = snapshot.revision
         self.conversationFiles = conversationFiles
         self.selectedRequestKey = snapshot.requests.first?.key
@@ -3273,6 +3281,9 @@ final class LivePresentationStore {
         if !locallyReconciledRead {
             do {
                 conversationThreads = try port.conversations(context: port.context).threads
+                submissionProgress = InboxSubmissionProgress.project(
+                    snapshot: try attentionStore.snapshot(context: profileContext),
+                    threads: conversationThreads)
                 conversationProjectionRevision = snapshot.revision
             }
             catch {
@@ -3370,6 +3381,8 @@ final class LivePresentationStore {
                 } ?? false
                 return PreparedLivePresentationUpdate(
                     conversationThreads: conversationThreads,
+                    submissionProgress: InboxSubmissionProgress.project(
+                        snapshot: attentionSnapshot, threads: conversationThreads),
                     messageArea: messageArea, replyItemArea: replyItemArea,
                     failedResponseWarnings: failedResponseWarnings,
                     warningGeneration: warningGeneration,
@@ -3419,6 +3432,7 @@ final class LivePresentationStore {
                 locallyReconciledConversationReadRevisions.remove(snapshot.revision)
             } else {
                 conversationThreads = prepared.conversationThreads
+                submissionProgress = prepared.submissionProgress
                 conversationProjectionRevision = snapshot.revision
             }
             locallyReconciledConversationReadRevisions = Set(

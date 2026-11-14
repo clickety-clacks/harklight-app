@@ -141,6 +141,9 @@ public enum IntentDisposition: Equatable, Codable, Sendable {
 }
 
 public struct Submission: Equatable, Codable, Sendable {
+    /// Local durable preparation time, for presentation ordering only.
+    /// Nil preserves old receipts without inventing their send time.
+    public let submittedAt: Date?
     public let requestRevision: UInt64?
     public let requestKey: RequestKey
     public let answer: JSONValue
@@ -174,7 +177,9 @@ public struct Submission: Equatable, Codable, Sendable {
                 descriptorFingerprint: String,
                 contentFingerprint: String,
                 disposition: IntentDisposition = .pending,
-                requestRevision: UInt64? = nil) {
+                requestRevision: UInt64? = nil,
+                submittedAt: Date? = nil) {
+        self.submittedAt = submittedAt
         self.requestRevision = requestRevision
         self.requestKey = requestKey
         self.answer = answer

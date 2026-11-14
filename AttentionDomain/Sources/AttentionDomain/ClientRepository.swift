@@ -451,7 +451,8 @@ public final class ClientRepository: @unchecked Sendable {
                                    opaqueSubmissionID: selector.opaqueSubmissionID,
                                    descriptorFingerprint: descriptorFingerprint,
                                    contentFingerprint: contentFingerprint,
-                                   requestRevision: selector.requestRevision)
+                                   requestRevision: selector.requestRevision,
+                                   submittedAt: Date())
 
         var next = state
         if persistAnswerDraft {
@@ -538,7 +539,8 @@ public final class ClientRepository: @unchecked Sendable {
                                     opaqueSubmissionID: selector.opaqueSubmissionID,
                                     descriptorFingerprint: descriptorFingerprint,
                                     contentFingerprint: contentFingerprint,
-                                    requestRevision: requestRevision)
+                                    requestRevision: requestRevision,
+                                    submittedAt: Date())
         var next = state
         next.intents[intentID] = submission
         next.intentByRequest[request.key] = intentID
@@ -3042,6 +3044,7 @@ public final class ClientRepository: @unchecked Sendable {
         // An edited draft is a new submission, never new bytes under an old ID.
         draft.operationID = nil
         draft.wireFrame = nil
+        draft.submittedAt = nil
         try validateConversationFiles(draft.files)
         thread.drafts[draft.binding.revision] = draft
         conversation.threads[draft.binding.request] = thread
@@ -3080,6 +3083,7 @@ public final class ClientRepository: @unchecked Sendable {
         draft.disposition = .saved
         draft.operationID = nil
         draft.wireFrame = nil
+        draft.submittedAt = nil
         thread.drafts[binding.revision] = draft
         conversation.threads[binding.request] = thread
         next.conversation = conversation
@@ -3260,6 +3264,7 @@ public final class ClientRepository: @unchecked Sendable {
             draft.disposition = .submitting(operation)
         }
         draft.operationID = operation
+        if draft.submittedAt == nil { draft.submittedAt = Date() }
         // Register planned upload-tier files before awaiting limits or disk/HTTP.
         // Departure during that preparation must fence this original operation too.
         let tiers = try ConversationFileLimits(inlineDecodedBytes: 262_144, uploadCap: nil).tiers(for: draft.files)
@@ -3455,6 +3460,7 @@ public final class ClientRepository: @unchecked Sendable {
         default: throw ConversationError.conflict
         }
         var facts = thread.facts[turn] ?? ConversationTurnFacts()
+        if facts.submittedAt == nil { facts.submittedAt = draft.submittedAt }
         if facts.acceptedAtMilliseconds == nil {
             let observedAt = acceptanceObservedAtMilliseconds ??
                 UInt64(max(0, Date().timeIntervalSince1970 * 1_000))
@@ -3719,7 +3725,8 @@ public final class ClientRepository: @unchecked Sendable {
         using references: (any ConversationFileReferenceStore)?, allowInlinePersistence: Bool) throws -> ConversationDraft {
         ConversationDraft(binding: draft.binding, text: draft.text,
             files: try draft.files.map { try externalizingConversationFiles(in: $0, using: references, allowInlinePersistence: allowInlinePersistence) },
-            disposition: draft.disposition, operationID: draft.operationID, wireFrame: draft.wireFrame)
+            disposition: draft.disposition, operationID: draft.operationID, wireFrame: draft.wireFrame,
+            submittedAt: draft.submittedAt)
     }
 
     private static func externalizingConversationFiles(in event: ConversationEvent,
