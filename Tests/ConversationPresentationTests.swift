@@ -186,6 +186,44 @@ final class ConversationPresentationTests: XCTestCase {
         XCTAssertTrue(ConversationPendingSubmission.rows(in: thread).isEmpty)
     }
 
+    func testChatTextHasOneHomeAndRejectedEditRestoresTheComposer() throws {
+        let context = ProfileContext(identity: ProfileIdentity(
+            trustedRelayAuthority: ExactText("relay.example"), personID: ExactText("person"),
+            deviceID: ExactText("device")), transportMode: .relay)
+        let key = RequestKey(accountScope: context.identity.personID,
+                             senderID: ExactText("sender"), messageID: ExactText("chat"))
+        let binding = ConversationBinding(request: key, revision: 1)
+        let domain = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        try domain.applyConversation(ConversationEvent(sequence: 1, binding: binding,
+            fact: .request(sessionHandle: ExactText("session"), payload: .null)), context: context)
+        try domain.saveConversationDraft(ConversationDraft(binding: binding,
+            text: ExactText("Never discard this")), context: context)
+        let model = try LivePresentationStore(store: domain, context: context)
+        XCTAssertEqual(ConversationSubmittedText.composerText(for: model.conversationDraft(for: key, revision: 1)),
+                       "Never discard this")
+        let operation = try domain.prepareDiscussion(binding, context: context)
+        let frame = Data("saved operation bytes".utf8)
+        try domain.freezeDiscussionFrame(frame, binding: binding, operation: operation, context: context)
+        try model.refreshFromDurableStore()
+        XCTAssertEqual(ConversationSubmittedText.composerText(for: model.conversationDraft(for: key, revision: 1)), "")
+        XCTAssertEqual(ConversationPendingSubmission.rows(in: try XCTUnwrap(model.conversation(for: key))).count, 1)
+        try domain.markDiscussionOutcome(binding, operation: operation,
+            rejection: ExactText("storage_unavailable"), context: context)
+        XCTAssertEqual(try domain.prepareDiscussion(binding, context: context), operation,
+                       "Retry must keep the original operation.")
+        XCTAssertEqual(try domain.conversationSnapshot(context: context).threads[key]?.drafts[1]?.wireFrame, frame)
+        try domain.markDiscussionOutcome(binding, operation: operation,
+            rejection: ExactText("storage_unavailable"), context: context)
+        try model.refreshFromDurableStore()
+        XCTAssertEqual(ConversationSubmittedText.composerText(for: model.conversationDraft(for: key, revision: 1)), "")
+        model.editRejectedDiscussion(for: key, revision: 1)
+        let edited = model.conversationDraft(for: key, revision: 1)
+        XCTAssertEqual(ConversationSubmittedText.composerText(for: edited), "Never discard this")
+        XCTAssertNil(edited.operationID)
+        XCTAssertNil(edited.wireFrame)
+        XCTAssertTrue(ConversationPendingSubmission.rows(in: try XCTUnwrap(model.conversation(for: key))).isEmpty)
+    }
+
     func testAcceptedDiscussionClearsOnlyTheSubmittedText() {
         XCTAssertEqual(ConversationSubmittedText.afterResult(
             accepted: true, submitted: "Sent", submittedEdit: 3,

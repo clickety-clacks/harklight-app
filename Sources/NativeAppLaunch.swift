@@ -2026,6 +2026,7 @@ final class LivePresentationStore {
     }
 
     func sendDiscussion(for key: RequestKey, revision: UInt64,
+                        onQueued: (() -> Void)? = nil,
                         onResult: ((Bool) -> Void)? = nil) {
         guard !isReadOnly, conversationUnavailableMessage == nil,
               canSendDiscussion(for: key) else { return }
@@ -2040,6 +2041,7 @@ final class LivePresentationStore {
                 guard !sendingDiscussionBindings.contains(binding), let files = conversationFiles else { return }
                 _ = try attentionStore.prepareDiscussion(binding, context: profileContext)
                 try refreshFromDurableStore()
+                onQueued?()
                 sendingDiscussionBindings.insert(binding)
                 conversationError = nil
                 Task { [weak self] in
@@ -2086,6 +2088,7 @@ final class LivePresentationStore {
             }
             try port.appendFixtureDiscussion(binding, context: port.context)
             try refreshFromDurableStore()
+            onQueued?()
             conversationError = nil
             onResult?(true)
         } catch {
@@ -2093,6 +2096,22 @@ final class LivePresentationStore {
             diagnose(.conversation, .discussionSubmission, .failed, error: error,
                      operationID: discussionOperationID(for: key, revision: revision),
                      request: key, revision: revision, receiptState: .unknown)
+        }
+    }
+
+    func editRejectedDiscussion(for key: RequestKey, revision: UInt64) {
+        guard !isReadOnly else { return }
+        var draft = conversationDraft(for: key, revision: revision)
+        guard case .rejected = draft.disposition else { return }
+        do {
+            draft.disposition = .saved
+            // The repository clears the failed operation's frozen identity.
+            // Retry retains that identity; Edit begins a different submission.
+            try port.saveConversationDraft(draft, context: port.context)
+            try refreshFromDurableStore()
+            conversationError = nil
+        } catch {
+            conversationError = "Your message could not be opened for editing. It is still saved."
         }
     }
 
