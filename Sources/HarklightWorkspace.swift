@@ -1855,20 +1855,13 @@ struct InboxList: View {
         HStack(spacing: 8) {
             HarklightBrand().accessibilityIdentifier("inbox-brand")
             if isRefreshing {
-                HStack(spacing: 5) {
-                    ProgressView().controlSize(.small)
-                    Text("Refreshing")
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(designPalette.text)
-                }
-                .foregroundStyle(designPalette.label)
-                .tint(designPalette.label)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 5)
-                .overlay(Capsule().strokeBorder(designPalette.line, lineWidth: 1))
-                .accessibilityElement(children: .combine)
-                .accessibilityLabel("Refreshing")
-                .accessibilityIdentifier("inbox-refreshing-badge")
+                // Refreshing is status, not a control: a plain spinner with no
+                // capsule or button chrome around it.
+                ProgressView()
+                    .controlSize(.small)
+                    .tint(designPalette.label)
+                    .accessibilityLabel("Refreshing")
+                    .accessibilityIdentifier("inbox-refreshing-badge")
             }
         }
     }
