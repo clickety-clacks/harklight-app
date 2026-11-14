@@ -1333,7 +1333,7 @@ final class NativeRelayCoreTests: XCTestCase {
         func acknowledgeConversation(_ request: Data) async throws {}
     }
 
-    private func refreshResult(_ core: NativeRelayCore) async -> Result<UInt64, Error> {
+    private static func refreshResult(_ core: NativeRelayCore) async -> Result<UInt64, Error> {
         do { return .success(try await core.resyncAndDrainOutbox()) }
         catch { return .failure(error) }
     }
@@ -1366,7 +1366,7 @@ final class NativeRelayCoreTests: XCTestCase {
     func testForegroundRefreshWaitsForLiveReplayAndContinuesFromItsDurableCursor() async throws {
         let waiting = expectation(description: "foreground refresh waits for live replay")
         let (core, control, store, context) = try await heldLiveReplay(refreshWaiting: waiting)
-        let refresh = Task { await refreshResult(core) }
+        let refresh = Task { await Self.refreshResult(core) }
         await fulfillment(of: [waiting], timeout: 2)
         await control.release.signal()
         let result = await refresh.value
@@ -1387,7 +1387,7 @@ final class NativeRelayCoreTests: XCTestCase {
         let completed = expectation(description: "cancelled refresh completes while live replay remains held")
         let refresh = Task {
             defer { completed.fulfill() }
-            return await refreshResult(core)
+            return await Self.refreshResult(core)
         }
         await fulfillment(of: [waiting], timeout: 2)
         refresh.cancel()
@@ -1412,7 +1412,7 @@ final class NativeRelayCoreTests: XCTestCase {
         let completed = expectation(description: "deactivation releases refresh without waiting for transport")
         let refresh = Task {
             defer { completed.fulfill() }
-            return await refreshResult(core)
+            return await Self.refreshResult(core)
         }
         await fulfillment(of: [waiting], timeout: 2)
         await core.deactivate()
