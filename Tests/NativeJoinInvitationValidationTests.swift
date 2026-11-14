@@ -5,7 +5,7 @@ import XCTest
 @testable import Harklight
 
 final class NativeJoinInvitationValidationTests: XCTestCase {
-    func testInvitationPayloadSizeAndLocalClockDoNotRefuseServerInvitation() throws {
+    func testInvitationPayloadSizeLocalClockAndEmptyLabelsDoNotRefuseServerInvitation() throws {
         let namespace = "Harklight.invitation-validation-test." + UUID().uuidString
         let identity = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
         defer { deleteIdentity(namespace: namespace, certificateLabel: identity.label) }
@@ -35,6 +35,14 @@ final class NativeJoinInvitationValidationTests: XCTestCase {
         XCTAssertEqual(invitation.personName?.utf8.count, 300)
         XCTAssertEqual(invitation.inviterName?.utf8.count, 300)
         XCTAssertNoThrow(try invitation.validate(now: .distantFuture))
+
+        var emptyLabels = payload
+        emptyLabels["person_label"] = ""
+        emptyLabels["inviter_label"] = ""
+        let unlabeledInvitation = try NativeJoinInvitation.decodePayload(
+            JSONSerialization.data(withJSONObject: emptyLabels))
+        XCTAssertEqual(unlabeledInvitation.claimedAccountLabel, NativeJoinInvitation.unnamedAccountPlaceholder)
+        XCTAssertEqual(unlabeledInvitation.approvingOwnerLabel, "The server owner")
 
         let encoded = data.base64EncodedString()
             .replacingOccurrences(of: "+", with: "-")
