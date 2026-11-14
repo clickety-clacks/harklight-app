@@ -56,6 +56,80 @@ final class ConversationPresentationTests: XCTestCase {
                        ExactText("Latest unsent text"))
     }
 
+    func testSubmittedChatRemainsVisibleAcrossRestartAndJoinsOneReplayedTurn() throws {
+        let context = ProfileContext(identity: ProfileIdentity(
+            trustedRelayAuthority: ExactText("relay.example"), personID: ExactText("person"),
+            deviceID: ExactText("device")), transportMode: .relay)
+        let key = RequestKey(accountScope: context.identity.personID,
+                             senderID: ExactText("sender"), messageID: ExactText("chat"))
+        let binding = ConversationBinding(request: key, revision: 1)
+        let persistence = MemoryPendingActionPersistence()
+        let first = try ClientRepository(context: context, persistence: persistence)
+        let payload = try JSONValue.parse(Data(#"{"title":"Chat"}"#.utf8))
+        _ = try first.apply(RelayEvent(sequence: 1,
+            body: .delivery(StoredRequest(key: key, originalPayload: payload), .message),
+            conversation: RelayConversationMetadata(revision: 1, sessionHandle: ExactText("session"))),
+            context: context)
+        try first.applyConversation(ConversationEvent(sequence: 1, binding: binding,
+            fact: .request(sessionHandle: ExactText("session"), payload: payload)), context: context)
+        let cached = ServerStateCacheSnapshot.make(identity: context.identity,
+            from: try first.serverCacheSnapshot(context: context),
+            conversations: try first.conversationSnapshot(context: context))
+        try first.saveConversationDraft(ConversationDraft(binding: binding,
+            text: ExactText("Keep this chat visible")), context: context)
+        let operation = try first.prepareDiscussion(binding, context: context)
+        let beforeResponse = try XCTUnwrap(first.conversationSnapshot(context: context).threads[key])
+        XCTAssertEqual(ConversationPendingSubmission.rows(in: beforeResponse).map(\.text),
+                       [ExactText("Keep this chat visible")])
+        try first.markDiscussionOutcome(binding, operation: operation, rejection: nil, context: context)
+        let restarted = try ClientRepository(context: context, persistence: persistence)
+        try restarted.restoreCachedServerState(try cached.attentionDomainState(for: context.identity), context: context)
+        let restoredThread = try XCTUnwrap(restarted.conversationSnapshot(context: context).threads[key])
+        let restored = try XCTUnwrap(ConversationPendingSubmission.rows(in: restoredThread).first)
+        XCTAssertEqual(restored.id, operation)
+        XCTAssertEqual(restored.text, ExactText("Keep this chat visible"))
+        XCTAssertEqual(restored.disposition, .outcomeUnknown(operation))
+        let turnID = ExactText("accepted-turn")
+        try restarted.markDiscussionAccepted(binding, operation: operation, turn: turnID, context: context)
+        let accepted = try XCTUnwrap(restarted.conversationSnapshot(context: context).threads[key])
+        XCTAssertEqual(ConversationPendingSubmission.rows(in: accepted).count, 1,
+                       "Clearing the composer after acceptance must not hide the saved message before replay.")
+        let turn = ConversationTurn(id: turnID, binding: binding, author: .person,
+            sessionHandle: ExactText("session"), text: restored.text, operationID: operation, kind: .discussion)
+        try restarted.applyConversation(ConversationEvent(sequence: 2, binding: binding,
+            fact: .turn(turn)), context: context)
+        let replayed = try XCTUnwrap(restarted.conversationSnapshot(context: context).threads[key])
+        XCTAssertTrue(ConversationPendingSubmission.rows(in: replayed).isEmpty)
+        XCTAssertEqual(replayed.turns.map(\.text), [restored.text])
+        let agentReply = ConversationTurn(id: ExactText("agent-reply"), binding: binding,
+            author: .origin, sessionHandle: ExactText("session"), text: ExactText("Agent reply"),
+            inReplyTo: turnID, kind: .reply)
+        try restarted.applyConversation(ConversationEvent(sequence: 3, binding: binding,
+            fact: .turn(agentReply)), context: context)
+        let withReply = try XCTUnwrap(restarted.conversationSnapshot(context: context).threads[key])
+        XCTAssertEqual(withReply.turns.map(\.text), [restored.text, agentReply.text])
+    }
+
+    func testRejectedChatKeepsItsTextVisibleWithoutPublishingAnUnsentEditor() throws {
+        let context = ProfileContext(identity: ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+            personID: ExactText("person"), deviceID: ExactText("device")), transportMode: .relay)
+        let repository = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        let key = RequestKey(accountScope: context.identity.personID,
+                             senderID: ExactText("sender"), messageID: ExactText("request"))
+        let binding = ConversationBinding(request: key, revision: 1)
+        try repository.applyConversation(ConversationEvent(sequence: 1, binding: binding,
+            fact: .request(sessionHandle: ExactText("session"), payload: .null)), context: context)
+        var thread = try XCTUnwrap(repository.conversationSnapshot(context: context).threads[key])
+        let operation = UUID()
+        thread.drafts[binding.revision] = ConversationDraft(binding: binding,
+            text: ExactText("Retained rejected text"), disposition: .rejected(ExactText("closed")),
+            operationID: operation)
+        XCTAssertEqual(ConversationPendingSubmission.rows(in: thread).map(\.text),
+                       [ExactText("Retained rejected text")])
+        thread.drafts[binding.revision] = ConversationDraft(binding: binding, text: ExactText("Unsent edit"))
+        XCTAssertTrue(ConversationPendingSubmission.rows(in: thread).isEmpty)
+    }
+
     func testAcceptedDiscussionClearsOnlyTheSubmittedText() {
         XCTAssertEqual(ConversationSubmittedText.afterResult(
             accepted: true, submitted: "Sent", submittedEdit: 3,

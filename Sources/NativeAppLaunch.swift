@@ -2059,7 +2059,7 @@ final class LivePresentationStore {
                             conversationError = nil
                             onResult?(true)
                         case let .rejected(reason):
-                            conversationError = "Not delivered: " + reason.rawValue + ". Draft and files retained."
+                            conversationError = ConversationDraftPresentationText.rejectionMessage(reason)
                             onResult?(false)
                         case .unresolved:
                             conversationError = "Sending… Your text and files are saved."

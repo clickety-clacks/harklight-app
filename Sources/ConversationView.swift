@@ -128,7 +128,8 @@ struct ConversationPanel: View {
                 let hasNotAcceptedCard = hasNotAcceptedCardForRetainedAnswer(thread: thread,
                                                                               request: request)
                 ConversationHistoryContent(store: store, key: key, revision: revision,
-                    thread: thread, request: request, sender: sender,
+                    thread: thread, pendingSubmissions: ConversationPendingSubmission.rows(in: thread),
+                    request: request, sender: sender,
                     local: store.isLocalExample,
                     hasNotAcceptedCardForRetainedAnswer: hasNotAcceptedCard,
                     initialScrollTurnID: initialScrollTurnID,
@@ -304,6 +305,7 @@ private struct ConversationHistoryContent: View, Equatable {
     let key: RequestKey
     let revision: UInt64
     let thread: ConversationThread
+    let pendingSubmissions: [ConversationPendingSubmission]
     let request: PresentedRequest?
     let sender: String
     let local: Bool
@@ -324,6 +326,7 @@ private struct ConversationHistoryContent: View, Equatable {
         lhs.thread.currentRevision == rhs.thread.currentRevision &&
         lhs.thread.revisions == rhs.thread.revisions &&
         lhs.thread.turns == rhs.thread.turns &&
+        lhs.pendingSubmissions == rhs.pendingSubmissions &&
         lhs.thread.facts == rhs.thread.facts &&
         lhs.thread.answerDrafts == rhs.thread.answerDrafts &&
         lhs.thread.latestReportedAvailabilityObservation == rhs.thread.latestReportedAvailabilityObservation &&
@@ -389,6 +392,12 @@ private struct ConversationHistoryContent: View, Equatable {
                                     visibleAgentReplyTurnIDs.remove(turn.id)
                                 }
                             }
+                    }
+                    ForEach(pendingSubmissions) { pending in
+                        ConversationPendingSubmissionView(submission: pending) { file in
+                            inspect(file, pending.revision)
+                        }
+                        .id(pending.id)
                     }
                 }.padding(.horizontal)
             }
@@ -456,6 +465,9 @@ private struct ConversationHistoryContent: View, Equatable {
             .onChange(of: thread.turns.count) { _, _ in
                 if let last = thread.turns.last { proxy.scrollTo(last.id, anchor: .bottom) }
             }
+            .onChange(of: pendingSubmissions.map(\.id)) { _, ids in
+                if let last = ids.last { proxy.scrollTo(last, anchor: .bottom) }
+            }
             .onChange(of: initialScrollTurnID, initial: true) { _, target in
                 guard let target, turnIDs.contains(target) else { return }
                 proxy.scrollTo(target, anchor: .center)
@@ -521,6 +533,65 @@ private struct ReadOnlyConversationDraftView: View {
     }
 }
 
+/// Local accepted work is visible in the transcript without pretending it is
+/// a Server turn. Its operation identity joins it to exactly one replayed turn.
+struct ConversationPendingSubmission: Identifiable, Equatable {
+    let id: UUID
+    let revision: UInt64
+    let text: ExactText
+    let files: [ConversationFile]
+    let disposition: ConversationDraft.Disposition
+
+    static func rows(in thread: ConversationThread) -> [Self] {
+        let replayedOperations = Set(thread.turns.compactMap(\.operationID))
+        let replayedTurns = Set(thread.turns.map(\.id))
+        return thread.drafts.values.compactMap { draft -> Self? in
+            let operation: UUID
+            switch draft.disposition {
+            case .saved: return nil
+            case let .submitting(id), let .outcomeUnknown(id): operation = id
+            case let .acceptedPendingReplay(id, turn):
+                guard !replayedTurns.contains(turn) else { return nil }
+                operation = id
+            case .rejected:
+                guard let id = draft.operationID else { return nil }
+                operation = id
+            }
+            guard !replayedOperations.contains(operation) else { return nil }
+            return Self(id: operation, revision: draft.binding.revision, text: draft.text,
+                        files: draft.files, disposition: draft.disposition)
+        }.sorted { $0.revision < $1.revision }
+    }
+}
+
+private struct ConversationPendingSubmissionView: View {
+    let submission: ConversationPendingSubmission
+    let inspect: (ConversationFile) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("You").font(.caption).foregroundStyle(.hkSecondary)
+            if !submission.text.rawValue.isEmpty {
+                Text(submission.text.rawValue)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .textSelection(.enabled)
+            }
+            ForEach(submission.files) { file in
+                Button { inspect(file) } label: {
+                    Label(file.name.rawValue, systemImage: "paperclip")
+                }
+                .buttonStyle(.plain)
+            }
+            ConversationDraftStatus(disposition: submission.disposition)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.quaternary, in: RoundedRectangle(cornerRadius: 12))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("conversation-pending-" + submission.id.uuidString.lowercased())
+    }
+}
+
 enum ConversationDraftPresentationText {
     static let readOnlyHeading: LocalizedStringResource = "Saved discussion draft"
 
@@ -529,6 +600,16 @@ enum ConversationDraftPresentationText {
         case outcomeUnknown
         case acceptedPendingReplay
         case rejected(ExactText)
+    }
+
+    static func rejectionMessage(_ reason: ExactText) -> String {
+        switch reason.rawValue {
+        case "closed": "This request was already closed. Your message is saved."
+        case "not_found": "This request is no longer available. Your message is saved."
+        case "forbidden": "The server did not allow this message. Your message is saved."
+        case "stale_revision": "This request changed before the message was sent. Your message is saved."
+        default: "Message not sent. Your text and files are saved."
+        }
     }
 
     static func status(for disposition: ConversationDraft.Disposition) -> Status? {
@@ -881,11 +962,11 @@ private struct ConversationDraftStatus: View {
             case .submitting:
                 Text("Sending").font(.caption).foregroundStyle(.hkSecondary)
             case .outcomeUnknown:
-                Text("Submission unconfirmed · saved draft retained").font(.caption).foregroundStyle(.hkSecondary)
+                Text("Pending · your message is saved").font(.caption).foregroundStyle(.hkSecondary)
             case .acceptedPendingReplay:
-                Text("Sent").font(.caption).foregroundStyle(.hkSecondary)
+                Text("Sent · syncing chat").font(.caption).foregroundStyle(.hkSecondary)
             case let .rejected(reason):
-                Text(reason.rawValue).font(.caption).foregroundStyle(.hkSecondary)
+                Text(ConversationDraftPresentationText.rejectionMessage(reason)).font(.caption).foregroundStyle(.hkSecondary)
             }
         }
     }
