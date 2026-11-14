@@ -387,9 +387,7 @@ final class NativeGuidedJoinCoordinator {
 
     var currentApprovalCode: String? {
         guard approvalObservationCurrent, screen == .pending,
-              attempt?.cancellationRequested != true,
-              let deadline = attempt?.approvalExpiresAt,
-              deadline > Int64(Date().timeIntervalSince1970 * 1000) else { return nil }
+              attempt?.cancellationRequested != true else { return nil }
         return attempt?.approvalCode
     }
 
@@ -546,8 +544,7 @@ final class NativeGuidedJoinCoordinator {
             // original POST replayed. An existing approval must never fall
             // back to redeeming an old invitation after its status is lost.
             guard saved.phase == .prepared, saved.approvalCode == nil,
-                  saved.cancellationRequested != true,
-                  saved.invitation.expiresAt > Int64(Date().timeIntervalSince1970 * 1000) else {
+                  saved.cancellationRequested != true else {
                 throw NativeJoinError.unavailable
             }
             result = try await store.submit()
