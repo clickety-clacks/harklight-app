@@ -71,7 +71,7 @@ final class HarklightUITests: XCTestCase {
         let finish = app.buttons["request-finish"]
         XCTAssertTrue(finish.waitForExistence(timeout: 5))
         XCTAssertTrue(finish.isEnabled, "A valid point and note should enable the shared answer action.")
-        let listVisibleAlongsideDetail = app.searchFields.firstMatch.isHittable
+        let listVisibleAlongsideDetail = listVisibleBesideDetail(in: app)
         finish.tap()
         let lifecycle = app.staticTexts["request-lifecycle-status"]
         let detail = app.scrollViews["message-card-scroll"]
@@ -125,7 +125,7 @@ final class HarklightUITests: XCTestCase {
         XCTAssertTrue(finish.isEnabled,
                       "A refresh must not dim or disable the visible answer action.")
         attachScreenshot("Answer available while inbox is refreshing", from: app)
-        let listVisibleAlongsideDetail = app.searchFields.firstMatch.isHittable
+        let listVisibleAlongsideDetail = listVisibleBesideDetail(in: app)
         finish.tap()
 
         let lifecycle = app.staticTexts["request-lifecycle-status"]
@@ -307,7 +307,7 @@ final class HarklightUITests: XCTestCase {
     }
     func testAcceptedAnswerShowsKnownAnsweredSceneThroughSharedFixture() throws {
         let app = launchFreshApp()
-        let listVisibleAlongsideDetail = app.searchFields.firstMatch.isHittable
+        let listVisibleAlongsideDetail = listVisibleBesideDetail(in: app)
         let submittedPoint = submitFacilitiesAnswer(in: app, x: 240, y: 610)
 
         applyFixtureOutcome("ownOperationAccepted", in: app)
@@ -851,7 +851,7 @@ final class HarklightUITests: XCTestCase {
         let finish = app.buttons["request-finish"]
         XCTAssertTrue(finish.waitForExistence(timeout: 5))
         XCTAssertTrue(finish.isEnabled)
-        let listVisibleAlongsideDetail = app.searchFields.firstMatch.isHittable
+        let listVisibleAlongsideDetail = listVisibleBesideDetail(in: app)
         finish.tap()
         let status = app.staticTexts["request-lifecycle-status"]
         let detail = app.scrollViews["message-card-scroll"]
