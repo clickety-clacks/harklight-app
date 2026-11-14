@@ -1369,6 +1369,8 @@ final class NativeRelayCoreTests: XCTestCase {
         let refresh = Task { await Self.refreshResult(core) }
         await fulfillment(of: [waiting], timeout: 2)
         await control.release.signal()
+        let finished = await control.replayFinished
+        await fulfillment(of: [finished], timeout: 2)
         let result = await refresh.value
         let starts = await control.starts
         await core.deactivate()
