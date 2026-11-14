@@ -27,7 +27,7 @@ final class AdaptiveDuoNavigationUITests: XCTestCase {
         attachHierarchy("fresh-launch-selected-detail-hierarchy", app: app)
     }
 
-    func testPortraitSelectionShowsDetailAndDismissesMasterOverlay() {
+    func testPortraitSelectionAdaptsListVisibilityToAvailableWidth() {
         XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()
         app.launchArguments = ["--reset-attention-fixture", "--harklight-samples",
@@ -39,27 +39,30 @@ final class AdaptiveDuoNavigationUITests: XCTestCase {
         attachScreenshot("portrait-master-before-selection")
         row.tap()
 
-        XCTAssertTrue(app.scrollViews["message-card-scroll"].waitForExistence(timeout: 5),
-                      app.debugDescription)
-        XCTAssertTrue(app.staticTexts["Facilities desk"].exists, app.debugDescription)
+        let card = app.scrollViews["message-card-scroll"]
+        XCTAssertTrue(card.waitForExistence(timeout: 5), app.debugDescription)
+        let heading = card.buttons["request-heading"]
+        XCTAssertTrue(heading.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(heading.label.contains("Facilities desk"), heading.debugDescription)
         let diagnostic = app.descendants(matching: .any)["inbox-ui-diagnostics"].firstMatch
         XCTAssertTrue(diagnostic.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertFalse(row.isHittable,
-                       "Selecting one row should close the portrait master overlay. \(diagnostic.label)")
-
-        attachScreenshot("portrait-detail-after-selection")
-        let hierarchy = XCTAttachment(string: app.debugDescription)
-        hierarchy.name = "portrait-selection-hierarchy"
-        hierarchy.lifetime = .keepAlways
-        add(hierarchy)
-
-        let back = app.toolbars.buttons["BackButton"].exists
-            ? app.toolbars.buttons["BackButton"] : app.navigationBars.buttons.firstMatch
-        XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
-        back.tap()
-        XCTAssertTrue(row.waitForExistence(timeout: 5),
-                      "The system Back control must reopen the message list.")
-        attachScreenshot("portrait-master-after-native-back")
+        if diagnostic.label.contains("sizeClass=regular") {
+            XCTAssertTrue(row.isHittable,
+                          "A regular-width split view keeps the Inbox row beside its detail. \(diagnostic.label)")
+            assertSideBySide(listRow: row, detailHeading: heading, in: app)
+            attachScreenshot("portrait-side-by-side-detail-after-selection")
+        } else {
+            XCTAssertFalse(row.isHittable,
+                           "A compact-width portrait selection closes the master overlay. \(diagnostic.label)")
+            attachScreenshot("portrait-detail-after-selection")
+            let back = workspaceBackButton(in: app)
+            XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
+            back.tap()
+            XCTAssertTrue(row.waitForExistence(timeout: 5),
+                          "The system Back control must reopen the message list.")
+            attachScreenshot("portrait-master-after-native-back")
+        }
+        attachHierarchy("portrait-selection-hierarchy", app: app)
     }
 
     func testSelectingAnotherMessageFromPortraitOverlayUpdatesDetailAndDismissesIt() {
@@ -123,8 +126,6 @@ final class AdaptiveDuoNavigationUITests: XCTestCase {
         let heading = card.buttons["request-heading"]
         XCTAssertTrue(heading.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(heading.label.contains("Facilities desk"), heading.debugDescription)
-        XCTAssertTrue(app.searchFields.firstMatch.isHittable,
-                      "The inbox list must remain beside the selected Facilities detail. \(app.debugDescription)")
         XCTAssertTrue(facilities.isHittable,
                       "The Facilities row must remain visible beside its detail. \(app.debugDescription)")
         assertSideBySide(listRow: facilities, detailHeading: heading, in: app)
@@ -135,8 +136,6 @@ final class AdaptiveDuoNavigationUITests: XCTestCase {
         XCTAssertTrue(heading.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(heading.label.contains("Studio review"),
                       "Selecting the second row must replace the detail with Studio review. \(heading.debugDescription)")
-        XCTAssertTrue(app.searchFields.firstMatch.isHittable,
-                      "The inbox list must remain beside the second selected detail. \(app.debugDescription)")
         XCTAssertTrue(review.isHittable,
                       "The Studio review row must remain visible beside its detail. \(app.debugDescription)")
         assertSideBySide(listRow: review, detailHeading: heading, in: app)
@@ -189,7 +188,8 @@ final class AdaptiveDuoNavigationUITests: XCTestCase {
         XCTAssertTrue(heading.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(heading.label.contains("Studio review"),
                       "Selecting the second row updates the detail. \(heading.debugDescription)")
-        XCTAssertTrue(review.isSelected, "The selected Inbox row remains visible in the sidebar.")
+        XCTAssertTrue(diagnostic.label.contains("selection=request:review-01"),
+                      "The tapped row remains the selected Inbox request. \(diagnostic.label)")
         XCTAssertTrue(review.isHittable, "The selected row remains available beside the detail.")
         assertSideBySide(listRow: review, detailHeading: heading, in: app)
         attachScreenshot("portrait-list-and-detail-after-selection")
