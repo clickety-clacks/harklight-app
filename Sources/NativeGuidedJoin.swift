@@ -134,9 +134,8 @@ final class NativeGuidedJoinStore {
         try invitation.validate(now: Date())
         // Any response from this endpoint proves the pinned TLS name. The
         // invitation secret is neither in the URL nor in this read-only probe.
-        let response = try await transport.request(invitation.enrollmentURL, method: "GET", body: nil,
-                                                   rootDER: invitation.trustedRootDER)
-        guard !(300..<400).contains(response.statusCode) else { throw NativeJoinError.refused }
+        _ = try await transport.request(invitation.enrollmentURL, method: "GET", body: nil,
+                                        rootDER: invitation.trustedRootDER)
     }
 
     func loadAttempt() throws -> NativeJoinAttempt? {
