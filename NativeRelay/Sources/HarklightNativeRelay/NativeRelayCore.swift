@@ -102,6 +102,7 @@ public enum OriginalOperationResult: Equatable, Sendable {
     case staleRevision(operationID: UUID, currentRevision: UInt64)
     case unsupported(operationID: UUID)
     case failed(operationID: UUID)
+    case refusedClosed(operationID: UUID)
     case unresolved
 }
 
@@ -2309,6 +2310,16 @@ public actor NativeRelayCore {
                          causeCode: "no_comment_unsupported", operationID: operationID,
                          request: submission.requestKey, revision: submission.requestRevision,
                          receipt: .pendingUnconfirmed)
+            case let .refusedClosed(operationID):
+                guard operationID == submission.operationID else {
+                    throw NativeRelayCoreError.mismatchedOperationResult
+                }
+                try store.recordAnswerRefusedClosed(submission.intentID,
+                    operationID: operationID, context: context)
+                diagnose(.answer, .originalOperationDelivery, .rejected,
+                         causeCode: NativeDiagnosticCauseCode.serverReason("closed"),
+                         operationID: operationID, request: submission.requestKey,
+                         revision: submission.requestRevision, receipt: .terminal)
             case let .failed(operationID):
                 guard operationID == submission.operationID else {
                     diagnose(.answer, .originalOperationDelivery, .unresolved,
@@ -2360,7 +2371,7 @@ public actor NativeRelayCore {
                     applied = .completed
                     receipt = .acceptedAwaitingReplay
                     terminalSequence = sequence
-                case .refusedByRetraction, .staleRevision, .failed:
+                case .refusedByRetraction, .refusedClosed, .staleRevision, .failed:
                     applied = .rejected
                     receipt = .terminal
                     terminalSequence = nil

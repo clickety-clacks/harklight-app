@@ -136,6 +136,7 @@ final class SampleResponse {
                 case .some(.refusedByRetraction): localStatus = "Answer refused · request retracted"
                 case .some(.terminalUnconfirmed): localStatus = "Submission unconfirmed · saved draft retained"
                 case .some(.notDelivered): localStatus = "Answer not delivered"
+                case .some(.refusedClosed): localStatus = "This request was already closed"
                 case .some(.unsupported): localStatus = "No comment was not accepted"
                 case .some(.repairRequired): localStatus = "Answer needs recovery"
                 default: localStatus = "Answer not delivered"

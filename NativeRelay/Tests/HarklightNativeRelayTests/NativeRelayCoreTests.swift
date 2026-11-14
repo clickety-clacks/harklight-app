@@ -830,6 +830,27 @@ final class NativeRelayCoreTests: XCTestCase {
         XCTAssertEqual(receipt.terminal?.sequence, 11)
     }
 
+    func testClosedRefusalStopsOriginalOperationRecoveryWithoutInventingTerminal() async throws {
+        let (context, store, session) = try setup()
+        let key = RequestKey(accountScope: context.identity.personID,
+                             senderID: ExactText("sender"), messageID: ExactText("closed-answer"))
+        let payload = try JSONValue.parse(data(#"{"title":"Closed request"}"#))
+        _ = try store.apply(RelayEvent(sequence: 1,
+            body: .delivery(StoredRequest(key: key, originalPayload: payload), .message)), context: context)
+        let port = AttentionDomainPort(store: store)
+        let selector = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first?.selector)
+        let receipt = try port.submitNoComment(context: port.context, selector: selector, intentID: UUID())
+        session.result = .refusedClosed(operationID: receipt.opID)
+        let core = try NativeRelayCore(store: store, context: context, session: session)
+        try await core.sendOriginalOperationForUserTap(receipt.intentID)
+        try store.queueRecoverableOperations(context: context)
+        XCTAssertEqual(session.sent.map(\.1), [receipt.opID])
+        XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty)
+        XCTAssertEqual(try store.lookupIntent(receipt.intentID, context: context)?.disposition, .refusedClosed)
+        XCTAssertNil(try store.snapshot(context: context).remoteStates[key]?.state)
+        XCTAssertThrowsError(try store.queueOriginalOperationForUserTap(receipt.intentID, context: context))
+    }
+
     func testStaleAnswerDeclineReleasesTheRequestForItsCurrentRevision() async throws {
         let (context, store, session) = try setup()
         let key = RequestKey(accountScope: context.identity.personID,

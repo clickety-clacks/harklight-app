@@ -99,6 +99,7 @@ public enum LocalIntentState: Equatable, Sendable {
     case refusedByRetraction(retractedAtMilliseconds: UInt64)
     case terminalUnconfirmed
     case notDelivered
+    case refusedClosed
     case unsupported
     case repairRequired
 }
@@ -820,6 +821,9 @@ public final class AttentionDomainPort: @unchecked Sendable {
         case .failed:
             localState = .notDelivered
             relayOutcome = .unknown
+        case .refusedClosed:
+            localState = .refusedClosed
+            relayOutcome = .unknown
         case .staleRevision:
             localState = .notDelivered
             relayOutcome = .unknown
@@ -1206,8 +1210,12 @@ public final class AttentionDomainPort: @unchecked Sendable {
                                                         ownOutcome: hasAcceptedIntent ? .accepted : .unconfirmed,
                                                         originalOperationUncertainty: !hasAcceptedIntent)
             } else if let submission {
-                status = .pending
-                if case .accepted = submission.disposition {
+                status = submission.disposition == .refusedClosed ? .open : .pending
+                if submission.disposition == .refusedClosed {
+                    receiptFacts = ReceiptPresentationFacts(evidenceLabel: "This request was already closed",
+                                                            ownOutcome: .refused,
+                                                            originalOperationUncertainty: false)
+                } else if case .accepted = submission.disposition {
                     receiptFacts = ReceiptPresentationFacts(evidenceLabel: "The relay accepted your original answer; the request outcome is still pending.",
                                                             ownOutcome: .accepted,
                                                             originalOperationUncertainty: false)
@@ -1392,7 +1400,9 @@ public final class AttentionDomainPort: @unchecked Sendable {
             return .confirmed
         }
         guard request.hasExplicitInformationalSeenAction else { return nil }
-        if submission?.isNoComment == true { return .resolvedWithoutSeen }
+        if submission?.isNoComment == true || submission?.disposition == .refusedClosed {
+            return .resolvedWithoutSeen
+        }
         if status == .open || status == .pending {
             return submission == nil ? .available : .pending
         }

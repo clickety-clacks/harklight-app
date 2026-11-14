@@ -2360,6 +2360,7 @@ final class LivePresentationStore {
         case .refusedByRetraction: "Answer refused · request retracted"
         case .terminalUnconfirmed: "Submission unconfirmed · saved draft retained"
         case .notDelivered: "Answer not delivered"
+        case .refusedClosed: "This request was already closed"
         case .unsupported: "No comment was not accepted"
         case .repairRequired: "Answer needs recovery"
         }

@@ -128,6 +128,9 @@ public enum IntentDisposition: Equatable, Codable, Sendable {
     /// The relay explicitly rejected this operation. Stop automatic attempts
     /// but retain its identity and payload for an explicit Retry.
     case failed
+    /// The Server definitively closed the request. Never resend this operation;
+    /// replay supplies the specific final state without guessing it locally.
+    case refusedClosed
     /// The relay declined the submitted revision and named the current one.
     case staleRevision(currentRevision: UInt64)
     case terminal(state: TerminalState, sequence: UInt64, authorizedAnswer: JSONValue?)

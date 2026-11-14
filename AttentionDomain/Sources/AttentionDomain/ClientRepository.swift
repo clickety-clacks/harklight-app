@@ -822,6 +822,36 @@ public final class ClientRepository: @unchecked Sendable {
         try commit(next)
     }
 
+    /// A definitive closure is not a lost response. Keep the receipt, remove
+    /// transport work, and await replay for the specific Server final state.
+    public func recordAnswerRefusedClosed(_ intentID: UUID,
+                                          operationID: UUID,
+                                          context suppliedContext: ProfileContext) throws {
+        writerLock.lock()
+        defer { writerLock.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard suppliedContext.transportMode == .relay,
+              var intent = state.intents[intentID], intent.operationID == operationID,
+              state.intentByRequest[intent.requestKey] == intentID else {
+            throw AttentionStoreError.intentConflict
+        }
+        switch intent.disposition {
+        case .pending, .lost: intent.disposition = .refusedClosed
+        case .refusedClosed: return
+        default: throw AttentionStoreError.intentConflict
+        }
+        var next = state
+        next.intents[intentID] = intent
+        next.outboxOrder.removeAll { $0 == intentID }
+        if var published = next.replayPublishedIntents {
+            published[intentID] = intent
+            next.replayPublishedIntents = published
+        }
+        try commit(next)
+    }
+
     /// A correlated relay error stops automatic delivery. Keep the operation
     /// durable so the person's Retry uses its original identity and payload.
     public func recordAnswerNotDelivered(_ intentID: UUID,
@@ -1804,9 +1834,10 @@ public final class ClientRepository: @unchecked Sendable {
     }
 
     private static func recordInboxOperationFailure(_ submission: Submission,
+                                                    reason: String? = nil,
                                                     in state: inout ClientSessionState) {
         var failed = submission
-        failed.disposition = .failed
+        failed.disposition = reason == "closed" || submission.disposition == .refusedClosed ? .refusedClosed : .failed
         state.intents[submission.intentID] = failed
         state.outboxOrder.removeAll(where: { $0 == submission.intentID })
         if var published = state.replayPublishedIntents {
@@ -2422,7 +2453,7 @@ public final class ClientRepository: @unchecked Sendable {
                       !Self.isAccepted(submission) else {
                     throw AttentionStoreError.inboxPageConflict
                 }
-                Self.recordInboxOperationFailure(submission, in: &next)
+                Self.recordInboxOperationFailure(submission, reason: reason, in: &next)
             }
         }
         candidate.batches[index].results = results
@@ -2974,7 +3005,7 @@ public final class ClientRepository: @unchecked Sendable {
 
     private func preservesOperationResult(_ disposition: IntentDisposition) -> Bool {
         switch disposition {
-        case .accepted, .refusedByRetraction, .staleRevision: true
+        case .accepted, .refusedByRetraction, .refusedClosed, .staleRevision: true
         default: false
         }
     }
@@ -4203,7 +4234,7 @@ private struct PersistedPendingActions: Codable {
         let pending = state.intents.filter { id, operation in
             guard state.intentByRequest[operation.requestKey] == id else { return false }
             switch operation.disposition {
-            case .pending, .lost, .accepted, .failed, .unsupported: return true
+            case .pending, .lost, .accepted, .failed, .unsupported, .refusedClosed: return true
             default: return false
             }
         }
