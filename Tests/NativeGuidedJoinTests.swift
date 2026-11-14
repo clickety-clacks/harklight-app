@@ -652,6 +652,26 @@ final class NativeGuidedJoinTests: XCTestCase {
         XCTAssertEqual(flow.screen, .connected)
     }
 
+    func testDestinationProbeDoesNotRefuseRedirectStatus() async throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanup() }
+        let transport = FakeTransport()
+        let store = NativeGuidedJoinStore(namespace: fixture.namespace, transport: transport)
+        var requests = 0
+        transport.handler = { url, method, body in
+            XCTAssertEqual(url, fixture.invitation.enrollmentURL)
+            XCTAssertEqual(method, "GET")
+            XCTAssertNil(body)
+            requests += 1
+            return try response(["location": "/enroll"], status: 302)
+        }
+
+        try await store.verifyDestination(fixture.invitation)
+
+        XCTAssertEqual(requests, 1)
+        XCTAssertNil(try store.loadAttempt())
+    }
+
     func testOfflineInvitationCheckCanRetryWithoutSendingAJoinRequest() async throws {
         let fixture = try Fixture()
         defer { fixture.cleanup() }
