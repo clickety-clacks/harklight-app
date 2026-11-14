@@ -63,25 +63,11 @@ final class InboxSubmissionProgressTests: XCTestCase {
         XCTAssertEqual(thread.drafts[1]?.text, ExactText("Keep this"))
     }
 
-    func testAnswerNeedsAgentResultNotMerelyAcceptanceOrReceivedAcknowledgement() {
-        var thread = makeThread()
-        thread.terminal = .answered
-        thread.terminalTurn = ExactText("terminal")
-        thread.turns = [ConversationTurn(id: ExactText("terminal"), binding: binding,
-            author: .person, sessionHandle: ExactText("session"), text: ExactText("Answer"), kind: .terminal)]
-        let accepted = submission(.accepted(sequence: 2))
-        XCTAssertEqual(project(thread, submissions: [accepted])[key], .init(state: .awaiting, since: sentAt))
-        thread.turns.append(ConversationTurn(id: ExactText("received"), binding: binding,
-            author: .origin, sessionHandle: ExactText("session"), text: ExactText(""),
-            inReplyTo: ExactText("terminal"), kind: .result, resultStatus: ExactText("received")))
-        XCTAssertNotNil(project(thread, submissions: [accepted])[key])
-        thread.turns.append(ConversationTurn(id: ExactText("applied"), binding: binding,
-            author: .origin, sessionHandle: ExactText("session"), text: ExactText("Done"),
-            inReplyTo: ExactText("terminal"), kind: .result, resultStatus: ExactText("applied")))
-        XCTAssertNil(project(thread, submissions: [accepted])[key])
-        XCTAssertNil(project(thread, submissions: [submission(.terminal(state: .answered,
-            sequence: 2, authorizedAnswer: nil))])[key],
-            "An authoritative linked result settles the row even while the original receipt is uncertain.")
+    func testAnswerSpinnerClearsOnServerConfirmationWithoutWaitingForAgentReply() {
+        let thread = makeThread()
+        XCTAssertEqual(project(thread, submissions: [submission(.pending)])[key],
+                       .init(state: .awaiting, since: sentAt))
+        XCTAssertNil(project(thread, submissions: [submission(.accepted(sequence: 2))])[key])
     }
 
     func testDefinitiveAnswerRefusalsStopSpinnerButLostOutcomeDoesNot() {
@@ -92,8 +78,8 @@ final class InboxSubmissionProgressTests: XCTestCase {
         }
         XCTAssertEqual(project(makeThread(), submissions: [submission(.lost)])[key]?.state, .awaiting)
         XCTAssertEqual(project(makeThread(), submissions: [submission(.terminal(state: .answered,
-            sequence: 2, authorizedAnswer: nil))])[key]?.state, .awaiting,
-            "An account terminal is not a definitive refusal of this original operation.")
+            sequence: 2, authorizedAnswer: nil))])[key]?.detail, "This request was already answered",
+            "Show the authoritative state without inventing an accepted original operation.")
     }
 
     func testNewPendingPromptSurvivesReplyToAnOlderPrompt() {
@@ -128,6 +114,8 @@ final class InboxSubmissionProgressTests: XCTestCase {
         try model.refreshFromDurableStore()
         XCTAssertTrue(observed.value)
         XCTAssertEqual(model.submissionProgress[key], .init(state: .awaiting, since: date))
+        XCTAssertEqual(model.inboxRows.first(where: { $0.key == key })?.submissionProgress,
+                       .init(state: .awaiting, since: date))
         XCTAssertEqual(try repository.prepareDiscussion(binding, context: context), operation)
         XCTAssertEqual(try repository.conversationSnapshot(context: context).threads[key]?.drafts[1]?.submittedAt, date)
         let cache = try repository.serverCacheSnapshot(context: context)

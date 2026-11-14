@@ -6,6 +6,13 @@ struct InboxSubmissionProgress: Equatable, Sendable {
     enum State: Equatable, Sendable { case awaiting, notSent }
     let state: State
     let since: Date
+    let detail: String?
+
+    init(state: State, since: Date, detail: String? = nil) {
+        self.state = state
+        self.since = since
+        self.detail = detail
+    }
 
     /// Old records have no local send date. Keep their ordering stable rather
     /// than making them look newly submitted whenever the view is refreshed.
@@ -14,8 +21,8 @@ struct InboxSubmissionProgress: Equatable, Sendable {
     static func project(snapshot: AttentionStoreSnapshot,
                         threads: [RequestKey: ConversationThread]) -> [RequestKey: Self] {
         var result: [RequestKey: Self] = [:]
-        func include(_ key: RequestKey, state: State, date: Date?) {
-            let candidate = Self(state: state, since: date ?? unknownSubmissionDate)
+        func include(_ key: RequestKey, state: State, date: Date?, detail: String? = nil) {
+            let candidate = Self(state: state, since: date ?? unknownSubmissionDate, detail: detail)
             if let previous = result[key] {
                 guard candidate.since > previous.since ||
                         (candidate.since == previous.since && candidate.state == .notSent) else { return }
@@ -26,18 +33,10 @@ struct InboxSubmissionProgress: Equatable, Sendable {
         // Index response references once per thread, rather than repeatedly
         // walking every turn for each row or each pending operation.
         var replies: [RequestKey: Set<ExactText>] = [:]
-        var results: [RequestKey: Set<ExactText>] = [:]
         for (key, thread) in threads {
             replies[key] = Set(thread.turns.compactMap { turn in
                 guard turn.author == .origin || turn.author == .agent,
                       turn.kind == .reply || turn.kind == nil else { return nil }
-                return turn.inReplyTo
-            })
-            results[key] = Set(thread.turns.compactMap { turn in
-                guard turn.author == .origin || turn.author == .agent,
-                      turn.kind == .result,
-                      turn.resultStatus == ExactText("applied") ||
-                        turn.resultStatus == ExactText("refused") else { return nil }
                 return turn.inReplyTo
             })
             let replyTargets = replies[key] ?? []
@@ -85,32 +84,42 @@ struct InboxSubmissionProgress: Equatable, Sendable {
             // prompt for an agent response. Their existing receipt UI remains.
             guard !submission.isNoComment,
                   snapshot.requests[key]?.hasExplicitInformationalSeenAction != true else { continue }
-            let hasAgentResponse: Bool
-            if let thread = threads[key], let terminalID = thread.terminalTurn {
-                hasAgentResponse = thread.turns.contains(where: {
-                    $0.id == terminalID && $0.author == .person &&
-                    $0.binding.revision == (submission.requestRevision ?? 1)
-                }) && ((results[key] ?? []).contains(terminalID) ||
-                       (replies[key] ?? []).contains(terminalID))
-            } else {
-                hasAgentResponse = false
-            }
             let state: State
+            let detail: String?
             switch submission.disposition {
-            case .pending, .lost: state = .awaiting
-            case .accepted:
-                if hasAgentResponse { continue }
+            case .pending, .lost:
                 state = .awaiting
+                detail = nil
+            case .accepted:
+                // Answers stop waiting when this operation is confirmed by the
+                // Server. Unlike chat, they do not wait for an origin reply.
+                continue
             case let .terminal(terminal, _, _):
-                if terminal == .answered, hasAgentResponse { continue }
-                // Account-wide answered state alone cannot prove whether this
-                // original operation succeeded. Its receipt still reconciles.
-                state = terminal == .answered ? .awaiting : .notSent
-            case .failed, .refusedClosed, .refusedNotFound, .staleRevision,
-                 .refusedByRetraction, .unsupported, .repairRequired:
                 state = .notSent
+                switch terminal {
+                case .answered: detail = "This request was already answered"
+                case .noComment: detail = "No comment was already recorded"
+                case .cleared: detail = "This request was cleared"
+                case .expired: detail = "This request expired"
+                case .superseded: detail = "This request was replaced"
+                }
+            case .refusedClosed:
+                state = .notSent
+                detail = "This request was already closed"
+            case .refusedNotFound:
+                state = .notSent
+                detail = "This request is no longer available"
+            case .staleRevision:
+                state = .notSent
+                detail = "This request has changed"
+            case .refusedByRetraction:
+                state = .notSent
+                detail = "This request was retracted"
+            case .failed, .unsupported, .repairRequired:
+                state = .notSent
+                detail = "Not accepted"
             }
-            include(key, state: state, date: submission.submittedAt)
+            include(key, state: state, date: submission.submittedAt, detail: detail)
         }
         return result
     }
