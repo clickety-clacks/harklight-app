@@ -52,7 +52,7 @@ struct NativeJoinInvitation: Codable, Equatable {
               components.path.isEmpty || components.path == "/",
               components.user == nil, components.password == nil,
               components.port == nil, components.query == nil,
-              let encoded = components.fragment, !encoded.isEmpty, encoded.utf8.count <= 90_000,
+              let encoded = components.fragment, !encoded.isEmpty,
               encoded.utf8.allSatisfy({ (48...57).contains($0) || (65...90).contains($0) ||
                                       (97...122).contains($0) || $0 == 45 || $0 == 95 }) else {
             throw NativeJoinInvitationError.invalid
@@ -64,7 +64,7 @@ struct NativeJoinInvitation: Codable, Equatable {
     }
 
     static func decodePayload(_ data: Data) throws -> NativeJoinInvitation {
-        guard !data.isEmpty, data.count <= 64 * 1024 else { throw NativeJoinInvitationError.invalid }
+        guard !data.isEmpty else { throw NativeJoinInvitationError.invalid }
         let result: NativeJoinInvitation
         do { result = try JSONDecoder().decode(Self.self, from: data) }
         catch { throw NativeJoinInvitationError.invalid }
@@ -72,26 +72,23 @@ struct NativeJoinInvitation: Codable, Equatable {
         return result
     }
 
-    func validate(now: Date? = nil) throws {
+    func validate(now _: Date? = nil) throws {
         guard v == 1,
-              !personID.isEmpty, personID.utf8.count <= 256,
+              !personID.isEmpty,
               !serverName.isEmpty, serverName.utf8.count <= 253,
               Self.endpoint(enrollmentURL, scheme: "https", path: "/enroll"),
               Self.endpoint(relayURL, scheme: "wss", path: "/relay"),
               enrollmentURL.host?.lowercased() == serverName.lowercased(),
               relayURL.host?.lowercased() == serverName.lowercased(),
               Self.hexSecret(inviteToken), Self.hexSecret(caSHA256),
-              expiresAt > 0, caPEM.utf8.count <= 16 * 1024,
+              expiresAt > 0,
               caPEM.components(separatedBy: "-----BEGIN CERTIFICATE-----").count == 2,
               caPEM.components(separatedBy: "-----END CERTIFICATE-----").count == 2,
               let root = NativeEnrollmentSettings.certificateDER(from: caPEM),
               SecCertificateCreateWithData(nil, root as CFData) != nil,
               SHA256.hash(data: root).map({ String(format: "%02x", $0) }).joined() == caSHA256,
-              [personName, inviterName].allSatisfy({ $0.map { !$0.isEmpty && $0.utf8.count <= 256 } ?? true }) else {
+              [personName, inviterName].allSatisfy({ $0.map { !$0.isEmpty } ?? true }) else {
             throw NativeJoinInvitationError.invalid
-        }
-        if let now, expiresAt <= Int64(now.timeIntervalSince1970 * 1000) {
-            throw NativeJoinInvitationError.expired
         }
     }
 
