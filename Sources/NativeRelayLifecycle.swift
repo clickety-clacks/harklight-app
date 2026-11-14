@@ -1013,9 +1013,9 @@ final class NativeRelayLifecycle {
         }
         do {
             try await current.checkConnection()
-            guard refreshGeneration == generation else { return }
-            resumeSavedAnswers()
-            resumeSavedDiscussions()
+            // A healthy pong is not a new delivery opportunity. Recovery is
+            // triggered by launch, refresh, or a replacement connection, not
+            // by the periodic health-check cadence.
         } catch {
             guard refreshGeneration == generation, allowReconnect,
                   connectionRecoveryTask == nil else { return }
@@ -1528,6 +1528,7 @@ final class NativeRelayLifecycle {
         case .lost: "locally_lost_unconfirmed"
         case .failed: "not_delivered"
         case .refusedClosed: "request_closed"
+        case .refusedNotFound: "request_not_found"
         case let .staleRevision(currentRevision): "stale_revision_current_\(currentRevision)"
         case let .terminal(state, sequence, _): "terminal_\(state.rawValue)_sequence_\(sequence)"
         case let .refusedByRetraction(retractedAt): "refused_retracted_at_\(retractedAt)"
@@ -1543,6 +1544,7 @@ final class NativeRelayLifecycle {
         if case .unsupported = submission.disposition { return false }
         if case .failed = submission.disposition { return false }
         if case .refusedClosed = submission.disposition { return false }
+        if case .refusedNotFound = submission.disposition { return false }
         if case .staleRevision = submission.disposition { return false }
         return true
     }

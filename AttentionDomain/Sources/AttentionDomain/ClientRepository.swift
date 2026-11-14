@@ -826,6 +826,7 @@ public final class ClientRepository: @unchecked Sendable {
     /// transport work, and await replay for the specific Server final state.
     public func recordAnswerRefusedClosed(_ intentID: UUID,
                                           operationID: UUID,
+                                          requestNotFound: Bool = false,
                                           context suppliedContext: ProfileContext) throws {
         writerLock.lock()
         defer { writerLock.unlock() }
@@ -838,8 +839,8 @@ public final class ClientRepository: @unchecked Sendable {
             throw AttentionStoreError.intentConflict
         }
         switch intent.disposition {
-        case .pending, .lost: intent.disposition = .refusedClosed
-        case .refusedClosed: return
+        case .pending, .lost: intent.disposition = requestNotFound ? .refusedNotFound : .refusedClosed
+        case .refusedClosed, .refusedNotFound: return
         default: throw AttentionStoreError.intentConflict
         }
         var next = state
@@ -1837,7 +1838,12 @@ public final class ClientRepository: @unchecked Sendable {
                                                     reason: String? = nil,
                                                     in state: inout ClientSessionState) {
         var failed = submission
-        failed.disposition = reason == "closed" || submission.disposition == .refusedClosed ? .refusedClosed : .failed
+        switch submission.disposition {
+        case .refusedClosed, .refusedNotFound: break
+        default:
+            failed.disposition = reason == "closed" ? .refusedClosed :
+                reason == "not_found" ? .refusedNotFound : .failed
+        }
         state.intents[submission.intentID] = failed
         state.outboxOrder.removeAll(where: { $0 == submission.intentID })
         if var published = state.replayPublishedIntents {
@@ -3005,7 +3011,7 @@ public final class ClientRepository: @unchecked Sendable {
 
     private func preservesOperationResult(_ disposition: IntentDisposition) -> Bool {
         switch disposition {
-        case .accepted, .refusedByRetraction, .refusedClosed, .staleRevision: true
+        case .accepted, .refusedByRetraction, .refusedClosed, .refusedNotFound, .staleRevision: true
         default: false
         }
     }
@@ -4234,7 +4240,7 @@ private struct PersistedPendingActions: Codable {
         let pending = state.intents.filter { id, operation in
             guard state.intentByRequest[operation.requestKey] == id else { return false }
             switch operation.disposition {
-            case .pending, .lost, .accepted, .failed, .unsupported, .refusedClosed: return true
+            case .pending, .lost, .accepted, .failed, .unsupported, .refusedClosed, .refusedNotFound: return true
             default: return false
             }
         }

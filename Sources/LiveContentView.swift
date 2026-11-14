@@ -1462,6 +1462,7 @@ struct LiveRequestDetail: View {
                                  localState: LocalIntentState? = nil,
                                  answerNotDelivered: Bool = false) -> String? {
         if localState == .refusedClosed { return "This request was already closed" }
+        if localState == .refusedNotFound { return "This request is no longer available" }
         if answerNotDelivered || localState == .notDelivered { return "Answer not delivered" }
         if localState == .terminalUnconfirmed ||
             (ownOutcome == .unconfirmed && answeredFromThisDevice) {

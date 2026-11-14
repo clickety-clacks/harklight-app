@@ -100,6 +100,7 @@ public enum LocalIntentState: Equatable, Sendable {
     case terminalUnconfirmed
     case notDelivered
     case refusedClosed
+    case refusedNotFound
     case unsupported
     case repairRequired
 }
@@ -824,6 +825,9 @@ public final class AttentionDomainPort: @unchecked Sendable {
         case .refusedClosed:
             localState = .refusedClosed
             relayOutcome = .unknown
+        case .refusedNotFound:
+            localState = .refusedNotFound
+            relayOutcome = .unknown
         case .staleRevision:
             localState = .notDelivered
             relayOutcome = .unknown
@@ -1210,9 +1214,12 @@ public final class AttentionDomainPort: @unchecked Sendable {
                                                         ownOutcome: hasAcceptedIntent ? .accepted : .unconfirmed,
                                                         originalOperationUncertainty: !hasAcceptedIntent)
             } else if let submission {
-                status = submission.disposition == .refusedClosed ? .open : .pending
-                if submission.disposition == .refusedClosed {
-                    receiptFacts = ReceiptPresentationFacts(evidenceLabel: "This request was already closed",
+                let definitivelyUnavailable = submission.disposition == .refusedClosed ||
+                    submission.disposition == .refusedNotFound
+                status = definitivelyUnavailable ? .open : .pending
+                if definitivelyUnavailable {
+                    receiptFacts = ReceiptPresentationFacts(evidenceLabel: submission.disposition == .refusedNotFound ?
+                                                            "This request is no longer available" : "This request was already closed",
                                                             ownOutcome: .refused,
                                                             originalOperationUncertainty: false)
                 } else if case .accepted = submission.disposition {
@@ -1400,7 +1407,8 @@ public final class AttentionDomainPort: @unchecked Sendable {
             return .confirmed
         }
         guard request.hasExplicitInformationalSeenAction else { return nil }
-        if submission?.isNoComment == true || submission?.disposition == .refusedClosed {
+        if submission?.isNoComment == true || submission?.disposition == .refusedClosed ||
+            submission?.disposition == .refusedNotFound {
             return .resolvedWithoutSeen
         }
         if status == .open || status == .pending {

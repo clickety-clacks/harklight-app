@@ -86,42 +86,45 @@ final class OperationRecoveryTests: XCTestCase {
     }
 
     func testClosedRefusalSurvivesRestartAndCannotBeRetriedBeforeReplay() throws {
-        for reconciled in [false, true] {
-            let (context, key, payload) = try fixture()
-            let persistence = MemoryPendingActionPersistence()
-            let first = try ClientRepository(context: context, persistence: persistence)
-            try confirm(first, context: context, key: key, payload: payload)
-            let original = try submit(first, context: context, key: key)
-            try first.recordUnresolvedOperation(original.intentID,
-                operationID: original.operationID, context: context)
-            if reconciled {
-                let batch = InboxReceiptBatch(batchID: "closed", operationIDs: [original.operationID])
-                _ = try first.beginInboxCandidate(startupID: "closed", since: 1,
-                    batches: [batch], context: context)
-                try first.saveInboxInitialPage(snapshotID: "closed", highWater: 1,
-                    items: [], nextCursor: nil, receiptCursor: nil, context: context)
-                try first.saveInboxReceiptBatch(batch.batchID, results: [InboxOperationReceipt(
-                    operationID: original.operationID, status: .refused, reason: "closed")], context: context)
-            } else {
-                try first.recordAnswerRefusedClosed(original.intentID,
-                    operationID: original.operationID, context: context)
+        for reason in ["closed", "not_found"] {
+            for reconciled in [false, true] {
+              let expected: IntentDisposition = reason == "closed" ? .refusedClosed : .refusedNotFound
+              let (context, key, payload) = try fixture()
+              let persistence = MemoryPendingActionPersistence()
+              let first = try ClientRepository(context: context, persistence: persistence)
+              try confirm(first, context: context, key: key, payload: payload)
+              let original = try submit(first, context: context, key: key)
+              try first.recordUnresolvedOperation(original.intentID,
+                  operationID: original.operationID, context: context)
+              if reconciled {
+                  let batch = InboxReceiptBatch(batchID: "closed", operationIDs: [original.operationID])
+                  _ = try first.beginInboxCandidate(startupID: "closed", since: 1,
+                      batches: [batch], context: context)
+                  try first.saveInboxInitialPage(snapshotID: "closed", highWater: 1,
+                      items: [], nextCursor: nil, receiptCursor: nil, context: context)
+                  try first.saveInboxReceiptBatch(batch.batchID, results: [InboxOperationReceipt(
+                      operationID: original.operationID, status: .refused, reason: reason)], context: context)
+              } else {
+                  try first.recordAnswerRefusedClosed(original.intentID,
+                      operationID: original.operationID, requestNotFound: reason == "not_found", context: context)
+              }
+              let restarted = try ClientRepository(context: context, persistence: persistence)
+              try restarted.queueRecoverableOperations(context: context)
+              XCTAssertTrue(try restarted.snapshot(context: context).outbox.isEmpty)
+              XCTAssertTrue(try restarted.inboxOperationInventory(context: context).isEmpty)
+              XCTAssertEqual(try restarted.lookupIntent(original.intentID, context: context)?.disposition,
+                             expected)
+              XCTAssertThrowsError(try restarted.queueOriginalOperationForUserTap(original.intentID,
+                  context: context), "A definitive closure cannot succeed on Retry.")
+              XCTAssertNil(try restarted.snapshot(context: context).remoteStates[key],
+                           "The refusal must not invent an answered, expired or retracted final state.")
+              try confirm(restarted, context: context, key: key, payload: payload)
+              let port = AttentionDomainPort(store: restarted)
+              let shown = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first)
+              XCTAssertEqual(shown.intentReceipt?.localState, reason == "closed" ? .refusedClosed : .refusedNotFound)
+              XCTAssertEqual(shown.receiptFacts?.ownOutcome, .refused)
+              XCTAssertNotEqual(shown.lifecycleStatus, .answered)
             }
-            let restarted = try ClientRepository(context: context, persistence: persistence)
-            try restarted.queueRecoverableOperations(context: context)
-            XCTAssertTrue(try restarted.snapshot(context: context).outbox.isEmpty)
-            XCTAssertTrue(try restarted.inboxOperationInventory(context: context).isEmpty)
-            XCTAssertEqual(try restarted.lookupIntent(original.intentID, context: context)?.disposition,
-                           .refusedClosed)
-            XCTAssertThrowsError(try restarted.queueOriginalOperationForUserTap(original.intentID,
-                context: context), "A definitive closure cannot succeed on Retry.")
-            XCTAssertNil(try restarted.snapshot(context: context).remoteStates[key],
-                         "The refusal must not invent an answered, expired or retracted final state.")
-            try confirm(restarted, context: context, key: key, payload: payload)
-            let port = AttentionDomainPort(store: restarted)
-            let shown = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first)
-            XCTAssertEqual(shown.intentReceipt?.localState, .refusedClosed)
-            XCTAssertEqual(shown.receiptFacts?.ownOutcome, .refused)
-            XCTAssertNotEqual(shown.lifecycleStatus, .answered)
         }
     }
 

@@ -565,6 +565,12 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
                     close()
                     return .unresolved
                 }
+                if reason == "not_found" {
+                    diagnose(.answer, .originalOperationDelivery, .rejected,
+                             causeCode: NativeDiagnosticCauseCode.serverReason(reason),
+                             operationID: operationID, receipt: .terminal)
+                    return .refusedNotFound(operationID: operationID)
+                }
                 if reason == "closed" {
                     diagnose(.answer, .originalOperationDelivery, .rejected,
                              causeCode: NativeDiagnosticCauseCode.serverReason(reason),

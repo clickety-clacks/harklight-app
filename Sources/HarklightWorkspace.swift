@@ -575,7 +575,7 @@ struct InboxRequestRow: Identifiable {
         guard let state = receipt?.localState else { return nil }
         return switch state {
         case .durable, .queuedForRelay, .accepted: .pendingOrAccepted
-        case .refusedByRetraction, .refusedClosed, .terminalUnconfirmed, .notDelivered, .unsupported, .repairRequired: .failed
+        case .refusedByRetraction, .refusedClosed, .refusedNotFound, .terminalUnconfirmed, .notDelivered, .unsupported, .repairRequired: .failed
         }
     }
 
