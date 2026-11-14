@@ -1,4 +1,4 @@
-import AttentionDomain
+@testable import AttentionDomain
 import Foundation
 import Observation
 import XCTest
