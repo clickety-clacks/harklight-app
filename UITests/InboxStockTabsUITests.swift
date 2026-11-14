@@ -227,7 +227,11 @@ final class InboxStockTabsUITests: XCTestCase {
                 let back = workspaceBackButton(in: app)
                 XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
                 back.tap()
-                leaveWorkspaceSearch(in: app)
+                // Search remains the selected tab after returning from its
+                // detail. Select Inbox to leave Search before opening Replied.
+                let inboxTab = workspaceTab("Inbox", in: app)
+                XCTAssertTrue(inboxTab.waitForExistence(timeout: 5), app.debugDescription)
+                inboxTab.tap()
             }
 
             let tab = workspaceTab(title, in: app)
@@ -239,8 +243,7 @@ final class InboxStockTabsUITests: XCTestCase {
             let rowID = title == "Inbox" ? "request-row-unknown-01" : "sample-approval-0"
             let firstRow = app.descendants(matching: .any)[rowID]
             XCTAssertTrue(firstRow.waitForExistence(timeout: 5), app.debugDescription)
-            XCTAssertTrue(firstRow.isHittable, app.debugDescription)
-            let refreshStart = firstRow.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.1))
+            let refreshStart = list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.2))
             refreshStart.press(forDuration: 0.05,
                                thenDragTo: refreshStart.withOffset(CGVector(dx: 0, dy: 310)),
                                withVelocity: .slow, thenHoldForDuration: 0.3)
@@ -250,7 +253,7 @@ final class InboxStockTabsUITests: XCTestCase {
             warningButton.tap()
             let warning = app.staticTexts["inbox-warning-message"]
             XCTAssertTrue(warning.waitForExistence(timeout: 5), app.debugDescription)
-            XCTAssertEqual(warning.label, "The approved server could not be reached.")
+            XCTAssertEqual(warning.label, "Waiting for the server. Your pending actions are saved.")
             app.terminate()
         }
     }

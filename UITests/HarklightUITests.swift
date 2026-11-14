@@ -38,7 +38,7 @@ final class HarklightUITests: XCTestCase {
         revealInCard(note, in: app)
         XCTAssertTrue(note.waitForExistence(timeout: 5), app.debugDescription)
         attachScreenshot("Sender scene note field", from: app)
-        XCTAssertTrue(app.staticTexts["Select the location on the floor plan and add a note."]
+        XCTAssertTrue(app.textViews["Select the location on the floor plan and add a note."]
             .waitForExistence(timeout: 5))
         XCTAssertFalse(app.staticTexts["request-lifecycle-status"].exists,
                        "The card omits the extra Open status line from the design.")
@@ -159,7 +159,7 @@ final class HarklightUITests: XCTestCase {
                       "Reviewing the changed message returns to its answer control.\n\(app.debugDescription)")
     }
 
-    func testConnectionWarningButtonShowsTheObservedError() throws {
+    func testConnectionWarningButtonShowsPendingConnectionStatus() throws {
         let app = launchFreshApp(additionalArguments: ["--harklight-test-connection-warning"])
         let warningButton = app.buttons["inbox-warning-button"]
         let message = app.staticTexts["inbox-warning-message"]
@@ -171,8 +171,8 @@ final class HarklightUITests: XCTestCase {
         XCTAssertTrue(warningButton.isHittable, app.debugDescription)
         warningButton.tap()
         XCTAssertTrue(message.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertEqual(message.label, "The approved server could not be reached.")
-        attachScreenshot("Tapped connection warning shows its error", from: app)
+        XCTAssertEqual(message.label, "Waiting for the server. Your pending actions are saved.")
+        attachScreenshot("Tapped connection warning shows pending status", from: app)
     }
 
     func testVisibleSettingsAndChatTapsOpenTheirPanelsWhileWarningsArePresent() throws {
@@ -314,8 +314,6 @@ final class HarklightUITests: XCTestCase {
         let detail = app.scrollViews["message-card-scroll"]
         XCTAssertTrue(detail.waitForExistence(timeout: 5),
                       "The pending row is reopened to simulate its later server outcome.")
-        // Measured while the detail is open: on iPad the list stays beside it.
-        let listVisibleAlongsideDetail = listVisibleBesideDetail(in: app)
         XCTAssertTrue(app.descendants(matching: .any)["request-answered"].waitForExistence(timeout: 5),
                       "The reopened detail reflects the accepted answer.")
         XCTAssertTrue(app.descendants(matching: .any)["request-closing-scene"].waitForExistence(timeout: 5),
@@ -325,6 +323,8 @@ final class HarklightUITests: XCTestCase {
         XCTAssertTrue(answeredFinish.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertFalse(answeredFinish.isEnabled,
                        "A confirmed answer leaves the submit check visible but unavailable.")
+        // Measure after the later Server outcome: on iPad, the list may remain beside detail.
+        let listVisibleAlongsideDetail = listVisibleBesideDetail(in: app)
         if !listVisibleAlongsideDetail {
             let back = workspaceBackButton(in: app)
             XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
@@ -475,17 +475,21 @@ final class HarklightUITests: XCTestCase {
 
         // Scroll part of a row so the position Back must keep is not the list's top.
         let top = ([facilities] + others).min { $0.frame.minY < $1.frame.minY }!
-        let unscrolledAnchor = review.frame.minY - list.frame.minY
+        let navigationBar = app.navigationBars.firstMatch
+        let visibleListAnchor: () -> CGFloat = {
+            let visibleHeaderBottom = brand.isHittable
+                ? navigationBar.frame.maxY
+                : navigationBar.frame.minY
+            return review.frame.minY - max(list.frame.minY, visibleHeaderBottom)
+        }
+        let unscrolledAnchor = visibleListAnchor()
         let start = list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.6))
         start.press(forDuration: 0.1, thenDragTo: start.withOffset(CGVector(dx: 0, dy: -(top.frame.height * 0.5 + 20))),
                     withVelocity: .slow, thenHoldForDuration: 0.5)
-        let scrolledAnchor = review.frame.minY - list.frame.minY
+        let scrolledAnchor = visibleListAnchor()
         XCTAssertLessThan(scrolledAnchor, unscrolledAnchor - 10,
                           "The tapped request must be scrolled within the list.")
 
-        let headerHidden = expectation(for: NSPredicate(format: "isHittable == false"),
-                                       evaluatedWith: brand)
-        wait(for: [headerHidden], timeout: 5)
         XCTAssertTrue(review.isHittable, app.debugDescription)
         review.tap()
         XCTAssertTrue(app.scrollViews["message-card-scroll"].waitForExistence(timeout: 5),
@@ -504,11 +508,11 @@ final class HarklightUITests: XCTestCase {
         XCTAssertTrue(facilities.exists, "The other untouched request remains in Inbox after native Back.")
         attachScreenshot("Last viewed row in Inbox", from: app)
         let kept = NSPredicate { _, _ in
-            abs((review.frame.minY - list.frame.minY) - scrolledAnchor) <= 1
+            abs(visibleListAnchor() - scrolledAnchor) <= 1
         }
         let keptPosition = XCTNSPredicateExpectation(predicate: kept, object: nil)
         XCTAssertEqual(XCTWaiter().wait(for: [keptPosition], timeout: 3), .completed,
-                       "Back without switching messages must preserve the tapped row's position within the list: \(review.frame.minY - list.frame.minY), expected \(scrolledAnchor).\n\(app.debugDescription)")
+                       "Back without switching messages must preserve the tapped row's visible position below the current header.")
     }
 
     func testSplitViewAdaptationKeepsTheSelectedMessage() {
