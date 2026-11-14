@@ -118,17 +118,17 @@ final class InboxStockTabsUITests: XCTestCase {
                                "--harklight-test-submission-progress"]
         app.launch()
 
-        let awaitingArea = app.descendants(matching: .any)["awaiting-reply-area-request-row-sample-approval-0"]
+        let awaitingArea = app.descendants(matching: .any)["awaiting-reply-area-sample-approval-0"]
         XCTAssertTrue(awaitingArea.waitForExistence(timeout: 15), app.debugDescription)
         XCTAssertTrue(awaitingArea.label.contains("Waiting for a reply"), awaitingArea.label)
 
-        let notSentArea = app.descendants(matching: .any)["awaiting-reply-area-request-row-sample-textChoice-0"]
+        let notSentArea = app.descendants(matching: .any)["awaiting-reply-area-sample-textChoice-0"]
         XCTAssertTrue(notSentArea.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(notSentArea.label.contains("Not sent"), notSentArea.label)
         XCTAssertLessThan(awaitingArea.frame.minY, notSentArea.frame.minY,
                           "The more recently sent item is first in the New area.")
 
-        let normalRow = app.descendants(matching: .any)["request-row-sample-approval-0"]
+        let normalRow = app.descendants(matching: .any)["sample-approval-0"]
         let list = app.collectionViews.firstMatch
         for _ in 0..<10 where !(normalRow.exists && normalRow.isHittable) { list.swipeUp() }
         XCTAssertTrue(normalRow.exists && normalRow.isHittable, app.debugDescription)
@@ -255,7 +255,10 @@ final class InboxStockTabsUITests: XCTestCase {
         }
     }
 
-    func testNativeSearchFieldStaysInMasterBesideDetail() throws {
+    /// On iPad the design puts search in the tab bar at the top, so the list
+    /// panel beside an open message has no search field of its own, and the
+    /// Search tab stays available.
+    func testSearchTabStaysAvailableBesideDetailWithNoListSearchField() throws {
         let app = XCUIApplication()
         app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
         app.launch()
@@ -270,15 +273,13 @@ final class InboxStockTabsUITests: XCTestCase {
                       "The detail is visible beside the master list.")
 
         let list = app.collectionViews.firstMatch
-        let field = app.searchFields.firstMatch
         XCTAssertTrue(list.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(field.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(list.isHittable, "The master list remains usable beside the detail.")
-        XCTAssertGreaterThan(field.frame.width, 180,
-                             "Search is a full native field while the master list is visible.")
-        XCTAssertGreaterThanOrEqual(field.frame.minX, list.frame.minX - 8)
-        XCTAssertLessThanOrEqual(field.frame.maxX, list.frame.maxX + 8)
-        attachScreenshot("Native Search in master beside detail", from: app)
+        XCTAssertEqual(list.searchFields.count, 0,
+                       "The list panel has no search field; search is the Search tab.")
+        XCTAssertTrue(workspaceTab("Search", in: app).waitForExistence(timeout: 5),
+                      "The Search tab stays available beside the detail.\n\(app.debugDescription)")
+        attachScreenshot("Search tab beside detail", from: app)
     }
 
     func testNotificationRouteClearsListSearchAndOpensTheTargetRequest() {
