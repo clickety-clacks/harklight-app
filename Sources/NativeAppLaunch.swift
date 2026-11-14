@@ -1433,7 +1433,9 @@ final class LivePresentationStore {
         return conversationThreads[key]?.allowsDiscussion == true
     }
     func canSendDiscussion(for key: RequestKey) -> Bool {
-        canSendToCurrentServer && conversationThreads[key]?.allowsDiscussion == true
+        guard canSendToCurrentServer, let thread = conversationThreads[key],
+              thread.allowsDiscussion else { return false }
+        return thread.drafts[thread.currentRevision]?.isPermanentlyRefused != true
     }
     @ObservationIgnored var notificationProjectionDidChange: (() -> Void)?
     @ObservationIgnored var confirmedRelayRefresh: (() -> Void)?

@@ -279,6 +279,13 @@ public struct ConversationDraft: Equatable, Codable, Sendable {
     public var operationID: UUID?
     public var wireFrame: Data?
 
+    /// The original request cannot accept another attempt after these
+    /// authoritative refusals. Keep its text available without resending it.
+    public var isPermanentlyRefused: Bool {
+        guard case let .rejected(reason) = disposition else { return false }
+        return reason.rawValue == "closed" || reason.rawValue == "not_found"
+    }
+
     public enum Disposition: Equatable, Codable, Sendable {
         case saved
         case submitting(UUID)

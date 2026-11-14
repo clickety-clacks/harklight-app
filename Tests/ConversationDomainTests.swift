@@ -269,6 +269,34 @@ final class ConversationDomainTests: XCTestCase {
         XCTAssertNil(try restored.conversationSnapshot(context: context).threads[binding.request]?.drafts[1])
     }
 
+    func testDefinitivelyRefusedDiscussionCannotRetryAfterRestartButKeepsText() async throws {
+        for reason in ["closed", "not_found"] {
+            let context = context()
+            let persistence = MemoryPendingActionPersistence()
+            let store = try ClientRepository(context: context, persistence: persistence)
+            let binding = binding(context)
+            try store.applyConversation(ConversationEvent(sequence: 1, binding: binding,
+                fact: .request(sessionHandle: ExactText("session"), payload: .null)), context: context)
+            try store.saveConversationDraft(ConversationDraft(binding: binding,
+                text: ExactText("Keep refused chat")), context: context)
+            let operation = try store.prepareDiscussion(binding, context: context)
+            try store.markDiscussionOutcome(binding, operation: operation,
+                rejection: ExactText(reason), context: context)
+            let restored = try await reopenWithServerCache(store, context: context, persistence: persistence)
+            XCTAssertThrowsError(try restored.prepareDiscussion(binding, context: context)) { error in
+                XCTAssertEqual(error as? ConversationError, .closed)
+            }
+            let thread = try XCTUnwrap(restored.conversationSnapshot(context: context).threads[binding.request])
+            let retained = try XCTUnwrap(thread.drafts[binding.revision])
+            XCTAssertEqual(retained.text, ExactText("Keep refused chat"))
+            XCTAssertEqual(retained.operationID, operation)
+            XCTAssertEqual(retained.disposition, .rejected(ExactText(reason)))
+            XCTAssertTrue(retained.isPermanentlyRefused)
+            let model = try LivePresentationStore(store: restored, context: context)
+            XCTAssertFalse(model.canSendDiscussion(for: binding.request))
+        }
+    }
+
     func testOrdinaryMetadataBootstrapsConversationAndTerminalBeforeHistoryDoesNotLoseHistory() async throws {
         let context = context()
         let persistence = MemoryPendingActionPersistence()

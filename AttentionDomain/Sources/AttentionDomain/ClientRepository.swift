@@ -3177,7 +3177,7 @@ public final class ClientRepository: @unchecked Sendable {
         var next = state
         guard var conversation = next.conversation, let thread = conversation.threads[binding.request],
               let draft = thread.drafts[binding.revision] else { throw ConversationError.missingRequest }
-        guard thread.allowsDiscussion else { throw ConversationError.closed }
+        guard thread.allowsDiscussion, !draft.isPermanentlyRefused else { throw ConversationError.closed }
         guard !draft.text.rawValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !draft.files.isEmpty else {
             throw ConversationError.emptyDraft
         }
