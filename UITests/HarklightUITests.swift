@@ -107,10 +107,10 @@ final class HarklightUITests: XCTestCase {
         let brand = app.descendants(matching: .any)["inbox-brand"]
         XCTAssertTrue(brand.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertEqual(refreshing.frame.midY, brand.frame.midY, accuracy: 1,
-                       "The refresh badge stays in the title row.")
+                       "The refresh spinner stays in the title row.")
         XCTAssertGreaterThanOrEqual(refreshing.frame.minX, brand.frame.maxX)
         XCTAssertLessThan(refreshing.frame.minX - brand.frame.maxX, 16,
-                          "The refresh badge sits immediately to the right of the title.")
+                          "The refresh spinner sits immediately to the right of the title.")
         attachScreenshot("Inbox badge while refreshing", from: app)
 
         selectFacilitiesRequest(in: app)
