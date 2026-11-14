@@ -313,8 +313,13 @@ struct SystemDetectedMessageBody: UIViewRepresentable {
         let markdown = MessageMarkdown.attributed(text)
         let rendered = NSMutableAttributedString(string: "")
         for run in markdown.runs {
-            let piece = NSMutableAttributedString(
-                attributedString: NSAttributedString(AttributedString(markdown[run.range])))
+            let content = AttributedString(markdown[run.range])
+            // Markdown supplies Foundation attributes; UIKit font and color are
+            // applied below. Avoid loading every SDK attribute scope on first open.
+            let attributed = (try? NSAttributedString(
+                content, including: AttributeScopes.FoundationAttributes.self))
+                ?? NSAttributedString(content)
+            let piece = NSMutableAttributedString(attributedString: attributed)
             if piece.length > 0 {
                 let fullRange = NSRange(location: 0, length: piece.length)
                 piece.addAttribute(.font,
@@ -376,6 +381,29 @@ struct SystemDetectedMessageBody: UIViewRepresentable {
         HarklightTypography.resolve(.messageBody, dynamicTypeSize: dynamicTypeSize).font
     }
 
+    @MainActor
+    final class Coordinator {
+        private var text: String?
+        private var bodyFont: UIFont?
+        private var foregroundColor: UIColor?
+
+        func updateText(_ text: String, bodyFont: UIFont, foregroundColor: UIColor,
+                        in textView: UITextView) {
+            guard self.text != text || self.bodyFont?.isEqual(bodyFont) != true ||
+                    self.foregroundColor?.isEqual(foregroundColor) != true else { return }
+            self.text = text
+            self.bodyFont = bodyFont
+            self.foregroundColor = foregroundColor
+            // An unchanged SwiftUI update must not rebuild Markdown or reset the
+            // text view's formatting and selection by assigning its base font.
+            textView.font = bodyFont
+            textView.attributedText = SystemDetectedMessageBody.attributedMessage(
+                text, foregroundColor: foregroundColor, bodyFont: bodyFont)
+        }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
     func makeUIView(context: Context) -> UITextView {
         let textView = UITextView()
         textView.isEditable = false
@@ -386,10 +414,9 @@ struct SystemDetectedMessageBody: UIViewRepresentable {
         textView.textContainerInset = .zero
         textView.textContainer.lineFragmentPadding = 0
         let bodyFont = preferredBodyFont(for: textView)
-        textView.font = bodyFont
         textView.adjustsFontForContentSizeCategory = true
-        textView.attributedText = Self.attributedMessage(
-            text, foregroundColor: UIColor(foregroundColor), bodyFont: bodyFont)
+        context.coordinator.updateText(text, bodyFont: bodyFont,
+            foregroundColor: UIColor(foregroundColor), in: textView)
         updateColors(on: textView)
         textView.accessibilityIdentifier = "request-message-body"
         return textView
@@ -397,14 +424,8 @@ struct SystemDetectedMessageBody: UIViewRepresentable {
 
     func updateUIView(_ textView: UITextView, context: Context) {
         let bodyFont = preferredBodyFont(for: textView)
-        if textView.font?.isEqual(bodyFont) != true {
-            textView.font = bodyFont
-        }
-        let markdown = Self.attributedMessage(
-            text, foregroundColor: UIColor(foregroundColor), bodyFont: bodyFont)
-        if !textView.attributedText.isEqual(to: markdown) {
-            textView.attributedText = markdown
-        }
+        context.coordinator.updateText(text, bodyFont: bodyFont,
+            foregroundColor: UIColor(foregroundColor), in: textView)
         updateColors(on: textView)
     }
 

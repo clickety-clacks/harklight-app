@@ -993,6 +993,163 @@ private struct ReplacedByMessagesSection: View {
     }
 }
 
+private struct RequestDetailHeading: View {
+    let sender: String
+    let initials: String
+    let title: String
+    let createdAt: Date?
+    let messageType: HarklightMessageType
+    let onOpenDetails: () -> Void
+
+    var body: some View {
+        Button {
+            onOpenDetails()
+        } label: {
+            MessageHeading(sender: sender,
+                           initials: initials,
+                           title: title,
+                           createdAt: createdAt,
+                           messageType: messageType)
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("request-heading")
+        .accessibilityHint("Open request details")
+    }
+}
+
+private struct RequestDetailMetadata: View {
+    let inboxScore: Double?
+    let messageType: MessageTypeValue?
+    let messageKind: MessageKindValue?
+    let deadline: Date?
+    let stake: String?
+    let key: RequestKey
+    let supersedesMessageIDs: [ExactText]
+    let secondaryTextColor: Color
+
+    var body: some View {
+        Group {
+            if let priorityLabel = InboxPriorityDisplay.forScore(inboxScore) {
+                Label {
+                    Text(priorityLabel.title)
+                } icon: {
+                    Image(systemName: "flag.fill")
+                }
+                    .font(.caption.weight(.semibold))
+                    .accessibilityLabel(Text(priorityLabel.title))
+                    .accessibilityIdentifier("request-priority")
+            }
+            if messageType != nil || messageKind != nil {
+                MessageMetadataBadges(messageType: messageType,
+                                      messageKind: messageKind,
+                                      containsChildAccessibilityElements: true)
+            }
+            if let deadline {
+                Label("Deadline · \(deadline.formatted(date: .omitted, time: .shortened))",
+                      systemImage: "calendar")
+                    .font(.subheadline)
+                    .accessibilityIdentifier("request-deadline")
+            }
+            if let stake {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("What’s at stake")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(secondaryTextColor)
+                    Text(MessageMarkdown.attributed(stake))
+                        .font(.body)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                        .accessibilityIdentifier("request-stake")
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            if !supersedesMessageIDs.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Supersedes")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(secondaryTextColor)
+                    ForEach(supersedesMessageIDs, id: \.self) { messageID in
+                        let targetKey = RequestKey(accountScope: key.accountScope,
+                            senderID: key.senderID, messageID: messageID)
+                        NavigationLink(value: RelatedMessageTarget.supersedes(targetKey)) {
+                            Text(messageID.rawValue)
+                                .font(.subheadline)
+                                .textSelection(.enabled)
+                        }
+                        .accessibilityIdentifier("request-supersedes-" + messageID.rawValue)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+    }
+}
+
+private struct RequestDetailLifecycleContent: View {
+    let isCurrent: Bool
+    let lifecycleText: String?
+    let replyText: String?
+    let seenStatus: InformationalSeenStatus?
+    let localOperationStatus: String?
+    let showsDefaultAnswer: Bool
+    let defaultAnswerWords: String?
+    let textColor: Color
+    let secondaryTextColor: Color
+
+    var body: some View {
+        Group {
+            if isCurrent {
+                if let lifecycleText {
+                    Text(lifecycleText)
+                        .font(.caption).foregroundStyle(secondaryTextColor)
+                        .accessibilityIdentifier("request-lifecycle-status")
+                }
+                if let replyText {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Reply")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(secondaryTextColor)
+                        Text(replyText)
+                            .font(.subheadline)
+                            .foregroundStyle(textColor)
+                            .textSelection(.enabled)
+                            .accessibilityIdentifier("request-account-answer")
+                    }
+                }
+                if let seenStatus {
+                    Label(LiveRequestDetail.informationalSeenText(seenStatus),
+                          systemImage: LiveRequestDetail.informationalSeenSymbol(seenStatus))
+                        .font(.caption).foregroundStyle(secondaryTextColor)
+                        .accessibilityIdentifier("informational-seen-status")
+                }
+            } else {
+                Label("Cached history · status not refreshed", systemImage: "clock.arrow.circlepath")
+                    .font(.caption).foregroundStyle(secondaryTextColor)
+                    .accessibilityIdentifier("inbox-status-unrefreshed")
+                if let localOperationStatus {
+                    Text(localOperationStatus).font(.caption).foregroundStyle(secondaryTextColor)
+                }
+            }
+            if showsDefaultAnswer {
+                VStack(alignment: .leading, spacing: 4) {
+                    Label("Answered by default", systemImage: "clock")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(secondaryTextColor)
+                        .accessibilityIdentifier("request-default-answer-status")
+                    if let defaultAnswerWords, !defaultAnswerWords.isEmpty {
+                        Text(defaultAnswerWords)
+                            .font(.subheadline)
+                            .foregroundStyle(textColor)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .textSelection(.enabled)
+                            .accessibilityIdentifier("request-default-answer")
+                    }
+                }
+            }
+        }
+    }
+}
+
 struct LiveRequestDetail: View {
     private struct StorePresentationSnapshot: Equatable {
         let conversationRevision: UInt64?
@@ -1016,16 +1173,61 @@ struct LiveRequestDetail: View {
     }
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(\.colorScheme) private var colorScheme
-    @State private var chatPresented = false
-    @State private var pendingChatScrollTarget: ExactText?
-    @State private var enlargedPicture: SampleOption?
-    @State private var fixtureOutcomePresented = false
-    @State private var requestDetailsPresented = false
-    @State private var warningDialog: WarningDialogKind?
-    @State private var activeReplyEditor: ReplyEditorTarget?
-    @State private var replyDraftSession: ReplyEditorDraftSession?
-    @State private var localReplyEditingActive = false
-    @State private var storePresentationSnapshot: StorePresentationSnapshot
+    private struct DetailPresentationState {
+        var chatPresented: Bool = false
+        var pendingChatScrollTarget: ExactText? = nil
+        var enlargedPicture: SampleOption? = nil
+        var fixtureOutcomePresented: Bool = false
+        var requestDetailsPresented: Bool = false
+        var warningDialog: WarningDialogKind? = nil
+        var activeReplyEditor: ReplyEditorTarget? = nil
+        var replyDraftSession: ReplyEditorDraftSession? = nil
+        var localReplyEditingActive: Bool = false
+        var storePresentationSnapshot: StorePresentationSnapshot
+    }
+
+    @State private var detailState: DetailPresentationState
+
+    private var chatPresented: Bool {
+        get { detailState.chatPresented }
+        nonmutating set { detailState.chatPresented = newValue }
+    }
+    private var pendingChatScrollTarget: ExactText? {
+        get { detailState.pendingChatScrollTarget }
+        nonmutating set { detailState.pendingChatScrollTarget = newValue }
+    }
+    private var enlargedPicture: SampleOption? {
+        get { detailState.enlargedPicture }
+        nonmutating set { detailState.enlargedPicture = newValue }
+    }
+    private var fixtureOutcomePresented: Bool {
+        get { detailState.fixtureOutcomePresented }
+        nonmutating set { detailState.fixtureOutcomePresented = newValue }
+    }
+    private var requestDetailsPresented: Bool {
+        get { detailState.requestDetailsPresented }
+        nonmutating set { detailState.requestDetailsPresented = newValue }
+    }
+    private var warningDialog: WarningDialogKind? {
+        get { detailState.warningDialog }
+        nonmutating set { detailState.warningDialog = newValue }
+    }
+    private var activeReplyEditor: ReplyEditorTarget? {
+        get { detailState.activeReplyEditor }
+        nonmutating set { detailState.activeReplyEditor = newValue }
+    }
+    private var replyDraftSession: ReplyEditorDraftSession? {
+        get { detailState.replyDraftSession }
+        nonmutating set { detailState.replyDraftSession = newValue }
+    }
+    private var localReplyEditingActive: Bool {
+        get { detailState.localReplyEditingActive }
+        nonmutating set { detailState.localReplyEditingActive = newValue }
+    }
+    private var storePresentationSnapshot: StorePresentationSnapshot {
+        get { detailState.storePresentationSnapshot }
+        nonmutating set { detailState.storePresentationSnapshot = newValue }
+    }
     @FocusState private var focusedReplyActionID: String?
 
     private enum WarningDialogKind: String, Equatable, Identifiable {
@@ -1053,15 +1255,12 @@ struct LiveRequestDetail: View {
         self.testNotificationRouter = testNotificationRouter
         self.testOpenForegroundChatIndicator = testOpenForegroundChatIndicator
         self.testConversationSheetDidAppear = testConversationSheetDidAppear
-        _storePresentationSnapshot = State(initialValue: Self.storePresentationSnapshot(
-            request: request, store: store))
+        let snapshot = Self.storePresentationSnapshot(request: request, store: store)
         let canSubmit = localExample == nil &&
             Self.canEditSnapshot(request: request, store: store, context: context)
-        if canSubmit {
-            _replyDraftSession = State(initialValue: store.replyEditorSession(for: request))
-        } else {
-            _replyDraftSession = State(initialValue: nil)
-        }
+        _detailState = State(initialValue: DetailPresentationState(
+            replyDraftSession: canSubmit ? store.replyEditorSession(for: request) : nil,
+            storePresentationSnapshot: snapshot))
     }
 
     private var detailColors: HarklightMessageColors {
@@ -1538,13 +1737,6 @@ struct LiveRequestDetail: View {
         return true
     }
 
-    private var noCommentChoice: some View {
-        NoCommentChoiceRow(selected: noCommentSelected,
-                           unavailable: showsNoCommentUnavailable,
-                           canOpenFailureDetails: failedResponseWarning != nil,
-                           onSelect: selectNoCommentAction)
-    }
-
     private func selectNoCommentAction() {
         closeReplyEditor()
         if let session = localReplySession {
@@ -1601,6 +1793,57 @@ struct LiveRequestDetail: View {
             .prefix(2).compactMap(\.first)).uppercased()
     }
 
+    private var answerConfirmation: AnswerConfirmationCard? {
+        if showsAnsweredConfirmation {
+            return AnswerConfirmationCard(
+                title: Self.answeredConfirmationTitle(isDefaultAnswered: request.isDefaultAnswered),
+                answer: confirmedAnswerText,
+                identifier: "request-answered",
+                accessibilityValue: "Completed",
+                symbolName: "checkmark",
+                answerIdentifier: request.isDefaultAnswered
+                    ? "request-default-answer" : "request-account-answer")
+        } else if showsNoCommentConfirmation {
+            return AnswerConfirmationCard(title: "No comment", answer: nil,
+                identifier: "request-no-comment-status",
+                accessibilityValue: "Completed", symbolName: "checkmark")
+        } else if showsPendingAnswerConfirmation {
+            return AnswerConfirmationCard(title: "Pending", answer: pendingAnswerText,
+                identifier: "request-pending-answer-status",
+                accessibilityValue: "Pending", symbolName: "clock",
+                answerIdentifier: "request-pending-answer")
+        } else if showsNotAcceptedConfirmation {
+            return AnswerConfirmationCard(title: "Not accepted", answer: attemptedAnswerText,
+                identifier: "request-not-accepted-status",
+                accessibilityValue: "Not accepted", symbolName: "xmark",
+                answerIdentifier: "request-not-accepted-answer")
+        }
+        return nil
+    }
+
+    private var lifecycleStatusText: String? {
+        guard request.inboxStateIsCurrent else { return nil }
+        if storePresentationSnapshot.isRetracted { return storePresentationSnapshot.retractionLabel }
+        if isSupersedesReadOnly || (request.lifecycleStatus != .open &&
+            request.lifecycleStatus != .answered && !showsNoCommentConfirmation) {
+            return String(localized: LiveLifecycleTitle(request.lifecycleStatus).label)
+        }
+        return nil
+    }
+
+    private var lifecycleReplyText: String? {
+        guard request.inboxStateIsCurrent, !showsAnsweredConfirmation,
+              case let .reply(text)? = request.accountAnswerOutcome else { return nil }
+        return text.rawValue
+    }
+
+    private var lifecycleSeenStatus: InformationalSeenStatus? {
+        guard request.inboxStateIsCurrent, let status = request.informationalSeenStatus,
+              (status != .available || isSupersedesReadOnly),
+              !(seenActionIsComplete && !isSupersedesReadOnly) else { return nil }
+        return status
+    }
+
     var body: some View {
         MessageCardSurface(context: context,
                            replyEditorIsOpen: activeReplyEditor != nil || focusedReplyActionID != nil,
@@ -1608,74 +1851,20 @@ struct LiveRequestDetail: View {
                                focusedReplyActionID = nil
                            }) {
             VStack(alignment: .leading, spacing: 12) {
-                Button {
-                    requestDetailsPresented = true
-                } label: {
-                    MessageHeading(sender: senderLabel,
-                               initials: senderInitials,
-                               title: request.title?.rawValue ?? "Message",
-                               createdAt: request.createdAt,
-                               messageType: context.messageType)
+                RequestDetailHeading(sender: senderLabel, initials: senderInitials,
+                    title: request.title?.rawValue ?? "Message", createdAt: request.createdAt,
+                    messageType: context.messageType,
+                    onOpenDetails: { requestDetailsPresented = true })
+                RequestDetailMetadata(inboxScore: request.inboxScore,
+                    messageType: request.messageType, messageKind: request.messageKind,
+                    deadline: byWhenDate, stake: request.stakeText?.rawValue,
+                    key: request.key, supersedesMessageIDs: request.supersedesMessageIDs,
+                    secondaryTextColor: detailColors.secondary)
+                if !request.supersededByMessageKeys.isEmpty {
+                    ReplacedByMessagesSection(
+                        replacementKeys: request.supersededByMessageKeys,
+                        secondaryTextColor: detailColors.secondary)
                 }
-                .buttonStyle(.plain)
-                .accessibilityIdentifier("request-heading")
-                .accessibilityHint("Open request details")
-                if let priorityLabel = InboxPriorityDisplay.forScore(request.inboxScore) {
-                    Label {
-                        Text(priorityLabel.title)
-                    } icon: {
-                        Image(systemName: "flag.fill")
-                    }
-                        .font(.caption.weight(.semibold))
-                        .accessibilityLabel(Text(priorityLabel.title))
-                        .accessibilityIdentifier("request-priority")
-                }
-                if request.messageType != nil || request.messageKind != nil {
-                    MessageMetadataBadges(messageType: request.messageType,
-                                          messageKind: request.messageKind,
-                                          containsChildAccessibilityElements: true)
-                }
-                if let deadline = byWhenDate {
-                    Label("Deadline · \(deadline.formatted(date: .omitted, time: .shortened))",
-                          systemImage: "calendar")
-                        .font(.subheadline)
-                        .accessibilityIdentifier("request-deadline")
-                }
-                if let stake = request.stakeText {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("What’s at stake")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(detailColors.secondary)
-                        Text(MessageMarkdown.attributed(stake.rawValue))
-                            .font(.body)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .textSelection(.enabled)
-                            .accessibilityIdentifier("request-stake")
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                if !request.supersedesMessageIDs.isEmpty {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("Supersedes")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(detailColors.secondary)
-                        ForEach(request.supersedesMessageIDs, id: \.self) { messageID in
-                            let targetKey = RequestKey(accountScope: request.key.accountScope,
-                                senderID: request.key.senderID, messageID: messageID)
-                            NavigationLink(value: RelatedMessageTarget.supersedes(targetKey)) {
-                                Text(messageID.rawValue)
-                                    .font(.subheadline)
-                                    .textSelection(.enabled)
-                            }
-                            .accessibilityIdentifier("request-supersedes-" + messageID.rawValue)
-                        }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                ReplacedByMessagesSection(
-                    replacementKeys: request.supersededByMessageKeys,
-                    secondaryTextColor: detailColors.secondary
-                )
                 if let localExample {
                     if localExample.message.revised || localExample.message.deadline != nil {
                         LocalSampleContext(response: localExample)
@@ -1711,144 +1900,57 @@ struct LiveRequestDetail: View {
                 if localExample?.message.kind == .review {
                     SampleDiffView()
                 }
-                if showsAnsweredConfirmation {
-                    AnswerConfirmationCard(
-                        title: Self.answeredConfirmationTitle(isDefaultAnswered: request.isDefaultAnswered),
-                        answer: confirmedAnswerText,
-                        identifier: "request-answered",
-                        accessibilityValue: "Completed",
-                        symbolName: "checkmark",
-                        answerIdentifier: request.isDefaultAnswered
-                            ? "request-default-answer" : "request-account-answer")
-                    closingScene
-                } else if showsNoCommentConfirmation {
-                    AnswerConfirmationCard(title: "No comment", answer: nil,
-                        identifier: "request-no-comment-status",
-                        accessibilityValue: "Completed", symbolName: "checkmark")
-                    closingScene
-                } else if showsPendingAnswerConfirmation {
-                    AnswerConfirmationCard(title: "Pending", answer: pendingAnswerText,
-                        identifier: "request-pending-answer-status",
-                        accessibilityValue: "Pending", symbolName: "clock",
-                        answerIdentifier: "request-pending-answer")
-                } else if showsNotAcceptedConfirmation {
-                    AnswerConfirmationCard(title: "Not accepted", answer: attemptedAnswerText,
-                        identifier: "request-not-accepted-status",
-                        accessibilityValue: "Not accepted", symbolName: "xmark",
-                        answerIdentifier: "request-not-accepted-answer")
+                if let answerConfirmation {
+                    answerConfirmation
+                    if showsAnsweredConfirmation || showsNoCommentConfirmation { closingScene }
+                } else if case let .compatibility(actions) = request.projection,
+                          let seenStatus = request.informationalSeenStatus {
+                    InformationalSeenControl(status: seenStatus,
+                        locallyCompleted: localExample?.localSeenSelected == true,
+                        hidden: isSupersedesReadOnly,
+                        sendDisabled: sendControlsDisabled,
+                        textColor: detailColors.text,
+                        secondaryTextColor: detailColors.secondary,
+                        onSeen: {
+                            guard let action = actions.first else { return }
+                            finishSeenAction(action.id, returnToList: returnToListIfSinglePane)
+                        })
                 } else {
-                    switch request.projection {
-                    case let .sender(sender):
-                        VStack(alignment: .leading, spacing: 10) {
-                            LiveProjectedSceneView(request: request,
-                                                   sender: sender,
-                                                   node: sender.scene,
-                                                   store: store,
-                                                   readOnly: controlsReadOnly,
-                                                   hideAnswerControls: isSupersedesReadOnly,
-                                                   focusedReplyActionID: $focusedReplyActionID,
-                                                   activeReplyEditor: activeReplyEditor,
-                                                   localReplyDraftSession: localReplySession,
-                                                   openReplyEditor: { openReplyEditor($0) },
-                                                   replyTextBinding: { replyTextBinding(for: $0) },
-                                                   closeReplyEditor: closeReplyEditor,
-                                                   onLocalReplyInteraction: markLocalReplyInteraction,
-                                                   localExample: localExample,
-                                                   enlargePicture: { enlargedPicture = $0 })
-                            if canOfferNoComment { noCommentChoice }
-                        }
-                    case let .compatibility(actions):
-                        LiveCompatibilityActions(request: request,
-                                                 actions: actions,
-                                                 store: store,
-                                                 readOnly: controlsReadOnly,
-                                                 hideAnswerControls: isSupersedesReadOnly,
-                                                 sendDisabled: sendControlsDisabled,
-                                                 localExample: localExample,
-                                                 onSeen: { action in
-                                                     finishSeenAction(action, returnToList: returnToListIfSinglePane)
-                                                 },
-                                                 canOfferNoComment: canOfferNoComment,
-                                                 noCommentSelected: noCommentSelected,
-                                                 noCommentUnavailable: showsNoCommentUnavailable,
-                                                 canOpenFailureDetails: failedResponseWarning != nil,
-                                                 onSelectNoComment: selectNoCommentAction,
-                                                 focusedReplyActionID: $focusedReplyActionID,
-                                                 replyTextBinding: { replyTextBinding(for: $0) },
-                                                 localReplyDraftSession: localReplySession,
-                                                 activeReplyEditor: activeReplyEditor,
-                                                 openReplyEditor: { openReplyEditor($0) },
-                                                 closeReplyEditor: closeReplyEditor,
-                                                 onLocalReplyInteraction: markLocalReplyInteraction)
-                    case .unsupported:
-                        VStack(alignment: .leading, spacing: 10) {
-                            Text("This request uses an unsupported answer format.")
-                                .foregroundStyle(detailColors.secondary)
-                            if canOfferNoComment { noCommentChoice }
-                        }
-                    }
+                    LiveRequestAnswerControls(
+                        request: request, store: store,
+                        controlsReadOnly: controlsReadOnly,
+                        isSupersedesReadOnly: isSupersedesReadOnly,
+                        sendControlsDisabled: sendControlsDisabled,
+                        localExample: localExample,
+                        canOfferNoComment: canOfferNoComment,
+                        noCommentSelected: noCommentSelected,
+                        showsNoCommentUnavailable: showsNoCommentUnavailable,
+                        canOpenFailureDetails: failedResponseWarning != nil,
+                        secondaryTextColor: detailColors.secondary,
+                        focusedReplyActionID: $focusedReplyActionID,
+                        activeReplyEditor: activeReplyEditor,
+                        localReplySession: localReplySession,
+                        openReplyEditor: openReplyEditor,
+                        replyTextBinding: { replyTextBinding(for: $0) },
+                        closeReplyEditor: closeReplyEditor,
+                        markLocalReplyInteraction: markLocalReplyInteraction,
+                        selectNoCommentAction: selectNoCommentAction,
+                        onSeen: { action in
+                            finishSeenAction(action, returnToList: returnToListIfSinglePane)
+                        },
+                        enlargePicture: { enlargedPicture = $0 })
                 }
-                if request.inboxStateIsCurrent {
-                    if storePresentationSnapshot.isRetracted {
-                        Text(storePresentationSnapshot.retractionLabel)
-                            .font(.caption).foregroundStyle(detailColors.secondary)
-                            .accessibilityIdentifier("request-lifecycle-status")
-                    } else if isSupersedesReadOnly {
-                        Text(String(localized: LiveLifecycleTitle(request.lifecycleStatus).label))
-                            .font(.caption).foregroundStyle(detailColors.secondary)
-                            .accessibilityIdentifier("request-lifecycle-status")
-                    } else if request.lifecycleStatus != .open && request.lifecycleStatus != .answered &&
-                                !showsNoCommentConfirmation {
-                        Text(String(localized: LiveLifecycleTitle(request.lifecycleStatus).label))
-                            .font(.caption).foregroundStyle(detailColors.secondary)
-                            .accessibilityIdentifier("request-lifecycle-status")
-                    }
-                    if case let .reply(answerText)? = request.accountAnswerOutcome,
-                       !showsAnsweredConfirmation {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Reply")
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(detailColors.secondary)
-                            Text(answerText.rawValue)
-                                .font(.subheadline)
-                                .foregroundStyle(detailColors.text)
-                                .textSelection(.enabled)
-                                .accessibilityIdentifier("request-account-answer")
-                        }
-                    }
-                    if let seenStatus = request.informationalSeenStatus,
-                       (seenStatus != .available || isSupersedesReadOnly),
-                       !(seenActionIsComplete && !isSupersedesReadOnly) {
-                        Label(Self.informationalSeenText(seenStatus),
-                              systemImage: Self.informationalSeenSymbol(seenStatus))
-                            .font(.caption).foregroundStyle(detailColors.secondary)
-                            .accessibilityIdentifier("informational-seen-status")
-                    }
-                } else {
-                    Label("Cached history · status not refreshed", systemImage: "clock.arrow.circlepath")
-                        .font(.caption).foregroundStyle(detailColors.secondary)
-                        .accessibilityIdentifier("inbox-status-unrefreshed")
-                    if failedResponseWarning == nil,
-                       let localStatus = store.answerOperationStatus(request.intentReceipt) {
-                        Text(localStatus).font(.caption).foregroundStyle(detailColors.secondary)
-                    }
-                }
-                if request.isDefaultAnswered && !showsAnsweredConfirmation {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Label("Answered by default", systemImage: "clock")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(detailColors.secondary)
-                            .accessibilityIdentifier("request-default-answer-status")
-                        if let answerWords = request.defaultAnswerWords, !answerWords.isEmpty {
-                            Text(answerWords)
-                                .font(.subheadline)
-                                .foregroundStyle(detailColors.text)
-                                .fixedSize(horizontal: false, vertical: true)
-                                .textSelection(.enabled)
-                                .accessibilityIdentifier("request-default-answer")
-                        }
-                    }
-                }
+                RequestDetailLifecycleContent(
+                    isCurrent: request.inboxStateIsCurrent,
+                    lifecycleText: lifecycleStatusText,
+                    replyText: lifecycleReplyText,
+                    seenStatus: lifecycleSeenStatus,
+                    localOperationStatus: failedResponseWarning == nil && !request.inboxStateIsCurrent
+                        ? store.answerOperationStatus(request.intentReceipt) : nil,
+                    showsDefaultAnswer: request.isDefaultAnswered && !showsAnsweredConfirmation,
+                    defaultAnswerWords: request.defaultAnswerWords,
+                    textColor: detailColors.text,
+                    secondaryTextColor: detailColors.secondary)
                 if !isSupersedesReadOnly, localExample == nil, fixtureStore == nil,
                    let receipt = request.intentReceipt,
                    [.terminalUnconfirmed, .notDelivered, .unsupported].contains(receipt.localState) {
@@ -1868,7 +1970,7 @@ struct LiveRequestDetail: View {
                     }
                     .accessibilityIdentifier("fixture-outcome-menu")
                     .confirmationDialog("Simulate fixture outcome",
-                                        isPresented: $fixtureOutcomePresented,
+                                        isPresented: $detailState.fixtureOutcomePresented,
                                         titleVisibility: .visible) {
                         ForEach([DemoTerminalScenario.ownOperationAccepted,
                                  .answerOutcomeUnconfirmed, .cleared]) { scenario in
@@ -1951,100 +2053,231 @@ struct LiveRequestDetail: View {
                 }
             }
         }
-        .sheet(item: $enlargedPicture) { picture in
-            SamplePictureViewer(initialPicture: picture)
-                .foregroundChatNotificationLayer(testRouter: testNotificationRouter,
-                                                 testOpen: testOpenForegroundChatIndicator)
-        }
-        .sheet(isPresented: $requestDetailsPresented) {
-            requestDetailsSheet
-                .foregroundChatNotificationLayer(testRouter: testNotificationRouter,
-                                                 testOpen: testOpenForegroundChatIndicator)
-        }
-        .sheet(item: $warningDialog) { dialogKind in
-            Group {
-                switch dialogKind {
-                case .failedResponse:
-                    if let warning = failedResponseWarning {
-                        FailedResponseDialog(title: "Response delivery",
-                            summary: warning.summary,
-                            detail: .localized(warning.detail),
-                            canRetry: store.canRetryFailedResponse(for: request.key),
-                            onRetry: { _ = store.retryFailedResponse(for: request.key) },
-                            onCopy: { UIPasteboard.general.string = $0 })
+        .modifier(DetailPresentationModifier(
+            enlargedPicture: $detailState.enlargedPicture,
+            requestDetailsPresented: $detailState.requestDetailsPresented,
+            warningDialog: $detailState.warningDialog,
+            chatPresented: $detailState.chatPresented,
+            pendingChatScrollTarget: $detailState.pendingChatScrollTarget,
+            requestKey: request.key, store: store,
+            failedResponseWarning: failedResponseWarning,
+            skippedMessageWarning: skippedMessageWarning,
+            testNotificationRouter: testNotificationRouter,
+            testOpenForegroundChatIndicator: testOpenForegroundChatIndicator,
+            requestDetailsSheet: { requestDetailsSheet },
+            conversationPanel: { conversationPanel }))
+        .modifier(DetailChangeEffects(
+            inlineChat: context.inlineChat,
+            chatTargetFallsBackToMessage: context.chatTargetFallsBackToMessage,
+            notificationChatRouteSerial: context.notificationChatRouteSerial,
+            request: request, conversationThreads: store.conversationThreads,
+            focusedReplyActionID: focusedReplyActionID,
+            failedResponseWarning: failedResponseWarning,
+            skippedMessageWarning: skippedMessageWarning,
+            chatPresented: $detailState.chatPresented, warningDialog: $detailState.warningDialog,
+            openNotificationChat: openNotificationChat,
+            refreshRequestPresentation: refreshRequestPresentation,
+            activateReplyFocus: activateReplyFocus,
+            resetReplyForRequest: resetReplyForRequest))
+        .preference(key: ReplyEditorFocusKey.self, value: focusedReplyActionID != nil)
+    }
+
+    private struct RequestDetailsSheet: View {
+        let sender: String
+        let messageID: String
+        let originalContentJSON: String
+        let answerJSON: String?
+        let receiptEvidence: String?
+        @Binding var isPresented: Bool
+
+        var body: some View {
+            NavigationStack {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        Text("Sender: \(sender)")
+                        Text("Message: \(messageID)")
+                        Text(originalContentJSON)
+                            .font(.caption.monospaced())
+                            .textSelection(.enabled)
+                            .accessibilityIdentifier("request-original-content-json")
+                        if let answerJSON {
+                            Text("Original answer")
+                                .font(.headline)
+                            Text(answerJSON)
+                                .font(.caption.monospaced())
+                                .textSelection(.enabled)
+                                .accessibilityIdentifier("request-details-original-answer-json")
+                        }
+                        if let receiptEvidence {
+                            Text("Receipt evidence")
+                                .font(.headline)
+                            Text(receiptEvidence)
+                                .font(.caption)
+                                .textSelection(.enabled)
+                                .accessibilityIdentifier("request-details-receipt-evidence")
+                        }
                     }
-                case .skippedMessage:
-                    if let warning = skippedMessageWarning {
-                        FailedResponseDialog(title: "Message not loaded",
-                            summary: "The message could not be loaded and was skipped.",
-                            detail: .plain(store.skippedMessageDiagnosticText(for: warning) ??
-                                "The safe diagnostic details are no longer retained."),
-                            accessibilityPrefix: "message-load-warning",
-                            canRetry: false,
-                            onRetry: nil,
-                            onCopy: { UIPasteboard.general.string = $0 })
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding()
+                }
+                .navigationTitle("Request details")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Done") { isPresented = false }
+                            .accessibilityIdentifier("request-details-done")
                     }
                 }
             }
-            .foregroundChatNotificationLayer(testRouter: testNotificationRouter,
-                                             testOpen: testOpenForegroundChatIndicator)
         }
-        .sheet(isPresented: $chatPresented, onDismiss: { pendingChatScrollTarget = nil }) {
-            conversationPanel
+    }
+
+    private struct DetailPresentationModifier: ViewModifier {
+        @Binding var enlargedPicture: SampleOption?
+        @Binding var requestDetailsPresented: Bool
+        @Binding var warningDialog: WarningDialogKind?
+        @Binding var chatPresented: Bool
+        @Binding var pendingChatScrollTarget: ExactText?
+        let requestKey: RequestKey
+        let store: LivePresentationStore
+        let failedResponseWarning: LivePresentationStore.FailedResponseWarning?
+        let skippedMessageWarning: LivePresentationStore.SkippedMessageWarning?
+        let testNotificationRouter: NativeNotificationRouter?
+        let testOpenForegroundChatIndicator: (() -> Void)?
+        let requestDetailsSheet: () -> RequestDetailsSheet
+        let conversationPanel: () -> ConversationPanel
+
+        func body(content: Content) -> some View {
+            content
+            .sheet(item: $enlargedPicture) { picture in
+                SamplePictureViewer(initialPicture: picture)
+                    .foregroundChatNotificationLayer(testRouter: testNotificationRouter,
+                                                     testOpen: testOpenForegroundChatIndicator)
+            }
+            .sheet(isPresented: $requestDetailsPresented) {
+                requestDetailsSheet()
+                    .foregroundChatNotificationLayer(testRouter: testNotificationRouter,
+                                                     testOpen: testOpenForegroundChatIndicator)
+            }
+            .sheet(item: $warningDialog) { dialogKind in
+                Group {
+                    switch dialogKind {
+                    case .failedResponse:
+                        if let warning = failedResponseWarning {
+                            FailedResponseDialog(title: "Response delivery",
+                                summary: warning.summary,
+                                detail: .localized(warning.detail),
+                                canRetry: store.canRetryFailedResponse(for: requestKey),
+                                onRetry: { _ = store.retryFailedResponse(for: requestKey) },
+                                onCopy: { UIPasteboard.general.string = $0 })
+                        }
+                    case .skippedMessage:
+                        if let warning = skippedMessageWarning {
+                            FailedResponseDialog(title: "Message not loaded",
+                                summary: "The message could not be loaded and was skipped.",
+                                detail: .plain(store.skippedMessageDiagnosticText(for: warning) ??
+                                    "The safe diagnostic details are no longer retained."),
+                                accessibilityPrefix: "message-load-warning",
+                                canRetry: false,
+                                onRetry: nil,
+                                onCopy: { UIPasteboard.general.string = $0 })
+                        }
+                    }
+                }
                 .foregroundChatNotificationLayer(testRouter: testNotificationRouter,
                                                  testOpen: testOpenForegroundChatIndicator)
-                .harklightSheetSurface()
-        }
-        .onChange(of: context.inlineChat) { _, inline in
-            if inline { chatPresented = false }
-        }
-        .onChange(of: context.chatTargetFallsBackToMessage) { _, fallsBack in
-            if fallsBack { chatPresented = false }
-        }
-        .onChange(of: context.notificationChatRouteSerial, initial: true) { _, serial in
-            guard serial != nil else { return }
-            // Capture the scroll target before didOpen, which may clear the route.
-            pendingChatScrollTarget = context.chatScrollTargetTurnID
-            if !context.inlineChat { chatPresented = true }
-            context.notificationChatRouteDidOpen?()
-        }
-        .onChange(of: request) { _, _ in
-            refreshStorePresentationSnapshot()
-            refreshUneditedReplySession()
-        }
-        .onChange(of: focusedReplyActionID) { _, focused in
-            if focused != nil {
-                NativePushedViewCoordinator.shared.replyEditorFocusChanged(true,
-                                                                           resetActivity: true)
-                activatePassivePushContent()
+            }
+            .sheet(isPresented: $chatPresented, onDismiss: { pendingChatScrollTarget = nil }) {
+                conversationPanel()
+                    .foregroundChatNotificationLayer(testRouter: testNotificationRouter,
+                                                     testOpen: testOpenForegroundChatIndicator)
+                    .harklightSheetSurface()
             }
         }
-        .onChange(of: failedResponseWarning) { previous, current in
-            if previous != nil, current == nil, warningDialog == .failedResponse {
-                warningDialog = nil
+    }
+
+    private struct DetailChangeEffects: ViewModifier {
+        let inlineChat: Bool
+        let chatTargetFallsBackToMessage: Bool
+        let notificationChatRouteSerial: UInt64?
+        let request: PresentedRequest
+        let conversationThreads: [RequestKey: ConversationThread]
+        let focusedReplyActionID: String?
+        let failedResponseWarning: LivePresentationStore.FailedResponseWarning?
+        let skippedMessageWarning: LivePresentationStore.SkippedMessageWarning?
+        @Binding var chatPresented: Bool
+        @Binding var warningDialog: WarningDialogKind?
+        let openNotificationChat: () -> Void
+        let refreshRequestPresentation: () -> Void
+        let activateReplyFocus: () -> Void
+        let resetReplyForRequest: () -> Void
+
+        func body(content: Content) -> some View {
+            content
+            .onChange(of: inlineChat) { _, inline in
+                if inline { chatPresented = false }
+            }
+            .onChange(of: chatTargetFallsBackToMessage) { _, fallsBack in
+                if fallsBack { chatPresented = false }
+            }
+            .onChange(of: notificationChatRouteSerial, initial: true) { _, serial in
+                guard serial != nil else { return }
+                openNotificationChat()
+            }
+            .onChange(of: request) { _, _ in
+                refreshRequestPresentation()
+            }
+            .onChange(of: focusedReplyActionID) { _, focused in
+                if focused != nil {
+                    activateReplyFocus()
+                }
+            }
+            .onChange(of: failedResponseWarning) { previous, current in
+                if previous != nil, current == nil, warningDialog == .failedResponse {
+                    warningDialog = nil
+                }
+            }
+            .onChange(of: skippedMessageWarning) { previous, current in
+                if previous != nil, current == nil, warningDialog == .skippedMessage {
+                    warningDialog = nil
+                }
+            }
+            .onChange(of: conversationThreads) { _, _ in
+                refreshRequestPresentation()
+            }
+            .onChange(of: request.key) { _, _ in
+                resetReplyForRequest()
             }
         }
-        .onChange(of: skippedMessageWarning) { previous, current in
-            if previous != nil, current == nil, warningDialog == .skippedMessage {
-                warningDialog = nil
-            }
+    }
+
+    private func openNotificationChat() {
+        // Capture the scroll target before didOpen, which may clear the route.
+        pendingChatScrollTarget = context.chatScrollTargetTurnID
+        if !context.inlineChat { chatPresented = true }
+        context.notificationChatRouteDidOpen?()
+    }
+
+    private func refreshRequestPresentation() {
+        refreshStorePresentationSnapshot()
+        refreshUneditedReplySession()
+    }
+
+    private func activateReplyFocus() {
+        NativePushedViewCoordinator.shared.replyEditorFocusChanged(true, resetActivity: true)
+        activatePassivePushContent()
+    }
+
+    private func resetReplyForRequest() {
+        closeReplyEditor()
+        localReplyEditingActive = false
+        let canSubmit = localExample == nil &&
+            Self.canEditSnapshot(request: request, store: store, context: context)
+        if canSubmit {
+            replyDraftSession = store.replyEditorSession(for: request)
+        } else {
+            replyDraftSession = nil
         }
-        .onChange(of: store.conversationThreads) { _, _ in
-            refreshStorePresentationSnapshot()
-            refreshUneditedReplySession()
-        }
-        .onChange(of: request.key) { _, _ in
-            closeReplyEditor()
-            localReplyEditingActive = false
-            let canSubmit = localExample == nil &&
-                Self.canEditSnapshot(request: request, store: store, context: context)
-            if canSubmit {
-                replyDraftSession = store.replyEditorSession(for: request)
-            } else {
-                replyDraftSession = nil
-            }
-        }
-        .preference(key: ReplyEditorFocusKey.self, value: focusedReplyActionID != nil)
     }
 
     private func refreshUneditedReplySession() {
@@ -2184,45 +2417,12 @@ struct LiveRequestDetail: View {
         }
     }
 
-    private var requestDetailsSheet: some View {
-        NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
-                    Text("Sender: \(detailSenderLabel)")
-                    Text("Message: \(request.key.messageID.rawValue)")
-                    Text(request.originalContentJSON)
-                        .font(.caption.monospaced())
-                        .textSelection(.enabled)
-                        .accessibilityIdentifier("request-original-content-json")
-                    if let receipt = request.intentReceipt {
-                        Text("Original answer")
-                            .font(.headline)
-                        Text(receipt.exactAnswerJSON)
-                            .font(.caption.monospaced())
-                            .textSelection(.enabled)
-                            .accessibilityIdentifier("request-details-original-answer-json")
-                    }
-                    if let facts = request.receiptFacts {
-                        Text("Receipt evidence")
-                            .font(.headline)
-                        Text(facts.evidenceLabel)
-                            .font(.caption)
-                            .textSelection(.enabled)
-                            .accessibilityIdentifier("request-details-receipt-evidence")
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding()
-            }
-            .navigationTitle("Request details")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") { requestDetailsPresented = false }
-                        .accessibilityIdentifier("request-details-done")
-                }
-            }
-        }
+    private var requestDetailsSheet: RequestDetailsSheet {
+        RequestDetailsSheet(sender: detailSenderLabel, messageID: request.key.messageID.rawValue,
+            originalContentJSON: request.originalContentJSON,
+            answerJSON: request.intentReceipt?.exactAnswerJSON,
+            receiptEvidence: request.receiptFacts?.evidenceLabel,
+            isPresented: $detailState.requestDetailsPresented)
     }
 
     private var conversationIndicator: Bool? {
@@ -2233,7 +2433,7 @@ struct LiveRequestDetail: View {
         return storePresentationSnapshot.conversationIndicator
     }
 
-    private var conversationPanel: some View {
+    private var conversationPanel: ConversationPanel {
         ConversationPanel(store: store, key: request.key,
             sender: detailSenderLabel, title: request.title?.rawValue ?? "",
             initialScrollTurnID: pendingChatScrollTarget,
@@ -2254,7 +2454,7 @@ struct LiveRequestDetail: View {
         }
     }
 
-    private static func informationalSeenSymbol(_ status: InformationalSeenStatus) -> String {
+    fileprivate static func informationalSeenSymbol(_ status: InformationalSeenStatus) -> String {
         switch status {
         case .available: "info.circle"
         case .pending: "clock"
@@ -2528,6 +2728,91 @@ private func senderPictureLoader(for request: PresentedRequest,
     { file in
         try await store.prepareConversationPreview(file, for: request.key,
                                                   revision: 1)
+    }
+}
+
+/// A concrete boundary keeps the answer projection's generic view tree out of
+/// the surrounding card and its sheets. Draft and navigation state stay above it.
+@MainActor
+private struct LiveRequestAnswerControls: View {
+    let request: PresentedRequest
+    let store: LivePresentationStore
+    let controlsReadOnly: Bool
+    let isSupersedesReadOnly: Bool
+    let sendControlsDisabled: Bool
+    let localExample: SampleResponse?
+    let canOfferNoComment: Bool
+    let noCommentSelected: Bool
+    let showsNoCommentUnavailable: Bool
+    let canOpenFailureDetails: Bool
+    let secondaryTextColor: Color
+    @FocusState.Binding var focusedReplyActionID: String?
+    let activeReplyEditor: ReplyEditorTarget?
+    let localReplySession: ReplyEditorDraftSession?
+    let openReplyEditor: (ReplyEditorTarget) -> Void
+    let replyTextBinding: (ReplyEditorTarget) -> Binding<String>
+    let closeReplyEditor: () -> Void
+    let markLocalReplyInteraction: () -> Void
+    let selectNoCommentAction: () -> Void
+    let onSeen: (ExactText) -> Void
+    let enlargePicture: (SampleOption) -> Void
+
+    private var noCommentChoice: some View {
+        NoCommentChoiceRow(selected: noCommentSelected,
+                           unavailable: showsNoCommentUnavailable,
+                           canOpenFailureDetails: canOpenFailureDetails,
+                           onSelect: selectNoCommentAction)
+    }
+
+    var body: some View {
+        switch request.projection {
+        case let .sender(sender):
+            VStack(alignment: .leading, spacing: 10) {
+                LiveProjectedSceneView(request: request,
+                                       sender: sender,
+                                       node: sender.scene,
+                                       store: store,
+                                       readOnly: controlsReadOnly,
+                                       hideAnswerControls: isSupersedesReadOnly,
+                                       focusedReplyActionID: $focusedReplyActionID,
+                                       activeReplyEditor: activeReplyEditor,
+                                       localReplyDraftSession: localReplySession,
+                                       openReplyEditor: { openReplyEditor($0) },
+                                       replyTextBinding: { replyTextBinding($0) },
+                                       closeReplyEditor: closeReplyEditor,
+                                       onLocalReplyInteraction: markLocalReplyInteraction,
+                                       localExample: localExample,
+                                       enlargePicture: enlargePicture)
+                if canOfferNoComment { noCommentChoice }
+            }
+        case let .compatibility(actions):
+            LiveCompatibilityActions(request: request,
+                                     actions: actions,
+                                     store: store,
+                                     readOnly: controlsReadOnly,
+                                     hideAnswerControls: isSupersedesReadOnly,
+                                     sendDisabled: sendControlsDisabled,
+                                     localExample: localExample,
+                                     onSeen: onSeen,
+                                     canOfferNoComment: canOfferNoComment,
+                                     noCommentSelected: noCommentSelected,
+                                     noCommentUnavailable: showsNoCommentUnavailable,
+                                     canOpenFailureDetails: canOpenFailureDetails,
+                                     onSelectNoComment: selectNoCommentAction,
+                                     focusedReplyActionID: $focusedReplyActionID,
+                                     replyTextBinding: { replyTextBinding($0) },
+                                     localReplyDraftSession: localReplySession,
+                                     activeReplyEditor: activeReplyEditor,
+                                     openReplyEditor: { openReplyEditor($0) },
+                                     closeReplyEditor: closeReplyEditor,
+                                     onLocalReplyInteraction: markLocalReplyInteraction)
+        case .unsupported:
+            VStack(alignment: .leading, spacing: 10) {
+                Text("This request uses an unsupported answer format.")
+                    .foregroundStyle(secondaryTextColor)
+                if canOfferNoComment { noCommentChoice }
+            }
+        }
     }
 }
 
@@ -2989,6 +3274,73 @@ private struct LiveProjectedInputView: View {
 }
 
 @MainActor
+private struct InformationalSeenControl: View {
+    let status: InformationalSeenStatus
+    let locallyCompleted: Bool
+    let hidden: Bool
+    let sendDisabled: Bool
+    let textColor: Color
+    let secondaryTextColor: Color
+    let onSeen: () -> Void
+
+    private var seenActionPresentation: SeenActionPresentation {
+        SeenActionPresentation(status: status)
+    }
+
+    var body: some View {
+        if hidden {
+            EmptyView()
+        } else if locallyCompleted || seenActionPresentation.isCompleted {
+            AnswerConfirmationCard(title: "Seen", answer: nil,
+                identifier: "request-seen-confirmation",
+                accessibilityValue: "Completed", symbolName: "checkmark")
+        } else {
+            VStack(alignment: .leading, spacing: 8) {
+                switch status {
+                case .available:
+                    Button(action: onSeen) {
+                        Label("Seen", systemImage: "eye")
+                            .font(.body.weight(.semibold))
+                            .foregroundStyle(textColor)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 6)
+                    }
+                    .buttonStyle(.glass)
+                    .controlSize(.large)
+                    .fixedSize(horizontal: true, vertical: false)
+                    .disabled(sendDisabled)
+                    .accessibilityLabel(Text(seenActionPresentation.accessibilityLabel))
+                    .accessibilityValue(Text(seenActionPresentation.accessibilityValue))
+                    .accessibilityIdentifier("request-seen-action")
+                case .pending:
+                    Button {} label: {
+                        HStack(spacing: 10) {
+                            Image(systemName: "clock")
+                                .foregroundStyle(secondaryTextColor)
+                            Text(seenActionPresentation.title)
+                                .foregroundStyle(secondaryTextColor)
+                        }
+                        .font(.headline)
+                        .frame(maxWidth: .infinity, minHeight: 50)
+                    }
+                    .buttonStyle(.glass)
+                    .tint(secondaryTextColor)
+                    .disabled(true)
+                    .accessibilityLabel(Text(seenActionPresentation.accessibilityLabel))
+                    .accessibilityValue(Text(seenActionPresentation.accessibilityValue))
+                    .accessibilityIdentifier("request-seen-action")
+                case .confirmed:
+                    AnswerConfirmationCard(title: "Seen", answer: nil,
+                        identifier: "request-seen-confirmation",
+                        accessibilityValue: "Completed", symbolName: "checkmark")
+                case .resolvedWithoutSeen:
+                    Label("Resolved without Seen confirmation", systemImage: "checkmark.circle")
+                }
+            }
+        }
+    }
+}
+
 private struct LiveCompatibilityActions: View {
     let request: PresentedRequest
     let actions: [ProjectedAction]
@@ -3078,69 +3430,31 @@ private struct LiveCompatibilityActions: View {
 
     @ViewBuilder
     var body: some View {
-        if hideAnswerControls {
-            if request.informationalSeenStatus == nil {
-                VStack(alignment: .leading, spacing: 10) {
-                    ForEach(actions, id: \.id) { action in
-                        Text(action.label.rawValue)
+        if let seenStatus = request.informationalSeenStatus {
+            InformationalSeenControl(status: seenStatus,
+                locallyCompleted: localExample?.localSeenSelected == true,
+                hidden: hideAnswerControls, sendDisabled: sendDisabled,
+                textColor: detailColors.text,
+                secondaryTextColor: detailColors.secondary,
+                onSeen: {
+                    guard seenStatus == .available, let action = actions.first else { return }
+                    if let onSeen {
+                        onSeen(action.id)
+                    } else {
+                        store.submitFromUser(request.key, explicitCompatibilityAction: action.id,
+                                             requestRevision: request.requestRevision)
                     }
+                })
+        } else if hideAnswerControls {
+            VStack(alignment: .leading, spacing: 10) {
+                ForEach(actions, id: \.id) { action in
+                    Text(action.label.rawValue)
                 }
             }
         } else if seenActionIsComplete {
             AnswerConfirmationCard(title: "Seen", answer: nil,
                 identifier: "request-seen-confirmation",
                 accessibilityValue: "Completed", symbolName: "checkmark")
-        } else if let seenStatus = request.informationalSeenStatus {
-            VStack(alignment: .leading, spacing: 8) {
-                switch seenStatus {
-                case .available:
-                    Button {
-                        guard seenStatus == .available, let action = actions.first else { return }
-                        if let onSeen {
-                            onSeen(action.id)
-                        } else {
-                            store.submitFromUser(request.key, explicitCompatibilityAction: action.id,
-                                                 requestRevision: request.requestRevision)
-                        }
-                    } label: {
-                        Label("Seen", systemImage: "eye")
-                            .font(.body.weight(.semibold))
-                            .foregroundStyle(detailColors.text)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 6)
-                    }
-                    .buttonStyle(.glass)
-                    .controlSize(.large)
-                    .fixedSize(horizontal: true, vertical: false)
-                    .disabled(sendDisabled)
-                    .accessibilityLabel(Text(seenActionPresentation.accessibilityLabel))
-                    .accessibilityValue(Text(seenActionPresentation.accessibilityValue))
-                    .accessibilityIdentifier("request-seen-action")
-                case .pending:
-                    Button {} label: {
-                        HStack(spacing: 10) {
-                            Image(systemName: "clock")
-                                .foregroundStyle(detailColors.secondary)
-                            Text(seenActionPresentation.title)
-                                .foregroundStyle(detailColors.secondary)
-                        }
-                        .font(.headline)
-                        .frame(maxWidth: .infinity, minHeight: 50)
-                    }
-                    .buttonStyle(.glass)
-                    .tint(detailColors.secondary)
-                    .disabled(true)
-                    .accessibilityLabel(Text(seenActionPresentation.accessibilityLabel))
-                    .accessibilityValue(Text(seenActionPresentation.accessibilityValue))
-                    .accessibilityIdentifier("request-seen-action")
-                case .confirmed:
-                    AnswerConfirmationCard(title: "Seen", answer: nil,
-                        identifier: "request-seen-confirmation",
-                        accessibilityValue: "Completed", symbolName: "checkmark")
-                case .resolvedWithoutSeen:
-                    Label("Resolved without Seen confirmation", systemImage: "checkmark.circle")
-                }
-            }
         } else {
             VStack(alignment: .leading, spacing: 10) {
                 ForEach(actions, id: \.id) { action in
