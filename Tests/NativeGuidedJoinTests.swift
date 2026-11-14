@@ -136,7 +136,7 @@ final class NativeGuidedJoinTests: XCTestCase {
         let renewedDeadline = now + 86_400_000
         transport.handler = { url, method, body in
             if method == "GET" { return try response(["error": "invalid_request"], status: 400) }
-            XCTAssertEqual(url.path, "/enroll/resume", "A fresh link must continue the original Join, not submit another")
+            XCTAssertEqual(url.path, "/enroll/status", "The Server reports whether the saved Join is still pending")
             let fields = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(body)) as? [String: String])
             XCTAssertEqual(fields["status_secret"], original.statusSecret)
             statusChecks += 1
@@ -154,6 +154,83 @@ final class NativeGuidedJoinTests: XCTestCase {
         XCTAssertEqual(saved.statusSecret, original.statusSecret)
         XCTAssertEqual(saved.approvalCode, "FGHIJK2345")
         XCTAssertEqual(saved.approvalExpiresAt, renewedDeadline)
+    }
+
+    func testPendingApprovalCodeRemainsAvailableWhenClientClockIsAhead() async throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanup() }
+        let transport = FakeTransport()
+        let store = NativeGuidedJoinStore(namespace: fixture.namespace, transport: transport)
+        let original = try store.prepare(fixture.invitation, deviceLabel: "My phone")
+        fixture.retainForCleanup(original)
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        let serverDeadline = now - 60_000
+        let statusDeadline = now + 86_400_000
+        transport.handler = { _, _, _ in
+            try response(["state": "pending", "approval_code": "ABCDEF2345",
+                          "expires_at": serverDeadline, "status_expires_at": statusDeadline])
+        }
+        _ = try await store.submit()
+        transport.handler = { url, _, _ in
+            XCTAssertEqual(url.path, "/enroll/status", "The Server owns pending versus expired state")
+            try response(["state": "pending", "approval_code": "ABCDEF2345",
+                          "expires_at": serverDeadline, "status_expires_at": statusDeadline])
+        }
+
+        let flow = NativeGuidedJoinCoordinator(store: store, deviceName: "My phone")
+        await flow.restore()
+
+        XCTAssertEqual(flow.screen, .pending)
+        XCTAssertEqual(flow.currentApprovalCode, "ABCDEF2345")
+    }
+
+    func testPreparedExpiredInvitationUsesServerAfterResumeHasNoReceipt() async throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanup() }
+        let transport = FakeTransport()
+        let store = NativeGuidedJoinStore(namespace: fixture.namespace, transport: transport)
+        let original = try store.prepare(fixture.invitation, deviceLabel: "My phone")
+        fixture.retainForCleanup(original)
+        var fields = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(original)) as? [String: Any])
+        var invitation = try XCTUnwrap(fields["invitation"] as? [String: Any])
+        invitation["expires_at"] = Int64(Date().timeIntervalSince1970 * 1000) - 60_000
+        fields["invitation"] = invitation
+        let aged = try JSONDecoder().decode(NativeJoinAttempt.self, from: JSONSerialization.data(withJSONObject: fields))
+        try fixture.saveLegacyAttempt(aged)
+
+        var statusQueries = 0
+        var resumes = 0
+        var joins = 0
+        transport.handler = { url, _, body in
+            switch url.path {
+            case "/enroll/status":
+                statusQueries += 1
+                return try response(["error": "not_found"], status: 404)
+            case "/enroll/resume":
+                resumes += 1
+                let fields = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(body)) as? [String: String])
+                XCTAssertEqual(fields["status_secret"], original.statusSecret)
+                return try response(["error": "not_found"], status: 404)
+            case "/enroll":
+                joins += 1
+                let fields = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(body)) as? [String: String])
+                XCTAssertEqual(fields["status_secret"], original.statusSecret)
+                XCTAssertEqual(fields["invite_token"], original.invitation.inviteToken)
+                return try response(["error": "expired"], status: 410)
+            default:
+                XCTFail("Unexpected request path: \(url.path)")
+                return try response(["error": "not_found"], status: 404)
+            }
+        }
+
+        let flow = NativeGuidedJoinCoordinator(store: store, deviceName: "My phone")
+        await flow.restore()
+
+        XCTAssertEqual(statusQueries, 1)
+        XCTAssertEqual(resumes, 1)
+        XCTAssertEqual(joins, 1)
+        XCTAssertEqual(try store.loadAttempt()?.phase, .expired)
+        XCTAssertEqual(flow.screen, .invitationExpired)
     }
 
     func testLegacyExpiredJoinResumesAutomaticallyAfterLostReplyAndRestart() async throws {
