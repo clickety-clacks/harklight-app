@@ -173,8 +173,8 @@ final class NativeGuidedJoinTests: XCTestCase {
         _ = try await store.submit()
         transport.handler = { url, _, _ in
             XCTAssertEqual(url.path, "/enroll/status", "The Server owns pending versus expired state")
-            try response(["state": "pending", "approval_code": "ABCDEF2345",
-                          "expires_at": serverDeadline, "status_expires_at": statusDeadline])
+            return try response(["state": "pending", "approval_code": "ABCDEF2345",
+                                 "expires_at": serverDeadline, "status_expires_at": statusDeadline])
         }
 
         let flow = NativeGuidedJoinCoordinator(store: store, deviceName: "My phone")
