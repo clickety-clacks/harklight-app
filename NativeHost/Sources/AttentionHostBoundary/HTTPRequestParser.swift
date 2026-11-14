@@ -5,16 +5,13 @@ public struct ParsedHTTPRequest: Sendable {
     public let body: Data
 }
 
-/// Bounded single-request HTTP/1.1 framing. The foreground listener closes
-/// each connection after one response, so pipelined or ambiguous framing is
-/// rejected instead of assigning an account command to uncertain bytes.
+/// Single-request HTTP/1.1 framing. The foreground listener closes each
+/// connection after one response, so pipelined or ambiguous framing is rejected
+/// instead of assigning an account command to uncertain bytes.
 public enum HTTPRequestParser {
-    public static let maxHeaderBytes = 16_384
-    public static let maxBodyBytes = 1_048_576
-
     public static func parse(_ raw: Data) throws -> ParsedHTTPRequest {
         let marker = Data("\r\n\r\n".utf8)
-        guard let split = raw.range(of: marker), split.lowerBound <= maxHeaderBytes,
+        guard let split = raw.range(of: marker),
               let headText = String(data: raw[..<split.lowerBound], encoding: .utf8) else {
             throw HostBoundaryError.rejected
         }
@@ -52,7 +49,7 @@ public enum HTTPRequestParser {
         if head.method == "POST" {
             guard let encoded = head.soleHeader("Content-Length"),
                   !encoded.isEmpty, encoded.utf8.allSatisfy({ $0 >= 48 && $0 <= 57 }),
-                  let parsed = Int(encoded), parsed <= maxBodyBytes else {
+                  let parsed = Int(encoded) else {
                 throw HostBoundaryError.rejected
             }
             length = parsed
