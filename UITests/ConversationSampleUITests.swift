@@ -513,11 +513,12 @@ final class ConversationSampleUITests: XCTestCase {
         }
         XCTAssertTrue(newestReply.isHittable,
                       "Scrolling to the later reply must bring it into the chat viewport.\n\(app.debugDescription)")
-        // This local sample has no server to acknowledge a read position. The
-        // badge transition is covered by live presentation tests, not this fixture.
+        let readBadge = NSPredicate(format: "value != %@", "1 item")
+        expectation(for: readBadge, evaluatedWith: chatButton)
+        waitForExpectations(timeout: 5)
     }
 
-    func testNormalReplyTextStaysAboveRevisionSevenTabBarAtLargeSizes() throws {
+    func testLastNormalReplyCanScrollAboveRevisionSevenTabBarAtXXLAndXXXL() throws {
         guard UIDevice.current.userInterfaceIdiom == .phone else {
             throw XCTSkip("The floating revision 7 tab bar is tested on iPhone.")
         }
@@ -532,7 +533,6 @@ final class ConversationSampleUITests: XCTestCase {
             XCUIDevice.shared.orientation = .portrait
             let app = XCUIApplication()
             app.launchArguments = [
-                "--harklight-samples",
                 "--harklight-test-reply-item-area",
                 "-UIPreferredContentSizeCategoryName",
                 size.category.rawValue
@@ -545,18 +545,29 @@ final class ConversationSampleUITests: XCTestCase {
                 "normal-reply-item-sample-information-0"
             ]
             XCTAssertTrue(normalReply.waitForExistence(timeout: 10), app.debugDescription)
-            for _ in 0..<8 where !normalReply.isHittable {
-                inboxList.swipeUp()
-            }
-            XCTAssertTrue(normalReply.isHittable,
-                          "The normal reply row must be reachable at \(size.name).\n\(app.debugDescription)")
-
-            let normalQuote = app.staticTexts.matching(
+            let finalRequest = app.descendants(matching: .any)[
+                "request-row-sample-information-0"
+            ]
+            let normalQuote = normalReply.staticTexts.matching(
                 NSPredicate(format: "label CONTAINS %@", "Newest unseen chat reply")
             ).firstMatch
             XCTAssertTrue(normalQuote.waitForExistence(timeout: 5), app.debugDescription)
-            XCTAssertTrue(normalQuote.isHittable, normalQuote.debugDescription)
 
+            // Drive the list to its actual end. The parent request is the final
+            // row after the normal reply in this fixture, so this measures the
+            // reply at its final reachable position relative to the tab bar.
+            for _ in 0..<12 {
+                inboxList.swipeUp()
+            }
+            XCTAssertTrue(finalRequest.waitForExistence(timeout: 5), app.debugDescription)
+            let endRowFrame = finalRequest.frame
+            inboxList.swipeUp()
+            XCTAssertEqual(finalRequest.frame.minY, endRowFrame.minY, accuracy: 1,
+                           "The list should already be at its end before measuring reply clearance at \(size.name).\n\(app.debugDescription)")
+            XCTAssertTrue(normalReply.isHittable,
+                          "The last reply must remain visible at the list end at \(size.name).\n\(app.debugDescription)")
+            XCTAssertTrue(normalQuote.isHittable,
+                          "Reply text must be fully hittable at the list end at \(size.name).\n\(app.debugDescription)")
             let inboxTab = workspaceTab("Inbox", in: app)
             let repliedTab = workspaceTab("Replied", in: app)
             let searchTab = workspaceTab("Search", in: app)
@@ -564,14 +575,16 @@ final class ConversationSampleUITests: XCTestCase {
             XCTAssertTrue(repliedTab.exists, app.debugDescription)
             XCTAssertTrue(searchTab.exists, app.debugDescription)
             let tabBarTop = [inboxTab.frame.minY, repliedTab.frame.minY, searchTab.frame.minY].min()!
-
-            capture("normal-reply-above-tab-bar-\(size.name)", app)
+            capture("last-normal-reply-above-tab-bar-\(size.name)", app)
             let geometry = XCTAttachment(string: "size=\(size.name) replyText=\(normalQuote.frame) tabBarTop=\(tabBarTop)")
-            geometry.name = "normal-reply-clearance-\(size.name)"
+            geometry.name = "last-normal-reply-clearance-\(size.name)"
             geometry.lifetime = .keepAlways
             add(geometry)
+            XCTAssertGreaterThanOrEqual(normalQuote.frame.minY, inboxList.frame.minY,
+                                        "Reply text must remain inside the list at \(size.name). " +
+                                        "reply=\(normalQuote.frame), list=\(inboxList.frame).\n\(app.debugDescription)")
             XCTAssertLessThanOrEqual(normalQuote.frame.maxY, tabBarTop,
-                                     "Reply text must clear the floating tab bar at \(size.name). " +
+                                     "The last reply text must clear the floating tab bar at the list end at \(size.name). " +
                                      "reply=\(normalQuote.frame), tabTop=\(tabBarTop).\n\(app.debugDescription)")
             app.terminate()
         }

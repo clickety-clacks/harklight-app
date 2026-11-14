@@ -1594,8 +1594,6 @@ struct InboxList: View {
         isPadSidebar ? .clear : designPalette.background
     }
 
-    private let bottomTabBarClearance: CGFloat = 72
-
     private var isPadSidebar: Bool {
         UIDevice.current.userInterfaceIdiom == .pad && horizontalSizeClass != .compact
     }
@@ -2494,13 +2492,6 @@ struct InboxList: View {
         .background { rowSurface.ignoresSafeArea() }
         .foregroundStyle(designPalette.text)
         .scrollDismissesKeyboard(.interactively)
-        .safeAreaInset(edge: .bottom, spacing: 0) {
-            if !isPadSidebar {
-                Color.clear
-                    .frame(height: bottomTabBarClearance)
-                    .accessibilityHidden(true)
-            }
-        }
         .navigationTitle("Harklight")
         .toolbarTitleDisplayMode(.inline)
         .toolbar(removing: .title)
