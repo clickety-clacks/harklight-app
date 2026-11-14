@@ -476,11 +476,18 @@ final class HarklightUITests: XCTestCase {
 
         // Scroll part of a row so the position Back must keep is not the list's top.
         let top = ([facilities] + others).min { $0.frame.minY < $1.frame.minY }!
-        let unscrolledAnchor = review.frame.minY - list.frame.minY
+        let navigationBar = app.navigationBars.firstMatch
+        let visibleListAnchor: () -> CGFloat = {
+            let visibleHeaderBottom = brand.isHittable
+                ? navigationBar.frame.maxY
+                : navigationBar.frame.minY
+            return review.frame.minY - max(list.frame.minY, visibleHeaderBottom)
+        }
+        let unscrolledAnchor = visibleListAnchor()
         let start = list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.6))
         start.press(forDuration: 0.1, thenDragTo: start.withOffset(CGVector(dx: 0, dy: -(top.frame.height * 0.5 + 20))),
                     withVelocity: .slow, thenHoldForDuration: 0.5)
-        let scrolledAnchor = review.frame.minY - list.frame.minY
+        let scrolledAnchor = visibleListAnchor()
         XCTAssertLessThan(scrolledAnchor, unscrolledAnchor - 10,
                           "The tapped request must be scrolled within the list.")
 
@@ -502,11 +509,11 @@ final class HarklightUITests: XCTestCase {
         XCTAssertTrue(facilities.exists, "The other untouched request remains in Inbox after native Back.")
         attachScreenshot("Last viewed row in Inbox", from: app)
         let kept = NSPredicate { _, _ in
-            abs((review.frame.minY - list.frame.minY) - scrolledAnchor) <= 1
+            abs(visibleListAnchor() - scrolledAnchor) <= 1
         }
         let keptPosition = XCTNSPredicateExpectation(predicate: kept, object: nil)
         XCTAssertEqual(XCTWaiter().wait(for: [keptPosition], timeout: 3), .completed,
-                       "Back without switching messages must preserve the tapped row's position within the list: \(review.frame.minY - list.frame.minY), expected \(scrolledAnchor).\n\(app.debugDescription)")
+                       "Back without switching messages must preserve the tapped row's visible position below the current header.")
     }
 
     func testSplitViewAdaptationKeepsTheSelectedMessage() {
