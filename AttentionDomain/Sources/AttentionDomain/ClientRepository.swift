@@ -1842,7 +1842,7 @@ public final class ClientRepository: @unchecked Sendable {
         case .refusedClosed, .refusedNotFound: break
         default:
             failed.disposition = reason == "closed" ? .refusedClosed :
-                reason == "not_found" ? .refusedNotFound : .failed
+                (reason == "not_found" || reason == "unknown_message") ? .refusedNotFound : .failed
         }
         state.intents[submission.intentID] = failed
         state.outboxOrder.removeAll(where: { $0 == submission.intentID })

@@ -1567,7 +1567,8 @@ final class NativeGuidedTLSTests: XCTestCase {
         let relay = try LocalRelayWebSocket(expectedDevice: identity.deviceID) { text in
             guard text.contains("\"type\":\"answer\"") ||
                   text.contains("\"type\":\"answer_no_comment\"") else { return [] }
-            let reason = text.contains("missing-request") ? "not_found" : "closed"
+            let missingReason = text.contains("\"type\":\"answer_no_comment\"") ? "not_found" : "unknown_message"
+            let reason = text.contains("missing-request") ? missingReason : "closed"
             return [#"{"v":1,"type":"error","reason":"\#(reason)"}"# + "\n"]
         }
         defer { relay.close() }

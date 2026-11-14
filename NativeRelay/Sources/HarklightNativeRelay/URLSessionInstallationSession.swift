@@ -565,7 +565,7 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
                     close()
                     return .unresolved
                 }
-                if reason == "not_found" {
+                if reason == "not_found" || (!isNoCommentOperation && reason == "unknown_message") {
                     diagnose(.answer, .originalOperationDelivery, .rejected,
                              causeCode: NativeDiagnosticCauseCode.serverReason(reason),
                              operationID: operationID, receipt: .terminal)

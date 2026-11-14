@@ -86,7 +86,7 @@ final class OperationRecoveryTests: XCTestCase {
     }
 
     func testClosedRefusalSurvivesRestartAndCannotBeRetriedBeforeReplay() throws {
-        for reason in ["closed", "not_found"] {
+        for reason in ["closed", "not_found", "unknown_message"] {
             for reconciled in [false, true] {
               let expected: IntentDisposition = reason == "closed" ? .refusedClosed : .refusedNotFound
               let (context, key, payload) = try fixture()
@@ -106,7 +106,7 @@ final class OperationRecoveryTests: XCTestCase {
                       operationID: original.operationID, status: .refused, reason: reason)], context: context)
               } else {
                   try first.recordAnswerRefusedClosed(original.intentID,
-                      operationID: original.operationID, requestNotFound: reason == "not_found", context: context)
+                      operationID: original.operationID, requestNotFound: reason != "closed", context: context)
               }
               let restarted = try ClientRepository(context: context, persistence: persistence)
               try restarted.queueRecoverableOperations(context: context)
