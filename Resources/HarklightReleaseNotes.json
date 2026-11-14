@@ -190,6 +190,12 @@
       "testFlightBuildNumber": null,
       "highlights": [
         {
+          "id": "ipad-list-search",
+          "symbol": "magnifyingglass",
+          "title": "Search from the list on iPad",
+          "detail": "On iPad, search is a field at the top of the list again, so you can type a reply right after opening a search result. iPhone keeps the search button in the tab bar."
+        },
+        {
           "id": "saved-data-connection-recovery",
           "symbol": "arrow.triangle.2.circlepath",
           "title": "Connect even when saved data is bad",
