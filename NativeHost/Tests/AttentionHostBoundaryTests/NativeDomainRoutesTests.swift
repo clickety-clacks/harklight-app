@@ -358,7 +358,7 @@ final class NativeDomainRoutesTests: XCTestCase {
         XCTAssertEqual(try reopenedStore.snapshot(context: reopenedContext).outbox.count, 1)
     }
 
-    func testTokenAndOriginFenceBeforeNativeRead() throws {
+    func testHeaderVariationsAllowNativeReadButGenerationAndLogoutStillFence() throws {
         let persistence = MemoryPendingActionPersistence()
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("fixture-only:test"),
                                        personID: ExactText("A"), deviceID: ExactText("device"))
@@ -371,12 +371,16 @@ final class NativeDomainRoutesTests: XCTestCase {
         let command = object(["hostGeneration": string(token.generation)])
         let correct = routes.reply(request("/api/observe", token: token, body: command), boundary: boundary)
         XCTAssertEqual(correct.status, 200)
-        let badOrigin = routes.reply(request("/api/observe", token: token, body: command,
+        let nullOrigin = routes.reply(request("/api/observe", token: token, body: command,
                                              origin: "null"), boundary: boundary)
-        XCTAssertEqual(badOrigin.status, 403)
-        let badHost = routes.reply(request("/api/observe", token: token, body: command,
+        XCTAssertEqual(nullOrigin.status, 200)
+        XCTAssertEqual(try payload(nullOrigin).uniqueValue(named: "requests"),
+                       try payload(correct).uniqueValue(named: "requests"))
+        let alternateHost = routes.reply(request("/api/observe", token: token, body: command,
                                            host: "localhost:43127"), boundary: boundary)
-        XCTAssertEqual(badHost.status, 403)
+        XCTAssertEqual(alternateHost.status, 200)
+        XCTAssertEqual(try payload(alternateHost).uniqueValue(named: "requests"),
+                       try payload(correct).uniqueValue(named: "requests"))
         let wrongGeneration = object(["hostGeneration": string("old-generation")])
         XCTAssertEqual(routes.reply(request("/api/observe", token: token, body: wrongGeneration),
                                     boundary: boundary).status, 403)
@@ -485,7 +489,9 @@ final class NativeDomainRoutesTests: XCTestCase {
                        "facilities-01")
         let foreign = try await post(origin + "/api/observe", origin: "null",
                                      body: observeBody, token: token)
-        XCTAssertEqual(foreign.0, 403)
+        XCTAssertEqual(foreign.0, 200)
+        XCTAssertEqual(try JSONValue.parse(foreign.1).uniqueValue(named: "requests"),
+                       try JSONValue.parse(observed.1).uniqueValue(named: "requests"))
     }
 
     func testNativeStreamStopsAfterProfileRemovalBetweenSnapshots() throws {
