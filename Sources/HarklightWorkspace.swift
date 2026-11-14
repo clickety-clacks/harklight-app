@@ -718,6 +718,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.scenePhase) private var scenePhase
     @State private var selection: InboxSelection?
+    @State private var preferredCompactColumn: NavigationSplitViewColumn = .sidebar
     @State private var relatedMessageNavigationPath: [RelatedMessageTarget] = []
     @State private var isWarningPresented = false
     @State private var settings = false
@@ -1155,7 +1156,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     @ViewBuilder
     private func inboxSplitView(for tab: InboxWorkspaceTab, inlineChat: Bool,
                                 geometry: GeometryProxy, searching: Bool = false) -> some View {
-        let splitView = NavigationSplitView {
+        let splitView = NavigationSplitView(preferredCompactColumn: $preferredCompactColumn) {
             InboxList(tab: tab, rows: rows, warnings: visibleWarnings,
                   showsBasicOrderMarker: showsBasicOrderMarker, isRefreshing: isRefreshing,
                   refreshInbox: refreshInbox,
@@ -1388,6 +1389,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                 }
             }
             .onChange(of: selection, initial: true) { _, next in
+                preferredCompactColumn = next == nil ? .sidebar : .detail
                 NativeFocusReporter.shared.selectionChanged(to: next)
             }
             .onChange(of: settings) { _, isPresented in
@@ -1438,10 +1440,6 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             }
             .onAppear {
                 UIDiagnostics.shared.record("inbox.appear selection=\(UIDiagnostics.describe(selection)) samples.selected=\(samples.selectedID ?? "nil")")
-                guard showsLocalExamples, selection == nil,
-                      let id = samples.selectedID, samples.responses[id] != nil else { return }
-                selection = .sample(id)
-                lastViewedSelection = .sample(id)
             }
             .uiDiagnostics("inbox-ui-diagnostics", diagnosticSummary(landscape: landscape))
         }

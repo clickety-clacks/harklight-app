@@ -1271,7 +1271,6 @@ private struct PreparedLivePresentationUpdate: Sendable {
     let noReplyRoutingChanges: [PreparedNoReplyRoutingChange]
     let staleAnswerDialog: StaleAnswerDialog?
     let requestKeys: Set<RequestKey>
-    let firstRequestKey: RequestKey?
     let actionErrorRequest: RequestKey?
     let shouldClearActionError: Bool
 }
@@ -1618,7 +1617,7 @@ final class LivePresentationStore {
                                             threads: conversationThreads)
         self.conversationProjectionRevision = snapshot.revision
         self.conversationFiles = conversationFiles
-        self.selectedRequestKey = snapshot.requests.first?.key
+        self.selectedRequestKey = nil
         if let preparedInitialState {
             _ = areaStore?.applyPreparedReconciliation(preparedInitialState.preparedMessageArea,
                                                         basedOn: 0)
@@ -3329,9 +3328,7 @@ final class LivePresentationStore {
         }
         if let selectedRequestKey,
            !snapshot.requests.contains(where: { $0.key == selectedRequestKey }) {
-            self.selectedRequestKey = snapshot.requests.first?.key
-        } else if selectedRequestKey == nil {
-            self.selectedRequestKey = snapshot.requests.first?.key
+            self.selectedRequestKey = nil
         }
         notificationProjectionDidChange?()
     }
@@ -3413,7 +3410,6 @@ final class LivePresentationStore {
                     noReplyRoutingChanges: noReplyRoutingChanges,
                     staleAnswerDialog: staleAnswerDialog,
                     requestKeys: Set(updateSnapshot.requests.map(\.key)),
-                    firstRequestKey: updateSnapshot.requests.first?.key,
                     actionErrorRequest: capturedActionErrorRequest,
                     shouldClearActionError: shouldClearActionError)
             }
@@ -3474,7 +3470,7 @@ final class LivePresentationStore {
                 clearActionError()
             }
             if selectedRequestKey.map(prepared.requestKeys.contains) != true {
-                selectedRequestKey = prepared.firstRequestKey
+                selectedRequestKey = nil
             }
             notificationProjectionDidChange?()
             mainActorWorkNanoseconds += DispatchTime.now().uptimeNanoseconds - mainActorSegmentStartedAt

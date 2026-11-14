@@ -141,7 +141,8 @@ struct NativeMessageDeepLink: Equatable {
     }
 }
 
-/// The persisted data is navigation only. It never enters the answer/outbox store.
+/// Only a notification tap delivered in this process creates navigation intent.
+/// An unfinished tap from a previous launch must not reopen detail on app launch.
 @MainActor
 @Observable
 final class NativeNotificationRouter {
@@ -155,7 +156,9 @@ final class NativeNotificationRouter {
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
-        intent = defaults.data(forKey: key).flatMap { try? JSONDecoder().decode(NativeNotificationIntent.self, from: $0) }
+        // Discard navigation saved by earlier versions. The system delivers a
+        // current launch tap through didReceive; it does not need disk replay.
+        defaults.removeObject(forKey: key)
     }
 
     func receive(_ payload: JSONValue, opened: Bool) {
@@ -166,12 +169,11 @@ final class NativeNotificationRouter {
         foregroundChatIndicator = nil
         liveGeneration = nil
         defaults.set(String(serial &+ 1), forKey: key + ".serial")
-        persist()
     }
 
     /// A chat alert delivered while the app is active is kept only as
     /// presentation state until the person taps it. The navigation intent is
-    /// persisted through the existing tap path, never from foreground receipt.
+    /// created through the current tap path, never from foreground receipt.
     @discardableResult
     func receiveForegroundNotification(_ payload: JSONValue, title: String,
                                        body: String) -> Bool {
@@ -216,7 +218,6 @@ final class NativeNotificationRouter {
         pending.profile = profile
         intent = pending
         liveGeneration = context.generation
-        persist()
         guard synchronized, let request = requests.first(where: { $0.key == locator.request }),
               request.acceptanceOrder == locator.acceptanceSequence else { return nil }
         return request.key
@@ -228,7 +229,6 @@ final class NativeNotificationRouter {
         pending.profile = nil
         intent = pending
         liveGeneration = nil
-        persist()
     }
 
     func consumed() {
@@ -237,7 +237,4 @@ final class NativeNotificationRouter {
         defaults.removeObject(forKey: key)
     }
 
-    private func persist() {
-        if let intent, let data = try? JSONEncoder().encode(intent) { defaults.set(data, forKey: key) }
-    }
 }

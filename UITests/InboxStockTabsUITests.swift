@@ -7,6 +7,60 @@ final class InboxStockTabsUITests: XCTestCase {
         XCUIDevice.shared.orientation = .portrait
     }
 
+    func testOrdinaryLaunchAndRelaunchShowInboxWithoutOpeningTheLastMessage() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
+        app.launch()
+        let inbox = workspaceTab("Inbox", in: app)
+        let row = app.descendants(matching: .any)["request-row-facilities-01"]
+        let detail = app.scrollViews["message-card-scroll"]
+        XCTAssertTrue(inbox.waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(inbox.isSelected)
+        XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(row.isHittable, "Compact launch must show the list column.")
+        XCTAssertFalse(detail.exists, "No message was tapped on this launch.")
+        row.tap()
+        XCTAssertTrue(detail.waitForExistence(timeout: 5), app.debugDescription)
+        attachScreenshot("Explicitly opened detail before ordinary relaunch", from: app)
+
+        app.terminate()
+        app.launchArguments = ["--harklight-samples"]
+        app.launch()
+        XCTAssertTrue(inbox.waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(inbox.isSelected)
+        XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(row.isHittable, app.debugDescription)
+        XCTAssertFalse(detail.exists, "Ordinary relaunch must not restore the last detail.")
+        attachScreenshot("Ordinary relaunch remains in the Inbox list", from: app)
+    }
+
+    func testSearchStartsUnselectedAndExplicitOpenAndBackChooseTheCorrectColumn() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
+        app.launch()
+        let search = app.tabBars.buttons["Search"]
+        XCTAssertTrue(search.waitForExistence(timeout: 10), app.debugDescription)
+        search.tap()
+        let field = app.searchFields.firstMatch
+        XCTAssertTrue(field.waitForExistence(timeout: 5), app.debugDescription)
+        field.tap()
+        field.typeText("Archive\n")
+        let row = app.descendants(matching: .any)["sample-approval-0"]
+        let detail = app.scrollViews["message-card-scroll"]
+        XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(row.isHittable)
+        XCTAssertFalse(detail.exists, "Search must not pick its first matching message.")
+        row.tap()
+        XCTAssertTrue(detail.waitForExistence(timeout: 5), app.debugDescription)
+        let back = workspaceBackButton(in: app)
+        XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
+        back.tap()
+        XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(row.isHittable, "Back must restore the searchable list column.")
+        XCTAssertFalse(detail.exists)
+        attachScreenshot("Search list after leaving explicitly opened detail", from: app)
+    }
+
     func testNativeHeaderMinimizesOnDownScrollAndRestoresOnUpScroll() {
         let app = XCUIApplication()
         app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]

@@ -458,6 +458,8 @@ final class HarklightTests: XCTestCase {
 
         XCTAssertEqual(visible.presentation.cursor, 1)
         XCTAssertEqual(visible.openRequests.map(\.key), [key])
+        XCTAssertNil(visible.selectedRequest)
+        visible.selectRequest(key)
         XCTAssertEqual(visible.selectedRequest?.title?.rawValue, "Real relay request")
         XCTAssertEqual(visible.selectedRequest?.body?.rawValue, "Reply requested")
         XCTAssertTrue(LiveRequestDetail(request: try XCTUnwrap(visible.selectedRequest),
@@ -558,7 +560,7 @@ final class HarklightTests: XCTestCase {
                                        body: .delivery(StoredRequest(key: key, originalPayload: payload), .message)),
                             context: context)
         let visible = try LivePresentationStore(store: store, context: context)
-        let request = try XCTUnwrap(visible.selectedRequest)
+        let request = try XCTUnwrap(visible.presentation.requests.first)
         guard case .unsupported = request.projection else {
             return XCTFail("An explicitly supplied unknown answer format must be unsupported.")
         }
@@ -630,6 +632,8 @@ final class HarklightTests: XCTestCase {
             serverStateCache: cache)
         XCTAssertTrue(confirmation.relayConfirmed)
         let live = try LivePresentationStore(store: store, context: context)
+        XCTAssertNil(live.selectedRequest)
+        live.selectRequest(fixture.key)
         guard case let .sender(sender) = try XCTUnwrap(live.selectedRequest).projection,
               let input = sender.inputs.first,
               case let .response(actions) = input.kind,
@@ -651,6 +655,8 @@ final class HarklightTests: XCTestCase {
         let cached = try await reopenedCache.load()
         try reopened.restoreCachedServerState(try XCTUnwrap(cached).attentionDomainState(for: identity), context: reopenedContext)
         let reopenedLive = try LivePresentationStore(store: reopened, context: reopenedContext)
+        XCTAssertNil(reopenedLive.selectedRequest)
+        reopenedLive.selectRequest(fixture.key)
         XCTAssertEqual(reopenedLive.selectedRequest?.lifecycleStatus, .pending)
         XCTAssertEqual(reopenedLive.selectedRequest?.intentReceipt?.intentID, receipt.intentID)
         XCTAssertThrowsError(try reopenedLive.submit(fixture.key),
