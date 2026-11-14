@@ -513,9 +513,68 @@ final class ConversationSampleUITests: XCTestCase {
         }
         XCTAssertTrue(newestReply.isHittable,
                       "Scrolling to the later reply must bring it into the chat viewport.\n\(app.debugDescription)")
-        let readBadge = NSPredicate(format: "value != %@", "1 item")
-        expectation(for: readBadge, evaluatedWith: chatButton)
-        waitForExpectations(timeout: 5)
+        // This local sample has no server to acknowledge a read position. The
+        // badge transition is covered by live presentation tests, not this fixture.
+    }
+
+    func testNormalReplyTextStaysAboveRevisionSevenTabBarAtLargeSizes() throws {
+        guard UIDevice.current.userInterfaceIdiom == .phone else {
+            throw XCTSkip("The floating revision 7 tab bar is tested on iPhone.")
+        }
+
+        let sizes: [(name: String, category: UIContentSizeCategory)] = [
+            ("large", .large),
+            ("xxl", .extraExtraLarge),
+            ("xxxl", .extraExtraExtraLarge)
+        ]
+
+        for size in sizes {
+            XCUIDevice.shared.orientation = .portrait
+            let app = XCUIApplication()
+            app.launchArguments = [
+                "--harklight-samples",
+                "--harklight-test-reply-item-area",
+                "-UIPreferredContentSizeCategoryName",
+                size.category.rawValue
+            ]
+            app.launch()
+
+            let inboxList = app.collectionViews.firstMatch
+            XCTAssertTrue(inboxList.waitForExistence(timeout: 10), app.debugDescription)
+            let normalReply = app.descendants(matching: .any)[
+                "normal-reply-item-sample-information-0"
+            ]
+            XCTAssertTrue(normalReply.waitForExistence(timeout: 10), app.debugDescription)
+            for _ in 0..<8 where !normalReply.isHittable {
+                inboxList.swipeUp()
+            }
+            XCTAssertTrue(normalReply.isHittable,
+                          "The normal reply row must be reachable at \(size.name).\n\(app.debugDescription)")
+
+            let normalQuote = app.staticTexts.matching(
+                NSPredicate(format: "label CONTAINS %@", "Newest unseen chat reply")
+            ).firstMatch
+            XCTAssertTrue(normalQuote.waitForExistence(timeout: 5), app.debugDescription)
+            XCTAssertTrue(normalQuote.isHittable, normalQuote.debugDescription)
+
+            let inboxTab = workspaceTab("Inbox", in: app)
+            let repliedTab = workspaceTab("Replied", in: app)
+            let searchTab = workspaceTab("Search", in: app)
+            XCTAssertTrue(inboxTab.waitForExistence(timeout: 5), app.debugDescription)
+            XCTAssertTrue(repliedTab.exists, app.debugDescription)
+            XCTAssertTrue(searchTab.exists, app.debugDescription)
+            let tabBarTop = [inboxTab.frame.minY, repliedTab.frame.minY, searchTab.frame.minY].min()!
+
+            capture("normal-reply-above-tab-bar-\(size.name)", app)
+            let geometry = XCTAttachment(string: "size=\(size.name) replyText=\(normalQuote.frame) tabBarTop=\(tabBarTop)")
+            geometry.name = "normal-reply-clearance-\(size.name)"
+            geometry.lifetime = .keepAlways
+            add(geometry)
+            XCTAssertLessThanOrEqual(normalQuote.frame.maxY, tabBarTop,
+                                     "Reply text must clear the floating tab bar at \(size.name). " +
+                                     "reply=\(normalQuote.frame), tabTop=\(tabBarTop).\n\(app.debugDescription)")
+            app.terminate()
+        }
     }
 
     func testForegroundChatIndicatorOpensTheMatchingConversation() {
