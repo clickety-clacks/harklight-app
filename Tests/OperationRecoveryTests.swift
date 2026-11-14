@@ -86,8 +86,11 @@ final class OperationRecoveryTests: XCTestCase {
     }
 
     func testClosedRefusalSurvivesRestartAndCannotBeRetriedBeforeReplay() throws {
-        for reason in ["closed", "not_found", "unknown_message"] {
-            for reconciled in [false, true] {
+        for reconciled in [false, true] {
+            // Answer-frame errors and reconciliation receipts have different
+            // reason vocabularies. unknown_message is only a direct answer error.
+            let reasons = reconciled ? ["closed", "not_found"] : ["closed", "not_found", "unknown_message"]
+            for reason in reasons {
               let expected: IntentDisposition = reason == "closed" ? .refusedClosed : .refusedNotFound
               let (context, key, payload) = try fixture()
               let persistence = MemoryPendingActionPersistence()
