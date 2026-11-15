@@ -181,6 +181,17 @@ final class NativeClientDiagnosticJournal {
             receiptState: receiptState))
     }
 
+    /// One durable event per saved-queue recovery found at launch, with its
+    /// kind, kept and dropped counts and lost section names.
+    func recordPendingActionsRecoveries(_ recoveries: [PendingActionsRecovery]) {
+        record(recoveries.map { recovery in
+            NativeClientDiagnosticEvent(area: .localStore, phase: .projectionRefresh, transition: .completed,
+                causeCode: recovery.kind.rawValue,
+                localRecovery: NativeDiagnosticLocalRecovery(keptOperations: recovery.keptOperations,
+                    droppedEntries: recovery.droppedEntries, lostSections: recovery.lostSections))
+        })
+    }
+
     var shareText: String {
         let source = NativeDiagnosticSourceProvenance.current
         var lines = [
@@ -227,6 +238,13 @@ final class NativeClientDiagnosticJournal {
             if let tag = event.requestTag { fields.append("request_tag_sha256=\(tag)") }
             if let revision = event.requestRevision { fields.append("request_revision=\(revision)") }
             if let receipt = event.receiptState { fields.append("receipt_state=\(receipt.rawValue)") }
+            if let recovery = event.localRecovery {
+                fields.append("kept_operations=\(recovery.keptOperations)")
+                fields.append("dropped_entries=\(recovery.droppedEntries)")
+                if !recovery.lostSections.isEmpty {
+                    fields.append("lost_sections=\(recovery.lostSections.joined(separator: ","))")
+                }
+            }
             if let rejection = event.conversationValidationRejection {
                 fields.append("conversation_validation_guard=\(rejection.guardID.rawValue)")
                 fields.append("conversation_event_kind=\(rejection.eventKind.rawValue)")

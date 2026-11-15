@@ -862,10 +862,7 @@ final class NativeAppLaunch {
             return (store, fileStorage, cache)
         }.value
         guard activationGeneration == generation else { return }
-        if store.pendingActionsRecoveryNote != nil {
-            diagnostics.record(area: .localStore, phase: .projectionRefresh, transition: .completed,
-                               causeCode: "pending_actions_recovered")
-        }
+        diagnostics.recordPendingActionsRecoveries(store.pendingActionsRecoveries)
         let activation = try await LivePresentationStore.makeForActivationRecoveringSavedState(
             store: store, context: context, serverStateCache: serverStateCache, diagnostics: diagnostics,
             newMessageAreaDefaults: .standard, conversationFiles: fileStorage)

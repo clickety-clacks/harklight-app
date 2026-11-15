@@ -665,4 +665,27 @@ final class SavedStateRecoveryPresentationTests: XCTestCase {
                             "Later updates still reach the view without a relaunch.")
         XCTAssertNil(model.observationError)
     }
+
+    func testQueueRecoveryDetailsArePersistedInTheDiagnosticJournal() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".json")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let journal = NativeClientDiagnosticJournal(fileURL: url)
+        journal.recordPendingActionsRecoveries([
+            PendingActionsRecovery(kind: .partlyRecovered, keptOperations: 3, droppedEntries: 2,
+                                   lostSections: ["readPositions", "not a section name"]),
+            PendingActionsRecovery(kind: .legacyUnreadable)
+        ])
+
+        let reloaded = NativeClientDiagnosticJournal(fileURL: url)
+        let recoveries = reloaded.events.filter { $0.localRecovery != nil }
+        XCTAssertEqual(recoveries.map(\.causeCode),
+                       ["pending_actions_partly_recovered", "legacy_pending_actions_unreadable"],
+                       "Each recovery kind survives in the durable journal.")
+        XCTAssertEqual(recoveries.first?.localRecovery,
+                       NativeDiagnosticLocalRecovery(keptOperations: 3, droppedEntries: 2,
+                                                     lostSections: ["readPositions"]),
+                       "Counts and known section names are kept; anything else is not recorded.")
+        XCTAssertTrue(reloaded.shareText.contains("dropped_entries=2"))
+        XCTAssertTrue(reloaded.shareText.contains("lost_sections=readPositions"))
+    }
 }

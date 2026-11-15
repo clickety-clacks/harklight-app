@@ -191,6 +191,8 @@ public struct NativeClientDiagnosticEvent: Codable, Equatable, Identifiable, Sen
     public let requestTag: String?
     public let requestRevision: UInt64?
     public let receiptState: NativeDiagnosticReceiptState?
+    /// Counts and section names for a local-state recovery; never content.
+    public let localRecovery: NativeDiagnosticLocalRecovery?
 
     private enum CodingKeys: String, CodingKey {
         case id, occurredAtMilliseconds, area, phase, transition, causeCode, terminalReason
@@ -198,6 +200,7 @@ public struct NativeClientDiagnosticEvent: Codable, Equatable, Identifiable, Sen
         case noReplyResponseClass, operationIDSource, terminalSequence, lifecycleSequence, noReplyRoute
         case conversationSequence, conversationValidationRejection
         case attemptID, transportAttemptID, operationID, requestTag, requestRevision, receiptState
+        case localRecovery
     }
 
     public init(area: NativeDiagnosticArea,
@@ -222,6 +225,7 @@ public struct NativeClientDiagnosticEvent: Codable, Equatable, Identifiable, Sen
                 request: RequestKey? = nil,
                 requestRevision: UInt64? = nil,
                 receiptState: NativeDiagnosticReceiptState? = nil,
+                localRecovery: NativeDiagnosticLocalRecovery? = nil,
                 id: UUID = UUID(),
                 occurredAtMilliseconds: Int64 = Int64(Date().timeIntervalSince1970 * 1_000)) {
         self.id = id
@@ -248,6 +252,7 @@ public struct NativeClientDiagnosticEvent: Codable, Equatable, Identifiable, Sen
         requestTag = request.map(Self.requestTag(for:))
         self.requestRevision = requestRevision
         self.receiptState = receiptState
+        self.localRecovery = localRecovery
     }
 
     public init(from decoder: Decoder) throws {
@@ -278,6 +283,7 @@ public struct NativeClientDiagnosticEvent: Codable, Equatable, Identifiable, Sen
         requestTag = Self.safeRequestTag(try values.decodeIfPresent(String.self, forKey: .requestTag))
         requestRevision = try values.decodeIfPresent(UInt64.self, forKey: .requestRevision)
         receiptState = try values.decodeIfPresent(NativeDiagnosticReceiptState.self, forKey: .receiptState)
+        localRecovery = try values.decodeIfPresent(NativeDiagnosticLocalRecovery.self, forKey: .localRecovery)
     }
 
     private static func requestTag(for request: RequestKey) -> String {
@@ -301,6 +307,34 @@ public struct NativeClientDiagnosticEvent: Codable, Equatable, Identifiable, Sen
     public static func nowMilliseconds() -> Int64 {
         Int64(Date().timeIntervalSince1970 * 1_000)
     }
+}
+
+/// What a local-state recovery kept and dropped. Section names are limited
+/// to the saved queue's own field names, so no content can be recorded.
+public struct NativeDiagnosticLocalRecovery: Codable, Equatable, Sendable {
+    public static let knownSections: Set<String> = [
+        "operations", "activeOperations", "cancelledOperations", "answerDrafts", "messageOpens",
+        "conversations", "readPositions", "drafts", "intents", "intentByRequest", "conversation"
+    ]
+
+    public let keptOperations: Int
+    public let droppedEntries: Int
+    public let lostSections: [String]
+
+    public init(keptOperations: Int, droppedEntries: Int, lostSections: [String]) {
+        self.keptOperations = max(0, keptOperations)
+        self.droppedEntries = max(0, droppedEntries)
+        self.lostSections = lostSections.filter { Self.knownSections.contains($0) }
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(keptOperations: try values.decode(Int.self, forKey: .keptOperations),
+                  droppedEntries: try values.decode(Int.self, forKey: .droppedEntries),
+                  lostSections: try values.decode([String].self, forKey: .lostSections))
+    }
+
+    private enum CodingKeys: String, CodingKey { case keptOperations, droppedEntries, lostSections }
 }
 
 /// A nonblocking callback keeps transport and domain code independent of the
@@ -349,7 +383,9 @@ public enum NativeDiagnosticCauseCode {
         "notification_empty_token", "notification_stored_token_invalid", "server_trust_validated", "client_identity_offered",
         "websocket_opened", "relay_admitted", "replay_requested_locally", "relay_resynced",
         "relay_acknowledged", "follow_on_replay_not_reached", "original_operation_terminal_not_observed",
-        "original_operation_state_unavailable", "saved_server_state_rebuilt", "pending_actions_recovered", "unprojectable_request_shown_unsupported"
+        "original_operation_state_unavailable", "saved_server_state_rebuilt", "unprojectable_request_shown_unsupported",
+        "pending_actions_partly_recovered", "pending_actions_replaced_unreadable", "pending_actions_replaced_foreign",
+        "legacy_pending_actions_partly_imported", "legacy_pending_actions_unreadable", "legacy_pending_actions_foreign"
     ]
 
     private static let serverReasons: Set<String> = [
