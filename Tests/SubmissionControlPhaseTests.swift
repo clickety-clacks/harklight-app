@@ -204,6 +204,51 @@ final class SubmissionControlPhaseTests: XCTestCase {
         XCTAssertNil(detail.submissionDisplay.reasonLine, "Closed shows in place, with no extra line.")
     }
 
+    @MainActor
+    func testANewerVersionRetiresTheOldAnswerAndTakesANewOne() throws {
+        let context = ProfileContext(identity: ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+            personID: ExactText("phase-revision"), deviceID: ExactText("device")), transportMode: .relay)
+        let domain = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        let key = RequestKey(accountScope: context.identity.personID, senderID: ExactText("sender"),
+                             messageID: ExactText("request"))
+        let first = try JSONValue.parse(Data(#"{"title":"First wording","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"old","label":"Old choice","kind":"text"}]}}"#.utf8))
+        let second = try JSONValue.parse(Data(#"{"title":"Revised wording","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"new","label":"New choice","kind":"text"}]}}"#.utf8))
+        try domain.apply(RelayEvent(sequence: 1, body: .delivery(StoredRequest(key: key, originalPayload: first), .message)),
+                         context: context)
+        try domain.applyConversation(ConversationEvent(sequence: 1, binding: ConversationBinding(request: key, revision: 1),
+            fact: .request(sessionHandle: ExactText("origin"), payload: first)), context: context)
+        let port = AttentionDomainPort(store: domain)
+        let oldSelector = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first?.selector)
+        let old = try port.submit(SubmitIntent(context: port.context, selector: oldSelector, intentID: UUID(),
+            inputs: [.compatibilityText(action: ExactText("old"), text: ExactText("Old answer"))]))
+        try domain.recordAcceptedOperation(old.intentID, operationID: old.opID, terminalSequence: 2, context: context)
+
+        // The sender sends a newer open version: the store retires the old
+        // answer as lost history.
+        try domain.applyConversation(ConversationEvent(sequence: 2, binding: ConversationBinding(request: key, revision: 2),
+            fact: .request(sessionHandle: ExactText("origin"), payload: second)), context: context)
+        try domain.setInboxView(InboxView(revision: ExactText("view-1"), entries: [
+            InboxViewEntry(key: key, priority: .high, thread: ExactText("release"))
+        ]), context: context)
+        let retired = try XCTUnwrap(domain.lookupIntent(old.intentID, context: context))
+        XCTAssertEqual(retired.disposition, .lost)
+        let live = try LivePresentationStore(store: domain, context: context)
+        XCTAssertEqual(live.submissionPhases[key]?.phase, .refused(.changed),
+                       "Retired history is not in flight: the message changed.")
+        XCTAssertEqual(SubmissionDisplay(phase: live.submissionPhases[key]).reasonLine,
+                       "This message changed. Answer again.")
+        XCTAssertNil(InboxSubmissionProgress.project(snapshot: try domain.snapshot(context: context),
+                                                     threads: [:])[key], "No row spinner for retired history.")
+
+        let newSelector = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first?.selector)
+        let next = try port.submit(SubmitIntent(context: port.context, selector: newSelector, intentID: UUID(),
+            inputs: [.compatibilityText(action: ExactText("new"), text: ExactText("New answer"))]))
+        XCTAssertEqual(try domain.lookupIntent(next.intentID, context: context)?.requestRevision, 2)
+        try live.refreshFromDurableStore()
+        XCTAssertEqual(live.submissionPhases[key]?.phase, .sending, "The new answer is the one in flight.")
+        XCTAssertEqual(live.submissionPhases[key]?.operationID, next.opID)
+    }
+
     func testAChangedMessageShowsItsReasonLine() {
         let display = SubmissionDisplay(phase: project([submission(.staleRevision(currentRevision: 2))])[key])
         XCTAssertEqual(display.reasonLine, "This message changed. Answer again.")

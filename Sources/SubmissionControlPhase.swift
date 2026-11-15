@@ -32,6 +32,13 @@ struct SubmissionControlPhase: Equatable, Sendable {
     let operationID: UUID
     let since: Date
 
+    /// An operation answering an older version than the message's current
+    /// one. The store keeps it as history; nothing recovers it.
+    static func isRetiredByNewerVersion(_ submission: Submission, in snapshot: AttentionStoreSnapshot) -> Bool {
+        guard let current = snapshot.conversationThreads[submission.requestKey]?.currentRevision else { return false }
+        return (submission.requestRevision ?? 1) < current
+    }
+
     static func project(snapshot: AttentionStoreSnapshot) -> [RequestKey: Self] {
         var result: [RequestKey: Self] = [:]
         func kind(of submission: Submission) -> Kind {
@@ -74,7 +81,14 @@ struct SubmissionControlPhase: Equatable, Sendable {
                 }
             // A dropped connection leaves the outcome unknown and the store
             // still recovering the same operation, so it is still sending.
-            case .lost: closedOnServer ? .refused(.closed) : .sending
+            // A newer open version of the message retires an earlier answer
+            // as lost too; that one is history, and the message changed.
+            case .lost:
+                if Self.isRetiredByNewerVersion(submission, in: snapshot) {
+                    .refused(.changed)
+                } else {
+                    closedOnServer ? .refused(.closed) : .sending
+                }
             case .failed, .unsupported: .failed(retryable: !closedOnServer, editable: !closedOnServer)
             case .repairRequired: .failed(retryable: false, editable: false)
             case .staleRevision: .refused(.changed)

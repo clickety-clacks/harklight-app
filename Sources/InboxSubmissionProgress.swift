@@ -91,8 +91,10 @@ struct InboxSubmissionProgress: Equatable, Sendable {
             case .lost:
                 // Still on its way, matching the control: a dropped connection
                 // leaves the same operation recovering. Not sent is only for a
-                // send the store gave up on.
-                guard snapshot.remoteStates[key]?.isTerminal != true else { continue }
+                // send the store gave up on. One retired by a newer version of
+                // the message is history, not in flight.
+                guard snapshot.remoteStates[key]?.isTerminal != true,
+                      !SubmissionControlPhase.isRetiredByNewerVersion(submission, in: snapshot) else { continue }
                 state = .awaiting
             case .accepted:
                 // Durable acceptance is the server's confirmation; answers do
