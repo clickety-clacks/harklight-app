@@ -1533,6 +1533,7 @@ final class LivePresentationStore {
     static func makeForActivationRecoveringSavedState(
         store: ClientRepository,
         context: ProfileContext,
+        featureFlags: RemoteFeatureFlags = NativeRelayLifecycle.shared.featureFlags,
         serverStateCache: any ServerStateCaching,
         diagnostics: NativeClientDiagnosticJournal? = nil,
         newMessageAreaDefaults: UserDefaults? = nil,
@@ -1541,7 +1542,7 @@ final class LivePresentationStore {
                         mainActorWorkMilliseconds: Double,
                         activationPreparationMilliseconds: Double) {
         do {
-            return try await makeForActivation(store: store, context: context, diagnostics: diagnostics,
+            return try await makeForActivation(store: store, context: context, featureFlags: featureFlags, diagnostics: diagnostics,
                 newMessageAreaDefaults: newMessageAreaDefaults, conversationFiles: conversationFiles)
         } catch let error where NativeRelayCoreError.isInvalidSavedServerState(error) {
             diagnostics?.record(area: .localStore, phase: .projectionRefresh, transition: .retrying,
@@ -1550,7 +1551,7 @@ final class LivePresentationStore {
             try await serverStateCache.discard()
             diagnostics?.record(area: .localStore, phase: .projectionRefresh, transition: .completed,
                                 causeCode: "saved_server_state_rebuilt")
-            return try await makeForActivation(store: store, context: context, diagnostics: diagnostics,
+            return try await makeForActivation(store: store, context: context, featureFlags: featureFlags, diagnostics: diagnostics,
                 newMessageAreaDefaults: newMessageAreaDefaults, conversationFiles: conversationFiles)
         }
     }
@@ -1558,6 +1559,7 @@ final class LivePresentationStore {
     static func makeForActivation(
         store: ClientRepository,
         context: ProfileContext,
+        featureFlags: RemoteFeatureFlags = NativeRelayLifecycle.shared.featureFlags,
         conversationAvailability: NativeConversationAvailability = NativeRelayLifecycle.shared.conversationAvailability,
         diagnostics: NativeClientDiagnosticJournal? = nil,
         clearedRetractionDefaults: UserDefaults = .standard,
@@ -1574,7 +1576,7 @@ final class LivePresentationStore {
         let replyLedgerData = newMessageAreaDefaults?.data(forKey: ReplyItemAreaStore.defaultsKey)
         let diagnosticEvents = diagnostics?.events ?? []
         mainActorWorkNanoseconds += DispatchTime.now().uptimeNanoseconds - mainActorSegmentStartedAt
-        let progressInboxEnabled = NativeRelayLifecycle.shared.featureFlags.isEnabled(.progressInbox)
+        let progressInboxEnabled = featureFlags.isEnabled(.progressInbox)
         let initial = try await Task.detached(priority: .userInitiated) {
             let port = AttentionDomainPort(store: store)
             let snapshot = try port.observe(context: port.context)
@@ -1625,7 +1627,8 @@ final class LivePresentationStore {
         mainActorSegmentStartedAt = DispatchTime.now().uptimeNanoseconds
         let presentation = try LivePresentationStore(
             store: store, context: context, permitsDelivery: true,
-            diagnostics: diagnostics, conversationAvailability: conversationAvailability,
+            diagnostics: diagnostics, featureFlags: featureFlags,
+            conversationAvailability: conversationAvailability,
             clearedRetractionDefaults: clearedRetractionDefaults,
             newMessageAreaDefaults: newMessageAreaDefaults, preparedInitialState: initial)
         presentation.reportUnprojectable(initial.snapshot)
