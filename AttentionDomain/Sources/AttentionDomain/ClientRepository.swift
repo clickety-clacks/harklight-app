@@ -249,6 +249,46 @@ public final class ClientRepository: @unchecked Sendable {
         acceptedAwaitingTerminalReplay = Self.acceptedAwaitingTerminalReplay(in: state)
     }
 
+    /// Saved Server state failed validation. The inbox and conversation
+    /// projections, cursors, checkpoint and receipts are a cache of Server
+    /// truth, so discard all of it and let the next connection rebuild it.
+    /// Only the person's own queue survives: unsent answers under their
+    /// original operation IDs, so the Server deduplicates a resend, plus
+    /// message opens, Chat drafts, uploads and read positions. Accepted,
+    /// refused and settled receipts are Server facts and return with the
+    /// rebuilt projection.
+    public func discardServerState(context suppliedContext: ProfileContext) throws {
+        writerLock.lock()
+        defer { writerLock.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard suppliedContext.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
+        var next = state
+        // Chat drafts, uploads and read positions live in their own queues
+        // (pendingConversations, pendingReadPositions), not in this projection.
+        next.server = ServerProjectionCache()
+        next.replayPublishedIntents = nil
+        var unsent: [UUID: Submission] = [:]
+        for id in state.intentByRequest.values {
+            guard var operation = state.intents[id] else { continue }
+            switch operation.disposition {
+            case .pending, .lost:
+                operation.disposition = .pending
+                unsent[id] = operation
+            default:
+                continue
+            }
+        }
+        next.intents = unsent
+        next.intentByRequest = state.intentByRequest.filter { unsent[$0.value] != nil }
+        next.outboxOrder = state.outboxOrder.filter { unsent[$0] != nil }
+        let unsentKeys = Set(unsent.values.map(\.requestKey))
+        next.drafts = state.drafts.filter { $0.value.hasEdits || unsentKeys.contains($0.key) }
+        try commit(next)
+        acceptedAwaitingTerminalReplay = Self.acceptedAwaitingTerminalReplay(in: state)
+    }
+
     public func invalidate() {
         writerLock.lock()
         defer { writerLock.unlock() }
@@ -3166,6 +3206,22 @@ public final class ClientRepository: @unchecked Sendable {
         var next = state
         guard var conversation = next.conversation else { throw ConversationError.missingRequest }
         try conversation.acceptReadPosition(pending, serverPosition: serverPosition)
+        next.conversation = conversation
+        try commit(next)
+    }
+
+    /// The Server refused this read-position operation. Stop resending it.
+    public func retireConversationReadPosition(_ pending: PendingConversationReadPosition,
+                                               context suppliedContext: ProfileContext) throws {
+        writerLock.lock()
+        defer { writerLock.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        try validate(pending.request, in: context.identity)
+        var next = state
+        guard var conversation = next.conversation else { return }
+        conversation.retireReadPosition(pending)
         next.conversation = conversation
         try commit(next)
     }

@@ -1837,6 +1837,14 @@ final class NativeRelayLifecycle {
     private func performRefreshAttempt(generation: UUID,
                                        checkBlockedPush: Bool) async -> NativeRelayRefreshResult {
         var needsReconnect = false
+        // Set after discarding saved Server state. Cleared by a socket
+        // interruption, or when the rebuilt connection got further than the
+        // previous failure (its accepted checkpoint moved the cursor past the
+        // cursor seen at that failure). Only a rebuild that fails again with
+        // no progress is reported; the next foreground, push, network change,
+        // answer or relaunch rebuilds again.
+        var rebuiltSavedServerState = false
+        var cursorAtLastRebuild: UInt64 = 0
         while refreshGeneration == generation && !Task.isCancelled {
             do {
                 if needsReconnect { try await reconnect(generation: generation) }
@@ -1851,6 +1859,18 @@ final class NativeRelayLifecycle {
                 guard refreshGeneration == generation, !Task.isCancelled else { return .unavailable }
                 foregroundProgress.recordFailure(error)
                 confirmedRelayContext = nil
+                if rebuiltSavedServerState, let cursor = savedRelayCursor(), cursor > cursorAtLastRebuild {
+                    rebuiltSavedServerState = false
+                    cursorAtLastRebuild = cursor
+                }
+                if !rebuiltSavedServerState, NativeRelayCoreError.isInvalidSavedServerState(error),
+                   await discardSavedServerState(after: error) {
+                    // Saved Server state is a cache. Report it, drop it, and
+                    // rebuild from the Server on a fresh connection.
+                    rebuiltSavedServerState = true
+                    needsReconnect = true
+                    continue
+                }
                 guard Self.isInterruptedConnection(error) else {
                     recordDiagnostic(.relay, .projectionRefresh, .failed, error: error,
                                      attemptID: activeTransportAttemptID)
@@ -1861,10 +1881,43 @@ final class NativeRelayLifecycle {
                 // prefix. There is no elapsed-time or retry-count cutoff.
                 recordDiagnostic(.relay, .projectionRefresh, .retrying, error: error,
                                  attemptID: activeTransportAttemptID)
+                rebuiltSavedServerState = false
                 needsReconnect = true
             }
         }
         return .unavailable
+    }
+
+    /// A rebuild starts from cursor 0; only an accepted Server checkpoint or
+    /// replayed events move it, so it measures progress made from the Server.
+    private func savedRelayCursor() -> UInt64? {
+        guard let expected = context, let configuration else { return nil }
+        return try? configuration.store.snapshot(context: expected).cursor
+    }
+
+    /// Records the validation failure and discards every saved copy of
+    /// Server state (repository and cache file), keeping the person's queue.
+    /// Returns false only when the discard itself cannot be committed.
+    private func discardSavedServerState(after error: Error) async -> Bool {
+        guard let expected = context, let configuration else { return false }
+        recordDiagnostic(.localStore, .projectionRefresh, .retrying, error: error,
+                         attemptID: activeTransportAttemptID)
+        do {
+            if let core {
+                try await core.discardSavedServerState()
+            } else {
+                try configuration.store.discardServerState(context: expected)
+                try await configuration.serverStateCache?.discard()
+            }
+        } catch {
+            recordDiagnostic(.localStore, .projectionRefresh, .failed, error: error,
+                             attemptID: activeTransportAttemptID)
+            return false
+        }
+        recordDiagnostic(.localStore, .projectionRefresh, .completed,
+                         causeCode: "saved_server_state_rebuilt",
+                         attemptID: activeTransportAttemptID)
+        return true
     }
 
     static func isInterruptedConnection(_ error: Error) -> Bool {

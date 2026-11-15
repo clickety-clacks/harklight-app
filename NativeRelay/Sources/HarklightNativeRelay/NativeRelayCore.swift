@@ -117,6 +117,31 @@ public enum NativeRelayCoreError: Error, Equatable {
     case mismatchedOperationResult
     case inboxPagingUnavailable
     case inboxPagingBusy
+
+    /// True when saved Server-owned state (cursor, checkpoint, receipts,
+    /// replay barrier or cached projection) failed local validation. That
+    /// state is only a cache: discard it and rebuild from the Server rather
+    /// than refusing to connect. Transport failures, Server refusals and
+    /// errors about the person's own input are not in this class.
+    public static func isInvalidSavedServerState(_ error: any Error) -> Bool {
+        if let error = error as? NativeRelayCoreError { return error == .invalidReplay || error == .eventRejected }
+        if let error = error as? ConversationError {
+            switch error {
+            case .gap, .conflict: return true
+            default: return false
+            }
+        }
+        guard let error = error as? AttentionStoreError else { return false }
+        switch error {
+        case .eventGap, .missingOriginContent, .replayAlreadyActive, .replayNotActive,
+             .replayIncomplete, .missingAcceptanceOrder, .duplicateAcceptanceOrder,
+             .inboxCheckpointPending, .inboxCheckpointIncomplete, .inboxPageConflict,
+             .inboxStateUnrefreshed:
+            return true
+        default:
+            return false
+        }
+    }
 }
 
 /// The first native relay seam. C is the only durable owner of events, cursor,
@@ -473,6 +498,14 @@ public actor NativeRelayCore {
         self.onDiagnostic = onDiagnostic
         self.wire = try RelayWire(profile: context)
         self.inboxWire = try InboxPagingWire(profile: context)
+    }
+
+    /// Discards every saved copy of Server state, in the repository and in
+    /// the Server cache file a relaunch would restore, keeping the person's
+    /// queue. A fresh connection then rebuilds it from the Server.
+    public func discardSavedServerState() async throws {
+        try store.discardServerState(context: context)
+        try await serverStateCache.discard()
     }
 
     public func deactivate() {
@@ -1718,6 +1751,12 @@ public actor NativeRelayCore {
                 diagnose(.conversation, .conversationReadPosition, .rejected,
                          causeCode: "read_position_\(reason.rawValue)",
                          operationID: pending.operationID, request: pending.request)
+                // A stated refusal is definitive for this operation. Retire it
+                // so later drains stop resending it; the Server's own read
+                // position arrives with the next conversation replay.
+                if reason.rawValue != "storage_unavailable" {
+                    try store.retireConversationReadPosition(pending, context: context)
+                }
             case .unresolved:
                 diagnose(.conversation, .conversationReadPosition, .unresolved,
                          operationID: pending.operationID, request: pending.request)
