@@ -10,6 +10,12 @@ public protocol PendingActionPersistence: AnyObject, Sendable {
     func commit(_ data: Data, identity: ProfileIdentity) throws
 }
 
+/// The saved pending-action file exists but its content cannot be used.
+public struct UnreadablePendingActions: Error, Sendable {
+    public let reason: String
+    public init(reason: String) { self.reason = reason }
+}
+
 public final class MemoryPendingActionPersistence: PendingActionPersistence, @unchecked Sendable {
     private let lock = NSLock()
     private var files: [String: Data] = [:]
@@ -64,9 +70,11 @@ public final class FilePendingActionPersistence: PendingActionPersistence, @unch
             if !fileManager.fileExists(atPath: url.path) {
                 // One-time transfer of user input only. The decoder has no
                 // server-record fields and cannot restore the retired cache.
-                let input = try PropertyListDecoder().decode(RetiredUnsentInput.self,
-                    from: Data(contentsOf: retired))
-                if input.profileIdentity == identity {
+                // An undecodable retired file cannot be imported. Dropping it
+                // is the only way the account can open; it is never retried.
+                let retiredBytes = try Data(contentsOf: retired)
+                if let input = try? PropertyListDecoder().decode(RetiredUnsentInput.self, from: retiredBytes),
+                   input.profileIdentity == identity {
                     var pending = ClientSessionState(profileIdentity: identity)
                     pending.intents = input.intents ?? [:]
                     pending.intentByRequest = input.intentByRequest ?? [:]
@@ -85,9 +93,11 @@ public final class FilePendingActionPersistence: PendingActionPersistence, @unch
         do {
             let data = try Data(contentsOf: url, options: .mappedIfSafe)
             guard data.count <= 64 * 1_048_576 else {
-                throw AttentionStoreError.persistence("The profile store exceeds its recovery size limit.")
+                throw UnreadablePendingActions(reason: "The profile store exceeds its recovery size limit.")
             }
             return data
+        } catch let error as UnreadablePendingActions {
+            throw error
         } catch let error as AttentionStoreError {
             throw error
         } catch {
@@ -185,15 +195,15 @@ public final class ClientRepository: @unchecked Sendable {
         state = ClientSessionState(profileIdentity: context.identity)
         // A read failure (storage unavailable, file protection while locked)
         // is not evidence the queue is bad, so it still throws.
-        guard let bytes = try persistence.load(identity: context.identity) else { return }
         let queue: PersistedPendingActions
         do {
+            guard let bytes = try persistence.load(identity: context.identity) else { return }
             let decoded = try PropertyListDecoder().decode(PersistedPendingActions.self, from: bytes)
             guard decoded.version == 1, decoded.profileIdentity == context.identity else {
-                throw AttentionStoreError.persistence("The pending actions do not belong to this account.")
+                throw UnreadablePendingActions(reason: "The pending actions do not belong to this account.")
             }
             queue = decoded
-        } catch {
+        } catch let error where Self.isUnreadableQueue(error) {
             // Bytes that cannot be decoded as this account's queue cannot be
             // resent, and refusing to open the account would leave the app
             // unusable. Record why, replace them with an empty queue and
@@ -215,6 +225,12 @@ public final class ClientRepository: @unchecked Sendable {
     /// Set when launch found the pending-action file unreadable and replaced
     /// it with an empty queue. The app reports it; it never blocks launch.
     public private(set) var discardedUnreadablePendingActions: (any Error)?
+
+    /// Decoding failures and files the store refuses to read are bad queue
+    /// content. Any other load error is a storage fault and still throws.
+    private static func isUnreadableQueue(_ error: any Error) -> Bool {
+        error is UnreadablePendingActions || error is DecodingError
+    }
 
     private static func emptyQueueBytes(for identity: ProfileIdentity) throws -> Data {
         let encoder = PropertyListEncoder()

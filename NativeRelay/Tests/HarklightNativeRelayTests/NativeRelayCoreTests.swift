@@ -2006,6 +2006,39 @@ final class NativeRelayCoreTests: XCTestCase {
         }
     }
 
+    func testCorruptQueueFileAndUndecodableLegacyFileStillOpenTheAccount() throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                                       personID: ExactText("person-files"),
+                                       deviceID: ExactText("installation-files"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let persistence = FilePendingActionPersistence(directoryURL: directory)
+        _ = try ClientRepository(context: context, persistence: persistence)
+            .enqueueMessageOpen(RequestKey(accountScope: identity.personID, senderID: ExactText("sender"),
+                                           messageID: ExactText("queued")), requestRevision: 1, context: context)
+        let current = try XCTUnwrap(FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+            .first { $0.lastPathComponent.hasSuffix(".pending-actions.plist") })
+        let retired = directory.appendingPathComponent(
+            current.lastPathComponent.replacingOccurrences(of: ".pending-actions.plist", with: ".plist"))
+        try Data("truncated".utf8).write(to: current)
+
+        let opened = try ClientRepository(context: context, persistence: persistence)
+        XCTAssertNotNil(opened.discardedUnreadablePendingActions)
+        XCTAssertTrue(try opened.snapshot(context: context).pendingMessageOpens.isEmpty)
+        XCTAssertNil(try ClientRepository(context: context, persistence: persistence).discardedUnreadablePendingActions,
+                     "The replaced file opens normally on the next launch.")
+
+        // A legacy file left from an old version that no longer decodes.
+        try FileManager.default.removeItem(at: current)
+        try Data("not a legacy queue".utf8).write(to: retired)
+        let migrated = try ClientRepository(context: context, persistence: persistence)
+        XCTAssertTrue(try migrated.snapshot(context: context).intents.isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: retired.path),
+                       "The undecodable legacy file is dropped, so later launches do not retry it.")
+        XCTAssertNoThrow(try ClientRepository(context: context, persistence: persistence))
+    }
+
     func testConflictingSavedPageStateIsRebuiltSoPagingContinuesWithTheQueueKept() async throws {
         let (context, store, session) = try setup()
         func key(_ id: String) -> RequestKey {

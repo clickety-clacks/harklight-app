@@ -866,9 +866,25 @@ final class NativeAppLaunch {
             diagnostics.record(area: .localStore, phase: .projectionRefresh, transition: .completed,
                                error: discarded, causeCode: "unreadable_pending_actions_discarded")
         }
-        let activation = try await LivePresentationStore.makeForActivation(
-            store: store, context: context, diagnostics: diagnostics,
-            newMessageAreaDefaults: .standard, conversationFiles: fileStorage)
+        let activation: (presentation: LivePresentationStore,
+                         mainActorWorkMilliseconds: Double,
+                         activationPreparationMilliseconds: Double)
+        do {
+            activation = try await LivePresentationStore.makeForActivation(
+                store: store, context: context, diagnostics: diagnostics,
+                newMessageAreaDefaults: .standard, conversationFiles: fileStorage)
+        } catch let error where NativeRelayCoreError.isInvalidSavedServerState(error) {
+            // The restored Server cache cannot be presented. It is only a
+            // cache: record it, discard it and open with what the relay
+            // rebuilds, rather than failing every launch.
+            diagnostics.record(area: .localStore, phase: .projectionRefresh, transition: .retrying,
+                               error: error)
+            try store.discardServerState(context: context)
+            try await serverStateCache.discard()
+            activation = try await LivePresentationStore.makeForActivation(
+                store: store, context: context, diagnostics: diagnostics,
+                newMessageAreaDefaults: .standard, conversationFiles: fileStorage)
+        }
         guard activationGeneration == generation else { return }
         let presentation = activation.presentation
         do {
