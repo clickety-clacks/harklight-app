@@ -218,6 +218,12 @@
           "symbol": "arrow.uturn.backward.circle",
           "title": "Recover from damaged saved data",
           "detail": "If data saved on this device is damaged, Harklight now recovers by itself and keeps any unsent work that is still intact. This fix is pending formal testing."
+        },
+        {
+          "id": "faster-catch-up-large-inboxes",
+          "symbol": "bolt",
+          "title": "Faster catch-up on large inboxes",
+          "detail": "Catching up with the server on a large inbox now takes much less work, which should help the phone run cooler. This fix is pending formal testing."
         }
       ]
     }
