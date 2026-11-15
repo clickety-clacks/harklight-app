@@ -2183,6 +2183,9 @@ final class NativeRelayCoreTests: XCTestCase {
             try store.saveConversationDraft(ConversationDraft(binding: ConversationBinding(request: key, revision: revision),
                 text: ExactText("draft \(revision)")), context: context)
         }
+        // Revision 1's message was sent and awaits its outcome: it must resend
+        // under the same operation ID after recovery.
+        let sending = try store.prepareDiscussion(ConversationBinding(request: key, revision: 1), context: context)
 
         // Damage only revision 2's draft inside the thread's queued work.
         var root = try XCTUnwrap(PropertyListSerialization.propertyList(
@@ -2211,6 +2214,8 @@ final class NativeRelayCoreTests: XCTestCase {
         try deliver(to: relaunched)
         let thread = try XCTUnwrap(relaunched.conversationSnapshot(context: context).threads[key])
         XCTAssertEqual(thread.drafts[1]?.text, ExactText("draft 1"), "The thread's intact draft survives.")
+        XCTAssertEqual(thread.drafts[1]?.disposition, .submitting(sending),
+                       "It is still queued to resend under its original operation ID.")
         XCTAssertNil(thread.drafts[2])
     }
 
