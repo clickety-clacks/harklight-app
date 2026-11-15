@@ -2661,14 +2661,28 @@ final class LivePresentationStore {
               let receipt = request(for: key)?.intentReceipt,
               receipt.opID == submissionPhases[key]?.operationID,
               !sendingAnswerIntentIDs.contains(receipt.intentID) else { return false }
+        // A Reply box send keeps no saved draft, so the sent answer becomes
+        // the draft to edit.
+        let sentAnswer = request(for: key)?.submittedAnswer
         do {
             try attentionStore.releaseFailedOperationForEdit(receipt.intentID, context: profileContext)
             try refreshFromDurableStore()
+            if let sentAnswer, draft(for: key, revision: nil)?.hasEdits != true {
+                editDraft(for: key) { $0 = sentAnswer }
+            }
             return true
         } catch {
             diagnose(.answer, .draftSave, .failed, error: error, operationID: receipt.intentID, request: key)
             return false
         }
+    }
+
+    /// After a definitive failure, changing the answer or sending again starts
+    /// a new operation, so the failed one is dropped first. Lost and in-flight
+    /// sends keep their operation for Retry.
+    private func releaseDefinitiveFailureBeforeChange(_ key: RequestKey) {
+        guard case .failed(_, editable: true)? = submissionPhases[key]?.phase else { return }
+        releaseFailedSubmissionForEdit(key)
     }
 
     func canRetryFailedResponse(for key: RequestKey) -> Bool {
@@ -2989,6 +3003,7 @@ final class LivePresentationStore {
                                       answerDraftOverride: RequestDraft?,
                                       explicitCompatibilityAction: ExactText?,
                                       requestRevision: UInt64?) -> Bool {
+        releaseDefinitiveFailureBeforeChange(key)
         guard validateUserAction(for: key) else { return false }
         do {
             let receipt: IntentReceipt
@@ -3043,6 +3058,7 @@ final class LivePresentationStore {
     func submitNoCommentFromUser(_ key: RequestKey,
                                  requestRevision: UInt64? = nil,
                                  selectionIsLocal: Bool = false) -> Bool {
+        releaseDefinitiveFailureBeforeChange(key)
         guard validateUserAction(for: key) else { return false }
         let revision: UInt64?
         if !selectionIsLocal {
@@ -3157,6 +3173,7 @@ final class LivePresentationStore {
     private func editDraft(for key: RequestKey, revision: UInt64? = nil,
                            _ change: (inout RequestDraft) -> Void) {
         guard !isReadOnly else { return }
+        releaseDefinitiveFailureBeforeChange(key)
         do {
             let request = try inspectedRequest(key, revision: revision)
             guard !isRetracted(key), request.lifecycleStatus == .open,
@@ -3186,6 +3203,7 @@ final class LivePresentationStore {
                                 _ change: (inout RequestDraft) -> Void) {
         // Staging is local and tentative. The debounced save and any submit
         // inspect the durable revision before writing or sending.
+        if !isReadOnly { releaseDefinitiveFailureBeforeChange(key) }
         guard !isReadOnly,
               let request = request(for: key),
               revision == nil || revision == request.requestRevision,

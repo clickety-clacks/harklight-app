@@ -354,27 +354,36 @@ final class ReplyEditorDraftSession {
 @MainActor
 private func liveChoiceButton<Label: View>(style: MessageChoiceStyle?,
                                            selected: Bool = false,
+                                           readOnly: Bool = false,
                                            perform action: @escaping () -> Void,
                                            @ViewBuilder label: () -> Label) -> some View {
-    LiveChoiceButton(style: style, selected: selected, action: action, label: label())
+    LiveChoiceButton(style: style, selected: selected, readOnly: readOnly, action: action, label: label())
 }
 
 /// A choice button. When the picked answer failed and can retry, tapping the
-/// picked choice resends the same operation; it shows Retry in place.
+/// picked choice resends the same operation; it shows Retry in place. That
+/// Retry stays tappable while the other controls are locked, as they are
+/// after a lost send.
 private struct LiveChoiceButton<Label: View>: View {
     let style: MessageChoiceStyle?
     let selected: Bool
+    var readOnly = false
     let action: () -> Void
     let label: Label
 
     @Environment(\.harklightSubmissionDisplay) private var submission
 
-    private var perform: () -> Void {
-        if selected, let retry = submission.retryAction(.answer) { return retry }
-        return action
+    private var retry: (() -> Void)? {
+        selected ? submission.retryAction(.answer) : nil
     }
 
     var body: some View {
+        button(perform: retry ?? action)
+            .disabled(readOnly && retry == nil)
+    }
+
+    @ViewBuilder
+    private func button(perform: @escaping () -> Void) -> some View {
         switch style {
         case .primary:
             Button(action: perform) { label }
@@ -1473,7 +1482,7 @@ struct LiveRequestDetail: View {
             })
     }
 
-    private var controlsReadOnly: Bool {
+    var controlsReadOnly: Bool {
         if isSupersedesReadOnly { return true }
         if let localExample {
             return store.isReadOnly || request.lifecycleStatus != .open ||
@@ -1567,13 +1576,14 @@ struct LiveRequestDetail: View {
                     Text("Seen")
                 }
                     .padding(.horizontal, 6)
+            } else if submissionDisplay.isFailed(.seen) {
+                // A failed Seen reports pending; it shows the failure, not a spinner.
+                Image(systemName: "exclamationmark.circle")
+                    .foregroundStyle(HarklightDesignSystem.palette(for: colorScheme).coral)
             } else if seenActionIsPending || submissionDisplay.isSending(.seen) {
                 // The check spins while Seen is sending.
                 ProgressView()
                     .tint(HarklightDesignSystem.palette(for: colorScheme).text)
-            } else if submissionDisplay.isFailed(.seen) {
-                Image(systemName: "exclamationmark.circle")
-                    .foregroundStyle(HarklightDesignSystem.palette(for: colorScheme).coral)
             } else {
                 Image(systemName: "checkmark")
                     .foregroundStyle(seenToolbarTint == nil
@@ -1583,7 +1593,8 @@ struct LiveRequestDetail: View {
         }
         .buttonStyle(.glassProminent)
         .tint(seenToolbarTint ?? HarklightDesignSystem.palette(for: colorScheme).raised)
-        .disabled(sendControlsDisabled || !canFinishSeenAction || seenActionIsComplete)
+        .disabled(submissionDisplay.retryAction(.seen) == nil &&
+                  (sendControlsDisabled || !canFinishSeenAction || seenActionIsComplete))
         .accessibilityLabel(seenActionIsComplete ? "Seen"
                             : seenActionIsPending ? "Seen pending confirmation" : "Mark as seen")
         .accessibilityValue(Text(localExample?.localSeenSelected == true
@@ -1801,6 +1812,7 @@ struct LiveRequestDetail: View {
         if let localReplySession { return localReplySession.canSubmitFromSnapshot }
         if let localExample { return localExample.canDeclineLocally }
         if let fixtureStore { return fixtureStore.canSendNoCommentLocally(for: request.key) }
+        if unlocksAfterDefinitiveFailure { return store.canSendToCurrentServer }
         guard !store.isReadOnly, store.canSendToCurrentServer,
               !store.isRetracted(request.key), request.lifecycleStatus == .open,
               request.intentReceipt == nil else { return false }
@@ -1836,7 +1848,32 @@ struct LiveRequestDetail: View {
     /// the server can decline that exact version if the message changed.
     var canEdit: Bool {
         if isEditingLocalReply { return true }
-        return Self.canEditSnapshot(request: request, store: store, context: context)
+        return Self.canEditSnapshot(request: request, store: store, context: context) ||
+            unlocksAfterDefinitiveFailure
+    }
+
+    /// After a definitive failure the controls open again: picking another
+    /// answer or sending drops the failed operation first, so the next send is
+    /// a new one. A lost send stays locked apart from its Retry.
+    var unlocksAfterDefinitiveFailure: Bool {
+        guard localExample == nil, !context.isSupersedesTarget, !store.isReadOnly,
+              !store.isRetracted(request.key),
+              request.lifecycleStatus == .open || request.lifecycleStatus == .pending,
+              case .failed(_, editable: true)? = submissionPhase?.phase,
+              submissionPhase?.kind != .seen else { return false }
+        return true
+    }
+
+    /// The No comment row: offered for a new answer, and kept while a sent
+    /// No comment is in flight or failed so it can carry that state.
+    var showsNoCommentRow: Bool {
+        if canOfferNoComment { return true }
+        guard request.informationalSeenStatus == nil, !isSupersedesReadOnly,
+              submissionPhase?.kind == .noComment else { return false }
+        switch submissionPhase?.phase {
+        case .sending?, .failed?: return true
+        default: return false
+        }
     }
 
     private var submitLabel: String {
@@ -1865,11 +1902,11 @@ struct LiveRequestDetail: View {
 
     /// The latest answer, No comment or Seen sent from this message, for the
     /// control that sent it.
-    private var submissionPhase: SubmissionControlPhase? {
+    var submissionPhase: SubmissionControlPhase? {
         SubmissionPhaseTestHook.phase(for: request.key) ?? store.submissionPhases[request.key]
     }
 
-    private var submissionDisplay: SubmissionDisplay {
+    var submissionDisplay: SubmissionDisplay {
         SubmissionDisplay(phase: submissionPhase, retry: { [store, key = request.key] in
             _ = store.retrySubmissionFromUser(key)
         }, edit: { [store, key = request.key] in
@@ -2015,7 +2052,7 @@ struct LiveRequestDetail: View {
                         isSupersedesReadOnly: isSupersedesReadOnly,
                         sendControlsDisabled: sendControlsDisabled,
                         localExample: localExample,
-                        canOfferNoComment: canOfferNoComment,
+                        canOfferNoComment: showsNoCommentRow,
                         noCommentSelected: noCommentSelected,
                         showsNoCommentUnavailable: showsNoCommentUnavailable,
                         canOpenFailureDetails: failedResponseWarning != nil,
@@ -2865,6 +2902,16 @@ private struct LiveRequestAnswerControls: View {
                            onSelect: selectNoCommentAction)
     }
 
+    /// A picked choice or written reply already carries a failed answer's
+    /// state; a form of typed or point inputs carries it below its fields.
+    private func showsFailureInPickedChoice(_ sender: AdmittedSenderProjection) -> Bool {
+        let answer = request.submittedAnswer ?? request.draft
+        return sender.inputs.contains { input in
+            guard case .response = input.kind else { return false }
+            return answer.inputs[input.id]?.selectedActionID != nil
+        }
+    }
+
     var body: some View {
         switch request.projection {
         case let .sender(sender):
@@ -2884,6 +2931,9 @@ private struct LiveRequestAnswerControls: View {
                                        onLocalReplyInteraction: markLocalReplyInteraction,
                                        localExample: localExample,
                                        enlargePicture: enlargePicture)
+                if !isSupersedesReadOnly, !showsFailureInPickedChoice(sender) {
+                    FormSubmissionFailureRow()
+                }
                 if canOfferNoComment { noCommentChoice }
             }
         case let .compatibility(actions):
@@ -3035,6 +3085,11 @@ private struct LiveProjectedInputView: View {
     @GestureState private var pointGestureActive = false
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.harklightMessageType) private var messageType
+    @Environment(\.harklightSubmissionDisplay) private var submission
+
+    /// Typed and point inputs stay locked after a failed send until Edit;
+    /// choices open again so another answer can be picked.
+    private var inputLocked: Bool { readOnly || submission.isFailed(.answer) }
 
     private var readOnlyContent: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -3138,7 +3193,7 @@ private struct LiveProjectedInputView: View {
                 onLocalReplyInteraction()
                 openReplyEditor(target)
             }
-            .disabled(readOnly)
+            .disabled(inputLocked)
     }
 
     private func activatePassivePushContent() {
@@ -3268,14 +3323,14 @@ private struct LiveProjectedInputView: View {
                                                     active = true
                                                 }
                                                 .onChanged { value in
-                                                    guard !readOnly else { return }
+                                                    guard !inputLocked else { return }
                                                     var capture = pointGestureCapture
                                                     _ = capture.update(at: value.location, in: bounds)
                                                     pointGestureCapture = capture
                                                 }
                                                 .onEnded { value in
                                                     defer { pointGestureCapture.gestureDidEnd() }
-                                                    guard !readOnly else { return }
+                                                    guard !inputLocked else { return }
                                                     var capture = pointGestureCapture
                                                     if let point = capture.finish(at: value.location, in: bounds) {
                                                         if let localReplyDraftSession {
@@ -3287,7 +3342,7 @@ private struct LiveProjectedInputView: View {
                                                         }
                                                     }
                                                     pointGestureCapture = capture
-                                                }, isEnabled: !readOnly)
+                                                }, isEnabled: !inputLocked)
                                             .onChange(of: geometry.size) { _, size in
                                                 var capture = pointGestureCapture
                                                 capture.cancelIfBoundsChanged(to: CGRect(origin: .zero, size: size))
@@ -3303,9 +3358,9 @@ private struct LiveProjectedInputView: View {
                                 }
                                 .accessibilityElement(children: .ignore)
                                 .accessibilityLabel(illustration.label.rawValue)
-                                .accessibilityHint(readOnly ? "Read-only illustration." : "Tap or drag to select a point.")
+                                .accessibilityHint(inputLocked ? "Read-only illustration." : "Tap or drag to select a point.")
                                 .accessibilityAction(named: "Set point at center") {
-                                    guard !readOnly else { return }
+                                    guard !inputLocked else { return }
                                     if let localReplyDraftSession {
                                         localReplyDraftSession.setPoint(PointValue(x: 500, y: 500), inputID: input.id)
                                         onLocalReplyInteraction()
@@ -3350,7 +3405,8 @@ private struct LiveProjectedInputView: View {
             }
             .disabled(readOnly)
         } else {
-            liveChoiceButton(style: action.style, selected: selected, perform: { activate(action) }) {
+            liveChoiceButton(style: action.style, selected: selected, readOnly: readOnly,
+                             perform: { activate(action) }) {
                 VStack(alignment: .leading, spacing: 8) {
                     if let artID = action.illustrationID,
                        let illustration = sender.illustrations.first(where: { $0.id == artID }) {
@@ -3368,7 +3424,6 @@ private struct LiveProjectedInputView: View {
             }
             .accessibilityAddTraits(selected ? .isSelected : [])
             .accessibilityValue(selected ? "Selected" : "Not selected")
-            .disabled(readOnly)
         }
     }
 
@@ -3423,7 +3478,7 @@ private struct InformationalSeenControl: View {
                 switch status {
                 case .available where submission.isSending(.seen):
                     sendingSeenButton
-                case .available where submission.isFailed(.seen):
+                case .available where submission.isFailed(.seen), .pending where submission.isFailed(.seen):
                     // It did not go through: the button itself offers Retry.
                     Button(action: submission.retryAction(.seen) ?? onSeen) {
                         Label {
@@ -3440,7 +3495,7 @@ private struct InformationalSeenControl: View {
                     .buttonStyle(.glass)
                     .controlSize(.large)
                     .fixedSize(horizontal: true, vertical: false)
-                    .disabled(sendDisabled)
+                    .disabled(submission.retryAction(.seen) == nil && sendDisabled)
                     .accessibilityIdentifier("request-seen-action")
                 case .available:
                     Button(action: onSeen) {
@@ -3599,7 +3654,7 @@ private struct LiveCompatibilityActions: View {
                         compatibilityChoice(action, selected: isSelected, detail: option?.detail ?? "",
                                             text: replyText)
                     } else {
-                        liveChoiceButton(style: action.style, selected: isSelected,
+                        liveChoiceButton(style: action.style, selected: isSelected, readOnly: readOnly,
                                          perform: { activate(action) }) {
                             MessageChoiceLabel(title: action.label.rawValue,
                                     detail: option?.detail ?? "",
@@ -3608,7 +3663,6 @@ private struct LiveCompatibilityActions: View {
                         }
                         .accessibilityAddTraits(isSelected ? .isSelected : [])
                         .accessibilityValue(isSelected ? "Selected" : "Not selected")
-                        .disabled(readOnly)
                     }
                 }
                 if canOfferNoComment {
@@ -3618,6 +3672,38 @@ private struct LiveCompatibilityActions: View {
                                        onSelect: onSelectNoComment)
                 }
             }
+        }
+    }
+}
+
+/// A failed form answer: the circled exclamation mark with Retry, which
+/// resends the same operation, and Edit where the server definitively did not
+/// take it. Shows nothing otherwise.
+private struct FormSubmissionFailureRow: View {
+    @Environment(\.harklightSubmissionDisplay) private var submission
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.harklightMessageType) private var messageType
+
+    var body: some View {
+        if submission.isFailed(.answer) {
+            HStack(spacing: 16) {
+                Image(systemName: "exclamationmark.circle")
+                    .font(.system(size: 18, weight: .regular))
+                    .foregroundStyle(HarklightDesignSystem.palette(for: colorScheme).coral)
+                    .accessibilityLabel("Did not send")
+                Spacer(minLength: 0)
+                if submission.canEdit(.answer), let edit = submission.edit {
+                    Button("Edit", action: edit)
+                        .accessibilityIdentifier("request-form-edit")
+                }
+                if let retry = submission.retryAction(.answer) {
+                    Button("Retry", action: retry)
+                        .fontWeight(.semibold)
+                        .accessibilityIdentifier("request-form-retry")
+                }
+            }
+            .tint(HarklightDesignSystem.palette(for: colorScheme).message(messageType).beam)
+            .padding(.vertical, 4)
         }
     }
 }
