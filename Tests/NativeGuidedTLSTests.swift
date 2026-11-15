@@ -1755,6 +1755,42 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertEqual(replies.first?.operationID, operationID)
     }
 
+    func testRelayErrorRepliesAreAttributedByRefOrToTheCurrentExchangeAcrossFocusReports() throws {
+        var attribution = RelayReplyAttribution()
+        func frame(_ text: String) -> Data { Data((text + "\n").utf8) }
+        let answerA = UUID(), answerB = UUID()
+
+        // An answer exchange is in flight when a focus report goes out beside it.
+        attribution.noteSent(frame(#"{"v":1,"type":"answer","op_id":"\#(answerA.uuidString.lowercased())","answer":null}"#),
+                             exchange: true)
+        attribution.noteSent(frame(#"{"v":1,"type":"focus_report","ref":"focus-1"}"#), exchange: false)
+        attribution.noteSent(frame(#"{"v":1,"type":"focus_report","ref":"focus-2"}"#), exchange: false)
+
+        // The answer's refusal carries no ref: it belongs to the gated answer, not the focus report.
+        XCTAssertEqual(attribution.observeReply(frame(#"{"v":1,"type":"error","reason":"closed"}"#)),
+                       .init(reason: "closed", request: .init(type: .answer, operationID: answerA)))
+        // The focus report's error echoes its ref.
+        XCTAssertEqual(attribution.observeReply(frame(#"{"v":1,"type":"error","ref":"focus-1","reason":"unknown_type"}"#)),
+                       .init(reason: "unknown_type", request: .init(type: .focusReport, operationID: nil)))
+
+        // A delayed focus error during a later answer exchange is not blamed on that answer.
+        attribution.noteSent(frame(#"{"v":1,"type":"answer","op_id":"\#(answerB.uuidString.lowercased())","answer":null}"#),
+                             exchange: true)
+        XCTAssertEqual(attribution.observeReply(frame(#"{"v":1,"type":"error","ref":"focus-2","reason":"forbidden"}"#)),
+                       .init(reason: "forbidden", request: .init(type: .focusReport, operationID: nil)))
+        XCTAssertEqual(attribution.observeReply(frame(#"{"v":1,"type":"error","reason":"not_found"}"#)),
+                       .init(reason: "not_found", request: .init(type: .answer, operationID: answerB)))
+
+        // A successful reply retires its ref; replay entries and successes are not error replies.
+        attribution.noteSent(frame(#"{"v":1,"type":"inbox_page","ref":"page-1"}"#), exchange: true)
+        XCTAssertNil(attribution.observeReply(frame(#"{"v":1,"type":"ok","ref":"page-1"}"#)))
+        XCTAssertEqual(attribution.observeReply(frame(#"{"v":1,"type":"error","ref":"page-1","reason":"closed"}"#)),
+                       .init(reason: "closed", request: nil), "A ref already answered matches no request.")
+        XCTAssertNil(attribution.observeReply(frame(#"{"v":1,"type":"delivery","seq":4}"#)))
+        XCTAssertFalse(RelayReplyAttribution.mayBeReply(#"{"v":1,"type":"conversation","conversation_seq":9}"#))
+        XCTAssertTrue(RelayReplyAttribution.mayBeReply(#"{"v":1,"type":"error","reason":"closed"}"#))
+    }
+
     func testFileDownloadSessionOpensNoRelayConnection() async throws {
         let namespace = "Harklight.download-no-relay-socket." + UUID().uuidString
         let identity = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()

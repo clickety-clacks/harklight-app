@@ -59,8 +59,7 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
     private let task: URLSessionWebSocketTask
     private let pingCoordinator: WebSocketPingCoordinator
     private var isClosed = false
-    private var lastSentRequestType: NativeDiagnosticRelayRequestType?
-    private var lastSentOperationID: UUID?
+    private var replyAttribution = RelayReplyAttribution()
     private var connectionFailure: (any Error)?
     private let profileContext: ProfileContext
     private let onProgress: @Sendable (NativeRelayProgressEvent) -> Void
@@ -204,7 +203,7 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
         guard let frame = try? focusReportWire.request(for: report, ref: ref) else { return }
         guard focusReportReplyRouter.register(ref: ref) else { return }
         do {
-            try await send(frame)
+            try await send(frame, exchange: false)
         } catch {
             focusReportReplyRouter.remove(ref: ref)
         }
@@ -793,6 +792,7 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
         postCheckpointReader = nil
         postCheckpointReaderOwnsSocket = false
         focusReportReplyRouter.reset()
+        replyAttribution.reset()
         failPostCheckpointReader(connectionFailure ?? InstallationTransportError.unexpectedServerFrame)
         task.cancel(with: .normalClosure, reason: nil)
         urlSession.invalidateAndCancel()
@@ -908,30 +908,25 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
         }
     }
 
-    private func send(_ frame: Data) async throws {
+    /// `exchange` is false only for frames sent outside the exchange gate.
+    private func send(_ frame: Data, exchange: Bool = true) async throws {
         if let connectionFailure { throw connectionFailure }
         guard let text = String(data: frame, encoding: .utf8), text.hasSuffix("\n") else {
             throw InstallationTransportError.unexpectedServerFrame
         }
-        let outgoing = try? JSONValue.parse(frame)
-        lastSentRequestType = NativeDiagnosticRelayRequestType(
-            wireType: outgoing?.uniqueValue(named: "type")?.stringValue?.rawValue)
-        lastSentOperationID = outgoing?.uniqueValue(named: "op_id")?.stringValue
-            .flatMap { UUID(uuidString: $0.rawValue) }
+        replyAttribution.noteSent(frame, exchange: exchange)
         try await task.send(.string(text))
     }
 
     /// Every error reply is recorded with its Server reason code, the type of
-    /// the request it answered and that request's operation ID. Exchanges on a
-    /// connection are serialized, so the last request sent is the one answered.
-    private func recordErrorReply(_ frame: Data) {
-        guard let value = try? JSONValue.parse(frame),
-              value.uniqueValue(named: "type")?.stringValue?.rawValue == "error" else { return }
+    /// the request it answered and that request's operation ID.
+    private func recordErrorReply(_ text: String) {
+        guard RelayReplyAttribution.mayBeReply(text),
+              let reply = replyAttribution.observeReply(Data(text.utf8)) else { return }
         onDiagnostic(NativeClientDiagnosticEvent(area: .relay, phase: .relayErrorReply, transition: .rejected,
-            causeCode: NativeDiagnosticCauseCode.serverReason(
-                value.uniqueValue(named: "reason")?.stringValue?.rawValue),
+            causeCode: NativeDiagnosticCauseCode.serverReason(reply.reason),
             attemptID: attemptID, transportAttemptID: attemptID,
-            operationID: lastSentOperationID, relayRequestType: lastSentRequestType ?? .other))
+            operationID: reply.request?.operationID, relayRequestType: reply.request?.type ?? .other))
     }
 
     private func receive() async throws -> Data {
@@ -954,9 +949,8 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
         do {
             switch try await task.receive() {
             case let .string(text):
-                let frame = Data(text.utf8)
-                recordErrorReply(frame)
-                return frame
+                recordErrorReply(text)
+                return Data(text.utf8)
             case .data: throw InstallationTransportError.unexpectedServerFrame
             @unknown default: throw InstallationTransportError.unexpectedServerFrame
             }
