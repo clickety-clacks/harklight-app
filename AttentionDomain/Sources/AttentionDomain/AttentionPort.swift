@@ -484,9 +484,6 @@ public struct PresentationSnapshot: Equatable, Sendable {
     public let inboxViewListItems: [InboxViewListItem]?
     public let inboxFreeOrderVersion: Int?
     public let requests: [PresentedRequest]
-    /// Saved requests left out because they cannot be presented. One such
-    /// request must not stop every other message from showing.
-    public let unpresentableRequestKeys: [RequestKey]
 
     public var showsBasicOrderMarker: Bool {
         inboxViewBasis == ExactText("fallback")
@@ -499,8 +496,7 @@ public struct PresentationSnapshot: Equatable, Sendable {
                 inboxViewBasis: ExactText? = nil,
                 inboxViewListItems: [InboxViewListItem]? = nil,
                 inboxFreeOrderVersion: Int? = nil,
-                requests: [PresentedRequest],
-                unpresentableRequestKeys: [RequestKey] = []) {
+                requests: [PresentedRequest]) {
         self.revision = revision
         self.cursor = cursor
         self.replayBarrier = replayBarrier
@@ -509,7 +505,6 @@ public struct PresentationSnapshot: Equatable, Sendable {
         self.inboxViewListItems = inboxViewListItems
         self.inboxFreeOrderVersion = inboxFreeOrderVersion
         self.requests = requests
-        self.unpresentableRequestKeys = unpresentableRequestKeys
     }
 }
 
@@ -934,8 +929,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
                            remoteStates: snapshot.remoteStates)
         } ?? [:]
         let intentsByRequest = Dictionary(grouping: snapshot.intents.values, by: \.requestKey)
-        var unpresentable: [RequestKey] = []
-        let requests = try orderedRequests.compactMap { item -> PresentedRequest? in
+        let requests = try orderedRequests.map { item in
             let session = snapshot.fixtureSessions[item.request.key]
             let thread = snapshot.conversationThreads[item.request.key]
             let deliveredFiles = thread?.turns
@@ -1018,7 +1012,6 @@ public final class AttentionDomainPort: @unchecked Sendable {
                                            submittedRevision: submittedRevision,
                                            currentRevision: currentRevision)
             }.sorted { $0.currentRevision < $1.currentRevision }.last
-            do {
             return try present(projectedRequest,
                         acceptanceOrder: item.order,
                         draft: currentDraft,
@@ -1043,10 +1036,6 @@ public final class AttentionDomainPort: @unchecked Sendable {
                             : nil,
                         inboxViewEntry: inboxViewEntry,
                         inboxReplyScores: Self.replyScores(for: item.request.key, in: currentView))
-            } catch AttentionStoreError.invalidProjection {
-                unpresentable.append(item.request.key)
-                return nil
-            }
         }
         let displayRequests = requests.sorted { left, right in
             if left.inboxStateIsCurrent != right.inboxStateIsCurrent {
@@ -1103,8 +1092,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
                                     inboxViewBasis: snapshot.inboxView?.basis,
                                     inboxViewListItems: snapshot.inboxView?.listItems,
                                     inboxFreeOrderVersion: snapshot.inboxView?.freeOrderVersion,
-                                    requests: sourceOrderedRequests,
-                                    unpresentableRequestKeys: unpresentable)
+                                    requests: sourceOrderedRequests)
     }
 
     private static func viewSlots(for keys: [RequestKey],
@@ -1470,8 +1458,7 @@ private extension PresentationSnapshot {
                              inboxViewBasis: inboxViewBasis,
                              inboxViewListItems: inboxViewListItems,
                              inboxFreeOrderVersion: inboxFreeOrderVersion,
-                             requests: requests.filter { $0.key == key },
-                             unpresentableRequestKeys: unpresentableRequestKeys.filter { $0 == key })
+                             requests: requests.filter { $0.key == key })
     }
 }
 

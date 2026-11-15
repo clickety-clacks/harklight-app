@@ -8,12 +8,13 @@ import Darwin
 public protocol PendingActionPersistence: AnyObject, Sendable {
     func load(identity: ProfileIdentity) throws -> Data?
     func commit(_ data: Data, identity: ProfileIdentity) throws
+    /// What the last load had to drop or salvage, if anything, so the
+    /// repository can record it. Reading the note clears it.
+    func takeLoadRecoveryNote(identity: ProfileIdentity) -> String?
 }
 
-/// The saved pending-action file exists but its content cannot be used.
-public struct UnreadablePendingActions: Error, Sendable {
-    public let reason: String
-    public init(reason: String) { self.reason = reason }
+extension PendingActionPersistence {
+    public func takeLoadRecoveryNote(identity: ProfileIdentity) -> String? { nil }
 }
 
 public final class MemoryPendingActionPersistence: PendingActionPersistence, @unchecked Sendable {
@@ -49,10 +50,24 @@ public final class MemoryPendingActionPersistence: PendingActionPersistence, @un
 public final class FilePendingActionPersistence: PendingActionPersistence, @unchecked Sendable {
     public let directoryURL: URL
     private let fileManager: FileManager
+    private let noteLock = NSLock()
+    private var recoveryNotes: [String: String] = [:]
 
     public init(directoryURL: URL, fileManager: FileManager = .default) {
         self.directoryURL = directoryURL
         self.fileManager = fileManager
+    }
+
+    public func takeLoadRecoveryNote(identity: ProfileIdentity) -> String? {
+        noteLock.lock()
+        defer { noteLock.unlock() }
+        return recoveryNotes.removeValue(forKey: identity.storageKey)
+    }
+
+    private func recordRecoveryNote(_ note: String, identity: ProfileIdentity) {
+        noteLock.lock()
+        defer { noteLock.unlock() }
+        recoveryNotes[identity.storageKey] = note
     }
 
     public static func applicationSupport() throws -> FilePendingActionPersistence {
@@ -70,19 +85,30 @@ public final class FilePendingActionPersistence: PendingActionPersistence, @unch
             if !fileManager.fileExists(atPath: url.path) {
                 // One-time transfer of user input only. The decoder has no
                 // server-record fields and cannot restore the retired cache.
-                // An undecodable retired file cannot be imported. Dropping it
-                // is the only way the account can open; it is never retried.
+                // Each section is salvaged on its own; what cannot be read is
+                // recorded for the repository instead of blocking every launch.
                 let retiredBytes = try Data(contentsOf: retired)
-                if let input = try? PropertyListDecoder().decode(RetiredUnsentInput.self, from: retiredBytes),
-                   input.profileIdentity == identity {
+                switch try? PropertyListDecoder().decode(RetiredUnsentInput.self, from: retiredBytes) {
+                case let input? where input.profileIdentity == identity:
                     var pending = ClientSessionState(profileIdentity: identity)
-                    pending.intents = input.intents ?? [:]
-                    pending.intentByRequest = input.intentByRequest ?? [:]
-                    pending.drafts = input.drafts ?? [:]
-                    pending.pendingConversations = input.conversation?.threads ?? [:]
+                    pending.intents = input.intents.values
+                    pending.intentByRequest = input.intentByRequest.values.filter {
+                        pending.intents[$0.value]?.requestKey == $0.key
+                    }
+                    pending.drafts = input.drafts.values
+                    pending.pendingConversations = input.threads.values
                     let encoder = PropertyListEncoder()
                     encoder.outputFormat = .binary
                     try commit(encoder.encode(PersistedPendingActions(state: pending)), identity: identity)
+                    let dropped = input.droppedEntries
+                    if dropped > 0 || !input.lostSections.isEmpty {
+                        recordRecoveryNote("legacy queue partly unreadable: dropped \(dropped) entries, lost sections \(input.lostSections)",
+                                           identity: identity)
+                    }
+                case .some:
+                    recordRecoveryNote("legacy queue belongs to another account; not imported", identity: identity)
+                case nil:
+                    recordRecoveryNote("legacy queue unreadable; not imported", identity: identity)
                 }
             }
             // Delete only after the separate queue was committed. A restart
@@ -91,13 +117,7 @@ public final class FilePendingActionPersistence: PendingActionPersistence, @unch
         }
         guard fileManager.fileExists(atPath: url.path) else { return nil }
         do {
-            let data = try Data(contentsOf: url, options: .mappedIfSafe)
-            guard data.count <= 64 * 1_048_576 else {
-                throw UnreadablePendingActions(reason: "The profile store exceeds its recovery size limit.")
-            }
-            return data
-        } catch let error as UnreadablePendingActions {
-            throw error
+            return try Data(contentsOf: url, options: .mappedIfSafe)
         } catch let error as AttentionStoreError {
             throw error
         } catch {
@@ -195,48 +215,54 @@ public final class ClientRepository: @unchecked Sendable {
         state = ClientSessionState(profileIdentity: context.identity)
         // A read failure (storage unavailable, file protection while locked)
         // is not evidence the queue is bad, so it still throws.
-        let queue: PersistedPendingActions
-        do {
-            guard let bytes = try persistence.load(identity: context.identity) else { return }
-            let decoded = try PropertyListDecoder().decode(PersistedPendingActions.self, from: bytes)
-            guard decoded.version == 1, decoded.profileIdentity == context.identity else {
-                throw UnreadablePendingActions(reason: "The pending actions do not belong to this account.")
+        let bytes = try persistence.load(identity: context.identity)
+        var notes = persistence.takeLoadRecoveryNote(identity: context.identity).map { [$0] } ?? []
+        defer { pendingActionsRecoveryNote = notes.isEmpty ? nil : notes.joined(separator: "; ") }
+        guard let bytes else { return }
+        if let queue = try? PropertyListDecoder().decode(PersistedPendingActions.self, from: bytes),
+           queue.version == 1, queue.profileIdentity == context.identity {
+            state.intents = queue.operations
+            state.intentByRequest = queue.activeOperations
+            state.fencedIntents = queue.cancelledOperations
+            state.drafts = queue.answerDrafts
+            state.pendingMessageOpens = queue.messageOpens
+            state.pendingConversations = queue.conversations
+            state.pendingReadPositions = queue.readPositions
+        } else if let salvaged = try? PropertyListDecoder().decode(SalvagedPendingActions.self, from: bytes),
+                  salvaged.version == 1, salvaged.profileIdentity == context.identity {
+            // The file no longer decodes whole. Keep every entry that still
+            // decodes, under its original operation ID, and record the rest.
+            state.intents = salvaged.operations.values
+            state.intentByRequest = salvaged.activeOperations.values.filter {
+                state.intents[$0.value]?.requestKey == $0.key
             }
-            queue = decoded
-        } catch let error where Self.isUnreadableQueue(error) {
-            // Bytes that cannot be decoded as this account's queue cannot be
-            // resent, and refusing to open the account would leave the app
-            // unusable. Record why, replace them with an empty queue and
-            // continue; Server state rebuilds from the Server.
-            try persistence.commit(Self.emptyQueueBytes(for: context.identity), identity: context.identity)
-            discardedUnreadablePendingActions = error
-            return
+            state.fencedIntents = salvaged.cancelledOperations?.values
+            state.drafts = salvaged.answerDrafts.values
+            state.pendingMessageOpens = salvaged.messageOpens?.values
+            state.pendingConversations = salvaged.conversations.values
+            state.pendingReadPositions = salvaged.readPositions.values
+            notes.append("queue partly unreadable: kept \(state.intents.count) operations, dropped \(salvaged.droppedEntries) entries, lost sections \(salvaged.lostSections)")
+            try persistence.commit(Self.queueBytes(for: state), identity: context.identity)
+        } else {
+            // No entry can be attributed to this account: unreadable bytes,
+            // or another account's queue, whose operations are never sent
+            // from this one. Record it and open with an empty queue.
+            notes.append("queue unreadable or for another account; replaced with an empty queue")
+            try persistence.commit(Self.queueBytes(for: state), identity: context.identity)
         }
-        state.intents = queue.operations
-        state.intentByRequest = queue.activeOperations
-        state.fencedIntents = queue.cancelledOperations
-        state.drafts = queue.answerDrafts
-        state.pendingMessageOpens = queue.messageOpens
-        state.pendingConversations = queue.conversations
-        state.pendingReadPositions = queue.readPositions
         acceptedAwaitingTerminalReplay = Self.acceptedAwaitingTerminalReplay(in: state)
     }
 
-    /// Set when launch found the pending-action file unreadable and replaced
-    /// it with an empty queue. The app reports it; it never blocks launch.
-    public private(set) var discardedUnreadablePendingActions: (any Error)?
+    /// Set when launch had to salvage or replace the saved queue. The app
+    /// records it; it never blocks launch.
+    public private(set) var pendingActionsRecoveryNote: String?
 
-    /// Decoding failures and files the store refuses to read are bad queue
-    /// content. Any other load error is a storage fault and still throws.
-    private static func isUnreadableQueue(_ error: any Error) -> Bool {
-        error is UnreadablePendingActions || error is DecodingError
-    }
-
-    private static func emptyQueueBytes(for identity: ProfileIdentity) throws -> Data {
+    private static func queueBytes(for state: ClientSessionState) throws -> Data {
         let encoder = PropertyListEncoder()
         encoder.outputFormat = .binary
-        return try encoder.encode(PersistedPendingActions(state: ClientSessionState(profileIdentity: identity)))
+        return try encoder.encode(PersistedPendingActions(state: state))
     }
+
 
     /// Replaces the disposable server cache. Pending user requests stay in the
     /// separate queue and cannot supply a missing server request or revision.
@@ -4341,15 +4367,141 @@ private struct ClientSessionState {
 /// every server-owned field from the retired store's schema.
 private struct RetiredUnsentInput: Decodable {
     let profileIdentity: ProfileIdentity
-    let drafts: [RequestKey: RequestDraft]?
-    let intents: [UUID: Submission]?
-    let intentByRequest: [RequestKey: UUID]?
-    let conversation: ConversationInput?
+    let drafts: SalvagedDictionary<RequestKey, RequestDraft>
+    let intents: SalvagedDictionary<UUID, Submission>
+    let intentByRequest: SalvagedDictionary<RequestKey, UUID>
+    let threads: SalvagedDictionary<RequestKey, PendingConversationActions>
+    let lostSections: [String]
 
-    struct ConversationInput: Decodable {
+    var droppedEntries: Int {
+        drafts.dropped + intents.dropped + intentByRequest.dropped + threads.dropped
+    }
+
+    private enum CodingKeys: String, CodingKey { case profileIdentity, drafts, intents, intentByRequest, conversation }
+    private enum ConversationKeys: String, CodingKey { case threads }
+
+    init(from decoder: Decoder) throws {
         // Decode only user input from each historical thread. Request content,
         // accepted turns, read positions and the conversation cursor are ignored.
-        let threads: [RequestKey: PendingConversationActions]
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        profileIdentity = try container.decode(ProfileIdentity.self, forKey: .profileIdentity)
+        var lost: [String] = []
+        func section<K, V>(_ key: CodingKeys) -> SalvagedDictionary<K, V> {
+            guard container.contains(key) else { return SalvagedDictionary() }
+            do { return try container.decode(SalvagedDictionary<K, V>.self, forKey: key) }
+            catch { lost.append(key.stringValue); return SalvagedDictionary() }
+        }
+        drafts = section(.drafts)
+        intents = section(.intents)
+        intentByRequest = section(.intentByRequest)
+        if container.contains(.conversation) {
+            do {
+                threads = try container.nestedContainer(keyedBy: ConversationKeys.self, forKey: .conversation)
+                    .decode(SalvagedDictionary<RequestKey, PendingConversationActions>.self, forKey: .threads)
+            } catch {
+                lost.append(CodingKeys.conversation.stringValue)
+                threads = SalvagedDictionary()
+            }
+        } else {
+            threads = SalvagedDictionary()
+        }
+        lostSections = lost
+    }
+}
+
+/// Swift encodes a dictionary whose keys are not String or Int as one
+/// unkeyed array of alternating keys and values. Decode each pair on its
+/// own, so one damaged entry costs only that entry.
+private struct SalvagedDictionary<Key: Decodable & Hashable, Value: Decodable>: Decodable {
+    private(set) var values: [Key: Value] = [:]
+    private(set) var dropped = 0
+
+    init() {}
+
+    init(from decoder: Decoder) throws {
+        var container = try decoder.unkeyedContainer()
+        while !container.isAtEnd {
+            let key = Self.decodeOrSkip(Key.self, from: &container)
+            guard !container.isAtEnd else { dropped += 1; break }
+            let value = Self.decodeOrSkip(Value.self, from: &container)
+            if let key, let value { values[key] = value } else { dropped += 1 }
+        }
+    }
+
+    static func decodeOrSkip<T: Decodable>(_ type: T.Type, from container: inout UnkeyedDecodingContainer) -> T? {
+        if let value = try? container.decode(T.self) { return value }
+        // A failed decode does not advance the container; consume the element.
+        _ = try? container.decode(SkippedElement.self)
+        return nil
+    }
+}
+
+private struct SalvagedArray<Element: Decodable>: Decodable {
+    private(set) var values: [Element] = []
+    private(set) var dropped = 0
+
+    init() {}
+
+    init(from decoder: Decoder) throws {
+        var container = try decoder.unkeyedContainer()
+        while !container.isAtEnd {
+            if let value = SalvagedDictionary<Int, Element>.decodeOrSkip(Element.self, from: &container) {
+                values.append(value)
+            } else {
+                dropped += 1
+            }
+        }
+    }
+}
+
+private struct SkippedElement: Decodable {
+    init(from decoder: Decoder) throws {}
+}
+
+/// The current queue file read section by section and entry by entry, for
+/// a file that no longer decodes whole. The account and version must still
+/// match: another account's operations are never sent from this one.
+private struct SalvagedPendingActions: Decodable {
+    let version: Int
+    let profileIdentity: ProfileIdentity
+    let operations: SalvagedDictionary<UUID, Submission>
+    let activeOperations: SalvagedDictionary<RequestKey, UUID>
+    let cancelledOperations: SalvagedDictionary<UUID, RequestKey>?
+    let answerDrafts: SalvagedDictionary<RequestKey, RequestDraft>
+    let messageOpens: SalvagedArray<PendingMessageOpen>?
+    let conversations: SalvagedDictionary<RequestKey, PendingConversationActions>
+    let readPositions: SalvagedDictionary<RequestKey, PendingConversationReadPosition>
+    let lostSections: [String]
+
+    var droppedEntries: Int {
+        operations.dropped + activeOperations.dropped + (cancelledOperations?.dropped ?? 0) +
+            answerDrafts.dropped + (messageOpens?.dropped ?? 0) + conversations.dropped + readPositions.dropped
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case version, profileIdentity, operations, activeOperations, cancelledOperations,
+             answerDrafts, messageOpens, conversations, readPositions
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        version = try container.decode(Int.self, forKey: .version)
+        profileIdentity = try container.decode(ProfileIdentity.self, forKey: .profileIdentity)
+        var lost: [String] = []
+        func section<T: Decodable>(_ key: CodingKeys, _ empty: T) -> T {
+            guard container.contains(key) else { return empty }
+            do { return try container.decode(T.self, forKey: key) }
+            catch { lost.append(key.stringValue); return empty }
+        }
+        operations = section(.operations, SalvagedDictionary())
+        activeOperations = section(.activeOperations, SalvagedDictionary())
+        cancelledOperations = container.contains(.cancelledOperations)
+            ? section(.cancelledOperations, SalvagedDictionary()) : nil
+        answerDrafts = section(.answerDrafts, SalvagedDictionary())
+        messageOpens = container.contains(.messageOpens) ? section(.messageOpens, SalvagedArray()) : nil
+        conversations = section(.conversations, SalvagedDictionary())
+        readPositions = section(.readPositions, SalvagedDictionary())
+        lostSections = lost
     }
 }
 

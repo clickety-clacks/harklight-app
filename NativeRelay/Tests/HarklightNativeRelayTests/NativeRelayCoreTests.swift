@@ -1986,12 +1986,12 @@ final class NativeRelayCoreTests: XCTestCase {
             try persistence.commit(unreadable, identity: identity)
 
             let store = try ClientRepository(context: context, persistence: persistence)
-            XCTAssertNotNil(store.discardedUnreadablePendingActions, "The discard is recorded for diagnostics.")
+            XCTAssertNotNil(store.pendingActionsRecoveryNote, "The replacement is recorded for diagnostics.")
             let opened = try store.snapshot(context: context)
             XCTAssertTrue(opened.intents.isEmpty)
             XCTAssertTrue(opened.pendingMessageOpens.isEmpty, "Nothing from the unreadable file is resent.")
             let relaunched = try ClientRepository(context: context, persistence: persistence)
-            XCTAssertNil(relaunched.discardedUnreadablePendingActions,
+            XCTAssertNil(relaunched.pendingActionsRecoveryNote,
                          "The replacement is a valid empty queue, so a relaunch opens normally.")
 
             let session = Session(identity)
@@ -2024,9 +2024,9 @@ final class NativeRelayCoreTests: XCTestCase {
         try Data("truncated".utf8).write(to: current)
 
         let opened = try ClientRepository(context: context, persistence: persistence)
-        XCTAssertNotNil(opened.discardedUnreadablePendingActions)
+        XCTAssertNotNil(opened.pendingActionsRecoveryNote)
         XCTAssertTrue(try opened.snapshot(context: context).pendingMessageOpens.isEmpty)
-        XCTAssertNil(try ClientRepository(context: context, persistence: persistence).discardedUnreadablePendingActions,
+        XCTAssertNil(try ClientRepository(context: context, persistence: persistence).pendingActionsRecoveryNote,
                      "The replaced file opens normally on the next launch.")
 
         // A legacy file left from an old version that no longer decodes.
@@ -2034,6 +2034,7 @@ final class NativeRelayCoreTests: XCTestCase {
         try Data("not a legacy queue".utf8).write(to: retired)
         let migrated = try ClientRepository(context: context, persistence: persistence)
         XCTAssertTrue(try migrated.snapshot(context: context).intents.isEmpty)
+        XCTAssertNotNil(migrated.pendingActionsRecoveryNote, "The unreadable legacy file is recorded, not lost silently.")
         XCTAssertFalse(FileManager.default.fileExists(atPath: retired.path),
                        "The undecodable legacy file is dropped, so later launches do not retry it.")
         XCTAssertNoThrow(try ClientRepository(context: context, persistence: persistence))
@@ -2072,6 +2073,67 @@ final class NativeRelayCoreTests: XCTestCase {
                        "The unsent answer is kept for the rebuilt connection.")
     }
 
+    func testPartlyDamagedQueueKeepsEveryIntactEntryUnderItsOriginalOperationID() throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                                       personID: ExactText("person-partial"),
+                                       deviceID: ExactText("installation-partial"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let persistence = MemoryPendingActionPersistence()
+        let store = try ClientRepository(context: context, persistence: persistence)
+        let key = RequestKey(accountScope: identity.personID, senderID: ExactText("sender"), messageID: ExactText("intact"))
+        let payload = try JSONValue.parse(data(#"{"title":"Question","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"yes","label":"Yes","kind":"value","value":{"ok":true}}]}}"#))
+        _ = try store.apply(RelayEvent(sequence: 1,
+            body: .delivery(StoredRequest(key: key, originalPayload: payload), .message)), context: context)
+        let port = AttentionDomainPort(store: store)
+        let selector = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first?.selector)
+        let unsent = try port.submit(SubmitIntent(context: port.context, selector: selector,
+            intentID: UUID(), inputs: [.compatibilityValue(action: ExactText("yes"))]))
+        let open = try store.enqueueMessageOpen(key, requestRevision: 1, context: context)
+
+        // Damage unrelated entries inside an otherwise valid file: a bogus
+        // operation pair and a bogus message open.
+        var root = try XCTUnwrap(PropertyListSerialization.propertyList(
+            from: XCTUnwrap(persistence.load(identity: identity)), format: nil) as? [String: Any])
+        root["operations"] = (root["operations"] as? [Any] ?? []) + ["not-an-operation-id", "garbage"]
+        root["messageOpens"] = (root["messageOpens"] as? [Any] ?? []) + ["garbage"]
+        try persistence.commit(PropertyListSerialization.data(fromPropertyList: root, format: .binary, options: 0),
+                               identity: identity)
+
+        let reopened = try ClientRepository(context: context, persistence: persistence)
+        let snapshot = try reopened.snapshot(context: context)
+        XCTAssertEqual(snapshot.intents[unsent.intentID]?.operationID, unsent.opID,
+                       "The intact unsent answer survives with its original operation ID.")
+        XCTAssertEqual(snapshot.intents[unsent.intentID]?.disposition, .pending)
+        XCTAssertEqual(snapshot.pendingMessageOpens, [open], "The intact message open survives.")
+        XCTAssertNotNil(reopened.pendingActionsRecoveryNote, "What was dropped is recorded.")
+        let relaunched = try ClientRepository(context: context, persistence: persistence)
+        XCTAssertNil(relaunched.pendingActionsRecoveryNote, "The salvaged queue was rewritten whole.")
+        XCTAssertEqual(try relaunched.snapshot(context: context).intents[unsent.intentID]?.operationID, unsent.opID)
+    }
+
+    func testLargeValidQueueFileIsKept() throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                                       personID: ExactText("person-large"),
+                                       deviceID: ExactText("installation-large"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let persistence = FilePendingActionPersistence(directoryURL: directory)
+        let key = RequestKey(accountScope: identity.personID, senderID: ExactText("sender"), messageID: ExactText("large"))
+        let open = try ClientRepository(context: context, persistence: persistence)
+            .enqueueMessageOpen(key, requestRevision: 1, context: context)
+        // Size is not corruption: a valid file larger than 64 MiB still opens.
+        var root = try XCTUnwrap(PropertyListSerialization.propertyList(
+            from: XCTUnwrap(persistence.load(identity: identity)), format: nil) as? [String: Any])
+        root["unrelatedPadding"] = Data(count: 65 * 1_048_576)
+        try persistence.commit(PropertyListSerialization.data(fromPropertyList: root, format: .binary, options: 0),
+                               identity: identity)
+
+        let reopened = try ClientRepository(context: context, persistence: persistence)
+        XCTAssertNil(reopened.pendingActionsRecoveryNote)
+        XCTAssertEqual(try reopened.snapshot(context: context).pendingMessageOpens, [open])
+    }
+
     func testConflictingSavedPageStateIsRebuiltSoPagingContinuesWithTheQueueKept() async throws {
         let (context, store, session) = try setup()
         func key(_ id: String) -> RequestKey {
@@ -2101,9 +2163,12 @@ final class NativeRelayCoreTests: XCTestCase {
                           "A page that conflicts with saved state is rebuilt, not a dead end: \(error)")
         }
 
-        try await core.discardSavedServerState()
-        XCTAssertEqual(try store.snapshot(context: context).intents[unsent.intentID]?.operationID, unsent.opID,
+        let afterConflict = try store.snapshot(context: context)
+        XCTAssertEqual(afterConflict.cursor, 0, "The core discarded the saved state by itself.")
+        XCTAssertNil(afterConflict.inboxCheckpoint)
+        XCTAssertEqual(afterConflict.intents[unsent.intentID]?.operationID, unsent.opID,
                        "The unsent answer is kept through the rebuild.")
+        // The lifecycle reconnects here; a fresh core on a fresh connection.
         session.olderPages["older"] = [snapshotItem(key("older"), payload: payload, sequence: 2)]
         session.result = .accepted(operationID: unsent.opID, terminalSequence: 5)
         let rebuilt = try NativeRelayCore(store: store, context: context, session: session)

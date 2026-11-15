@@ -862,29 +862,13 @@ final class NativeAppLaunch {
             return (store, fileStorage, cache)
         }.value
         guard activationGeneration == generation else { return }
-        if let discarded = store.discardedUnreadablePendingActions {
+        if store.pendingActionsRecoveryNote != nil {
             diagnostics.record(area: .localStore, phase: .projectionRefresh, transition: .completed,
-                               error: discarded, causeCode: "unreadable_pending_actions_discarded")
+                               causeCode: "pending_actions_recovered")
         }
-        let activation: (presentation: LivePresentationStore,
-                         mainActorWorkMilliseconds: Double,
-                         activationPreparationMilliseconds: Double)
-        do {
-            activation = try await LivePresentationStore.makeForActivation(
-                store: store, context: context, diagnostics: diagnostics,
-                newMessageAreaDefaults: .standard, conversationFiles: fileStorage)
-        } catch let error where NativeRelayCoreError.isInvalidSavedServerState(error) {
-            // The restored Server cache cannot be presented. It is only a
-            // cache: record it, discard it and open with what the relay
-            // rebuilds, rather than failing every launch.
-            diagnostics.record(area: .localStore, phase: .projectionRefresh, transition: .retrying,
-                               error: error)
-            try store.discardServerState(context: context)
-            try await serverStateCache.discard()
-            activation = try await LivePresentationStore.makeForActivation(
-                store: store, context: context, diagnostics: diagnostics,
-                newMessageAreaDefaults: .standard, conversationFiles: fileStorage)
-        }
+        let activation = try await LivePresentationStore.makeForActivationRecoveringSavedState(
+            store: store, context: context, serverStateCache: serverStateCache, diagnostics: diagnostics,
+            newMessageAreaDefaults: .standard, conversationFiles: fileStorage)
         guard activationGeneration == generation else { return }
         let presentation = activation.presentation
         do {
@@ -1519,6 +1503,35 @@ final class LivePresentationStore {
                       diagnostics: nil, newMessageAreaDefaults: newMessageAreaDefaults)
     }
 
+    /// Activation from the restored Server cache. A cache that cannot be
+    /// presented is only a cache: record it, discard it (repository and
+    /// file) keeping the person's queue, and open with what the relay
+    /// rebuilds, rather than failing every launch.
+    static func makeForActivationRecoveringSavedState(
+        store: ClientRepository,
+        context: ProfileContext,
+        serverStateCache: any ServerStateCaching,
+        diagnostics: NativeClientDiagnosticJournal? = nil,
+        newMessageAreaDefaults: UserDefaults? = nil,
+        conversationFiles: ConversationFileStorage? = nil
+    ) async throws -> (presentation: LivePresentationStore,
+                        mainActorWorkMilliseconds: Double,
+                        activationPreparationMilliseconds: Double) {
+        do {
+            return try await makeForActivation(store: store, context: context, diagnostics: diagnostics,
+                newMessageAreaDefaults: newMessageAreaDefaults, conversationFiles: conversationFiles)
+        } catch let error where NativeRelayCoreError.isInvalidSavedServerState(error) {
+            diagnostics?.record(area: .localStore, phase: .projectionRefresh, transition: .retrying,
+                                error: error)
+            try store.discardServerState(context: context)
+            try await serverStateCache.discard()
+            diagnostics?.record(area: .localStore, phase: .projectionRefresh, transition: .completed,
+                                causeCode: "saved_server_state_rebuilt")
+            return try await makeForActivation(store: store, context: context, diagnostics: diagnostics,
+                newMessageAreaDefaults: newMessageAreaDefaults, conversationFiles: conversationFiles)
+        }
+    }
+
     static func makeForActivation(
         store: ClientRepository,
         context: ProfileContext,
@@ -1583,10 +1596,6 @@ final class LivePresentationStore {
                 failedResponseWarnings: failedResponseWarnings,
                 staleAnswerDialog: staleAnswerDialog)
         }.value
-        if !initial.snapshot.unpresentableRequestKeys.isEmpty {
-            diagnostics?.record(area: .localStore, phase: .projectionRefresh, transition: .observed,
-                                causeCode: "unpresentable_request_skipped")
-        }
 
         mainActorSegmentStartedAt = DispatchTime.now().uptimeNanoseconds
         let presentation = try LivePresentationStore(
@@ -3305,15 +3314,47 @@ final class LivePresentationStore {
                                                  afterRevision: presentation.revision)
                 for try await snapshot in updates {
                     _ = try await adoptForLiveUpdates(snapshot)
+                    observationRecoveredWithoutUpdate = false
                 }
             } catch is CancellationError {
                 return
             } catch {
+                // The stream has ended. Clear it so a later start can resume.
+                observation = nil
                 observationError = "The local request view could not be refreshed."
                 diagnose(.localStore, .projectionRefresh,
                          NativeDiagnosticCauseCode.failureTransition(for: error), error: error)
+                guard !Task.isCancelled, recoverSavedServerState(after: error) else { return }
+                startObserving()
             }
         }
+    }
+
+    /// Set after a recovery and cleared by the next adopted update, so a
+    /// failure that a fresh rebuild does not fix is reported, not repeated.
+    @ObservationIgnored private var observationRecoveredWithoutUpdate = false
+
+    /// Saved Server state that cannot be presented is only a cache. Discard
+    /// it, keeping the person's queue, and ask the relay to rebuild it.
+    private func recoverSavedServerState(after error: Error) -> Bool {
+        guard NativeRelayCoreError.isInvalidSavedServerState(error), !observationRecoveredWithoutUpdate,
+              permitsDelivery, !isReadOnly, profileContext.transportMode == .relay else { return false }
+        do {
+            try attentionStore.discardServerState(context: profileContext)
+        } catch {
+            diagnose(.localStore, .projectionRefresh, .failed, error: error)
+            return false
+        }
+        observationRecoveredWithoutUpdate = true
+        observationError = nil
+        diagnose(.localStore, .projectionRefresh, .completed, causeCode: "saved_server_state_rebuilt")
+        let context = profileContext
+        Task {
+            // The relay discards its cache file as part of the rebuild.
+            guard NativeRelayLifecycle.shared.isActive(for: context) else { return }
+            _ = await NativeRelayLifecycle.shared.refreshResultFromTrustedRelay()
+        }
+        return true
     }
 
     func stopObserving() {

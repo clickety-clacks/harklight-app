@@ -707,6 +707,18 @@ public actor NativeRelayCore {
             try await saveServerStateCache()
             return true
         } catch {
+            if NativeRelayCoreError.isInvalidSavedServerState(error) {
+                // The Server's page conflicts with the saved page state. Discard
+                // every saved copy now, keeping the person's queue; the caller
+                // reconnects so a fresh startup rebuilds it from the Server.
+                diagnose(.localStore, .inboxPage, .retrying, error: error)
+                do {
+                    try await discardSavedServerState()
+                    diagnose(.localStore, .inboxPage, .completed, causeCode: "saved_server_state_rebuilt")
+                } catch let discardError {
+                    diagnose(.localStore, .inboxPage, .failed, error: discardError)
+                }
+            }
             throw error
         }
     }
