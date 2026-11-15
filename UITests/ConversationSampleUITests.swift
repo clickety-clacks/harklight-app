@@ -573,8 +573,9 @@ final class ConversationSampleUITests: XCTestCase {
             let searchTab = workspaceTab("Search", in: app)
             XCTAssertTrue(inboxTab.waitForExistence(timeout: 5), app.debugDescription)
             XCTAssertTrue(repliedTab.exists, app.debugDescription)
-            XCTAssertTrue(searchTab.exists, app.debugDescription)
-            let tabBarTop = [inboxTab.frame.minY, repliedTab.frame.minY, searchTab.frame.minY].min()!
+            // The Search tab exists on iPhone only; iPad searches from the list.
+            let tabFrames = [inboxTab, repliedTab] + (searchTab.exists ? [searchTab] : [])
+            let tabBarTop = tabFrames.map(\.frame.minY).min()!
             capture("last-normal-reply-above-tab-bar-\(size.name)", app)
             let geometry = XCTAttachment(string: "size=\(size.name) replyText=\(normalQuote.frame) tabBarTop=\(tabBarTop)")
             geometry.name = "last-normal-reply-clearance-\(size.name)"

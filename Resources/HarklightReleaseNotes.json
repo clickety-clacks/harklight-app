@@ -190,6 +190,12 @@
       "testFlightBuildNumber": null,
       "highlights": [
         {
+          "id": "ipad-list-search",
+          "symbol": "magnifyingglass",
+          "title": "Search from the list on iPad",
+          "detail": "On iPad, search is a field at the top of the list again, so you can type a reply right after opening a search result. iPhone keeps the search button in the tab bar."
+        },
+        {
           "id": "saved-data-connection-recovery",
           "symbol": "arrow.triangle.2.circlepath",
           "title": "Connect even when saved data is bad",
@@ -224,6 +230,12 @@
           "symbol": "bolt",
           "title": "Faster catch-up on large inboxes",
           "detail": "Catching up with the server on a large inbox now takes much less work, which should help the phone run cooler. This fix is pending formal testing."
+        },
+        {
+          "id": "connect-when-server-position-disagrees",
+          "symbol": "arrow.triangle.2.circlepath",
+          "title": "Connect even when the server's saved position disagrees",
+          "detail": "If the server's record of what this device has received no longer matches the device's own record, Harklight now reloads the chat history from the server and keeps connecting, and answers the server has already settled stop showing as pending. This fix is pending formal testing."
         },
         {
           "id": "answer-state-in-the-control",

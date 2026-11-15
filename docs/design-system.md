@@ -254,3 +254,4 @@ The Client PO ruled on these on 2026-11-13 (verdict `att_497f07a8`): where the a
 - The open message heading has no chat icon; the chat button's badge carries unread turns.
 - C10 iPad split: the list uses the stock flush `NavigationSplitView` sidebar, not a custom floating panel. The restyle supplies only the tint behind it, the iPad open row fill and bar, and the indent (C11); iPadOS decides column placement and visibility in each orientation.
 - C8 chat sheet grabber: the grabber is not forced visible. The sheet keeps today's short downward swipe to close.
+- C1 on iPad: search is a field at the top of the list, not a Search tab. After a search in the system search tab, iPad reply editors could no longer take the keyboard, so the Client PO ruled for the list field on iPad only until Apple fixes the search tab; iPhone keeps the Search tab as drawn.
