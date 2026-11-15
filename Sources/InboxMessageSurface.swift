@@ -150,9 +150,12 @@ struct MessageChoiceLabel: View {
     let suggested: Bool
     var ownAnswer = false
     var drawsSurface = true
+    /// Which submission this choice sends, for its in-place send state.
+    var submissionKind: SubmissionControlPhase.Kind = .answer
 
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.harklightMessageType) private var messageType
+    @Environment(\.harklightSubmissionDisplay) private var submission
 
     private var messageColors: HarklightMessageColors {
         HarklightDesignSystem.palette(for: colorScheme).message(messageType)
@@ -160,9 +163,24 @@ struct MessageChoiceLabel: View {
 
     private var cornerRadius: CGFloat { HarklightDesignSystem.shape(.card) }
 
+    /// The picked choice carries the send state: a spinner while sending, an
+    /// error mark and Retry when it did not go through.
+    private var isSendingHere: Bool { selected && submission.isSending(submissionKind) }
+    private var isFailedHere: Bool { selected && submission.isFailed(submissionKind) }
+
     @ViewBuilder
     private var mark: some View {
-        if multiple {
+        if isSendingHere {
+            ProgressView()
+                .controlSize(.small)
+                .tint(messageColors.beam)
+                .accessibilityLabel("Sending")
+        } else if isFailedHere {
+            Image(systemName: "exclamationmark.circle")
+                .font(.system(size: 20, weight: .regular))
+                .foregroundStyle(HarklightDesignSystem.palette(for: colorScheme).coral)
+                .accessibilityLabel("Did not send")
+        } else if multiple {
             ZStack {
                 RoundedRectangle(cornerRadius: 4)
                     .stroke(selected ? messageColors.beam : messageColors.secondary, lineWidth: 1.5)
@@ -206,6 +224,12 @@ struct MessageChoiceLabel: View {
                 }
             }
             Spacer(minLength: 0)
+            if isFailedHere, submission.retryAction(submissionKind) != nil {
+                Text("Retry")
+                    .harklightType(.choiceTitle)
+                    .foregroundStyle(messageColors.beam)
+                    .accessibilityIdentifier("request-choice-retry")
+            }
         }
         .foregroundStyle(messageColors.text)
         .padding(16).frame(maxWidth: .infinity, alignment: .leading)
@@ -224,5 +248,7 @@ struct MessageChoiceLabel: View {
             }
         }
         .contentShape(RoundedRectangle(cornerRadius: cornerRadius))
+        // While one choice is sending, the others step back.
+        .opacity(submission.isSendingAny && !selected ? 0.45 : 1)
     }
 }

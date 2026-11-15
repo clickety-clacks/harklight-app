@@ -70,16 +70,20 @@ final class InboxSubmissionProgressTests: XCTestCase {
         XCTAssertNil(project(thread, submissions: [submission(.accepted(sequence: 2))])[key])
     }
 
-    func testDefinitiveAnswerRefusalsStopSpinnerButLostOutcomeDoesNot() {
-        let refusals: [IntentDisposition] = [.failed, .refusedClosed, .refusedNotFound,
-                                             .staleRevision(currentRevision: 2), .unsupported]
-        for disposition in refusals {
-            XCTAssertEqual(project(makeThread(), submissions: [submission(disposition)])[key]?.state, .notSent)
+    func testFailedAnswersShowNotSentButRefusalsShowTheMessageState() {
+        // Retry cases: a failed, unsupported or lost (outcome unknown) send.
+        for disposition in [IntentDisposition.failed, .unsupported, .lost] {
+            let progress = project(makeThread(), submissions: [submission(disposition)])[key]
+            XCTAssertEqual(progress?.state, .notSent, "\(disposition)")
+            XCTAssertNil(progress?.detail, "Retry is the indicator; a plain failure has no reason line.")
         }
-        XCTAssertEqual(project(makeThread(), submissions: [submission(.lost)])[key]?.state, .awaiting)
-        XCTAssertEqual(project(makeThread(), submissions: [submission(.terminal(state: .answered,
-            sequence: 2, authorizedAnswer: nil))])[key]?.detail, "This request was already answered",
-            "Show the authoritative state without inventing an accepted original operation.")
+        // Not Retry cases: the message's own closed, retracted or current state shows instead.
+        let refusals: [IntentDisposition] = [.refusedClosed, .refusedNotFound, .staleRevision(currentRevision: 2),
+            .refusedByRetraction(retractedAtMilliseconds: 5),
+            .terminal(state: .answered, sequence: 2, authorizedAnswer: nil)]
+        for disposition in refusals {
+            XCTAssertNil(project(makeThread(), submissions: [submission(disposition)])[key], "\(disposition)")
+        }
     }
 
     func testNewPendingPromptSurvivesReplyToAnOlderPrompt() {

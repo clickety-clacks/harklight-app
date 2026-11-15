@@ -512,9 +512,9 @@ struct InboxRowSubmissionProgress: Equatable {
     enum State: Equatable {
         /// Sent or still sending, with no agent reply or server result yet.
         case awaiting
-        /// Definitively failed or refused. The detail is the server's state in
-        /// plain words, such as "Not accepted"; without one the mark says
-        /// "Not sent".
+        /// Did not go through, or the outcome is unknown; Retry applies. The
+        /// detail is a reason in plain words, shown only when there is one;
+        /// otherwise the row shows the error mark alone.
         case notSent(detail: String?)
     }
 
@@ -2920,11 +2920,20 @@ struct InboxSubmissionProgressMark: View {
                 .accessibilityLabel("Waiting for a reply")
                 .accessibilityIdentifier("inbox-awaiting-reply")
         case let .notSent(detail):
-            Label(detail ?? String(localized: "Not sent"), systemImage: "exclamationmark.circle.fill")
-                .labelStyle(.titleAndIcon)
-                .harklightType(.rowTime)
-                .foregroundStyle(palette.coral)
-                .accessibilityIdentifier("inbox-not-sent")
+            // The error mark is the indicator; words appear only for a reason.
+            if let detail {
+                Label(detail, systemImage: "exclamationmark.circle")
+                    .labelStyle(.titleAndIcon)
+                    .harklightType(.rowTime)
+                    .foregroundStyle(palette.coral)
+                    .accessibilityIdentifier("inbox-not-sent")
+            } else {
+                Image(systemName: "exclamationmark.circle")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(palette.coral)
+                    .accessibilityLabel("Did not send")
+                    .accessibilityIdentifier("inbox-not-sent")
+            }
         }
     }
 }

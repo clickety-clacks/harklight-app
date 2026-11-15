@@ -1244,6 +1244,7 @@ private struct PreparedLivePresentationInitialState: Sendable {
     let requestsByKey: [RequestKey: PresentedRequest]
     let conversationThreads: [RequestKey: ConversationThread]
     let submissionProgress: [RequestKey: InboxSubmissionProgress]
+    let submissionPhases: [RequestKey: SubmissionControlPhase]
     let conversationFiles: ConversationFileStorage?
     let messageLedger: NewMessageAreaLedger
     let replyLedger: ReplyItemLedger
@@ -1267,6 +1268,7 @@ private struct PreparedLivePresentationUpdate: Sendable {
     let requestsByKey: [RequestKey: PresentedRequest]
     let conversationThreads: [RequestKey: ConversationThread]
     let submissionProgress: [RequestKey: InboxSubmissionProgress]
+    let submissionPhases: [RequestKey: SubmissionControlPhase]
     let messageArea: VersionedPreparedNewMessageAreaReconciliation?
     let replyItemArea: VersionedPreparedReplyItemAreaReconciliation?
     let failedResponseWarnings: [RequestKey: LivePresentationStore.FailedResponseWarning]
@@ -1324,6 +1326,9 @@ final class LivePresentationStore {
     }
 
     private(set) var submissionProgress: [RequestKey: InboxSubmissionProgress] = [:]
+    /// Each message's latest answer, No comment or Seen, for the control that
+    /// sent it. A pure projection of the store, refreshed with submissionProgress.
+    private(set) var submissionPhases: [RequestKey: SubmissionControlPhase] = [:]
     private(set) var conversationThreads: [RequestKey: ConversationThread]
     @ObservationIgnored private var pendingConversationTextByBinding: [ConversationBinding: String] = [:]
     private(set) var conversationError: String?
@@ -1588,6 +1593,7 @@ final class LivePresentationStore {
                 conversationThreads: conversationThreads,
                 submissionProgress: InboxSubmissionProgress.project(
                     snapshot: attentionSnapshot, threads: conversationThreads),
+                submissionPhases: SubmissionControlPhase.project(snapshot: attentionSnapshot),
                 conversationFiles: conversationFiles,
                 messageLedger: messageLedger, replyLedger: replyLedger,
                 preparedMessageArea: preparedMessageArea, preparedReplyArea: preparedReplyArea,
@@ -1653,9 +1659,15 @@ final class LivePresentationStore {
         self.requestsByKey = preparedInitialState?.requestsByKey ??
             Dictionary(uniqueKeysWithValues: snapshot.requests.map { ($0.key, $0) })
         self.conversationThreads = conversationThreads
-        self.submissionProgress = try preparedInitialState?.submissionProgress ??
-            InboxSubmissionProgress.project(snapshot: store.snapshot(context: context),
-                                            threads: conversationThreads)
+        if let preparedInitialState {
+            self.submissionProgress = preparedInitialState.submissionProgress
+            self.submissionPhases = preparedInitialState.submissionPhases
+        } else {
+            let attentionSnapshot = try store.snapshot(context: context)
+            self.submissionProgress = InboxSubmissionProgress.project(snapshot: attentionSnapshot,
+                                                                      threads: conversationThreads)
+            self.submissionPhases = SubmissionControlPhase.project(snapshot: attentionSnapshot)
+        }
         self.conversationProjectionRevision = snapshot.revision
         self.conversationFiles = conversationFiles
         self.selectedRequestKey = nil
@@ -2433,10 +2445,10 @@ final class LivePresentationStore {
         return switch state {
         case .durable, .queuedForRelay: nil
         case .accepted: "Answer accepted"
-        case .refusedByRetraction: "Answer refused · request retracted"
+        case .refusedByRetraction: "This message was retracted."
         case .terminalUnconfirmed: "Submission unconfirmed · saved draft retained"
         case .notDelivered: "Answer not delivered"
-        case .refusedClosed: "This request was already closed"
+        case .refusedClosed: "This message was closed."
         case .refusedNotFound: "This request is no longer available"
         case .unsupported: "No comment was not accepted"
         case .repairRequired: "Answer needs recovery"
@@ -2625,6 +2637,75 @@ final class LivePresentationStore {
               let receipt = request(for: key)?.intentReceipt else { return false }
         sendAnswerOperationForUserTap(receipt.intentID, request: key)
         return true
+    }
+
+    /// Retry from the control that shows a failed send: resends the same
+    /// operation, including one whose outcome was lost with the connection.
+    @discardableResult
+    func retrySubmissionFromUser(_ key: RequestKey) -> Bool {
+        if retryUnconfirmedAnswerFromUser(key) { return true }
+        guard canSendToCurrentServer, !isRetracted(key),
+              case .failed(retryable: true, _)? = submissionPhases[key]?.phase,
+              let saved = savedSubmission(for: key),
+              !sendingAnswerIntentIDs.contains(saved.intentID) else { return false }
+        do {
+            // A definitively failed operation left the outbox; queue the same
+            // operation again before sending it.
+            let queued = try attentionStore.queueOriginalOperationForUserTap(saved.intentID,
+                                                                             context: profileContext)
+            guard queued.operationID == saved.operationID else { return false }
+            try refreshFromDurableStore()
+        } catch {
+            diagnose(.answer, .originalOperationDelivery, .failed, error: error,
+                     operationID: saved.intentID, request: key)
+            return false
+        }
+        sendAnswerOperationForUserTap(saved.intentID, request: key)
+        return true
+    }
+
+    /// The saved operation the control's phase describes. A definitively
+    /// failed one is not the presented submission, so it is read from the store.
+    private func savedSubmission(for key: RequestKey) -> Submission? {
+        guard let operationID = submissionPhases[key]?.operationID,
+              let snapshot = try? attentionStore.snapshot(context: profileContext) else { return nil }
+        return snapshot.intents.values.first { $0.operationID == operationID && $0.requestKey == key }
+    }
+
+    /// Edit on a failed answer: drops the failed operation and makes what it
+    /// sent the draft again; the next send is a new operation. Offered only
+    /// where the server definitively did not take it.
+    @discardableResult
+    func releaseFailedSubmissionForEdit(_ key: RequestKey, restoresReplySession: Bool = true) -> Bool {
+        guard case .failed(_, editable: true)? = submissionPhases[key]?.phase,
+              let saved = savedSubmission(for: key),
+              !sendingAnswerIntentIDs.contains(saved.intentID) else { return false }
+        // A Reply box send keeps no saved draft, so the sent answer becomes
+        // the draft to edit.
+        let sentAnswer = request(for: key).flatMap { $0.failedAnswer ?? $0.submittedAnswer }
+        do {
+            try attentionStore.releaseFailedOperationForEdit(saved.intentID, context: profileContext)
+            if restoresReplySession, let sentAnswer, let session = replyEditorSessions[key] {
+                session.restore(sentAnswer)
+            }
+            try refreshFromDurableStore()
+            if let sentAnswer, draft(for: key, revision: nil)?.hasEdits != true {
+                editDraft(for: key) { $0 = sentAnswer }
+            }
+            return true
+        } catch {
+            diagnose(.answer, .draftSave, .failed, error: error, operationID: saved.intentID, request: key)
+            return false
+        }
+    }
+
+    /// After a definitive failure, changing the answer or sending again starts
+    /// a new operation, so the failed one is dropped first. Lost and in-flight
+    /// sends keep their operation for Retry.
+    func releaseDefinitiveFailureBeforeChange(_ key: RequestKey) {
+        guard case .failed(_, editable: true)? = submissionPhases[key]?.phase else { return }
+        // The change itself is already in any open Reply box session.
+        releaseFailedSubmissionForEdit(key, restoresReplySession: false)
     }
 
     func canRetryFailedResponse(for key: RequestKey) -> Bool {
@@ -2945,6 +3026,7 @@ final class LivePresentationStore {
                                       answerDraftOverride: RequestDraft?,
                                       explicitCompatibilityAction: ExactText?,
                                       requestRevision: UInt64?) -> Bool {
+        releaseDefinitiveFailureBeforeChange(key)
         guard validateUserAction(for: key) else { return false }
         do {
             let receipt: IntentReceipt
@@ -2999,6 +3081,7 @@ final class LivePresentationStore {
     func submitNoCommentFromUser(_ key: RequestKey,
                                  requestRevision: UInt64? = nil,
                                  selectionIsLocal: Bool = false) -> Bool {
+        releaseDefinitiveFailureBeforeChange(key)
         guard validateUserAction(for: key) else { return false }
         let revision: UInt64?
         if !selectionIsLocal {
@@ -3113,6 +3196,7 @@ final class LivePresentationStore {
     private func editDraft(for key: RequestKey, revision: UInt64? = nil,
                            _ change: (inout RequestDraft) -> Void) {
         guard !isReadOnly else { return }
+        releaseDefinitiveFailureBeforeChange(key)
         do {
             let request = try inspectedRequest(key, revision: revision)
             guard !isRetracted(key), request.lifecycleStatus == .open,
@@ -3142,6 +3226,7 @@ final class LivePresentationStore {
                                 _ change: (inout RequestDraft) -> Void) {
         // Staging is local and tentative. The debounced save and any submit
         // inspect the durable revision before writing or sending.
+        if !isReadOnly { releaseDefinitiveFailureBeforeChange(key) }
         guard !isReadOnly,
               let request = request(for: key),
               revision == nil || revision == request.requestRevision,
@@ -3391,9 +3476,10 @@ final class LivePresentationStore {
         if !locallyReconciledRead {
             do {
                 conversationThreads = try port.conversations(context: port.context).threads
+                let attentionSnapshot = try attentionStore.snapshot(context: profileContext)
                 submissionProgress = InboxSubmissionProgress.project(
-                    snapshot: try attentionStore.snapshot(context: profileContext),
-                    threads: conversationThreads)
+                    snapshot: attentionSnapshot, threads: conversationThreads)
+                submissionPhases = SubmissionControlPhase.project(snapshot: attentionSnapshot)
                 conversationProjectionRevision = snapshot.revision
             }
             catch {
@@ -3494,6 +3580,7 @@ final class LivePresentationStore {
                     conversationThreads: conversationThreads,
                     submissionProgress: InboxSubmissionProgress.project(
                         snapshot: attentionSnapshot, threads: conversationThreads),
+                    submissionPhases: SubmissionControlPhase.project(snapshot: attentionSnapshot),
                     messageArea: messageArea, replyItemArea: replyItemArea,
                     failedResponseWarnings: failedResponseWarnings,
                     warningGeneration: warningGeneration,
@@ -3543,6 +3630,7 @@ final class LivePresentationStore {
             } else {
                 conversationThreads = prepared.conversationThreads
                 submissionProgress = prepared.submissionProgress
+                submissionPhases = prepared.submissionPhases
                 conversationProjectionRevision = snapshot.revision
             }
             locallyReconciledConversationReadRevisions = Set(

@@ -10,7 +10,7 @@ final class AnswerStatusPresentationTests: XCTestCase {
     func testClosedRefusalShowsPlainServerStatusWithoutClaimingDelivery() {
         XCTAssertEqual(LiveRequestDetail.answerStatusText(lifecycleStatus: .open,
             ownOutcome: .refused, answeredFromThisDevice: true, localState: .refusedClosed),
-            "This request was already closed")
+            "This message was closed.")
         XCTAssertFalse(LiveRequestDetail.answerStatusIsComplete(lifecycleStatus: .open,
             ownOutcome: .refused, answerNotDelivered: false))
     }

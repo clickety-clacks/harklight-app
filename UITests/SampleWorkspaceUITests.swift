@@ -215,13 +215,16 @@ final class SampleWorkspaceUITests: XCTestCase {
                       "The submitted ordinary answer remains pending after relaunch and local example actions.")
         original.tap()
         XCTAssertTrue(app.scrollViews["message-card-scroll"].waitForExistence(timeout: 5))
-        let pending = app.descendants(matching: .any)["request-pending-answer-status"]
-        XCTAssertTrue(pending.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertEqual(pending.value as? String, "Pending",
-                       "The persisted ordinary submission retains its pending confirmation after local example actions.")
-        for answer in ["Cover A", "Cover B", "Send a note"] {
-            XCTAssertFalse(app.buttons[answer].exists,
-                           "Pending confirmation replaces the editable answer controls.")
+        // The persisted submission still shows its send state in place: the
+        // check spins and the answers step back, with no Pending card.
+        let sending = app.buttons["request-finish"]
+        XCTAssertTrue(sending.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertEqual(sending.label, "Sending",
+                       "The persisted ordinary submission keeps sending after local example actions.")
+        XCTAssertFalse(app.descendants(matching: .any)["request-pending-answer-status"].exists)
+        for answer in ["Cover A", "Cover B", "Send a note"] where app.buttons[answer].exists {
+            XCTAssertFalse(app.buttons[answer].isEnabled,
+                           "While sending, the other answers step back.")
         }
         capture("ordinary-request-after-example", app)
     }

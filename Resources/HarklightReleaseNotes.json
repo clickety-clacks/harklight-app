@@ -236,6 +236,12 @@
           "symbol": "arrow.triangle.2.circlepath",
           "title": "Connect even when the server's saved position disagrees",
           "detail": "If the server's record of what this device has received no longer matches the device's own record, Harklight now reloads the chat history from the server and keeps connecting, and answers the server has already settled stop showing as pending. This fix is pending formal testing."
+        },
+        {
+          "id": "answer-state-in-the-control",
+          "symbol": "checkmark.circle",
+          "title": "Your answer shows its own progress",
+          "detail": "The choice, reply, No comment or Seen you send now shows a spinner while it sends, then your answer when it arrives. If it does not go through, it shows a circled exclamation mark and Retry, and a failed reply can be edited. The old status lines below the answers are gone. This change is pending formal testing."
         }
       ]
     }

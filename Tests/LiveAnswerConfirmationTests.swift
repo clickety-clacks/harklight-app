@@ -606,8 +606,10 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         XCTAssertEqual(request.defaultAnswerWords, "Hold for now",
                        "Display words come from the shared outcome, not the duplicate action label.")
         XCTAssertEqual(request.defaultAnswerStatusText, "Answered by default: Hold for now")
-        XCTAssertEqual(String(localized: LiveRequestDetail.answeredConfirmationTitle(
-            isDefaultAnswered: request.isDefaultAnswered)), "Answered by default")
+        XCTAssertEqual(LiveRequestDetail.answeredConfirmationTitle(
+            isDefaultAnswered: request.isDefaultAnswered).map { String(localized: $0) }, "Answered by default")
+        XCTAssertNil(LiveRequestDetail.answeredConfirmationTitle(isDefaultAnswered: false),
+                     "A confirmed answer has no Answered label; the check and the card carry it.")
         XCTAssertEqual(request.byWhenMilliseconds, 1_793_300_000_000)
         XCTAssertEqual(request.stakeText, ExactText("The review deadline slips."))
         let row = try XCTUnwrap(live.inboxRows.first { $0.key == key })
