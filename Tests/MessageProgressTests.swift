@@ -45,18 +45,33 @@ final class MessageProgressTests: XCTestCase {
             #"{"percent":0,"stage":"","segments":[]}"#,
             #"{"percent":0,"stage":"coding","segments":[null]}"#
         ] {
-            XCTAssertEqual(MessageProgress.read(from: try message(raw)), .unavailable)
+            XCTAssertEqual(MessageProgress.read(from: try message(raw.replacingOccurrences(of: "{\"percent\":", with: "{\"updated_at\":\"2026-11-09T10:00:00Z\",\"percent\":"))), .unavailable)
         }
     }
 
     func testCompleteRemainsProgressAndMissingAnnotationsStayAbsent() throws {
-        let raw = #"{"percent":100,"stage":"packaging","segments":[{"stage":"packaging","width":100,"visit_at":"bad","reported_percent":"100","delta":null}]}"#
+        let raw = #"{"updated_at":"2026-11-09T10:00:00Z","percent":100,"stage":"packaging","segments":[{"stage":"packaging","width":100,"visit_at":"bad","reported_percent":"100","delta":null}]}"#
         let snapshot = try XCTUnwrap(MessageProgress.read(from: message(raw))?.snapshot)
         XCTAssertEqual(snapshot.percent, 100)
         XCTAssertEqual(snapshot.legend, ["packaging"])
-        XCTAssertNil(snapshot.updatedAt)
+        XCTAssertNotNil(snapshot.updatedAt)
         XCTAssertNil(snapshot.visits[0].visitAt)
         XCTAssertNil(snapshot.visits[0].reportedPercent)
         XCTAssertNil(snapshot.visits[0].delta)
     }
+    func testMalformedNotesAndUpdateTimesShowUnavailable() throws {
+        let valid = #"{"updated_at":"2026-11-09T10:00:00Z","percent":20,"stage":"coding","note":null,"segments":[{"stage":"coding","width":20,"note":"kept"}]}"#
+        XCTAssertNotNil(MessageProgress.read(from: try message(valid))?.snapshot)
+        for malformed in [
+            valid.replacingOccurrences(of: "\"note\":null", with: "\"note\":42"),
+            valid.replacingOccurrences(of: "\"note\":null", with: "\"note\":false"),
+            valid.replacingOccurrences(of: "\"note\":\"kept\"", with: "\"note\":{}"),
+            valid.replacingOccurrences(of: "\"note\":\"kept\"", with: "\"note\":[]"),
+            valid.replacingOccurrences(of: "\"updated_at\":\"2026-11-09T10:00:00Z\",", with: ""),
+            valid.replacingOccurrences(of: "2026-11-09T10:00:00Z", with: "not a time")
+        ] {
+            XCTAssertEqual(MessageProgress.read(from: try message(malformed)), .unavailable)
+        }
+    }
+
 }

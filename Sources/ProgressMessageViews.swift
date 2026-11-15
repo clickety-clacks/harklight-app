@@ -66,9 +66,7 @@ struct ProgressMessageRow: View {
                 HStack(alignment: .firstTextBaseline) {
                     Text("\(ProgressStageStyle.number(snapshot.percent))% · \(ProgressStageStyle.label(snapshot.stage))")
                     Spacer(minLength: 8)
-                    if let updatedAt = snapshot.updatedAt {
-                        Text(updatedAt, format: .dateTime.hour().minute())
-                    }
+                    Text(snapshot.updatedAt, format: .dateTime.hour().minute())
                 }
                 .harklightType(.rowTime)
                 .foregroundStyle(.hkLabel)
@@ -155,11 +153,9 @@ struct ProgressMessageDetail: View {
                 .foregroundStyle(.hkText)
                 .textSelection(.enabled)
         }
-        if let updatedAt = snapshot.updatedAt {
-            Text("Agent update time: \(updatedAt.formatted(date: .abbreviated, time: .shortened))")
-                .harklightType(.rowTime)
-                .foregroundStyle(.hkLabel)
-        }
+        Text("Agent update time: \(snapshot.updatedAt.formatted(date: .abbreviated, time: .shortened))")
+            .harklightType(.rowTime)
+            .foregroundStyle(.hkLabel)
         ForEach(Array(snapshot.visits.enumerated().reversed()), id: \.offset) { _, visit in
             VStack(alignment: .leading, spacing: 6) {
                 Divider().overlay(.hkLine)

@@ -23,7 +23,7 @@ public enum MessageProgress: Equatable, Sendable {
 }
 
 public struct ProgressSnapshot: Equatable, Sendable {
-    public let updatedAt: Date?
+    public let updatedAt: Date
     public let percent: Double
     public let stage: String
     public let note: String?
@@ -35,7 +35,9 @@ public struct ProgressSnapshot: Equatable, Sendable {
     }
 
     fileprivate init?(_ raw: JSONValue) {
-        guard let percent = progressNumber(raw.uniqueValue(named: "percent")),
+        guard progressNoteIsValid(raw.uniqueValue(named: "note")),
+              let updatedAt = progressDate(raw.uniqueValue(named: "updated_at")),
+              let percent = progressNumber(raw.uniqueValue(named: "percent")),
               (0...100).contains(percent),
               let stage = progressStage(raw.uniqueValue(named: "stage")),
               let entries = raw.uniqueValue(named: "segments")?.arrayValues else { return nil }
@@ -47,7 +49,7 @@ public struct ProgressSnapshot: Equatable, Sendable {
         self.stage = stage
         self.note = raw.uniqueValue(named: "note")?.stringValue?.rawValue
         self.visits = visits
-        self.updatedAt = progressDate(raw.uniqueValue(named: "updated_at"))
+        self.updatedAt = updatedAt
     }
 }
 
@@ -60,7 +62,8 @@ public struct ProgressVisit: Equatable, Sendable {
     public let delta: Double?
 
     fileprivate init?(_ raw: JSONValue) {
-        guard let stage = progressStage(raw.uniqueValue(named: "stage")),
+        guard progressNoteIsValid(raw.uniqueValue(named: "note")),
+              let stage = progressStage(raw.uniqueValue(named: "stage")),
               let width = progressNumber(raw.uniqueValue(named: "width")),
               (0...100).contains(width) else { return nil }
         self.stage = stage
@@ -93,4 +96,11 @@ private func progressDate(_ raw: JSONValue?) -> Date? {
     if let date = formatter.date(from: text) { return date }
     formatter.formatOptions = [.withInternetDateTime]
     return formatter.date(from: text)
+}
+
+private func progressNoteIsValid(_ raw: JSONValue?) -> Bool {
+    switch raw {
+    case nil, .null, .string: true
+    default: false
+    }
 }
