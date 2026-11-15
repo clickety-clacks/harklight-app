@@ -349,7 +349,7 @@ public enum NativeDiagnosticCauseCode {
         "notification_empty_token", "notification_stored_token_invalid", "server_trust_validated", "client_identity_offered",
         "websocket_opened", "relay_admitted", "replay_requested_locally", "relay_resynced",
         "relay_acknowledged", "follow_on_replay_not_reached", "original_operation_terminal_not_observed",
-        "original_operation_state_unavailable", "saved_server_state_rebuilt", "unreadable_pending_actions_discarded"
+        "original_operation_state_unavailable", "saved_server_state_rebuilt", "unreadable_pending_actions_discarded", "unpresentable_request_skipped"
     ]
 
     private static let serverReasons: Set<String> = [

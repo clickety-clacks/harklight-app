@@ -2039,6 +2039,39 @@ final class NativeRelayCoreTests: XCTestCase {
         XCTAssertNoThrow(try ClientRepository(context: context, persistence: persistence))
     }
 
+    func testUnpresentableRestoredCacheIsDiscardedSoTheInboxOpensWithTheQueueKept() throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                                       personID: ExactText("person-unpresentable"),
+                                       deviceID: ExactText("installation-unpresentable"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let store = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        let key = RequestKey(accountScope: identity.personID,
+                             senderID: ExactText("sender"), messageID: ExactText("cached"))
+        let payload = try JSONValue.parse(data(#"{"title":"Question","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"yes","label":"Yes","kind":"value","value":{"ok":true}}]}}"#))
+        _ = try store.apply(RelayEvent(sequence: 1,
+            body: .delivery(StoredRequest(key: key, originalPayload: payload), .message)), context: context)
+        let port = AttentionDomainPort(store: store)
+        let selector = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first?.selector)
+        let unsent = try port.submit(SubmitIntent(context: port.context, selector: selector,
+            intentID: UUID(), inputs: [.compatibilityValue(action: ExactText("yes"))]))
+
+        // A restored cache whose request has lost its inbox order cannot be
+        // presented; before this fix that failed activation on every launch.
+        try store.restoreCachedServerState(CachedAttentionServerState(identity: identity,
+            requests: [key: StoredRequest(key: key, originalPayload: payload)], remoteStates: [:],
+            cursor: 1, conversationCursor: 0, conversations: [:], inboxView: nil,
+            currentRequestKeys: [key]), context: context)
+        XCTAssertThrowsError(try port.observe(context: port.context)) { error in
+            XCTAssertTrue(NativeRelayCoreError.isInvalidSavedServerState(error),
+                          "An unpresentable restored cache is rebuilt, not a dead end: \(error)")
+        }
+
+        try store.discardServerState(context: context)
+        XCTAssertNoThrow(try port.observe(context: port.context), "The inbox opens and waits for the rebuild.")
+        XCTAssertEqual(try store.snapshot(context: context).intents[unsent.intentID]?.operationID, unsent.opID,
+                       "The unsent answer is kept for the rebuilt connection.")
+    }
+
     func testConflictingSavedPageStateIsRebuiltSoPagingContinuesWithTheQueueKept() async throws {
         let (context, store, session) = try setup()
         func key(_ id: String) -> RequestKey {

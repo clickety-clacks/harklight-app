@@ -1583,6 +1583,10 @@ final class LivePresentationStore {
                 failedResponseWarnings: failedResponseWarnings,
                 staleAnswerDialog: staleAnswerDialog)
         }.value
+        if !initial.snapshot.unpresentableRequestKeys.isEmpty {
+            diagnostics?.record(area: .localStore, phase: .projectionRefresh, transition: .observed,
+                                causeCode: "unpresentable_request_skipped")
+        }
 
         mainActorSegmentStartedAt = DispatchTime.now().uptimeNanoseconds
         let presentation = try LivePresentationStore(
