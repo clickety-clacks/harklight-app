@@ -156,7 +156,7 @@ enum InboxListProjection {
     static func filteredRows(_ rows: [InboxItem], in tab: InboxWorkspaceTab,
                              search: String) -> [InboxItem] {
         let messageTab = tab.messageTab
-        let inTab = rows.filter { $0.belongsToReplied == (messageTab == .replied) }
+        let inTab = rows.filter { !$0.isProgress && $0.belongsToReplied == (messageTab == .replied) }
         let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else { return inTab }
         return inTab.filter { $0.matchesSearch(query) }
@@ -168,7 +168,7 @@ enum InboxListProjection {
         let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
         return InboxThreadListProjection.grouped(rows).compactMap { entry in
             let matches = entry.members.filter { item in
-                item.belongsToReplied == isRepliedTab &&
+                !item.isProgress && item.belongsToReplied == isRepliedTab &&
                     (query.isEmpty || item.matchesSearch(query))
             }
             guard !matches.isEmpty else { return nil }
@@ -539,6 +539,7 @@ struct InboxRequestRow: Identifiable {
     var informationalSeenStatus: InformationalSeenStatus? = nil
     var declaredMessageType: MessageTypeValue? = nil
     var declaredMessageKind: MessageKindValue? = nil
+    var progress: MessageProgress? = nil
     var canMarkSeen = false
     var canNoComment = false
     var noCommentUnavailable = false
@@ -1097,7 +1098,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             .frame(maxWidth: .infinity)
             if inlineChat, !pushedChatFallsBackToMessage, case let .request(key)? = item,
                !dismissedInlineChatRequests.contains(key), let conversationStore,
-               let request = conversationStore.request(for: key) {
+               let request = conversationStore.request(for: key), request.messageProgress == nil {
                 Group {
                     Rectangle().fill(.hkLine).frame(width: 1).ignoresSafeArea()
                     ConversationPanel(store: conversationStore, key: key,
@@ -1540,6 +1541,7 @@ struct InboxList: View {
     @State private var warningContentHeight: CGFloat = 0
     @State private var expandedThreadGroups: Set<InboxListEntryID> = []
     @State private var isNewMessageAreaExpanded = false
+    @State private var isProgressExpanded = false
     @State private var visibleMessagePlacements: Set<NewMessageAreaVisibility> = []
     @State private var lastViewedReplyTarget: RequestKey?
 
@@ -1660,7 +1662,7 @@ struct InboxList: View {
         let isRepliedTab = tab.messageTab == .replied
         return conversationStore.expiredRetractionSearchRows.filter { row in
             let item = InboxItem.request(row)
-            return item.belongsToReplied == isRepliedTab && item.matchesSearch(query)
+            return !item.isProgress && item.belongsToReplied == isRepliedTab && item.matchesSearch(query)
         }
     }
 
@@ -1682,7 +1684,7 @@ struct InboxList: View {
         }
         let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
         return newMessageAreaStore.entries.compactMap { entry in
-            guard let row = requestRows[entry.key],
+            guard let row = requestRows[entry.key], row.progress == nil,
                   query.isEmpty || InboxItem.request(row).matchesSearch(query) else { return nil }
             return NewMessageAreaListRow(entry: entry, row: row)
         }
@@ -1698,6 +1700,7 @@ struct InboxList: View {
         let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
         return replyItemAreaStore.entries.compactMap { entry in
             let row = conversationStore?.inboxRow(for: entry.parent) ?? requestRows[entry.parent]
+            guard row?.progress == nil else { return nil }
             let matchesSearch = row.map { InboxItem.request($0).matchesSearch(query) } ??
                 (entry.parent.senderID.rawValue.localizedCaseInsensitiveContains(query) ||
                  entry.parent.messageID.rawValue.localizedCaseInsensitiveContains(query))
@@ -1727,7 +1730,7 @@ struct InboxList: View {
             case let .request(request): request
             case let .example(_, response): response.inboxRow
             }
-            guard let row, row.submissionProgress != nil,
+            guard let row, row.progress == nil, row.submissionProgress != nil,
                   query.isEmpty || item.matchesSearch(query) else { return nil }
             return AwaitingAreaItem(item: item, row: row)
         }
@@ -2029,6 +2032,15 @@ struct InboxList: View {
         let replyTargetKey = requestedReplyTarget
         guard rows.contains(where: { $0.id == lastViewedSelection }) || replyTargetKey != nil else {
             if lastViewedReplyTarget != nil { return }
+            didRestoreLastViewed()
+            return
+        }
+        if tab == .inbox,
+           ProgressInboxProjection.rows(rows, search: search).contains(where: {
+               InboxSelection.request($0.key) == lastViewedSelection
+           }) {
+            isProgressExpanded = true
+            proxy.scrollTo(InboxListRowScrollTarget(tab: tab, selection: lastViewedSelection), anchor: .center)
             didRestoreLastViewed()
             return
         }
@@ -2391,6 +2403,8 @@ struct InboxList: View {
     @ViewBuilder
     private func listContent(for tab: InboxWorkspaceTab,
                              using proxy: ScrollViewProxy) -> some View {
+        let progressRows = tab == .inbox ? ProgressInboxProjection.rows(rows, search: search) : []
+        let shownProgressRows = ProgressInboxProjection.shown(progressRows, expanded: isProgressExpanded)
         let normalEntries = normalListEntries
         let historyIDs = freeHistoryIDs
         let historyRows = matchingExpiredRetractionRows
@@ -2408,6 +2422,44 @@ struct InboxList: View {
                 .navigationLinkIndicatorVisibility(.hidden)
                 .listRowSeparator(.hidden)
                 .accessibilityIdentifier("notification-pending-row")
+            }
+            if !progressRows.isEmpty {
+                Section {
+                    ForEach(shownProgressRows) { row in
+                        NavigationLink(value: InboxSelection.request(row.key)) {
+                            ProgressMessageRow(title: row.title, progress: row.progress!)
+                                .padding(.horizontal, HarklightDesignSystem.shape(.rowHorizontalPadding))
+                                .overlay(alignment: .bottom) {
+                                    Rectangle().fill(designPalette.line).frame(height: 1)
+                                }
+                        }
+                        .buttonStyle(.plain)
+                        .navigationLinkIndicatorVisibility(.hidden)
+                        .tag(InboxSelection.request(row.key))
+                        .id(InboxListRowScrollTarget(tab: tab, selection: .request(row.key)))
+                        .accessibilityIdentifier("progress-row-\(row.key.messageID.rawValue)")
+                    }
+                    if progressRows.count > 5 && !isProgressExpanded {
+                        Button("More…") { isProgressExpanded = true }
+                            .harklightType(.more)
+                            .foregroundStyle(designPalette.text)
+                            .padding(.horizontal, HarklightDesignSystem.shape(.rowHorizontalPadding))
+                            .padding(.vertical, HarklightDesignSystem.shape(.rowVerticalPadding))
+                            .accessibilityIdentifier("progress-more")
+                    }
+                } header: {
+                    Text("Progress · \(shownProgressRows.count) of \(progressRows.count)")
+                        .harklightType(.sectionHeading)
+                        .foregroundStyle(designPalette.label)
+                        .textCase(nil)
+                        .padding(.horizontal, HarklightDesignSystem.shape(.rowHorizontalPadding))
+                        .padding(.vertical, 8)
+                        .accessibilityIdentifier("progress-header")
+                }
+                .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
+                .listRowSeparator(.hidden)
+                .listRowBackground(rowSurface)
+                .listSectionMargins(.vertical, 0)
             }
             if !areaRows.isEmpty {
                 Section {

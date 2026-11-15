@@ -99,6 +99,7 @@ targets:
         excludes:
           - ConversationSampleUITests.swift
           - FreeRenderedUITests.swift
+          - ProgressRenderedUITests.swift
     dependencies:
       - target: Harklight
       - package: AttentionDomain
@@ -118,6 +119,7 @@ targets:
     sources:
       - path: UITests/ConversationSampleUITests.swift
       - path: UITests/FreeRenderedUITests.swift
+      - path: UITests/ProgressRenderedUITests.swift
     dependencies:
       - target: HarklightConversationUITestHost
       - package: AttentionDomain

@@ -621,11 +621,21 @@ struct LiveContentView: View {
                 clearRetractedRequest: { store.clearRetracted($0) },
                 requestDetail: { key, context in
                     if let request = store.request(for: key) {
+                        if let progress = request.messageProgress {
+                            if request.isResolved || store.inboxRow(for: key)?.isRetracted == true {
+                                ContentUnavailableView("Progress unavailable", systemImage: "checkmark.circle")
+                            } else {
+                                ProgressMessageDetail(title: request.title?.rawValue ?? "Message",
+                                    sender: request.senderDisplayName?.rawValue ?? key.senderID.rawValue,
+                                    bodyText: request.body?.rawValue, progress: progress)
+                            }
+                        } else {
                         LiveRequestDetail(request: request, store: store, context: context,
                             fixtureStore: fixtureStore,
                             testNotificationRouter: testNotificationRouter,
                             testOpenForegroundChatIndicator: testOpenForegroundChatIndicator,
                             testConversationSheetDidAppear: testConversationSheetDidAppear)
+                        }
                     } else {
                         ContentUnavailableView("Request unavailable", systemImage: "questionmark.folder")
                     }

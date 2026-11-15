@@ -324,6 +324,8 @@ public struct PresentedRequest: Equatable, Sendable {
     public let messageType: MessageTypeValue?
     /// Explicit sender-stated message kind, if recognized from the current message.
     public let messageKind: MessageKindValue?
+    /// Progress from this admitted revision; malformed marked FYIs stay marked.
+    public let messageProgress: MessageProgress?
     /// The server's account-wide terminal outcome, when supported.
     public let accountAnswerOutcome: AccountAnswerOutcome?
     /// The first value action matching a default outcome in the current revision.
@@ -386,6 +388,7 @@ public struct PresentedRequest: Equatable, Sendable {
                 informationalSeenStatus: InformationalSeenStatus? = nil,
                 messageType: MessageTypeValue? = nil,
                 messageKind: MessageKindValue? = nil,
+                messageProgress: MessageProgress? = nil,
                 accountAnswerOutcome: AccountAnswerOutcome? = nil,
                 defaultAnswerAction: ProjectedActionReference? = nil,
                 attentionTier: AttentionTier = .middle,
@@ -425,6 +428,7 @@ public struct PresentedRequest: Equatable, Sendable {
         self.informationalSeenStatus = informationalSeenStatus
         self.messageType = messageType
         self.messageKind = messageKind
+        self.messageProgress = messageProgress
         self.accountAnswerOutcome = accountAnswerOutcome
         self.defaultAnswerAction = defaultAnswerAction
         self.attentionTier = attentionTier
@@ -1381,6 +1385,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
                                     status: status, remote: remote, submission: submission),
                                 messageType: request.messageType,
                                 messageKind: request.messageKind,
+                                messageProgress: MessageProgress.read(from: request.originalPayload),
                                 accountAnswerOutcome: remote?.accountAnswerOutcome,
                                 defaultAnswerAction: defaultAnswerAction,
                                 attentionTier: .middle,

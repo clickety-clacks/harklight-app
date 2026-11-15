@@ -75,6 +75,11 @@ enum InboxItem: Identifiable {
         }
     }
 
+    var isProgress: Bool {
+        if case let .request(row) = self { return row.progress != nil }
+        return false
+    }
+
     var resolvedMessageType: HarklightMessageType {
         switch self {
         case let .request(row): row.resolvedMessageType
@@ -322,7 +327,7 @@ enum InboxNormalListProjection {
         for item in serverItems {
             switch item.kind {
             case .message:
-                guard let row = rowsByKey[item.key],
+                guard let row = rowsByKey[item.key], row.progress == nil,
                       isFree || row.belongsToReplied == (tab.messageTab == .replied),
                       query.isEmpty || InboxItem.request(row).matchesSearch(query) else {
                     flushMessages()
@@ -332,6 +337,7 @@ enum InboxNormalListProjection {
                 pendingMessages.append(.request(row))
             case .reply:
                 flushMessages()
+                guard rowsByKey[item.key]?.progress == nil else { continue }
                 guard let unseenCount = item.unseenCount,
                       isFree || (unseenCount == 0 ? tab == .replied : tab == .inbox),
                       matchesReplySearch(item, query: query, rowsByKey: rowsByKey) else { continue }

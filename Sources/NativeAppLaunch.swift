@@ -2259,7 +2259,7 @@ final class LivePresentationStore {
     private nonisolated static func newMessageObservations(
         for requests: [PresentedRequest]
     ) -> [NewMessageAreaMessage] {
-        requests.map {
+        requests.filter { $0.messageProgress == nil }.map {
             NewMessageAreaMessage(key: $0.key, acceptanceOrder: $0.acceptanceOrder,
                                   isResolved: $0.isResolved,
                                   hasSubmittedAnswer: $0.intentReceipt != nil)
@@ -2369,6 +2369,7 @@ final class LivePresentationStore {
         } else {
             localStatus = nil
         }
+        let progress = request.messageProgress
         let row = InboxRequestRow(key: request.key, requestRevision: request.requestRevision,
             title: request.title?.rawValue ?? "Message",
             sender: request.key.senderID.rawValue,
@@ -2376,17 +2377,19 @@ final class LivePresentationStore {
             senderDisplayName: request.senderDisplayName?.rawValue,
             bodyText: request.body?.rawValue,
             symbol: request.informationalSeenStatus == nil ? "envelope" : "info.circle",
-            isResolved: request.answerNotDelivered || receiptStatus == .failed || hasDeliveryWarning
-                ? false : request.isResolved,
+            isResolved: progress != nil ? request.isResolved :
+                (request.answerNotDelivered || receiptStatus == .failed || hasDeliveryWarning
+                ? false : request.isResolved),
             createdAt: request.createdAt,
             localStatus: localStatus,
             informationalSeenStatus: request.informationalSeenStatus,
             declaredMessageType: request.messageType,
             declaredMessageKind: request.messageKind,
-            canMarkSeen: canSendToCurrentServer &&
+            progress: progress,
+            canMarkSeen: progress == nil && canSendToCurrentServer &&
                 !retracted && request.lifecycleStatus == .open &&
                 request.intentReceipt == nil && request.informationalSeenStatus == .available,
-            canNoComment: canNoComment(request, isRetracted: retracted),
+            canNoComment: progress == nil && canNoComment(request, isRetracted: retracted),
             noCommentUnavailable: request.noCommentUnavailable,
             hasUserAction: receiptStatus == .pendingOrAccepted ||
                 request.lifecycleStatus == .answered ||
