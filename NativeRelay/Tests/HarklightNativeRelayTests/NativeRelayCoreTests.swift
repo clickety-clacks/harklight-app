@@ -1549,7 +1549,7 @@ final class NativeRelayCoreTests: XCTestCase {
     /// or past the stored position and no later than what this open delivered.
     private final class AckRuleConversationSession: Session, AuthenticatedConversationSession, @unchecked Sendable {
         var storedAck: UInt64
-        let history: UInt64
+        var history: UInt64
         var abortAfterFirstEvent = false
         private var contiguous: UInt64 = 0
         var opens: [UInt64] = []
@@ -1646,14 +1646,43 @@ final class NativeRelayCoreTests: XCTestCase {
         XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, 4)
         XCTAssertEqual(try turns(), 3, "Only the Server's history remains after the rebuild.")
 
-        // 3. The relay's stored ACK is ahead of its own history: every ACK is
-        // refused. The connection still completes with the whole history.
+        // 3. The relay's stored ACK is ahead of its own history, so every ACK
+        // is refused. A client cannot produce this state; it is the Server
+        // wedge the Server PO identified, injected here. The connection still
+        // completes with the whole history, after one rebuild.
         let stale = session(storedAck: 9, history: 4)
         _ = try await NativeRelayCore(store: store, context: context, session: stale, serverStateCache: cache)
             .resyncAndDrainOutbox()
-        XCTAssertEqual(stale.refusedAcks.count, 2)
+        XCTAssertEqual(stale.refusedAcks, [4, 4])
+        XCTAssertEqual(stale.opens.filter { $0 == 0 }.count, 1, "One rebuild from the Server's whole history.")
         XCTAssertTrue(stale.acceptedAcks.isEmpty)
         XCTAssertEqual(try turns(), 3)
+
+        // 4. Another connection against the same relay state does not rebuild
+        // again: the history from 0 was already verified at this position.
+        let opensBefore = stale.opens.count
+        _ = try await NativeRelayCore(store: store, context: context, session: stale, serverStateCache: cache)
+            .resyncAndDrainOutbox()
+        XCTAssertEqual(stale.opens.dropFirst(opensBefore).filter { $0 == 0 }.count, 0, "No repeated rebuild.")
+        XCTAssertEqual(stale.refusedAcks.count, 3)
+
+        // 5. A later event still below the relay's stored ACK: applied, its ACK
+        // refused, and still no rebuild.
+        stale.history = 6
+        let opensBeforeEvent = stale.opens.count
+        _ = try await NativeRelayCore(store: store, context: context, session: stale, serverStateCache: cache)
+            .resyncAndDrainOutbox()
+        XCTAssertEqual(stale.opens.dropFirst(opensBeforeEvent).filter { $0 == 0 }.count, 0)
+        XCTAssertEqual(try turns(), 5, "Later events keep arriving while the relay's ACK is ahead.")
+
+        // 6. Once the history passes the relay's stored ACK, the ACK lands and
+        // the relay and the app agree again.
+        stale.history = 10
+        _ = try await NativeRelayCore(store: store, context: context, session: stale, serverStateCache: cache)
+            .resyncAndDrainOutbox()
+        XCTAssertEqual(stale.acceptedAcks, [10])
+        XCTAssertEqual(stale.storedAck, 10)
+        XCTAssertNil(store.conversationAckRefusedAfterRebuild, "Agreement clears the recorded refusal.")
     }
 
     func testBuild227SavedStateWithAnOlderRelayAckConnectsAndClearsEveryPendingAnswer() async throws {

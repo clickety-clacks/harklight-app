@@ -235,6 +235,7 @@ public final class ClientRepository: @unchecked Sendable {
     private var selectorBindings: [UUID: SelectorBinding] = [:]
     private var changeObservers: [UUID: AsyncStream<UInt64>.Continuation] = [:]
     private var isInvalidated = false
+    private var conversationAckRefusalMarker: UInt64?
 
     var profileContext: ProfileContext { context }
     public var requiresConfirmedServerProjection: Bool { context.transportMode == .relay }
@@ -424,6 +425,27 @@ public final class ClientRepository: @unchecked Sendable {
         var next = state
         next.server.conversation = nil
         try commit(next)
+    }
+
+    /// The conversation position at which a rebuild from the whole Server
+    /// history was still refused by the relay, for this app session. Kept in
+    /// memory only: a relaunch verifies the history once more.
+    public var conversationAckRefusedAfterRebuild: UInt64? {
+        lock.lock()
+        defer { lock.unlock() }
+        return conversationAckRefusalMarker
+    }
+
+    public func recordConversationAckRefusedAfterRebuild(at position: UInt64) {
+        lock.lock()
+        defer { lock.unlock() }
+        conversationAckRefusalMarker = position
+    }
+
+    public func clearConversationAckRefusal() {
+        lock.lock()
+        defer { lock.unlock() }
+        conversationAckRefusalMarker = nil
     }
 
     public func invalidate() {

@@ -1668,16 +1668,22 @@ public actor NativeRelayCore {
                 using: transport, wire: wire)
             flushCommittedLiveReplyArrivals()
             try await saveServerStateCache()
-            high = try await acknowledgeConversationRebuildingIfRefused(high, using: transport, wire: wire)
+            var acknowledged: Bool
+            (high, acknowledged) = try await acknowledgeConversationRebuildingIfRefused(high, using: transport, wire: wire)
             if drainReadPositions,
                try await sendPendingConversationReadPositions(using: transport) {
                 high = try await replayConversation(since: store.conversationSnapshot(context: context).cursor,
                     using: transport, wire: wire)
                 flushCommittedLiveReplyArrivals()
                 try await saveServerStateCache()
-                high = try await acknowledgeConversationRebuildingIfRefused(high, using: transport, wire: wire)
+                (high, acknowledged) = try await acknowledgeConversationRebuildingIfRefused(high, using: transport, wire: wire)
             }
-            diagnose(.conversation, .acknowledgement, .completed)
+            if acknowledged {
+                diagnose(.conversation, .acknowledgement, .completed)
+            } else {
+                diagnose(.conversation, .acknowledgement, .unresolved,
+                         causeCode: "conversation_ack_refused_after_rebuild", conversationSequence: high)
+            }
             diagnose(.conversation, .conversationReplay, .completed)
         } catch InstallationTransportError.conversationsUnavailable {
             conversationsUnavailable = true
@@ -1843,14 +1849,25 @@ public actor NativeRelayCore {
     /// acknowledge that. If the relay still refuses, its stored position is
     /// ahead of its own history; the projection now holds that whole history,
     /// so record it and carry on rather than ending the connection.
+    ///
+    /// The store remembers the position at which a full rebuild was still
+    /// refused. A later refusal at or past it is the same relay state (the
+    /// history from 0 was already verified, and later events are applied
+    /// contiguously), so it is recorded without rebuilding again. The first
+    /// accepted acknowledgement clears it.
     private func acknowledgeConversationRebuildingIfRefused(_ high: UInt64,
-        using transport: any AuthenticatedConversationSession, wire: ConversationWire) async throws -> UInt64 {
+        using transport: any AuthenticatedConversationSession,
+        wire: ConversationWire) async throws -> (high: UInt64, acknowledged: Bool) {
         do {
             try await transport.acknowledgeConversation(wire.acknowledge(high))
-            return high
+            store.clearConversationAckRefusal()
+            return (high, true)
         } catch InstallationTransportError.acknowledgementBehind {
             diagnose(.conversation, .acknowledgement, .retrying,
-                     error: InstallationTransportError.acknowledgementBehind)
+                     error: InstallationTransportError.acknowledgementBehind, conversationSequence: high)
+        }
+        if let refusedAt = store.conversationAckRefusedAfterRebuild, high >= refusedAt {
+            return (high, false)
         }
         try store.discardConversationProjection(context: context)
         let rebuilt = try await replayConversation(since: 0, using: transport, wire: wire)
@@ -1858,11 +1875,12 @@ public actor NativeRelayCore {
         try await saveServerStateCache()
         do {
             try await transport.acknowledgeConversation(wire.acknowledge(rebuilt))
+            store.clearConversationAckRefusal()
+            return (rebuilt, true)
         } catch InstallationTransportError.acknowledgementBehind {
-            diagnose(.conversation, .acknowledgement, .observed,
-                     causeCode: "conversation_ack_refused_after_rebuild")
+            store.recordConversationAckRefusedAfterRebuild(at: rebuilt)
+            return (rebuilt, false)
         }
-        return rebuilt
     }
 
     private func replayConversation(since cursor: UInt64, using transport: any AuthenticatedConversationSession,
