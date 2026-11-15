@@ -319,6 +319,11 @@ final class ReplyEditorDraftSession {
         store(updated)
     }
 
+    /// Edit on a failed send: its sent answer becomes this session's edited draft.
+    func restore(_ sent: RequestDraft) {
+        store(sent)
+    }
+
     func adoptUneditedRequest(_ request: PresentedRequest, canSubmit: Bool) {
         guard request.key == requestKey, !hasLocalChanges else { return }
         requestRevision = request.requestRevision
@@ -336,6 +341,9 @@ final class ReplyEditorDraftSession {
     }
 
     private static func initialDraft(for request: PresentedRequest) -> RequestDraft {
+        // A definitively failed send keeps showing what it sent until Edit or
+        // another answer.
+        if let sent = request.failedAnswer { return sent }
         var inputs: [ExactText: InputDraft] = [:]
         if case let .sender(sender) = request.projection {
             for input in sender.inputs {
@@ -1425,6 +1433,11 @@ struct LiveRequestDetail: View {
     private func markLocalReplyInteraction() {
         guard localReplySession?.canSubmitFromSnapshot == true else { return }
         if !localReplyEditingActive { localReplyEditingActive = true }
+        // Changing a definitively failed answer replaces it: drop the failed
+        // operation so the failure marks leave and the next send is new.
+        if localReplySession?.hasLocalChanges == true {
+            store.releaseDefinitiveFailureBeforeChange(request.key)
+        }
     }
 
     private func openReplyEditor(_ target: ReplyEditorTarget) {
@@ -2905,7 +2918,7 @@ private struct LiveRequestAnswerControls: View {
     /// A picked choice or written reply already carries a failed answer's
     /// state; a form of typed or point inputs carries it below its fields.
     private func showsFailureInPickedChoice(_ sender: AdmittedSenderProjection) -> Bool {
-        let answer = request.submittedAnswer ?? request.draft
+        let answer = request.failedAnswer ?? request.submittedAnswer ?? request.draft
         return sender.inputs.contains { input in
             guard case .response = input.kind else { return false }
             return answer.inputs[input.id]?.selectedActionID != nil

@@ -2645,34 +2645,55 @@ final class LivePresentationStore {
         if retryUnconfirmedAnswerFromUser(key) { return true }
         guard canSendToCurrentServer, !isRetracted(key),
               case .failed(retryable: true, _)? = submissionPhases[key]?.phase,
-              let receipt = request(for: key)?.intentReceipt,
-              receipt.opID == submissionPhases[key]?.operationID,
-              !sendingAnswerIntentIDs.contains(receipt.intentID) else { return false }
-        sendAnswerOperationForUserTap(receipt.intentID, request: key)
+              let saved = savedSubmission(for: key),
+              !sendingAnswerIntentIDs.contains(saved.intentID) else { return false }
+        do {
+            // A definitively failed operation left the outbox; queue the same
+            // operation again before sending it.
+            let queued = try attentionStore.queueOriginalOperationForUserTap(saved.intentID,
+                                                                             context: profileContext)
+            guard queued.operationID == saved.operationID else { return false }
+            try refreshFromDurableStore()
+        } catch {
+            diagnose(.answer, .originalOperationDelivery, .failed, error: error,
+                     operationID: saved.intentID, request: key)
+            return false
+        }
+        sendAnswerOperationForUserTap(saved.intentID, request: key)
         return true
     }
 
-    /// Edit on a failed written reply: drops the failed operation so the saved
-    /// draft opens again; the next send is a new operation. Offered only where
-    /// the server definitively did not take it.
+    /// The saved operation the control's phase describes. A definitively
+    /// failed one is not the presented submission, so it is read from the store.
+    private func savedSubmission(for key: RequestKey) -> Submission? {
+        guard let operationID = submissionPhases[key]?.operationID,
+              let snapshot = try? attentionStore.snapshot(context: profileContext) else { return nil }
+        return snapshot.intents.values.first { $0.operationID == operationID && $0.requestKey == key }
+    }
+
+    /// Edit on a failed answer: drops the failed operation and makes what it
+    /// sent the draft again; the next send is a new operation. Offered only
+    /// where the server definitively did not take it.
     @discardableResult
-    func releaseFailedSubmissionForEdit(_ key: RequestKey) -> Bool {
+    func releaseFailedSubmissionForEdit(_ key: RequestKey, restoresReplySession: Bool = true) -> Bool {
         guard case .failed(_, editable: true)? = submissionPhases[key]?.phase,
-              let receipt = request(for: key)?.intentReceipt,
-              receipt.opID == submissionPhases[key]?.operationID,
-              !sendingAnswerIntentIDs.contains(receipt.intentID) else { return false }
+              let saved = savedSubmission(for: key),
+              !sendingAnswerIntentIDs.contains(saved.intentID) else { return false }
         // A Reply box send keeps no saved draft, so the sent answer becomes
         // the draft to edit.
-        let sentAnswer = request(for: key)?.submittedAnswer
+        let sentAnswer = request(for: key).flatMap { $0.failedAnswer ?? $0.submittedAnswer }
         do {
-            try attentionStore.releaseFailedOperationForEdit(receipt.intentID, context: profileContext)
+            try attentionStore.releaseFailedOperationForEdit(saved.intentID, context: profileContext)
+            if restoresReplySession, let sentAnswer, let session = replyEditorSessions[key] {
+                session.restore(sentAnswer)
+            }
             try refreshFromDurableStore()
             if let sentAnswer, draft(for: key, revision: nil)?.hasEdits != true {
                 editDraft(for: key) { $0 = sentAnswer }
             }
             return true
         } catch {
-            diagnose(.answer, .draftSave, .failed, error: error, operationID: receipt.intentID, request: key)
+            diagnose(.answer, .draftSave, .failed, error: error, operationID: saved.intentID, request: key)
             return false
         }
     }
@@ -2680,9 +2701,10 @@ final class LivePresentationStore {
     /// After a definitive failure, changing the answer or sending again starts
     /// a new operation, so the failed one is dropped first. Lost and in-flight
     /// sends keep their operation for Retry.
-    private func releaseDefinitiveFailureBeforeChange(_ key: RequestKey) {
+    func releaseDefinitiveFailureBeforeChange(_ key: RequestKey) {
         guard case .failed(_, editable: true)? = submissionPhases[key]?.phase else { return }
-        releaseFailedSubmissionForEdit(key)
+        // The change itself is already in any open Reply box session.
+        releaseFailedSubmissionForEdit(key, restoresReplySession: false)
     }
 
     func canRetryFailedResponse(for key: RequestKey) -> Bool {

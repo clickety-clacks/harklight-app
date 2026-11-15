@@ -196,11 +196,59 @@ final class SubmissionControlPhaseTests: XCTestCase {
                                                     context: fixture.context)
         let detail = try fixture.refresh()
         XCTAssertTrue(detail.submissionDisplay.canEdit(.answer))
+        XCTAssertNotNil(detail.submissionDisplay.retryAction(.answer))
+        let request = try XCTUnwrap(fixture.live.request(for: fixture.key))
+        XCTAssertNil(request.intentReceipt, "A definitively failed send is not the presented submission.")
+        let session = fixture.live.replyEditorSession(for: request)
+        XCTAssertEqual(session.draft.compatibility.selectedActionID, ExactText("reply"),
+                       "Reopening the message shows the failed reply picked.")
+        XCTAssertEqual(session.draft.compatibility.textByActionID[ExactText("reply")],
+                       ExactText("Book the Avenida"), "and its sent text, locked until Edit.")
+
         XCTAssertTrue(fixture.live.releaseFailedSubmissionForEdit(fixture.key))
         XCTAssertTrue(try fixture.intents.isEmpty)
+        XCTAssertNil(fixture.live.submissionPhases[fixture.key])
+        XCTAssertTrue(session.hasLocalChanges, "Edit keeps the sent text as the edited draft.")
+        XCTAssertEqual(session.draft.compatibility.textByActionID[ExactText("reply")],
+                       ExactText("Book the Avenida"))
         XCTAssertEqual(fixture.live.draft(for: fixture.key)?.compatibility.textByActionID[ExactText("reply")],
                        ExactText("Book the Avenida"),
                        "A Reply box send keeps no draft, so Edit restores the sent text.")
+    }
+
+    @MainActor
+    func testRetryResendsADefinitivelyFailedOperation() throws {
+        let fixture = try liveFixture(payload: try choicePayload())
+        let failed = try fixture.submit([.compatibilityValue(action: ExactText("a"))])
+        try fixture.domain.recordAnswerNotDelivered(failed.intentID, operationID: failed.opID,
+                                                    context: fixture.context)
+        _ = try fixture.refresh()
+        XCTAssertTrue(fixture.live.retrySubmissionFromUser(fixture.key))
+        let intents = try fixture.intents
+        XCTAssertEqual(intents.map(\.operationID), [failed.opID], "Retry resends the same operation.")
+        XCTAssertEqual(intents.first?.disposition, .pending)
+        XCTAssertEqual(fixture.live.submissionPhases[fixture.key]?.phase, .sending)
+    }
+
+    @MainActor
+    func testAReplyBoxChoiceChangeReplacesADefinitivelyFailedAnswer() throws {
+        let fixture = try liveFixture(payload: try choicePayload())
+        let failed = try fixture.submit([.compatibilityValue(action: ExactText("a"))], persistDraft: false)
+        try fixture.domain.recordAnswerNotDelivered(failed.intentID, operationID: failed.opID,
+                                                    context: fixture.context)
+        _ = try fixture.refresh()
+        let request = try XCTUnwrap(fixture.live.request(for: fixture.key))
+        let session = fixture.live.replyEditorSession(for: request)
+        XCTAssertEqual(session.draft.compatibility.selectedActionID, ExactText("a"))
+        session.selectAction(ExactText("b"), inputID: nil)
+        fixture.live.releaseDefinitiveFailureBeforeChange(fixture.key)
+        XCTAssertTrue(try fixture.intents.isEmpty)
+        XCTAssertEqual(session.draft.compatibility.selectedActionID, ExactText("b"),
+                       "The new pick is kept, not replaced by the failed answer.")
+        XCTAssertTrue(fixture.live.submitFromUser(fixture.key, answerDraft: session.draft,
+                                                  requestRevision: session.requestRevision))
+        let next = try XCTUnwrap(try fixture.intents.first)
+        XCTAssertNotEqual(next.operationID, failed.opID)
     }
 
     @MainActor
@@ -252,10 +300,16 @@ final class SubmissionControlPhaseTests: XCTestCase {
         XCTAssertNotNil(detail.submissionDisplay.retryAction(.answer), "The form offers Retry.")
         XCTAssertTrue(detail.submissionDisplay.canEdit(.answer), "The form offers Edit.")
 
+        let session = fixture.live.replyEditorSession(for: try XCTUnwrap(fixture.live.request(for: fixture.key)))
+        XCTAssertEqual(session.draft.inputs[ExactText("note")]?.text, ExactText("Check the partition."),
+                       "The failed form shows its sent fields, not blank ones.")
+        XCTAssertEqual(session.draft.inputs[ExactText("location")]?.point, point)
+
         XCTAssertTrue(fixture.live.releaseFailedSubmissionForEdit(fixture.key))
         let draft = try XCTUnwrap(fixture.live.draft(for: fixture.key))
         XCTAssertEqual(draft.inputs[ExactText("note")]?.text, ExactText("Check the partition."))
         XCTAssertEqual(draft.inputs[ExactText("location")]?.point, point)
+        XCTAssertEqual(session.draft.inputs[ExactText("note")]?.text, ExactText("Check the partition."))
     }
 
     private func submission(_ disposition: IntentDisposition, kind: SubmissionAnswerKind? = nil,
