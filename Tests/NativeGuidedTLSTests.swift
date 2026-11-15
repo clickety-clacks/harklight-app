@@ -1124,7 +1124,10 @@ final class NativeGuidedTLSTests: XCTestCase {
         let structuredKey = RequestKey(accountScope: identity.personID, senderID: ExactText("sender"), messageID: ExactText("structured"))
         let legacyKey = RequestKey(accountScope: identity.personID, senderID: ExactText("sender"), messageID: ExactText("legacy"))
         let session = OrdinaryOrderingRelaySession(identity: identity)
-        let core = try NativeRelayCore(store: store, context: context, session: session)
+        // The lifecycle's refresh core never sends queued answers itself; a
+        // separate per-answer flight sends them (sendOriginalOperationForUserTap).
+        let core = try NativeRelayCore(store: store, context: context, session: session,
+                                       automaticallySendsPendingOperations: false)
 
         let firstHigh = try await core.resyncAndDrainOutbox()
         XCTAssertEqual(firstHigh, 3)
@@ -1505,6 +1508,10 @@ final class NativeGuidedTLSTests: XCTestCase {
                 // client must save its prefix on failure, without a cache-triggered reset.
                 return [ok + "}\n", turn] + (sequence == 3
                     ? [#"{"v":1,"type":"conversation_resynced","conversation_seq":3}"# + "\n"] : [])
+            case "conversation_ack":
+                // The Server's acknowledgement reply carries the accepted position.
+                let acknowledged = value.uniqueValue(named: "conversation_seq")?.integerValue ?? -1
+                return [ok + ",\"conversation_seq\":\(acknowledged)}\n"]
             default: return [ok + "}\n"]
             }
         }
@@ -1542,7 +1549,10 @@ final class NativeGuidedTLSTests: XCTestCase {
         let key = RequestKey(accountScope: context.identity.personID, senderID: ExactText("sender"),
                              messageID: ExactText("conversation"))
         let turns = try restarted.conversationSnapshot(context: context).threads[key]?.turns ?? []
-        XCTAssertEqual(turns.map(\.id), [ExactText("turn-1"), ExactText("turn-2"), ExactText("turn-3")])
+        // The inbox delivery carries its question revision (event "request"),
+        // which the thread keeps ahead of the replayed discussion turns.
+        XCTAssertEqual(turns.map(\.id), [ExactText("request"), ExactText("turn-1"), ExactText("turn-2"),
+                                          ExactText("turn-3")])
     }
 
     func testUploadEndpointDiscoveryDoesNotWaitForConversationHistoryOrAcknowledgeIt() async throws {
@@ -1935,7 +1945,7 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertNil(presentation.conversationUnavailableMessage, "A replacement connection clears the old refusal.")
     }
 
-    func testConnectionWarningNamesTheErrorAndClearsOnlyAfterMatchingConfirmation() throws {
+    func testConnectionWarningShowsPlainStatusAndClearsOnlyAfterMatchingConfirmation() throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
             personID: ExactText("person"), deviceID: ExactText("device"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
@@ -1948,7 +1958,9 @@ final class NativeGuidedTLSTests: XCTestCase {
                               userInfo: [NSLocalizedDescriptionKey: "approved server could not be reached"])
 
         presentation.applyRefreshResult(.failed(error: failure))
-        XCTAssertTrue(presentation.connectionWarning?.contains("approved server could not be reached") == true)
+        // The person sees plain status, not transport error text.
+        XCTAssertEqual(presentation.connectionWarning, "Waiting for the server. Your pending actions are saved.")
+        XCTAssertFalse(presentation.connectionWarning?.contains("approved server could not be reached") == true)
 
         presentation.applyRefreshResult(NativeRelayRefreshResult(relayConfirmed: true,
             pushRegistration: .confirmed, confirmedContext: otherContext,
