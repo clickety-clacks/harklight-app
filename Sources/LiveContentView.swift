@@ -161,7 +161,8 @@ enum AnswerConfirmationText {
 }
 
 private struct AnswerConfirmationCard: View {
-    let title: LocalizedStringResource
+    /// Nil when the check and the answer say it all, as for a confirmed answer.
+    let title: LocalizedStringResource?
     let answer: String?
     let identifier: String
     let accessibilityValue: LocalizedStringResource
@@ -178,6 +179,17 @@ private struct AnswerConfirmationCard: View {
     private let symbolWidth: CGFloat = 22
     private let symbolSpacing: CGFloat = 12
 
+    private func answerText(_ answer: String) -> some View {
+        Text(answer)
+            .harklightType(.messageBody)
+            .fontWeight(.semibold)
+            .fixedSize(horizontal: false, vertical: true)
+            .textSelection(.enabled)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .foregroundStyle(messageColors.text)
+            .accessibilityIdentifier(answerIdentifier ?? "\(identifier)-answer")
+    }
+
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: HarklightDesignSystem.shape(.card))
         VStack(alignment: .leading, spacing: 8) {
@@ -188,21 +200,18 @@ private struct AnswerConfirmationCard: View {
                         .foregroundStyle(messageColors.beam)
                         .frame(width: symbolWidth)
                 }
-                Text(title)
-                    .font(.body.weight(.semibold))
-                    .foregroundStyle(messageColors.text)
+                if let title {
+                    Text(title)
+                        .font(.body.weight(.semibold))
+                        .foregroundStyle(messageColors.text)
+                } else if let answer, !answer.isEmpty {
+                    answerText(answer)
+                }
             }
 
-            if let answer, !answer.isEmpty {
-                Text(answer)
-                    .harklightType(.messageBody)
-                    .fontWeight(.semibold)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+            if title != nil, let answer, !answer.isEmpty {
+                answerText(answer)
                     .padding(.leading, symbolName == nil ? 0 : symbolWidth + symbolSpacing)
-                    .foregroundStyle(messageColors.text)
-                    .accessibilityIdentifier(answerIdentifier ?? "\(identifier)-answer")
             }
         }
         .padding(16)
@@ -342,20 +351,40 @@ final class ReplyEditorDraftSession {
     }
 }
 
-@ViewBuilder
 private func liveChoiceButton<Label: View>(style: MessageChoiceStyle?,
+                                           selected: Bool = false,
                                            perform action: @escaping () -> Void,
                                            @ViewBuilder label: () -> Label) -> some View {
-    switch style {
-    case .primary:
-        Button(action: action, label: label)
-            .buttonStyle(.borderedProminent)
-    case .destructive:
-        Button(role: .destructive, action: action, label: label)
-            .buttonStyle(.bordered)
-    case .secondary, nil:
-        Button(action: action, label: label)
-            .buttonStyle(.plain)
+    LiveChoiceButton(style: style, selected: selected, action: action, label: label())
+}
+
+/// A choice button. When the picked answer failed and can retry, tapping the
+/// picked choice resends the same operation; it shows Retry in place.
+private struct LiveChoiceButton<Label: View>: View {
+    let style: MessageChoiceStyle?
+    let selected: Bool
+    let action: () -> Void
+    let label: Label
+
+    @Environment(\.harklightSubmissionDisplay) private var submission
+
+    private var perform: () -> Void {
+        if selected, let retry = submission.retryAction(.answer) { return retry }
+        return action
+    }
+
+    var body: some View {
+        switch style {
+        case .primary:
+            Button(action: perform) { label }
+                .buttonStyle(.borderedProminent)
+        case .destructive:
+            Button(role: .destructive, action: perform) { label }
+                .buttonStyle(.bordered)
+        case .secondary, nil:
+            Button(action: perform) { label }
+                .buttonStyle(.plain)
+        }
     }
 }
 
@@ -1565,8 +1594,10 @@ struct LiveRequestDetail: View {
         }
     }
 
-    static func answeredConfirmationTitle(isDefaultAnswered: Bool) -> LocalizedStringResource {
-        isDefaultAnswered ? "Answered by default" : "Answered"
+    /// A confirmed answer shows only the check and the answer; a default
+    /// answer still says so, because that is a reason the person can't see.
+    static func answeredConfirmationTitle(isDefaultAnswered: Bool) -> LocalizedStringResource? {
+        isDefaultAnswered ? "Answered by default" : nil
     }
 
     private var showsNoCommentConfirmation: Bool {
@@ -1793,6 +1824,26 @@ struct LiveRequestDetail: View {
             .prefix(2).compactMap(\.first)).uppercased()
     }
 
+    /// The latest answer, No comment or Seen sent from this message, for the
+    /// control that sent it.
+    private var submissionPhase: SubmissionControlPhase? {
+        SubmissionPhaseTestHook.phase(for: request.key) ?? store.submissionPhases[request.key]
+    }
+
+    private var submissionDisplay: SubmissionDisplay {
+        SubmissionDisplay(phase: submissionPhase, retry: { [store, key = request.key] in
+            _ = store.retryUnconfirmedAnswerFromUser(key)
+        })
+    }
+
+    private func submissionReasonLine(_ reason: String) -> some View {
+        Text(reason)
+            .harklightType(.newStatus)
+            .foregroundStyle(detailColors.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .accessibilityIdentifier("request-submission-reason")
+    }
+
     private var answerConfirmation: AnswerConfirmationCard? {
         if showsAnsweredConfirmation {
             return AnswerConfirmationCard(
@@ -1807,25 +1858,19 @@ struct LiveRequestDetail: View {
             return AnswerConfirmationCard(title: "No comment", answer: nil,
                 identifier: "request-no-comment-status",
                 accessibilityValue: "Completed", symbolName: "checkmark")
-        } else if showsPendingAnswerConfirmation {
-            return AnswerConfirmationCard(title: "Pending", answer: pendingAnswerText,
-                identifier: "request-pending-answer-status",
-                accessibilityValue: "Pending", symbolName: "clock",
-                answerIdentifier: "request-pending-answer")
-        } else if showsNotAcceptedConfirmation {
-            return AnswerConfirmationCard(title: "Not accepted", answer: attemptedAnswerText,
-                identifier: "request-not-accepted-status",
-                accessibilityValue: "Not accepted", symbolName: "xmark",
-                answerIdentifier: "request-not-accepted-answer")
         }
+        // Sending and failed sends show in the control that sent them
+        // (submissionPhase), not as separate Pending or Not accepted cards.
         return nil
     }
 
     private var lifecycleStatusText: String? {
         guard request.inboxStateIsCurrent else { return nil }
         if storePresentationSnapshot.isRetracted { return storePresentationSnapshot.retractionLabel }
+        // Pending is shown by the control that is sending, not as a line.
         if isSupersedesReadOnly || (request.lifecycleStatus != .open &&
-            request.lifecycleStatus != .answered && !showsNoCommentConfirmation) {
+            request.lifecycleStatus != .answered && request.lifecycleStatus != .pending &&
+            !showsNoCommentConfirmation) {
             return String(localized: LiveLifecycleTitle(request.lifecycleStatus).label)
         }
         return nil
@@ -1905,6 +1950,9 @@ struct LiveRequestDetail: View {
                     if showsAnsweredConfirmation || showsNoCommentConfirmation { closingScene }
                 } else if case let .compatibility(actions) = request.projection,
                           let seenStatus = request.informationalSeenStatus {
+                    if let reason = submissionDisplay.reasonLine {
+                        submissionReasonLine(reason)
+                    }
                     InformationalSeenControl(status: seenStatus,
                         locallyCompleted: localExample?.localSeenSelected == true,
                         hidden: isSupersedesReadOnly,
@@ -1915,7 +1963,11 @@ struct LiveRequestDetail: View {
                             guard let action = actions.first else { return }
                             finishSeenAction(action.id, returnToList: returnToListIfSinglePane)
                         })
+                    .environment(\.harklightSubmissionDisplay, submissionDisplay)
                 } else {
+                    if let reason = submissionDisplay.reasonLine {
+                        submissionReasonLine(reason)
+                    }
                     LiveRequestAnswerControls(
                         request: request, store: store,
                         controlsReadOnly: controlsReadOnly,
@@ -1939,31 +1991,23 @@ struct LiveRequestDetail: View {
                             finishSeenAction(action, returnToList: returnToListIfSinglePane)
                         },
                         enlargePicture: { enlargedPicture = $0 })
+                    .environment(\.harklightSubmissionDisplay, submissionDisplay)
+                    // While one answer is sending, the other controls step back.
+                    .disabled(submissionDisplay.isSendingAny)
                 }
                 RequestDetailLifecycleContent(
                     isCurrent: request.inboxStateIsCurrent,
                     lifecycleText: lifecycleStatusText,
                     replyText: lifecycleReplyText,
                     seenStatus: lifecycleSeenStatus,
-                    localOperationStatus: failedResponseWarning == nil && !request.inboxStateIsCurrent
-                        ? store.answerOperationStatus(request.intentReceipt) : nil,
+                    // Send states show in the controls themselves, never as a line here.
+                    localOperationStatus: nil,
                     showsDefaultAnswer: request.isDefaultAnswered && !showsAnsweredConfirmation,
                     defaultAnswerWords: request.defaultAnswerWords,
                     textColor: detailColors.text,
                     secondaryTextColor: detailColors.secondary)
-                if !isSupersedesReadOnly, localExample == nil, fixtureStore == nil,
-                   let receipt = request.intentReceipt,
-                   [.terminalUnconfirmed, .notDelivered, .unsupported].contains(receipt.localState) {
-                    Button("Retry") { _ = store.retryUnconfirmedAnswerFromUser(request.key) }
-                        .buttonStyle(.bordered)
-                        .disabled(!store.canRetryUnconfirmedAnswer(for: request.key))
-                } else if !isSupersedesReadOnly, localExample == nil, fixtureStore == nil,
-                          request.inboxStateIsCurrent,
-                          request.lifecycleStatus == .pending, failedResponseWarning == nil {
-                    Button("Refresh status") { store.retryPendingDelivery() }
-                        .buttonStyle(.bordered)
-                        .disabled(store.isReadOnly || store.isRefreshing)
-                }
+                // Retry lives in the control that failed; there is no separate
+                // Retry or Refresh status button under the answers.
                 if !isSupersedesReadOnly, let fixtureStore, request.lifecycleStatus == .pending {
                     Button("Simulate fixture outcome", systemImage: "testtube.2") {
                         fixtureOutcomePresented = true
@@ -2012,6 +2056,13 @@ struct LiveRequestDetail: View {
                     skippedMessageWarningButton
                 }
             }
+            // Delivery details stay one tap away, beside the check rather than
+            // in its place: the check comes back after a failed send.
+            if failedResponseWarning != nil {
+                ToolbarItem(placement: .topBarTrailing) {
+                    failedResponseWarningButton
+                }
+            }
             ToolbarItemGroup(placement: .bottomBar) {
                 Spacer()
                 chatButton
@@ -2041,8 +2092,6 @@ struct LiveRequestDetail: View {
                     .disabled(!localExample.canFinishLocally || localExample.finished ||
                               localExample.localSeenSelected)
                     .accessibilityIdentifier("sample-finish")
-                } else if failedResponseWarning != nil {
-                    failedResponseWarningButton
                 } else if isEditingLocalReply {
                     submitReplyButton
                 } else if showsAnsweredConfirmation || showsNoCommentConfirmation ||
@@ -2349,16 +2398,27 @@ struct LiveRequestDetail: View {
             closeReplyEditor()
             returnToListIfSinglePane()
         } label: {
-            Label(submitLabel, systemImage: "checkmark")
-                .labelStyle(.iconOnly)
-                .foregroundStyle(HarklightDesignSystem.palette(for: colorScheme).onInverse)
+            if submissionIsSendingAnswer {
+                // The send itself spins until the server answers.
+                ProgressView()
+                    .tint(HarklightDesignSystem.palette(for: colorScheme).onInverse)
+                    .accessibilityLabel("Sending")
+            } else {
+                Label(submitLabel, systemImage: "checkmark")
+                    .labelStyle(.iconOnly)
+                    .foregroundStyle(HarklightDesignSystem.palette(for: colorScheme).onInverse)
+            }
         }
         .buttonStyle(.glassProminent)
         .tint(HarklightDesignSystem.palette(for: colorScheme).inverse)
-        .disabled(isEditingLocalReply
+        .disabled(submissionIsSendingAnswer || (isEditingLocalReply
                   ? !canSubmitCurrentAnswer
-                  : (fixtureStore.map { !$0.canSend(for: request.key) } ?? !canSubmitCurrentAnswer))
+                  : (fixtureStore.map { !$0.canSend(for: request.key) } ?? !canSubmitCurrentAnswer)))
         .accessibilityIdentifier("request-finish")
+    }
+
+    private var submissionIsSendingAnswer: Bool {
+        submissionDisplay.isSending(.answer) || submissionDisplay.isSending(.noComment)
     }
 
     private func endLocalReplyIfRequestChanged(_ session: ReplyEditorDraftSession) {
@@ -3249,7 +3309,7 @@ private struct LiveProjectedInputView: View {
             }
             .disabled(readOnly)
         } else {
-            liveChoiceButton(style: action.style, perform: { activate(action) }) {
+            liveChoiceButton(style: action.style, selected: selected, perform: { activate(action) }) {
                 VStack(alignment: .leading, spacing: 8) {
                     if let artID = action.illustrationID,
                        let illustration = sender.illustrations.first(where: { $0.id == artID }) {
@@ -3283,8 +3343,31 @@ private struct InformationalSeenControl: View {
     let secondaryTextColor: Color
     let onSeen: () -> Void
 
+    @Environment(\.harklightSubmissionDisplay) private var submission
+    @Environment(\.colorScheme) private var colorScheme
+
     private var seenActionPresentation: SeenActionPresentation {
         SeenActionPresentation(status: status)
+    }
+
+    /// The Seen button while its send is in flight: a spinner in place.
+    private var sendingSeenButton: some View {
+        Button {} label: {
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small).tint(textColor)
+                Text("Seen")
+            }
+            .font(.body.weight(.semibold))
+            .foregroundStyle(textColor)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 6)
+        }
+        .buttonStyle(.glass)
+        .controlSize(.large)
+        .fixedSize(horizontal: true, vertical: false)
+        .disabled(true)
+        .accessibilityLabel("Seen, sending")
+        .accessibilityIdentifier("request-seen-action")
     }
 
     var body: some View {
@@ -3297,6 +3380,27 @@ private struct InformationalSeenControl: View {
         } else {
             VStack(alignment: .leading, spacing: 8) {
                 switch status {
+                case .available where submission.isSending(.seen):
+                    sendingSeenButton
+                case .available where submission.isFailed(.seen):
+                    // It did not go through: the button itself offers Retry.
+                    Button(action: submission.retryAction(.seen) ?? onSeen) {
+                        Label {
+                            Text("Retry Seen")
+                        } icon: {
+                            Image(systemName: "exclamationmark.circle")
+                                .foregroundStyle(HarklightDesignSystem.palette(for: colorScheme).coral)
+                        }
+                        .font(.body.weight(.semibold))
+                        .foregroundStyle(textColor)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 6)
+                    }
+                    .buttonStyle(.glass)
+                    .controlSize(.large)
+                    .fixedSize(horizontal: true, vertical: false)
+                    .disabled(sendDisabled)
+                    .accessibilityIdentifier("request-seen-action")
                 case .available:
                     Button(action: onSeen) {
                         Label("Seen", systemImage: "eye")
@@ -3313,22 +3417,7 @@ private struct InformationalSeenControl: View {
                     .accessibilityValue(Text(seenActionPresentation.accessibilityValue))
                     .accessibilityIdentifier("request-seen-action")
                 case .pending:
-                    Button {} label: {
-                        HStack(spacing: 10) {
-                            Image(systemName: "clock")
-                                .foregroundStyle(secondaryTextColor)
-                            Text(seenActionPresentation.title)
-                                .foregroundStyle(secondaryTextColor)
-                        }
-                        .font(.headline)
-                        .frame(maxWidth: .infinity, minHeight: 50)
-                    }
-                    .buttonStyle(.glass)
-                    .tint(secondaryTextColor)
-                    .disabled(true)
-                    .accessibilityLabel(Text(seenActionPresentation.accessibilityLabel))
-                    .accessibilityValue(Text(seenActionPresentation.accessibilityValue))
-                    .accessibilityIdentifier("request-seen-action")
+                    sendingSeenButton
                 case .confirmed:
                     AnswerConfirmationCard(title: "Seen", answer: nil,
                         identifier: "request-seen-confirmation",
@@ -3469,7 +3558,8 @@ private struct LiveCompatibilityActions: View {
                         compatibilityChoice(action, selected: isSelected, detail: option?.detail ?? "",
                                             text: replyText)
                     } else {
-                        liveChoiceButton(style: action.style, perform: { activate(action) }) {
+                        liveChoiceButton(style: action.style, selected: isSelected,
+                                         perform: { activate(action) }) {
                             MessageChoiceLabel(title: action.label.rawValue,
                                     detail: option?.detail ?? "",
                                     selected: isSelected, multiple: false,
@@ -3497,11 +3587,14 @@ private struct NoCommentChoiceRow: View {
     let canOpenFailureDetails: Bool
     let onSelect: () -> Void
 
+    @Environment(\.harklightSubmissionDisplay) private var submission
+
     var body: some View {
-        Button(action: onSelect) {
+        // A failed No comment that can retry resends the same operation.
+        Button(action: selected ? (submission.retryAction(.noComment) ?? onSelect) : onSelect) {
             MessageChoiceLabel(title: "No comment", detail: "",
                                selected: selected, multiple: false,
-                               suggested: false)
+                               suggested: false, submissionKind: .noComment)
         }
         .buttonStyle(.plain)
         .accessibilityAddTraits(selected ? .isSelected : [])
