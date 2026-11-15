@@ -1048,15 +1048,23 @@ final class ConversationPresentationTests: XCTestCase {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
             personID: ExactText("person"), deviceID: ExactText("device"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
-        let domain = try ClientRepository(context: context,
-            persistence: MemoryPendingActionPersistence())
         let key = RequestKey(accountScope: identity.personID,
             senderID: ExactText("sender"), messageID: ExactText("request"))
         let payload = try JSONValue.parse(Data(#"{"title":"A message"}"#.utf8))
-        try domain.apply(RelayEvent(sequence: 1, body: .delivery(
+        let previous = try ClientRepository(context: context,
+            persistence: MemoryPendingActionPersistence())
+        try previous.apply(RelayEvent(sequence: 1, body: .delivery(
             StoredRequest(key: key, originalPayload: payload), .message),
             conversation: RelayConversationMetadata(revision: 1,
                 sessionHandle: ExactText("session"))), context: context)
+        let saved = try previous.snapshot(context: context)
+        // A cold launch from the saved cache whose current inbox does not yet
+        // include this request: catch-up has not confirmed it.
+        let domain = try ClientRepository(context: context,
+            persistence: MemoryPendingActionPersistence())
+        try domain.restoreCachedServerState(CachedAttentionServerState(identity: context.identity,
+            requests: saved.requests, remoteStates: [:], cursor: 1, conversationCursor: 0,
+            conversations: [:], inboxView: nil, currentRequestKeys: []), context: context)
         let model = try LivePresentationStore(store: domain, context: context)
         let request = try XCTUnwrap(model.request(for: key))
         XCTAssertFalse(model.canUseCurrentServerState(for: key),
