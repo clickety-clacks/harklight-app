@@ -39,7 +39,9 @@ Add a row when you add a flag, update it when the default changes, and delete th
 
 | Flag | Owner | Default | Remove when |
 | --- | --- | --- | --- |
-| _none yet_ (example: `exampleFeature`) | the session or person accountable for the feature | off | the feature is accepted in a shipped build; delete the flag, its off path and tests |
+| `progress_inbox` | Client PO and the Progress feature owner | **on** (recorded exception: Progress was requested, is reviewed and merged in #293, and the server has no flag support yet, so default-off would hide it with no way to turn it on) | the Progress list and detail behavior is accepted |
+| `server_matched_push_routing` | Client PO and the push-routing feature owner | off | notification routing and the account-departure behavior (#292) are accepted |
+| `priority_level_editing` | Client PO and the priority-levels feature owner | off | native read and save of priority levels (#203) are accepted |
 
 ## Project generation
 
