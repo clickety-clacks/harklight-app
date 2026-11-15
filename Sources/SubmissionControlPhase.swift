@@ -13,11 +13,11 @@ struct SubmissionControlPhase: Equatable, Sendable {
     enum RefusalReason: Equatable, Sendable { case changed, closed, retracted }
 
     enum Phase: Equatable, Sendable {
-        /// Not final yet: saved, in flight, recovering after a dropped
-        /// connection, or accepted while the message's final state is still
-        /// on its way. It never claims more than the server has confirmed.
+        /// Saved, in flight, or recovering after a dropped connection: the
+        /// server has not durably accepted it yet.
         case sending
-        /// The message reached its final state with this answer.
+        /// The server durably accepted it. A later refusal from the message's
+        /// final state turns it into `refused`.
         case confirmed
         /// The store gave up on it. Retry resends the same operation when
         /// `retryable`. `editable` only where the server definitively did not
@@ -63,8 +63,15 @@ struct SubmissionControlPhase: Equatable, Sendable {
             let closedOnServer = snapshot.remoteStates[key]?.isTerminal == true
             let phase: Phase = switch submission.disposition {
             case .pending: .sending
-            // Accepted is not final: keep Sending until the answered state arrives.
-            case .accepted: closedOnServer ? .confirmed : .sending
+            // Durable acceptance is the server's confirmation. A final state
+            // that is not an answer (expired, cleared, superseded) refuses it.
+            case .accepted:
+                if closedOnServer, let state = snapshot.remoteStates[key]?.state,
+                   state != .answered, state != .noComment {
+                    .refused(.closed)
+                } else {
+                    .confirmed
+                }
             // A dropped connection leaves the outcome unknown and the store
             // still recovering the same operation, so it is still sending.
             case .lost: closedOnServer ? .refused(.closed) : .sending

@@ -88,13 +88,16 @@ struct InboxSubmissionProgress: Equatable, Sendable {
             switch submission.disposition {
             case .pending:
                 state = .awaiting
-            case .lost, .accepted:
+            case .lost:
                 // Still on its way, matching the control: a dropped connection
-                // leaves the same operation recovering, and an accepted answer
-                // waits for the message's final state. Not sent is only for a
+                // leaves the same operation recovering. Not sent is only for a
                 // send the store gave up on.
                 guard snapshot.remoteStates[key]?.isTerminal != true else { continue }
                 state = .awaiting
+            case .accepted:
+                // Durable acceptance is the server's confirmation; answers do
+                // not wait for an origin reply or the message's final state.
+                continue
             case .terminal, .refusedClosed, .refusedNotFound, .staleRevision, .refusedByRetraction:
                 // Not a Retry case: the message's own closed, retracted or
                 // current state shows instead of a not-sent mark.

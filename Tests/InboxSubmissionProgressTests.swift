@@ -63,18 +63,16 @@ final class InboxSubmissionProgressTests: XCTestCase {
         XCTAssertEqual(thread.drafts[1]?.text, ExactText("Keep this"))
     }
 
-    func testAnswerSpinnerLastsUntilTheMessageIsFinalWithoutWaitingForAgentReply() {
+    func testAnswerSpinnerLastsThroughADropAndClearsAtAcceptanceWithoutWaitingForAgentReply() {
         let thread = makeThread()
         XCTAssertEqual(project(thread, submissions: [submission(.pending)])[key],
                        .init(state: .awaiting, since: sentAt))
         XCTAssertEqual(project(thread, submissions: [submission(.lost)])[key],
                        .init(state: .awaiting, since: sentAt),
                        "A dropped connection leaves the same operation recovering, so it still spins.")
-        XCTAssertEqual(project(thread, submissions: [submission(.accepted(sequence: 2))])[key],
-                       .init(state: .awaiting, since: sentAt),
-                       "Accepted is not final; it spins until the message's answered state arrives.")
+        XCTAssertNil(project(thread, submissions: [submission(.accepted(sequence: 2))])[key],
+                     "Durable acceptance is the server's confirmation.")
         let answered = [key: RemoteRequestState(state: .answered)]
-        XCTAssertNil(project(thread, submissions: [submission(.accepted(sequence: 2))], remote: answered)[key])
         XCTAssertNil(project(thread, submissions: [submission(.lost)], remote: answered)[key])
     }
 

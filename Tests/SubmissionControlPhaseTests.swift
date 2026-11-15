@@ -11,7 +11,7 @@ final class SubmissionControlPhaseTests: XCTestCase {
     func testEachOperationOutcomeMapsToOneControlPhase() {
         let cases: [(IntentDisposition, SubmissionControlPhase.Phase)] = [
             (.pending, .sending),
-            (.accepted(sequence: 2), .sending),
+            (.accepted(sequence: 2), .confirmed),
             (.lost, .sending),
             (.failed, .failed(retryable: true, editable: true)),
             (.unsupported, .failed(retryable: true, editable: true)),
@@ -41,6 +41,9 @@ final class SubmissionControlPhaseTests: XCTestCase {
     func testTheMessagesFinalStateEndsSending() {
         let answered = [key: RemoteRequestState(state: .answered)]
         XCTAssertEqual(project([submission(.accepted(sequence: 2))], remote: answered)[key]?.phase, .confirmed)
+        XCTAssertEqual(project([submission(.accepted(sequence: 2))],
+                               remote: [key: RemoteRequestState(state: .expired)])[key]?.phase,
+                       .refused(.closed), "A final state that is not an answer reverts the confirmation.")
         XCTAssertEqual(project([submission(.lost)], remote: answered)[key]?.phase, .refused(.closed))
         XCTAssertEqual(project([submission(.failed)], remote: answered)[key]?.phase,
                        .failed(retryable: false, editable: false), "No Retry once the message is closed.")
@@ -150,7 +153,7 @@ final class SubmissionControlPhaseTests: XCTestCase {
     }
 
     @MainActor
-    func testADroppedConnectionKeepsSendingUntilTheAnswerIsFinal() throws {
+    func testADroppedConnectionKeepsSendingThenShowsTheAnswerAtAcceptance() throws {
         let fixture = try liveFixture(payload: try choicePayload())
         let receipt = try fixture.submit([.compatibilityValue(action: ExactText("a"))])
         XCTAssertEqual(try fixture.refresh().submissionPhase?.phase, .sending)
@@ -173,15 +176,38 @@ final class SubmissionControlPhaseTests: XCTestCase {
         try fixture.domain.recordAcceptedOperation(receipt.intentID, operationID: receipt.opID,
                                                    terminalSequence: 2, context: fixture.context)
         detail = try fixture.refresh()
-        XCTAssertEqual(detail.submissionPhase?.phase, .sending,
-                       "Accepted is not final: it keeps Sending until the answered state arrives.")
-        XCTAssertTrue(detail.submissionDisplay.isSending(.answer))
+        XCTAssertEqual(detail.submissionPhase?.phase, .confirmed,
+                       "Durable acceptance is the server's confirmation.")
+        XCTAssertTrue(detail.isDurablyAccepted(.answer), "The control becomes the answered card.")
+        XCTAssertFalse(detail.submissionDisplay.isSendingAny)
 
         try finish(fixture, intentID: receipt.intentID, state: .answered)
         detail = try fixture.refresh()
         XCTAssertEqual(fixture.live.request(for: fixture.key)?.lifecycleStatus, .answered)
-        XCTAssertFalse(detail.submissionDisplay.isSendingAny, "The final state ends Sending.")
+        XCTAssertFalse(detail.submissionDisplay.isSendingAny)
         XCTAssertFalse(detail.submissionDisplay.isFailed(.answer))
+    }
+
+    @MainActor
+    func testAnAcceptedAnswerRevertsWhenTheFinalStateRefusesIt() throws {
+        let fixture = try liveFixture(payload: try choicePayload())
+        let receipt = try fixture.submit([.compatibilityValue(action: ExactText("a"))])
+        try fixture.domain.recordAcceptedOperation(receipt.intentID, operationID: receipt.opID,
+                                                   terminalSequence: 2, context: fixture.context)
+        XCTAssertTrue(try fixture.refresh().isDurablyAccepted(.answer))
+
+        try finish(fixture, intentID: receipt.intentID, state: .expired)
+        let detail = try fixture.refresh()
+        XCTAssertFalse(detail.isDurablyAccepted(.answer), "The answered card goes.")
+        XCTAssertFalse(detail.submissionDisplay.isSendingAny)
+        XCTAssertFalse(detail.submissionDisplay.isFailed(.answer), "A refusal is not a failure; no Retry.")
+        XCTAssertNil(detail.submissionDisplay.reasonLine, "Closed shows in place, with no extra line.")
+    }
+
+    func testAChangedMessageShowsItsReasonLine() {
+        let display = SubmissionDisplay(phase: project([submission(.staleRevision(currentRevision: 2))])[key])
+        XCTAssertEqual(display.reasonLine, "This message changed. Answer again.")
+        XCTAssertNil(display.retryAction(.answer))
     }
 
     @MainActor
@@ -270,7 +296,7 @@ final class SubmissionControlPhaseTests: XCTestCase {
     }
 
     @MainActor
-    func testASentNoCommentKeepsSendingThroughADropAndAcceptanceUntilFinal() throws {
+    func testASentNoCommentKeepsSendingThroughADropThenShowsItsCardAtAcceptance() throws {
         let fixture = try liveFixture(payload: try choicePayload())
         let receipt = try fixture.port.submitNoComment(context: fixture.port.context, selector: fixture.selector,
                                                        intentID: UUID())
@@ -290,8 +316,8 @@ final class SubmissionControlPhaseTests: XCTestCase {
         try fixture.domain.recordAcceptedOperation(receipt.intentID, operationID: receipt.opID,
                                                    terminalSequence: 2, context: fixture.context)
         detail = try fixture.refresh()
-        XCTAssertEqual(detail.submissionPhase?.phase, .sending, "Accepted No comment keeps Sending.")
-        XCTAssertTrue(detail.showsNoCommentRow)
+        XCTAssertEqual(detail.submissionPhase?.phase, .confirmed)
+        XCTAssertTrue(detail.isDurablyAccepted(.noComment), "Accepted No comment shows its card.")
 
         try finish(fixture, intentID: receipt.intentID, state: .noComment)
         detail = try fixture.refresh()
@@ -304,7 +330,7 @@ final class SubmissionControlPhaseTests: XCTestCase {
     private func finish(_ fixture: LiveFixture, intentID: UUID, state: TerminalState) throws {
         let answer = try XCTUnwrap(fixture.domain.snapshot(context: fixture.context).intents[intentID]).answer
         _ = try fixture.domain.apply(RelayEvent(sequence: 2,
-            body: .terminal(fixture.key, state, state == .noComment ? nil : answer)), context: fixture.context)
+            body: .terminal(fixture.key, state, state == .answered ? answer : nil)), context: fixture.context)
     }
 
     @MainActor
