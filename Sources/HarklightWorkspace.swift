@@ -9,7 +9,15 @@ import AttentionDomain
 private final class InboxSplitPresentation {
     weak var reader: UIViewController?
 
-
+    func dismissOverlay() {
+        guard let split = reader?.splitViewController, !split.isCollapsed else { return }
+        switch split.displayMode {
+        case .oneOverSecondary, .twoOverSecondary:
+            split.hide(.primary)
+        default:
+            break
+        }
+    }
 }
 
 private struct InboxSplitPresentationReader: UIViewControllerRepresentable {
@@ -1110,6 +1118,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
 
     private var navigationSelection: Binding<InboxSelection?> {
         Binding(get: { selection }, set: { next in
+            if next != nil { splitPresentation.dismissOverlay() }
             navigate(to: next)
         })
     }
