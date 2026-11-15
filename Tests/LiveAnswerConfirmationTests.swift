@@ -143,8 +143,11 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         XCTAssertEqual(live.request(for: key)?.lifecycleStatus, .answered)
         XCTAssertNil(live.request(for: key)?.receiptFacts,
                      "A completed account state does not expose the submitting device's receipt.")
-        XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty)
-        XCTAssertEqual(try store.snapshot(context: context).intents.count, 1)
+        let settled = try store.snapshot(context: context)
+        XCTAssertTrue(settled.outbox.isEmpty)
+        XCTAssertEqual(settled.intents.count, 1)
+        XCTAssertEqual(settled.intents[receipt.intentID]?.disposition, .accepted(sequence: 2),
+                       "The terminal state hides the local receipt but keeps its durable operation history.")
     }
 
     func testNewDurableReceiptClearsAnObsoleteSubmissionError() async throws {
@@ -723,8 +726,20 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         expectedDraft.noCommentSelected = true
         XCTAssertTrue(queuedDraft == nil || queuedDraft == expectedDraft,
                       "Any retained draft contains only No comment, never the local Reply text.")
-        XCTAssertNil(try XCTUnwrap(live.request(for: key)).submittedAnswer,
-                     "The queued No comment operation does not create a server answer.")
+        let queuedRequest = try XCTUnwrap(live.request(for: key))
+        XCTAssertEqual(queuedRequest.lifecycleStatus, .pending,
+                       "A local No comment operation does not change the server lifecycle.")
+        XCTAssertEqual(queuedRequest.submittedAnswer, expectedDraft,
+                       "The pending projection shows only No comment until the Server accepts it.")
+        XCTAssertNotNil(queuedRequest.intentReceipt)
+        XCTAssertNil(queuedRequest.accountAnswerOutcome,
+                     "The queued operation is not a server-confirmed answer.")
+        XCTAssertEqual(live.submissionPhases[key]?.kind, .noComment)
+        XCTAssertEqual(live.submissionPhases[key]?.phase, .sending,
+                       "No comment stays pending until durable server acceptance, like an answer.")
+        XCTAssertFalse(LiveRequestDetail.showsNoCommentConfirmation(
+            lifecycleStatus: queuedRequest.lifecycleStatus, isSupersedesReadOnly: false),
+            "The No comment confirmation appears only at durable acceptance or a server terminal.")
         XCTAssertEqual(submitted.answerKind, .noComment)
     }
 
