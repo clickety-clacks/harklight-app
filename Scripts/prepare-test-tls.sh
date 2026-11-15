@@ -3,7 +3,7 @@ set -eu
 umask 077
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-FIXTURES="$ROOT/Tests/Fixtures"
+FIXTURES="$ROOT/TestResources"
 TEMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/harklight-test-tls.XXXXXX")
 trap 'rm -rf "$TEMP_DIR"' EXIT HUP INT TERM
 
