@@ -194,6 +194,12 @@
           "symbol": "arrow.triangle.2.circlepath",
           "title": "Connect even when saved data is bad",
           "detail": "If data saved on this device stopped Harklight from connecting, it now discards that data and reloads everything from the server, keeping your unsent answers. This fix is pending formal testing."
+        },
+        {
+          "id": "chat-read-badge-clears-at-once",
+          "symbol": "bubble.left",
+          "title": "Reading a reply clears its badge right away",
+          "detail": "When a reply appears in Chat, its unread badge clears at once instead of waiting for the server to confirm. This fix is pending formal testing."
         }
       ]
     }
