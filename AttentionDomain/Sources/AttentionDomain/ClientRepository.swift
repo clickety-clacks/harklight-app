@@ -249,13 +249,15 @@ public final class ClientRepository: @unchecked Sendable {
         acceptedAwaitingTerminalReplay = Self.acceptedAwaitingTerminalReplay(in: state)
     }
 
-    /// Saved inbox state failed validation. It is a cache of Server truth, so
-    /// discard it and let the next connection rebuild it from the Server.
-    /// Only the person's unsent answers survive, under their original operation
-    /// IDs so the Server deduplicates a resend. Accepted, refused and settled
-    /// receipts are Server facts and return with the rebuilt projection.
-    /// Message opens, Chat drafts and read positions stay queued.
-    public func discardServerInboxState(context suppliedContext: ProfileContext) throws {
+    /// Saved Server state failed validation. The inbox and conversation
+    /// projections, cursors, checkpoint and receipts are a cache of Server
+    /// truth, so discard all of it and let the next connection rebuild it.
+    /// Only the person's own queue survives: unsent answers under their
+    /// original operation IDs, so the Server deduplicates a resend, plus
+    /// message opens, Chat drafts, uploads and read positions. Accepted,
+    /// refused and settled receipts are Server facts and return with the
+    /// rebuilt projection.
+    public func discardServerState(context suppliedContext: ProfileContext) throws {
         writerLock.lock()
         defer { writerLock.unlock() }
         lock.lock()
@@ -263,9 +265,9 @@ public final class ClientRepository: @unchecked Sendable {
         try validate(suppliedContext)
         guard suppliedContext.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
         var next = state
-        let conversation = next.server.conversation
+        // Chat drafts, uploads and read positions live in their own queues
+        // (pendingConversations, pendingReadPositions), not in this projection.
         next.server = ServerProjectionCache()
-        next.server.conversation = conversation
         next.replayPublishedIntents = nil
         var unsent: [UUID: Submission] = [:]
         for id in state.intentByRequest.values {

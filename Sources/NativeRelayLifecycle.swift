@@ -1864,7 +1864,7 @@ final class NativeRelayLifecycle {
                     cursorAtLastRebuild = cursor
                 }
                 if !rebuiltSavedServerState, NativeRelayCoreError.isInvalidSavedServerState(error),
-                   discardSavedServerState(after: error) {
+                   await discardSavedServerState(after: error) {
                     // Saved Server state is a cache. Report it, drop it, and
                     // rebuild from the Server on a fresh connection.
                     rebuiltSavedServerState = true
@@ -1895,15 +1895,20 @@ final class NativeRelayLifecycle {
         return try? configuration.store.snapshot(context: expected).cursor
     }
 
-    /// Records the validation failure and discards saved Server-owned inbox
-    /// state, keeping the person's unsent queue. Returns false only when the
-    /// discard itself cannot be committed.
-    private func discardSavedServerState(after error: Error) -> Bool {
+    /// Records the validation failure and discards every saved copy of
+    /// Server state (repository and cache file), keeping the person's queue.
+    /// Returns false only when the discard itself cannot be committed.
+    private func discardSavedServerState(after error: Error) async -> Bool {
         guard let expected = context, let configuration else { return false }
         recordDiagnostic(.localStore, .projectionRefresh, .retrying, error: error,
                          attemptID: activeTransportAttemptID)
         do {
-            try configuration.store.discardServerInboxState(context: expected)
+            if let core {
+                try await core.discardSavedServerState()
+            } else {
+                try configuration.store.discardServerState(context: expected)
+                try await configuration.serverStateCache?.discard()
+            }
         } catch {
             recordDiagnostic(.localStore, .projectionRefresh, .failed, error: error,
                              attemptID: activeTransportAttemptID)

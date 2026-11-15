@@ -1886,23 +1886,32 @@ final class NativeRelayCoreTests: XCTestCase {
         try store.recordAcceptedOperation(accepted.intentID, operationID: accepted.opID,
                                           terminalSequence: 3, context: context)
 
-        // A saved cursor past the Server's history: the bounded checkpoint can
-        // never validate against it, on this launch or any later one.
-        let corrupt = ServerStateCacheSnapshot.make(identity: identity,
+        // The bad state lives where the app keeps it, in the Server cache
+        // file: a cursor past the Server's history and a conversation cursor
+        // the Server never issued. The checkpoint can never validate against it.
+        let cacheURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".json")
+        defer { try? FileManager.default.removeItem(at: cacheURL) }
+        let cache = FileServerStateCache(identity: identity, fileURL: cacheURL)
+        let current = ServerStateCacheSnapshot.make(identity: identity,
             from: try store.serverCacheSnapshot(context: context),
-            conversations: try store.conversationSnapshot(context: context), cursorOverride: 50)
-        try store.restoreCachedServerState(corrupt.attentionDomainState(for: identity), context: context)
+            conversations: try store.conversationSnapshot(context: context))
+        try await cache.save(ServerStateCacheSnapshot(identity: identity, cursor: 50, conversationCursor: 7,
+            requests: current.requests, conversations: current.conversations, inboxView: nil,
+            currentRequestKeys: current.currentRequestKeys))
+
+        // Launch as the app does: the pending-action file, then the cache file.
+        let launched = try ClientRepository(context: context, persistence: persistence)
+        let saved = try await cache.load()
+        try launched.restoreCachedServerState(XCTUnwrap(saved).attentionDomainState(for: identity), context: context)
+        XCTAssertEqual(try launched.conversationSnapshot(context: context).cursor, 7)
 
         let session = Session(identity)
         session.snapshotHighWater = 10
         session.initialItems = [snapshotItem(unsentKey, payload: payload, sequence: 1),
                                 snapshotItem(acceptedKey, payload: payload, sequence: 2)]
         session.frames = [data(#"{"v":1,"type":"resynced","seq":10}"#)]
-        let cacheURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".json")
-        defer { try? FileManager.default.removeItem(at: cacheURL) }
-        let cache = FileServerStateCache(identity: identity, fileURL: cacheURL)
 
-        let stuck = try NativeRelayCore(store: store, context: context, session: session, serverStateCache: cache)
+        let stuck = try NativeRelayCore(store: launched, context: context, session: session, serverStateCache: cache)
         do {
             _ = try await stuck.resyncAndDrainOutbox()
             XCTFail("The saved cursor cannot validate against the Server checkpoint.")
@@ -1912,22 +1921,33 @@ final class NativeRelayCoreTests: XCTestCase {
         }
         XCTAssertTrue(session.sent.isEmpty)
 
-        try store.discardServerInboxState(context: context)
-        let discarded = try store.snapshot(context: context)
+        try await stuck.discardSavedServerState()
+        let discarded = try launched.snapshot(context: context)
         XCTAssertEqual(discarded.cursor, 0, "The rebuild starts from the Server, not the bad cursor.")
         XCTAssertNil(discarded.inboxCandidate)
+        XCTAssertEqual(try launched.conversationSnapshot(context: context).cursor, 0,
+                       "The conversation projection is Server state too and is rebuilt.")
         XCTAssertEqual(discarded.intents[unsent.intentID]?.operationID, unsent.opID,
                        "The unsent answer keeps its original operation ID.")
         XCTAssertNil(discarded.intents[accepted.intentID],
                      "An accepted receipt is Server truth and returns with the rebuilt projection.")
-        let restartedStore = try ClientRepository(context: context, persistence: persistence)
-        XCTAssertEqual(try restartedStore.snapshot(context: context).intents.keys.sorted { $0.uuidString < $1.uuidString },
-                       [unsent.intentID], "A relaunch after the discard keeps only the unsent queue.")
+        let discardedCache = try await cache.load()
+        XCTAssertNil(discardedCache, "The bad cache file is gone, so a relaunch cannot restore it.")
 
-        let rebuilt = try NativeRelayCore(store: store, context: context, session: session, serverStateCache: cache)
+        // Relaunch between the discard and the rebuild.
+        let relaunched = try ClientRepository(context: context, persistence: persistence)
+        let relaunchCache = FileServerStateCache(identity: identity, fileURL: cacheURL)
+        let relaunchSaved = try await relaunchCache.load()
+        XCTAssertNil(relaunchSaved)
+        XCTAssertEqual(try relaunched.snapshot(context: context).cursor, 0)
+        XCTAssertEqual(Array(try relaunched.snapshot(context: context).intents.keys), [unsent.intentID],
+                       "A relaunch after the discard keeps only the unsent queue.")
+
+        let rebuilt = try NativeRelayCore(store: relaunched, context: context, session: session,
+                                          serverStateCache: relaunchCache)
         let high = try await rebuilt.resyncAndDrainOutbox()
         XCTAssertEqual(high, 10)
-        let settled = try store.snapshot(context: context)
+        let settled = try relaunched.snapshot(context: context)
         XCTAssertEqual(settled.cursor, 10)
         XCTAssertEqual(Set(settled.requests.keys), [unsentKey, acceptedKey])
         let inboxStarts = session.requests.map { String(decoding: $0, as: UTF8.self) }
@@ -1936,6 +1956,8 @@ final class NativeRelayCoreTests: XCTestCase {
                       "The rebuild asks the Server for its whole current inbox.")
         XCTAssertEqual(session.sent.map(\.1), [unsent.opID],
                        "Only the unsent answer is resent, under its original operation ID.")
+        let rebuiltCache = try await relaunchCache.load()
+        XCTAssertEqual(rebuiltCache?.cursor, 10, "The rebuilt state replaces the cache file.")
     }
 
     func testAcceptedAnswerRemainsInReceiptInventoryWithoutOrdinaryResend() throws {

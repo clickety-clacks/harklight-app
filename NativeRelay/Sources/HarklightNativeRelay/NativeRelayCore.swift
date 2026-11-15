@@ -125,6 +125,12 @@ public enum NativeRelayCoreError: Error, Equatable {
     /// errors about the person's own input are not in this class.
     public static func isInvalidSavedServerState(_ error: any Error) -> Bool {
         if let error = error as? NativeRelayCoreError { return error == .invalidReplay || error == .eventRejected }
+        if let error = error as? ConversationError {
+            switch error {
+            case .gap, .conflict: return true
+            default: return false
+            }
+        }
         guard let error = error as? AttentionStoreError else { return false }
         switch error {
         case .eventGap, .missingOriginContent, .replayAlreadyActive, .replayNotActive,
@@ -492,6 +498,14 @@ public actor NativeRelayCore {
         self.onDiagnostic = onDiagnostic
         self.wire = try RelayWire(profile: context)
         self.inboxWire = try InboxPagingWire(profile: context)
+    }
+
+    /// Discards every saved copy of Server state, in the repository and in
+    /// the Server cache file a relaunch would restore, keeping the person's
+    /// queue. A fresh connection then rebuilds it from the Server.
+    public func discardSavedServerState() async throws {
+        try store.discardServerState(context: context)
+        try await serverStateCache.discard()
     }
 
     public func deactivate() {
