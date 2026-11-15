@@ -38,10 +38,8 @@ final class InboxStockTabsUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
         app.launch()
-        let search = app.tabBars.buttons["Search"]
-        XCTAssertTrue(search.waitForExistence(timeout: 10), app.debugDescription)
-        search.tap()
-        let field = app.searchFields.firstMatch
+        XCTAssertTrue(workspaceTab("Inbox", in: app).waitForExistence(timeout: 10), app.debugDescription)
+        let field = workspaceSearchField(in: app)
         XCTAssertTrue(field.waitForExistence(timeout: 5), app.debugDescription)
         field.tap()
         field.typeText("Archive\n")
@@ -52,6 +50,12 @@ final class InboxStockTabsUITests: XCTestCase {
         XCTAssertFalse(detail.exists, "Search must not pick its first matching message.")
         row.tap()
         XCTAssertTrue(detail.waitForExistence(timeout: 5), app.debugDescription)
+        if UIDevice.current.userInterfaceIdiom == .pad {
+            // iPad keeps the searched list beside the opened message.
+            XCTAssertTrue(row.isHittable, "The searched list stays beside the opened message.")
+            attachScreenshot("Search list beside explicitly opened detail", from: app)
+            return
+        }
         let back = workspaceBackButton(in: app)
         XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
         back.tap()
@@ -136,7 +140,10 @@ final class InboxStockTabsUITests: XCTestCase {
                       "The same message keeps its normal-list row, with the spinner. \(normalRow.label)")
     }
 
-    func testSearchTabSearchesTheListItWasOpenedFrom() {
+    func testSearchTabSearchesTheListItWasOpenedFrom() throws {
+        guard UIDevice.current.userInterfaceIdiom == .phone else {
+            throw XCTSkip("The Search tab is iPhone only; iPad searches from a field in the list.")
+        }
         let app = XCUIApplication()
         app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
         app.launch()
@@ -255,10 +262,12 @@ final class InboxStockTabsUITests: XCTestCase {
         }
     }
 
-    /// On iPad the design puts search in the tab bar at the top, so the list
-    /// panel beside an open message has no search field of its own, and the
-    /// Search tab stays available.
-    func testSearchTabStaysAvailableBesideDetailWithNoListSearchField() throws {
+    /// On iPad search is a field at the top of the list rather than a tab, so
+    /// it stays beside an open message and filters the list in place.
+    func testIPadListSearchFieldFiltersBesideDetail() throws {
+        guard UIDevice.current.userInterfaceIdiom == .pad else {
+            throw XCTSkip("The list search field is the iPad search; iPhone uses the Search tab.")
+        }
         let app = XCUIApplication()
         app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
         app.launch()
@@ -271,15 +280,40 @@ final class InboxStockTabsUITests: XCTestCase {
         row.tap()
         XCTAssertTrue(app.buttons["request-heading"].waitForExistence(timeout: 5),
                       "The detail is visible beside the master list.")
+        let fullTotal = positionTotal(in: app)
+        XCTAssertNotNil(fullTotal, app.debugDescription)
 
+        XCTAssertFalse(app.tabBars.buttons["Search"].exists,
+                       "iPad has no Search tab.\n\(app.debugDescription)")
         let list = app.collectionViews.firstMatch
+        let field = app.searchFields.firstMatch
         XCTAssertTrue(list.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(field.waitForExistence(timeout: 5),
+                      "The list has its own search field.\n\(app.debugDescription)")
         XCTAssertTrue(list.isHittable, "The master list remains usable beside the detail.")
-        XCTAssertEqual(list.searchFields.count, 0,
-                       "The list panel has no search field; search is the Search tab.")
-        XCTAssertTrue(workspaceTab("Search", in: app).waitForExistence(timeout: 5),
-                      "The Search tab stays available beside the detail.\n\(app.debugDescription)")
-        attachScreenshot("Search tab beside detail", from: app)
+        XCTAssertGreaterThanOrEqual(field.frame.minX, list.frame.minX - 8)
+        XCTAssertLessThanOrEqual(field.frame.maxX, list.frame.maxX + 8)
+        field.tap()
+        field.typeText("Archive\n")
+        let match = app.descendants(matching: .any)["sample-approval-0"]
+        XCTAssertTrue(match.waitForExistence(timeout: 5),
+                      "Typing filters the list in place.\n\(app.debugDescription)")
+        match.tap()
+        XCTAssertTrue(app.buttons["request-heading"].waitForExistence(timeout: 5), app.debugDescription)
+        let filteredTotal = positionTotal(in: app)
+        XCTAssertNotNil(filteredTotal, app.debugDescription)
+        if let fullTotal, let filteredTotal {
+            XCTAssertLessThan(filteredTotal, fullTotal,
+                              "Detail position counts the search results, not the whole Inbox.")
+        }
+        attachScreenshot("iPad list search beside detail", from: app)
+    }
+
+    /// The total in the detail's "N of M" position pill.
+    private func positionTotal(in app: XCUIApplication) -> Int? {
+        let pill = app.staticTexts.matching(NSPredicate(format: "label MATCHES %@", "^[0-9]+ of [0-9]+$")).firstMatch
+        guard pill.waitForExistence(timeout: 5) else { return nil }
+        return pill.label.split(separator: " ").last.flatMap { Int($0) }
     }
 
     func testNotificationRouteClearsListSearchAndOpensTheTargetRequest() {
@@ -304,6 +338,13 @@ final class InboxStockTabsUITests: XCTestCase {
         XCTAssertTrue(targetHeading.label.contains("Unfamiliar interface"),
                       "The notification target is presented in the visible detail: \(targetHeading.label)")
 
+        if UIDevice.current.userInterfaceIdiom == .pad {
+            // iPad shows the list beside the routed message, with its query cleared.
+            XCTAssertTrue(inboxTab.isSelected, app.debugDescription)
+            XCTAssertTrue(app.descendants(matching: .any)["request-row-facilities-01"]
+                .waitForExistence(timeout: 5), "The routed notification clears the list query.")
+            return
+        }
         let back = workspaceBackButton(in: app)
         XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
         back.tap()

@@ -3800,7 +3800,11 @@ public final class ClientRepository: @unchecked Sendable {
 
     private func effectiveRequest(for key: RequestKey) -> StoredRequest? {
         guard let original = state.requests[key] else { return nil }
-        guard let thread = state.conversation?.threads[key] else { return original }
+        // Only the Server's question revisions matter here. Read the stored
+        // thread directly: the `conversation` accessor rebuilds every thread
+        // with the person's queued drafts and read positions, and snapshot
+        // calls this once per request.
+        guard let thread = state.server.conversation?.threads[key] else { return original }
         let currentPayload: JSONValue
         if let members = thread.currentQuestionPayload.objectMembers {
             // Supersedes belongs to the original delivery. A later question
@@ -4004,7 +4008,9 @@ public final class ClientRepository: @unchecked Sendable {
         next.intentByRequest.removeValue(forKey: key)
         next.outboxOrder.removeAll { ids.contains($0) }
         next.drafts.removeValue(forKey: key)
-        next.pendingConversations[key]?.answerDrafts = nil
+        if next.conversation?.threads[key]?.isRetracted != true {
+            next.pendingConversations[key]?.answerDrafts = nil
+        }
     }
 
     private func dropAnswersInvalidatedBySnapshot(_ checkpoint: InboxPagingCheckpoint,
