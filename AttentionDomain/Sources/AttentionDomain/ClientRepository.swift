@@ -183,20 +183,43 @@ public final class ClientRepository: @unchecked Sendable {
         self.conversationFileReferences = conversationFileReferences
         self.maximumWireFrameBytes = max(0, maximumWireFrameBytes)
         state = ClientSessionState(profileIdentity: context.identity)
-        if let bytes = try persistence.load(identity: context.identity) {
-            let queue = try PropertyListDecoder().decode(PersistedPendingActions.self, from: bytes)
-            guard queue.version == 1, queue.profileIdentity == context.identity else {
+        // A read failure (storage unavailable, file protection while locked)
+        // is not evidence the queue is bad, so it still throws.
+        guard let bytes = try persistence.load(identity: context.identity) else { return }
+        let queue: PersistedPendingActions
+        do {
+            let decoded = try PropertyListDecoder().decode(PersistedPendingActions.self, from: bytes)
+            guard decoded.version == 1, decoded.profileIdentity == context.identity else {
                 throw AttentionStoreError.persistence("The pending actions do not belong to this account.")
             }
-            state.intents = queue.operations
-            state.intentByRequest = queue.activeOperations
-            state.fencedIntents = queue.cancelledOperations
-            state.drafts = queue.answerDrafts
-            state.pendingMessageOpens = queue.messageOpens
-            state.pendingConversations = queue.conversations
-            state.pendingReadPositions = queue.readPositions
-            acceptedAwaitingTerminalReplay = Self.acceptedAwaitingTerminalReplay(in: state)
+            queue = decoded
+        } catch {
+            // Bytes that cannot be decoded as this account's queue cannot be
+            // resent, and refusing to open the account would leave the app
+            // unusable. Record why, replace them with an empty queue and
+            // continue; Server state rebuilds from the Server.
+            try persistence.commit(Self.emptyQueueBytes(for: context.identity), identity: context.identity)
+            discardedUnreadablePendingActions = error
+            return
         }
+        state.intents = queue.operations
+        state.intentByRequest = queue.activeOperations
+        state.fencedIntents = queue.cancelledOperations
+        state.drafts = queue.answerDrafts
+        state.pendingMessageOpens = queue.messageOpens
+        state.pendingConversations = queue.conversations
+        state.pendingReadPositions = queue.readPositions
+        acceptedAwaitingTerminalReplay = Self.acceptedAwaitingTerminalReplay(in: state)
+    }
+
+    /// Set when launch found the pending-action file unreadable and replaced
+    /// it with an empty queue. The app reports it; it never blocks launch.
+    public private(set) var discardedUnreadablePendingActions: (any Error)?
+
+    private static func emptyQueueBytes(for identity: ProfileIdentity) throws -> Data {
+        let encoder = PropertyListEncoder()
+        encoder.outputFormat = .binary
+        return try encoder.encode(PersistedPendingActions(state: ClientSessionState(profileIdentity: identity)))
     }
 
     /// Replaces the disposable server cache. Pending user requests stay in the

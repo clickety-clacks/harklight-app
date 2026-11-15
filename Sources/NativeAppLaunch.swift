@@ -862,6 +862,10 @@ final class NativeAppLaunch {
             return (store, fileStorage, cache)
         }.value
         guard activationGeneration == generation else { return }
+        if let discarded = store.discardedUnreadablePendingActions {
+            diagnostics.record(area: .localStore, phase: .projectionRefresh, transition: .completed,
+                               error: discarded, causeCode: "unreadable_pending_actions_discarded")
+        }
         let activation = try await LivePresentationStore.makeForActivation(
             store: store, context: context, diagnostics: diagnostics,
             newMessageAreaDefaults: .standard, conversationFiles: fileStorage)

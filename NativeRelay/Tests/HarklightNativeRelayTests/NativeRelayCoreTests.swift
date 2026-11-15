@@ -1960,6 +1960,95 @@ final class NativeRelayCoreTests: XCTestCase {
         XCTAssertEqual(rebuiltCache?.cursor, 10, "The rebuilt state replaces the cache file.")
     }
 
+    func testUnreadablePendingActionsAreReplacedAndTheAccountStillConnects() async throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                                       personID: ExactText("person-unreadable"),
+                                       deviceID: ExactText("installation-unreadable"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let key = RequestKey(accountScope: identity.personID,
+                             senderID: ExactText("sender"), messageID: ExactText("after-recovery"))
+        let payload = try JSONValue.parse(data(#"{"title":"Question","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"yes","label":"Yes","kind":"value","value":{"ok":true}}]}}"#))
+
+        // Another account's valid queue stored under this account, then bytes
+        // that are not a queue at all. Neither may stop the account opening.
+        let otherIdentity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                                            personID: ExactText("person-other"),
+                                            deviceID: ExactText("installation-other"))
+        let otherPersistence = MemoryPendingActionPersistence()
+        let otherContext = ProfileContext(identity: otherIdentity, transportMode: .relay)
+        _ = try ClientRepository(context: otherContext, persistence: otherPersistence)
+            .enqueueMessageOpen(RequestKey(accountScope: otherIdentity.personID, senderID: ExactText("sender"),
+                                           messageID: ExactText("other")),
+                                requestRevision: 1, context: otherContext)
+        let foreignQueue = try XCTUnwrap(otherPersistence.load(identity: otherIdentity))
+        for unreadable in [foreignQueue, Data("not a saved queue".utf8)] {
+            let persistence = MemoryPendingActionPersistence()
+            try persistence.commit(unreadable, identity: identity)
+
+            let store = try ClientRepository(context: context, persistence: persistence)
+            XCTAssertNotNil(store.discardedUnreadablePendingActions, "The discard is recorded for diagnostics.")
+            let opened = try store.snapshot(context: context)
+            XCTAssertTrue(opened.intents.isEmpty)
+            XCTAssertTrue(opened.pendingMessageOpens.isEmpty, "Nothing from the unreadable file is resent.")
+            let relaunched = try ClientRepository(context: context, persistence: persistence)
+            XCTAssertNil(relaunched.discardedUnreadablePendingActions,
+                         "The replacement is a valid empty queue, so a relaunch opens normally.")
+
+            let session = Session(identity)
+            session.snapshotHighWater = 3
+            session.initialItems = [snapshotItem(key, payload: payload, sequence: 3)]
+            session.frames = [data(#"{"v":1,"type":"resynced","seq":3}"#)]
+            let core = try NativeRelayCore(store: relaunched, context: context, session: session)
+            let high = try await core.resyncAndDrainOutbox()
+            XCTAssertEqual(high, 3)
+            XCTAssertEqual(Set(try relaunched.snapshot(context: context).requests.keys), [key],
+                           "The account connects and loads its inbox from the Server.")
+        }
+    }
+
+    func testConflictingSavedPageStateIsRebuiltSoPagingContinuesWithTheQueueKept() async throws {
+        let (context, store, session) = try setup()
+        func key(_ id: String) -> RequestKey {
+            RequestKey(accountScope: context.identity.personID, senderID: ExactText("sender"), messageID: ExactText(id))
+        }
+        let payload = try JSONValue.parse(data(#"{"title":"Question","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"yes","label":"Yes","kind":"value","value":{"ok":true}}]}}"#))
+        session.snapshotHighWater = 4
+        session.initialItems = [snapshotItem(key("newest"), payload: payload, sequence: 4)]
+        session.nextItemCursor = "older"
+        session.frames = [data(#"{"v":1,"type":"resynced","seq":4}"#)]
+        let core = try NativeRelayCore(store: store, context: context, session: session)
+        _ = try await core.resyncAndDrainOutbox()
+
+        let port = AttentionDomainPort(store: store)
+        let selector = try XCTUnwrap(port.inspect(context: port.context, request: key("newest")).requests.first?.selector)
+        let unsent = try port.submit(SubmitIntent(context: port.context, selector: selector,
+            intentID: UUID(), inputs: [.compatibilityValue(action: ExactText("yes"))]))
+
+        // The saved page state says "newest" is already loaded; the next page
+        // contains it again, so the saved state cannot accept that page.
+        session.olderPages["older"] = [snapshotItem(key("newest"), payload: payload, sequence: 4)]
+        do {
+            _ = try await core.fetchNextInboxPage()
+            XCTFail("The page conflicts with the saved page state.")
+        } catch {
+            XCTAssertTrue(NativeRelayCoreError.isInvalidSavedServerState(error),
+                          "A page that conflicts with saved state is rebuilt, not a dead end: \(error)")
+        }
+
+        try await core.discardSavedServerState()
+        XCTAssertEqual(try store.snapshot(context: context).intents[unsent.intentID]?.operationID, unsent.opID,
+                       "The unsent answer is kept through the rebuild.")
+        session.olderPages["older"] = [snapshotItem(key("older"), payload: payload, sequence: 2)]
+        session.result = .accepted(operationID: unsent.opID, terminalSequence: 5)
+        let rebuilt = try NativeRelayCore(store: store, context: context, session: session)
+        _ = try await rebuilt.resyncAndDrainOutbox()
+        let paged = try await rebuilt.fetchNextInboxPage()
+        XCTAssertTrue(paged, "Paging continues after the rebuild.")
+        XCTAssertEqual(Set(try store.snapshot(context: context).requests.keys), [key("newest"), key("older")])
+        XCTAssertEqual(session.sent.map(\.1), [unsent.opID],
+                       "The kept answer is resent once under its original operation ID.")
+    }
+
     func testAcceptedAnswerRemainsInReceiptInventoryWithoutOrdinaryResend() throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
                                        personID: ExactText("person-accepted-cache"),

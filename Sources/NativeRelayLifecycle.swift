@@ -1656,6 +1656,22 @@ final class NativeRelayLifecycle {
             recordDiagnostic(.relay, .ordinaryReplay,
                 NativeDiagnosticCauseCode.failureTransition(for: error), error: error,
                 attemptID: activeTransportAttemptID)
+            if NativeRelayCoreError.isInvalidSavedServerState(error), self.context == context {
+                // Paging found saved inbox state that no longer validates.
+                // Rebuild it from the Server on a fresh connection instead of
+                // leaving older pages unloadable.
+                let generation = refreshGeneration
+                Task { [weak self] in
+                    guard let self, self.refreshGeneration == generation,
+                          await self.discardSavedServerState(after: error) else { return }
+                    _ = await self.refreshFlights.afterCurrent { [weak self] in
+                        guard let self, self.refreshGeneration == generation else { return .unavailable }
+                        do { try await self.reconnect(generation: generation) }
+                        catch { return .failed(error: error) }
+                        return await self.performRefresh(generation: generation)
+                    }
+                }
+            }
             return false
         }
     }
