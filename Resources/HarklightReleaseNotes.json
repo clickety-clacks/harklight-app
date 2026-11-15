@@ -241,7 +241,7 @@
           "id": "answer-state-in-the-control",
           "symbol": "checkmark.circle",
           "title": "Your answer shows its own progress",
-          "detail": "The choice, reply, No comment or Seen you send now shows a spinner while it sends, then your answer when it arrives. If it does not go through, it shows a circled exclamation mark and Retry, and a failed reply can be edited. The old status lines below the answers are gone. This change is pending formal testing."
+          "detail": "The choice, reply, No comment or Seen you send now shows a spinner until the server confirms it, including while the connection drops and reconnects, then your answer. Only a send that really failed shows a circled exclamation mark and Retry, and a failed reply can be edited. The old status lines below the answers are gone. This change is pending formal testing."
         },
         {
           "id": "progress-section-and-detail",

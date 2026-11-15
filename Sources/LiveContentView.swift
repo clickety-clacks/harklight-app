@@ -1638,7 +1638,17 @@ struct LiveRequestDetail: View {
     }
 
     private var showsAnsweredConfirmation: Bool {
-        answerIsComplete && !isSupersedesReadOnly
+        (answerIsComplete || isDurablyAccepted(.answer)) && !isSupersedesReadOnly
+    }
+
+    /// The server durably accepted this message's answer or No comment: that
+    /// is its confirmation, so the control becomes its card without waiting
+    /// for the final state. A later refusal changes the phase and reverts it.
+    func isDurablyAccepted(_ kind: SubmissionControlPhase.Kind) -> Bool {
+        guard localExample == nil, request.informationalSeenStatus == nil,
+              !storePresentationSnapshot.isRetracted,
+              submissionPhase?.kind == kind else { return false }
+        return submissionPhase?.phase == .confirmed
     }
 
     /// A custom answer form that has been answered or got No comment shows its
@@ -1675,7 +1685,8 @@ struct LiveRequestDetail: View {
 
     private var showsNoCommentConfirmation: Bool {
         Self.showsNoCommentConfirmation(lifecycleStatus: request.lifecycleStatus,
-                                       isSupersedesReadOnly: isSupersedesReadOnly)
+                                       isSupersedesReadOnly: isSupersedesReadOnly) ||
+            (isDurablyAccepted(.noComment) && !isSupersedesReadOnly)
     }
 
     static func showsNoCommentConfirmation(lifecycleStatus: AppLifecycleStatus,
