@@ -342,7 +342,13 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         XCTAssertEqual(try store.lookupIntent(failed.intentID, context: context)?.disposition, .failed,
                        "Editing leaves the refused operation available to same-ID Retry.")
         let retry = try live.submit(key)
+        XCTAssertNotEqual(retry.intentID, failed.intentID,
+                          "The replacement answer gets a new intent binding.")
         XCTAssertNotEqual(retry.opID, failed.opID)
+        XCTAssertEqual(live.request(for: key)?.intentReceipt?.intentID, retry.intentID,
+                       "The open request is bound to the replacement answer.")
+        XCTAssertThrowsError(try store.queueOriginalOperationForUserTap(failed.intentID, context: context),
+                             "Retrying the refused answer must not replace the new binding.")
         XCTAssertEqual(try store.snapshot(context: context).intents.values.filter {
             $0.disposition == .pending
         }.map(\.operationID), [retry.opID],
