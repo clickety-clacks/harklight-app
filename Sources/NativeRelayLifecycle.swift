@@ -2012,6 +2012,7 @@ final class NativeRelayLifecycle {
         resumeSavedAnswers()
         resumeSavedDiscussions()
         try await refreshConfirmedProjection(core: core, context: context, generation: generation)
+        try enrollment.updateServerID(await transport.serverID, for: context.identity)
         if let configuration {
             let threads = try configuration.store.conversationSnapshot(context: context).threads
             for (request, thread) in threads where (thread.uploadCleanups ?? [:]).values.contains(where: {

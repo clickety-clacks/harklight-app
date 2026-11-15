@@ -1,6 +1,7 @@
 import AttentionDomain
 import Foundation
 import Observation
+import HarklightNativeRelay
 
 struct NativeNotificationBinding: Codable, Equatable {
     let bindingID: ExactText
@@ -37,6 +38,7 @@ extension NativeEnrollmentRecord {
 }
 
 struct NativeNotificationLocator: Codable, Equatable {
+    let serverID: String?
     let bindingID: ExactText
     let deviceID: ExactText
     let request: RequestKey
@@ -57,6 +59,8 @@ struct NativeNotificationLocator: Codable, Equatable {
               let message = locator.uniqueValue(named: "message_id")?.stringValue, !message.rawValue.isEmpty,
               case let .number(number)? = locator.uniqueValue(named: "acceptance_seq"),
               let sequence = UInt64(number.lexeme), sequence > 0 else { return nil }
+        do { serverID = try RelayServerIdentity.read(from: attention) }
+        catch { return nil }
         bindingID = binding
         deviceID = device
         request = RequestKey(accountScope: person, senderID: sender, messageID: message)
@@ -66,7 +70,10 @@ struct NativeNotificationLocator: Codable, Equatable {
 
     func profile(in records: [NativeEnrollmentRecord]) -> NativeNotificationProfile? {
         let matches = records.filter { record in
-            (record.notificationBindings ?? []).contains { $0.bindingID == bindingID }
+            // A push from a server we have left must not open a message in a
+            // different account. Missing identity preserves legacy resolution.
+            if let serverID, let knownServer = record.serverID, serverID != knownServer { return false }
+            return (record.notificationBindings ?? []).contains { $0.bindingID == bindingID }
         }
         guard matches.count == 1, let record = matches.first,
               NativeAuthorityBinding.samePerson(record.personID, request.accountScope.rawValue),

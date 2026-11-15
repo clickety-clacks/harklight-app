@@ -219,3 +219,17 @@ public struct RelayWire: Sendable {
         }
     }
 }
+
+/// Shared reader for the stable server identity exposed by authenticated sync
+/// and notification payloads. Older servers omit it.
+public enum RelayServerIdentity {
+    public static func read(from value: JSONValue) throws -> String? {
+        guard let field = value.uniqueValue(named: "server") else { return nil }
+        guard let server = field.stringValue?.rawValue,
+              server.utf8.count == 32,
+              server.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) else {
+            throw RelayWireError.invalidFrame
+        }
+        return server
+    }
+}

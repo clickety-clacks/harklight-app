@@ -71,6 +71,7 @@ struct NativeEnrollmentRecord: Codable, Equatable {
     var personID: String?
     var pushBinding: NativePushBinding? = nil
     var serverDisplayName: String? = nil
+    var serverID: String? = nil
     var accountDisplayName: String? = nil
     var notificationExplanationSeen: Bool? = nil
     var foregroundRelayConfirmed: Bool? = nil
@@ -509,6 +510,17 @@ struct NativeEnrollmentStore {
         record.pushBinding = binding
         try save(record)
         return binding
+    }
+
+    /// The authenticated server is the authority; an older server with no field
+    /// resets the cached identity to unknown.
+    func updateServerID(_ serverID: String?, for identity: ProfileIdentity) throws {
+        guard var record = try load(), record.matchesNotificationIdentity(identity) else {
+            throw NativeJoinError.superseded
+        }
+        guard record.serverID != serverID else { return }
+        record.serverID = serverID
+        try save(record)
     }
 
     /// Persist routing metadata and acceptance together, guarded by the exact

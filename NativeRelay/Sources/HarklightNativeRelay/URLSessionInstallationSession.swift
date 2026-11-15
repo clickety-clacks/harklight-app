@@ -58,6 +58,7 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
     private let urlSession: URLSession
     private let task: URLSessionWebSocketTask
     private let pingCoordinator: WebSocketPingCoordinator
+    public private(set) var serverID: String?
     private var isClosed = false
     private var connectionFailure: (any Error)?
     private let profileContext: ProfileContext
@@ -255,6 +256,9 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
                 guard kind == "delivery" || kind == "lifecycle" || kind == "resynced" else {
                     throw InstallationTransportError.unexpectedServerFrame
                 }
+                if kind == "resynced" {
+                    serverID = try RelayServerIdentity.read(from: value)
+                }
                 try await consume(frame)
                 if kind == "resynced" {
                     startPostCheckpointReader()
@@ -365,6 +369,9 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
                     }
                 } else if (event == "conversation" && ordinary) || (event == "delivery" && conversation) {
                     continue
+                }
+                if kind == "resynced" {
+                    serverID = try RelayServerIdentity.read(from: value)
                 }
                 try await consume(frame)
                 if kind == end { return }

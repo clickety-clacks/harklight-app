@@ -384,6 +384,58 @@ final class NativeGuidedTLSTests: XCTestCase {
         return record
     }
 
+    func testPushServerIdentityParsingAndCurrentAccountRouting() throws {
+        let current = String(repeating: "a", count: 32)
+        let other = String(repeating: "b", count: 32)
+        func payload(server: String?) throws -> JSONValue {
+            let original = try notificationPayload()
+            guard case var .object(fields) = original,
+                  let index = fields.firstIndex(where: { $0.key.rawValue == "attention" }),
+                  case var .object(attention) = fields[index].value else {
+                throw RelayWireError.invalidFrame
+            }
+            if let server { attention.append(JSONMember(key: ExactText("server"), value: .string(ExactText(server)))) }
+            fields[index] = JSONMember(key: fields[index].key, value: .object(attention))
+            return .object(fields)
+        }
+        var record = notificationRecord()
+        record.serverID = current
+        let matching = try XCTUnwrap(NativeNotificationLocator(payload(server: current)))
+        XCTAssertEqual(matching.serverID, current)
+        XCTAssertNotNil(matching.profile(in: [record]))
+        let legacy = try XCTUnwrap(NativeNotificationLocator(payload(server: nil)))
+        XCTAssertNil(legacy.serverID)
+        XCTAssertNotNil(legacy.profile(in: [record]))
+        let unknown = try XCTUnwrap(NativeNotificationLocator(payload(server: other)))
+        XCTAssertEqual(unknown.serverID, other)
+        XCTAssertNil(unknown.profile(in: [record]), "A server we have left falls back to inbox.")
+        record.serverID = nil
+        XCTAssertNotNil(matching.profile(in: [record]), "Older servers use active-account resolution.")
+        XCTAssertNil(NativeNotificationLocator(try payload(server: "invalid")))
+    }
+
+    func testAuthenticatedServerIdentityCacheAndArchiveRoundTrip() throws {
+        let service = "Harklight.server-identity." + UUID().uuidString
+        defer { deleteEnrollmentRecord(service: service) }
+        let record = notificationRecord()
+        try saveEnrollmentRecord(record, service: service)
+        let store = NativeEnrollmentStore(service: service)
+        let identity = try XCTUnwrap(NativeNotificationProfile(record)).identity
+        let server = String(repeating: "c", count: 32)
+        let sync = try JSONValue.parse(Data(("{\"v\":1,\"type\":\"resynced\",\"seq\":0,\"server\":\"" + server + "\"}").utf8))
+        try store.updateServerID(RelayServerIdentity.read(from: sync), for: identity)
+        let saved = try XCTUnwrap(store.load())
+        XCTAssertEqual(saved.serverID, server)
+        let archive = NativeAccountDeparture(record: saved, replacement: nil, removed: true)
+        let restored = try JSONDecoder().decode(NativeAccountDeparture.self, from: JSONEncoder().encode(archive))
+        XCTAssertEqual(restored.record.serverID, server)
+        let olderSync = try JSONValue.parse(Data(#"{"v":1,"type":"resynced","seq":0}"#.utf8))
+        try store.updateServerID(RelayServerIdentity.read(from: olderSync), for: identity)
+        XCTAssertNil(try store.load()?.serverID, "Do not retain stale identity when the server no longer exposes it.")
+        let invalid = try JSONValue.parse(Data(#"{"server":"ABCDEF"}"#.utf8))
+        XCTAssertThrowsError(try RelayServerIdentity.read(from: invalid))
+    }
+
     func testPushBindingReplyCorrelationAndDurableSameOperationRecovery() throws {
         let service = "Harklight.push-binding-test." + UUID().uuidString
         defer { deleteEnrollmentRecord(service: service) }
