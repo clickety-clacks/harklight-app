@@ -2638,6 +2638,39 @@ final class LivePresentationStore {
         return true
     }
 
+    /// Retry from the control that shows a failed send: resends the same
+    /// operation, including one whose outcome was lost with the connection.
+    @discardableResult
+    func retrySubmissionFromUser(_ key: RequestKey) -> Bool {
+        if retryUnconfirmedAnswerFromUser(key) { return true }
+        guard canSendToCurrentServer, !isRetracted(key),
+              case .failed(retryable: true, _)? = submissionPhases[key]?.phase,
+              let receipt = request(for: key)?.intentReceipt,
+              receipt.opID == submissionPhases[key]?.operationID,
+              !sendingAnswerIntentIDs.contains(receipt.intentID) else { return false }
+        sendAnswerOperationForUserTap(receipt.intentID, request: key)
+        return true
+    }
+
+    /// Edit on a failed written reply: drops the failed operation so the saved
+    /// draft opens again; the next send is a new operation. Offered only where
+    /// the server definitively did not take it.
+    @discardableResult
+    func releaseFailedSubmissionForEdit(_ key: RequestKey) -> Bool {
+        guard case .failed(_, editable: true)? = submissionPhases[key]?.phase,
+              let receipt = request(for: key)?.intentReceipt,
+              receipt.opID == submissionPhases[key]?.operationID,
+              !sendingAnswerIntentIDs.contains(receipt.intentID) else { return false }
+        do {
+            try attentionStore.releaseFailedOperationForEdit(receipt.intentID, context: profileContext)
+            try refreshFromDurableStore()
+            return true
+        } catch {
+            diagnose(.answer, .draftSave, .failed, error: error, operationID: receipt.intentID, request: key)
+            return false
+        }
+    }
+
     func canRetryFailedResponse(for key: RequestKey) -> Bool {
         guard permitsDelivery, canSendToCurrentServer,
               let request = request(for: key),

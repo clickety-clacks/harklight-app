@@ -98,7 +98,7 @@ struct SubmissionDisplay {
     /// Resends the same operation; nil when this phase cannot be retried.
     var retry: (() -> Void)?
     /// Turns a failed written reply back into a draft; the next send is a
-    /// new operation. Nil until the store offers it.
+    /// new operation.
     var edit: (() -> Void)? = nil
 
     var isSendingAny: Bool { phase?.phase == .sending }

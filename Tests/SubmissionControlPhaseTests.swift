@@ -61,6 +61,45 @@ final class SubmissionControlPhaseTests: XCTestCase {
         XCTAssertNil(SubmissionControlPhase.project(snapshot: makeSnapshot([]))[key])
     }
 
+    @MainActor
+    func testEditDropsOnlyAFailedReplyAndKeepsItsDraft() throws {
+        let context = ProfileContext(identity: ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+            personID: ExactText("edit-reply"), deviceID: ExactText("device")), transportMode: .relay)
+        let key = RequestKey(accountScope: context.identity.personID, senderID: ExactText("sender"),
+                             messageID: ExactText("reply"))
+        let payload = try JSONValue.parse(Data(#"{"title":"Question","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"reply","label":"Reply","kind":"text"}]}}"#.utf8))
+        let domain = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        try domain.restoreCachedServerState(CachedAttentionServerState(identity: context.identity,
+            requests: [key: StoredRequest(key: key, originalPayload: payload)], remoteStates: [:], cursor: 1,
+            conversationCursor: 0, conversations: [:], inboxView: nil, currentRequestKeys: [key]), context: context)
+        let port = AttentionDomainPort(store: domain)
+        let selector = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first?.selector)
+        let receipt = try port.submit(SubmitIntent(context: port.context, selector: selector, intentID: UUID(),
+            inputs: [.compatibilityText(action: ExactText("reply"), text: ExactText("My failed reply"))]))
+        let live = try LivePresentationStore(store: domain, context: context)
+        XCTAssertEqual(live.submissionPhases[key]?.phase, .sending)
+        XCTAssertFalse(live.releaseFailedSubmissionForEdit(key), "A send in flight cannot become a draft.")
+        XCTAssertThrowsError(try domain.releaseFailedOperationForEdit(receipt.intentID, context: context))
+
+        try domain.recordUnresolvedOperation(receipt.intentID, operationID: receipt.opID, context: context)
+        try live.refreshFromDurableStore()
+        XCTAssertEqual(live.submissionPhases[key]?.phase, .failed(retryable: true, editable: false))
+        XCTAssertFalse(live.releaseFailedSubmissionForEdit(key),
+                       "A lost send may have arrived, so it keeps its operation for Retry.")
+        XCTAssertThrowsError(try domain.releaseFailedOperationForEdit(receipt.intentID, context: context))
+
+        try domain.recordAnswerNotDelivered(receipt.intentID, operationID: receipt.opID, context: context)
+        try live.refreshFromDurableStore()
+        XCTAssertEqual(live.submissionPhases[key]?.phase, .failed(retryable: true, editable: true))
+        XCTAssertTrue(live.releaseFailedSubmissionForEdit(key))
+        let released = try domain.snapshot(context: context)
+        XCTAssertNil(released.intents[receipt.intentID])
+        XCTAssertFalse(released.outbox.contains { $0.intentID == receipt.intentID })
+        XCTAssertNil(live.submissionPhases[key])
+        XCTAssertNil(live.request(for: key)?.intentReceipt)
+        XCTAssertNotNil(released.drafts[key], "The written text stays as a draft to edit.")
+    }
+
     private func submission(_ disposition: IntentDisposition, kind: SubmissionAnswerKind? = nil,
                             at date: Date? = nil) -> Submission {
         Submission(requestKey: key, answer: .string(ExactText("Answer")), answerKind: kind,

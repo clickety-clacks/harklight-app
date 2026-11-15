@@ -1870,7 +1870,9 @@ struct LiveRequestDetail: View {
 
     private var submissionDisplay: SubmissionDisplay {
         SubmissionDisplay(phase: submissionPhase, retry: { [store, key = request.key] in
-            _ = store.retryUnconfirmedAnswerFromUser(key)
+            _ = store.retrySubmissionFromUser(key)
+        }, edit: { [store, key = request.key] in
+            _ = store.releaseFailedSubmissionForEdit(key)
         })
     }
 
