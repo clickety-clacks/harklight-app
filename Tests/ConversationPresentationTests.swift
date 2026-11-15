@@ -1001,7 +1001,7 @@ final class ConversationPresentationTests: XCTestCase {
         try model.refreshFromDurableStore()
         XCTAssertTrue(model.hasUnreadAgentReply(request))
 
-        // An unconfirmed local view cannot replace the server read position.
+        // Before the server reports read-position support, a view has no position to record.
         model.markConversationRead(request)
         XCTAssertTrue(model.hasUnreadAgentReply(request))
         try domain.applyConversation(ConversationEvent(sequence: 4,
@@ -1030,8 +1030,13 @@ final class ConversationPresentationTests: XCTestCase {
         let resumedStore = try await reopen(replayed)
         let resumed = try LivePresentationStore(store: resumedStore, context: context)
         XCTAssertTrue(resumed.hasUnreadAgentReply(request))
+        // The relaunched store has not caught up with the server. Reading still shows at once.
         resumed.markConversationRead(request)
-        XCTAssertTrue(resumed.hasUnreadAgentReply(request))
+        await waitUntil { !resumed.hasUnreadAgentReply(request) }
+        XCTAssertFalse(resumed.hasUnreadAgentReply(request),
+                       "Reading during catch-up records the read immediately.")
+        XCTAssertEqual(try resumedStore.conversationSnapshot(context: context)
+            .pendingChatReadPositions.first?.readThroughConversationSequence, 5)
         try resumedStore.applyConversation(ConversationEvent(sequence: 6,
             binding: ConversationBinding(request: request, revision: 0),
             fact: .readPosition(eventID: ExactText("read-5"), readThroughConversationSequence: 5)), context: context)
@@ -1103,6 +1108,14 @@ final class ConversationPresentationTests: XCTestCase {
                        "A closed request must still show an unseen agent reply.")
     }
 
+
+    private func waitUntil(_ condition: @MainActor () -> Bool) async {
+        for _ in 0..<200 {
+            if condition() { return }
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        XCTFail("The condition did not become true.")
+    }
 }
 
 private final class FailOncePendingActionPersistence: PendingActionPersistence, @unchecked Sendable {

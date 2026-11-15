@@ -200,6 +200,12 @@
           "symbol": "bubble.left",
           "title": "Reading a reply clears its badge right away",
           "detail": "When a reply appears in Chat, its unread badge clears at once instead of waiting for the server to confirm. This fix is pending formal testing."
+        },
+        {
+          "id": "chat-read-during-catch-up",
+          "symbol": "arrow.triangle.2.circlepath",
+          "title": "Replies you read while catching up stay read",
+          "detail": "Reading a reply while Harklight is still catching up with the server marks it read at once. The server is told when catch-up finishes. This fix is pending formal testing."
         }
       ]
     }

@@ -1778,8 +1778,10 @@ final class LivePresentationStore {
         return thread.hasUnreadAgentReply
     }
 
+    // Reading is never gated on catch-up. The queued read shows at once and
+    // the relay sends it once the connection is free.
     func markConversationRead(_ key: RequestKey) {
-        guard !isReadOnly, canUseCurrentServerState(for: key),
+        guard !isReadOnly,
               let latest = conversationThreads[key]?.latestAgentReply else { return }
         markConversationRead(key, through: latest.id)
     }
@@ -1787,7 +1789,7 @@ final class LivePresentationStore {
     /// Chat calls this when the reply crosses the visible threshold. The durable
     /// position stops at that reply, so later offscreen replies stay unread.
     func markConversationRead(_ key: RequestKey, through turnID: ExactText) {
-        guard !isReadOnly, canUseCurrentServerState(for: key),
+        guard !isReadOnly,
               conversationThreads[key]?.turns.contains(where: {
                   $0.id == turnID && $0.kind == .reply && $0.author != .person
               }) == true else { return }
