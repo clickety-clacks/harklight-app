@@ -1044,6 +1044,31 @@ final class ConversationPresentationTests: XCTestCase {
         XCTAssertFalse(resumed.hasUnreadAgentReply(request))
     }
 
+    func testOpeningAMessageDuringCatchUpQueuesItsReportAtOnce() throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+            personID: ExactText("person"), deviceID: ExactText("device"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let domain = try ClientRepository(context: context,
+            persistence: MemoryPendingActionPersistence())
+        let key = RequestKey(accountScope: identity.personID,
+            senderID: ExactText("sender"), messageID: ExactText("request"))
+        let payload = try JSONValue.parse(Data(#"{"title":"A message"}"#.utf8))
+        try domain.apply(RelayEvent(sequence: 1, body: .delivery(
+            StoredRequest(key: key, originalPayload: payload), .message),
+            conversation: RelayConversationMetadata(revision: 1,
+                sessionHandle: ExactText("session"))), context: context)
+        let model = try LivePresentationStore(store: domain, context: context)
+        let request = try XCTUnwrap(model.request(for: key))
+        XCTAssertFalse(model.canUseCurrentServerState(for: key),
+                       "The inbox has not caught up with the server yet.")
+
+        model.reportMessageContentOpened(request)
+        let opens = try domain.snapshot(context: context).pendingMessageOpens
+        XCTAssertEqual(opens.map(\.requestKey), [key],
+                       "Opening a message during catch-up queues its report at once.")
+        XCTAssertEqual(opens.first?.requestRevision, request.requestRevision)
+    }
+
     func testInboxChatMarkerNeedsAChatTurnAndKeepsClosedUnreadRepliesVisible() async throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
             personID: ExactText("person"), deviceID: ExactText("device"))
