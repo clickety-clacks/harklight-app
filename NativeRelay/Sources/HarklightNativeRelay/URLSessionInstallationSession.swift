@@ -456,7 +456,7 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
             diagnose(.answer, .originalOperationDelivery,
                      NativeDiagnosticCauseCode.unresolvedTransition(for: error), error: error,
                      operationID: operationID, receipt: .unknown)
-            close()
+            retire(after: error)
             return .unresolved
         }
         if isNoCommentOperation {
@@ -489,7 +489,7 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
                 diagnose(.answer, .originalOperationDelivery,
                          NativeDiagnosticCauseCode.unresolvedTransition(for: error), error: error,
                          operationID: operationID, receipt: .unknown)
-                close()
+                retire(after: error)
                 return .unresolved
             }
             let responseType = value.uniqueValue(named: "type")?.stringValue?.rawValue
@@ -665,7 +665,7 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
             diagnose(.conversation, .discussionSubmission,
                      NativeDiagnosticCauseCode.unresolvedTransition(for: error), error: error,
                      operationID: operationID, receipt: .unknown)
-            close()
+            retire(after: error)
             return .unresolved
         }
     }
@@ -775,6 +775,14 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
             close()
             throw error
         }
+    }
+
+    /// Closes a connection that failed under a submission, keeping the actual
+    /// failure so the live connection's other users see it (and reconnect on
+    /// a real interruption) instead of a bare cancellation.
+    private func retire(after error: Error) {
+        if !isClosed, connectionFailure == nil { connectionFailure = error }
+        close()
     }
 
     public func close() {
