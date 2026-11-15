@@ -70,6 +70,7 @@ struct NativeEnrollmentRecord: Codable, Equatable {
     let statusExpiresAt: Int64
     var personID: String?
     var pushBinding: NativePushBinding? = nil
+    var pushRegistrationRevisionFloor: UInt64? = nil
     var serverDisplayName: String? = nil
     var serverID: String? = nil
     var accountDisplayName: String? = nil
@@ -456,7 +457,7 @@ struct NativeEnrollmentStore {
         if let existing = record.pushBinding, existing.address == address {
             return existing.accepted ? nil : existing
         }
-        let previous = record.pushBinding?.revision ?? 0
+        let previous = max(record.pushBinding?.revision ?? 0, record.pushRegistrationRevisionFloor ?? 0)
         guard previous < UInt64(Int64.max) - 1 else {
             throw NativeEnrollmentError.invalidServerResponse
         }
@@ -516,6 +517,7 @@ struct NativeEnrollmentStore {
 
     private struct PushRemovalState: Codable {
         var operation: PushRemovalOperation?
+        var revision: UInt64? = nil
     }
 
     private func notificationIdentity(_ record: NativeEnrollmentRecord) throws -> ProfileIdentity {
@@ -557,7 +559,10 @@ struct NativeEnrollmentStore {
     }
 
     func finishPushDeparture(for record: NativeEnrollmentRecord) throws {
-        try savePushRemoval(PushRemovalState(operation: nil), for: notificationIdentity(record))
+        let identity = try notificationIdentity(record)
+        let prior = try pushRemovalState(for: identity)
+        try savePushRemoval(PushRemovalState(operation: nil,
+            revision: prior?.operation?.revision ?? prior?.revision), for: identity)
     }
 
     /// The pending operation is independent of the current enrollment so an
@@ -568,7 +573,33 @@ struct NativeEnrollmentStore {
         let revision = record.pushBinding?.revision ?? 0
         guard revision < UInt64(Int64.max) - 1 else { throw NativeEnrollmentError.invalidServerResponse }
         let operation = try PushRemovalOperation(revision: revision + 1)
-        try savePushRemoval(PushRemovalState(operation: operation), for: identity)
+        try savePushRemoval(PushRemovalState(operation: operation, revision: operation.revision), for: identity)
+    }
+
+    /// A failed switch-away kept this account live. Cancel unsent removal and
+    /// prepare registration above any removal that may already have reached the
+    /// server, so the kept account continues receiving notifications.
+    func cancelPushDeparture(for expected: NativeEnrollmentRecord) throws {
+        guard var record = try load(), record.sameNotificationProfile(as: expected) else {
+            throw NativeJoinError.superseded
+        }
+        let identity = try notificationIdentity(record)
+        guard let departure = try pushRemovalState(for: identity) else { return }
+        let floor = max(record.pushRegistrationRevisionFloor ?? 0,
+                        departure.operation?.revision ?? departure.revision ?? 0)
+        guard floor < UInt64(Int64.max) - 1 else { throw NativeEnrollmentError.invalidServerResponse }
+        record.pushRegistrationRevisionFloor = floor
+        if let binding = record.pushBinding {
+            record.pushBinding = NativePushBinding(address: binding.address, operationID: UUID(),
+                                                  revision: max(binding.revision, floor) + 1, accepted: false)
+        }
+        try save(record)
+        let status = SecItemDelete([kSecClass as String: kSecClassGenericPassword,
+                                    kSecAttrService as String: service,
+                                    kSecAttrAccount as String: try pushRemovalKey(identity)] as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else {
+            throw NativeEnrollmentError.identityStorage
+        }
     }
 
     func retryPendingPushRemoval(using session: any AuthenticatedPushRemovalSession) async throws {
@@ -588,13 +619,13 @@ struct NativeEnrollmentStore {
                         throw NativeEnrollmentError.invalidServerResponse
                     }
                     let next = try PushRemovalOperation(revision: status.revision + 1)
-                    try savePushRemoval(PushRemovalState(operation: next), for: identity)
+                    try savePushRemoval(PushRemovalState(operation: next, revision: next.revision), for: identity)
                     continue
                 }
                 // The server reports no binding remaining.
             }
             // Keep the departure marker so reconnect cannot register pushes again.
-            try savePushRemoval(PushRemovalState(operation: nil), for: identity)
+            try savePushRemoval(PushRemovalState(operation: nil, revision: operation.revision), for: identity)
             return
         }
     }

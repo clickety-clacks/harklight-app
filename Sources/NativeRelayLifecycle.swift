@@ -1992,7 +1992,9 @@ final class NativeRelayLifecycle {
     /// enrollment or notification registration. It never forces send permission.
     func confirmInProcessSessionForTesting(store: ClientRepository, context: ProfileContext,
                                           session: any AuthenticatedInstallationSession,
-                                          serverStateCache: any ServerStateCaching) async throws -> NativeRelayRefreshResult {
+                                          serverStateCache: any ServerStateCaching,
+                                          pushRemovalSession: (any AuthenticatedPushRemovalSession)? = nil,
+                                          enrollmentStore: NativeEnrollmentStore = NativeEnrollmentStore()) async throws -> NativeRelayRefreshResult {
         await deactivate()
         let generation = UUID()
         let attemptID = UUID()
@@ -2003,7 +2005,12 @@ final class NativeRelayLifecycle {
                                        automaticallySendsPendingOperations: false,
                                        attemptID: attemptID, serverStateCache: serverStateCache)
         self.core = core
-        try await refreshConfirmedProjection(core: core, context: context, generation: generation)
+        if let pushRemovalSession {
+            try await refreshProjectionAfterPendingPushRemoval(core: core, context: context, generation: generation,
+                                                              pushSession: pushRemovalSession, enrollment: enrollmentStore)
+        } else {
+            try await refreshConfirmedProjection(core: core, context: context, generation: generation)
+        }
         try await resumeConfirmedDiscussions(core: core, context: context, generation: generation)
         return NativeRelayRefreshResult(relayConfirmed: true, pushRegistration: .notAttempted,
             confirmedContext: context, confirmedTransportAttemptID: attemptID)
@@ -2019,19 +2026,32 @@ final class NativeRelayLifecycle {
         }
     }
 
+    private func refreshProjectionAfterPendingPushRemoval(core: NativeRelayCore, context: ProfileContext,
+                                                           generation: UUID,
+                                                           pushSession: any AuthenticatedPushRemovalSession,
+                                                           enrollment: NativeEnrollmentStore) async throws {
+        do {
+            try await enrollment.retryPendingPushRemoval(using: pushSession)
+        } catch {
+            // Notification setup cannot prevent the account from syncing. A
+            // refused removal stays durable for another connection.
+            recordDiagnostic(.notifications, .pushRegistration, .failed, error: error,
+                             attemptID: activeTransportAttemptID)
+        }
+        guard refreshGeneration == generation, self.context == context else {
+            throw NativeRelayCoreError.inactive
+        }
+        try await refreshConfirmedProjection(core: core, context: context, generation: generation)
+    }
+
     private func refreshOnce(generation: UUID,
                              checkBlockedPush: Bool = false) async throws -> NativeRelayRefreshResult {
         guard refreshGeneration == generation else { throw NativeRelayCoreError.inactive }
         guard let core, let transport, let context else { throw NativeRelayCoreError.inactive }
         resumeSavedAnswers()
         resumeSavedDiscussions()
-        // A departure interrupted offline is settled on the next connection
-        // before replay or any attempt to restore the APNs registration.
-        try await enrollment.retryPendingPushRemoval(using: transport)
-        guard refreshGeneration == generation, self.context == context else {
-            throw NativeRelayCoreError.inactive
-        }
-        try await refreshConfirmedProjection(core: core, context: context, generation: generation)
+        try await refreshProjectionAfterPendingPushRemoval(core: core, context: context, generation: generation,
+                                                          pushSession: transport, enrollment: enrollment)
         try enrollment.updateServerID(await transport.serverID, for: context.identity)
         if let configuration {
             let threads = try configuration.store.conversationSnapshot(context: context).threads

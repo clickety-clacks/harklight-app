@@ -744,6 +744,10 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
                 default: return try operation.result(value)
                 }
             }
+        } catch InstallationTransportError.serverRejected {
+            // A correlated refusal completes this exchange. It does not make
+            // the authenticated connection unusable for inbox sync.
+            throw InstallationTransportError.serverRejected
         } catch {
             close()
             throw error
@@ -790,6 +794,8 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
                     throw InstallationTransportError.unexpectedServerFrame
                 }
             }
+        } catch InstallationTransportError.serverRejected {
+            throw InstallationTransportError.serverRejected
         } catch {
             close()
             throw error

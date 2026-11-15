@@ -457,7 +457,7 @@ final class NativeGuidedTLSTests: XCTestCase {
     }
 
     func testSignOutAndSwitchAwayRemovePushBeforeRelayTeardown() async throws {
-        for switching in [false, true] {
+        for (switching, failsSwitch) in [(false, false), (true, false), (true, true)] {
             let namespace = "Harklight.departure-order." + UUID().uuidString
             defer { deleteEnrollmentRecord(service: namespace) }
             let installation = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
@@ -491,7 +491,8 @@ final class NativeGuidedTLSTests: XCTestCase {
             let domain = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
             let live = try LivePresentationStore(store: domain, context: context)
             let app = NativeAppLaunch(arguments: [], enrollmentStore: enrollment, joinStore: join,
-                                      initialState: .live(live), initialEnrollmentRecord: record)
+                                      initialState: .live(live), initialEnrollmentRecord: record,
+                                      refreshOperation: { _ in .unavailable })
             let lifecycle = NativeRelayLifecycle.shared
             try await lifecycle.activate(store: domain, context: context,
                 relayURL: XCTUnwrap(URL(string: "wss://localhost:\(port)/relay")),
@@ -506,6 +507,7 @@ final class NativeGuidedTLSTests: XCTestCase {
                 let remaining = await probe.sent
                 XCTAssertTrue(remaining.isEmpty, "Push removal must be confirmed before device removal.")
                 removalObserved = true
+                if failsSwitch { throw URLError(.networkConnectionLost) }
             }
             if switching {
                 let root = "-----BEGIN CERTIFICATE-----\n" +
@@ -528,9 +530,107 @@ final class NativeGuidedTLSTests: XCTestCase {
                 await app.disconnectCurrentAccount()
             }
             XCTAssertTrue(removalObserved)
-            XCTAssertFalse(lifecycle.isActive(for: context), "Both departure paths tear down after push_remove.")
+            if failsSwitch {
+                XCTAssertTrue(lifecycle.isActive(for: context), "A failed switch keeps the old account live.")
+                XCTAssertFalse(try enrollment.hasPushDeparture(for: context.identity),
+                               "Cancel removal when the user never switched away.")
+                let registration = try XCTUnwrap(enrollment.pendingPushRegistration(
+                    address: record.pushBinding!.address, for: record.deviceID))
+                XCTAssertGreaterThan(registration.revision, 4,
+                                     "Restore pushes even if removal was already acknowledged.")
+                XCTAssertEqual(try enrollment.load()?.personID, record.personID)
+            } else {
+                XCTAssertFalse(lifecycle.isActive(for: context), "Both departures tear down after push_remove.")
+            }
             await lifecycle.deactivate()
         }
+    }
+
+    func testPushRemovalRefusalDoesNotCloseAuthenticatedRelay() async throws {
+        let namespace = "Harklight.push-remove-refusal." + UUID().uuidString
+        let installation = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
+        defer {
+            SecItemDelete([kSecClass as String: kSecClassCertificate,
+                           kSecAttrLabel as String: installation.label] as CFDictionary)
+            SecItemDelete([kSecClass as String: kSecClassKey,
+                           kSecAttrApplicationTag as String: Data(namespace.utf8)] as CFDictionary)
+        }
+        let relay = try LocalRelayWebSocket(expectedDevice: installation.deviceID) { text in
+            let value = try? JSONValue.parse(Data(text.utf8))
+            if value?.uniqueValue(named: "type")?.stringValue?.rawValue == "push_remove" {
+                return [#"{"v":1,"type":"error","ref":"native-push-remove","reason":"invalid_field"}"#]
+            }
+            return [#"{"v":1,"type":"ok","ref":"probe"}"#]
+        }
+        defer { relay.close() }
+        let port = try await relay.start()
+        let context = ProfileContext(identity: ProfileIdentity(trustedRelayAuthority: ExactText("localhost"),
+            personID: ExactText("test-person"), deviceID: ExactText(installation.deviceID)), transportMode: .relay)
+        let session = try URLSessionInstallationSession(profile: context,
+            relayURL: XCTUnwrap(URL(string: "wss://localhost:\(port)/relay")),
+            clientIdentity: TrustedKeychainIdentity(installation.value), trustedRootDER: relay.rootDER)
+        do {
+            _ = try await session.removePush(PushRemovalOperation(revision: 1))
+            XCTFail("The fixture refuses push removal.")
+        } catch InstallationTransportError.serverRejected {}
+        let response = try await session.inboxRequest(Data(#"{"v":1,"type":"inbox_status","ref":"probe"}"#.utf8),
+                                                     ref: "probe")
+        XCTAssertEqual(try JSONValue.parse(response).uniqueValue(named: "type")?.stringValue?.rawValue, "ok")
+        await session.close()
+    }
+
+    func testKeptAccountCancelsUnacknowledgedPushRemovalAndRestoresRegistration() async throws {
+        let service = "Harklight.cancel-push-departure." + UUID().uuidString
+        defer { deleteEnrollmentRecord(service: service) }
+        let record = notificationRecord()
+        try saveEnrollmentRecord(record, service: service)
+        let store = NativeEnrollmentStore(service: service)
+        let identity = try XCTUnwrap(NativeNotificationProfile(record)).identity
+        try store.preparePushRemoval(for: record)
+        let offline = PushRemovalProbeSession(identity: identity, results: [nil])
+        do { try await store.retryPendingPushRemoval(using: offline) }
+        catch {}
+        try store.cancelPushDeparture(for: record)
+        XCTAssertFalse(try store.hasPushDeparture(for: identity))
+        let reconnected = PushRemovalProbeSession(identity: identity, results: [.removed])
+        try await store.retryPendingPushRemoval(using: reconnected)
+        let sent = await reconnected.sent
+        XCTAssertTrue(sent.isEmpty, "The kept account must not remove pushes on its next connection.")
+        let registration = try XCTUnwrap(store.pendingPushRegistration(address: record.pushBinding!.address,
+                                                                      for: record.deviceID))
+        XCTAssertGreaterThan(registration.revision, record.pushBinding!.revision + 1)
+        XCTAssertFalse(registration.accepted)
+    }
+
+    func testPendingPushRemovalFailureDoesNotBlockRefreshProjection() async throws {
+        let namespace = "Harklight.nonfatal-push-drain." + UUID().uuidString
+        defer { deleteEnrollmentRecord(service: namespace) }
+        let record = notificationRecord()
+        try saveEnrollmentRecord(record, service: namespace)
+        let enrollment = NativeEnrollmentStore(service: namespace)
+        try enrollment.preparePushRemoval(for: record)
+        let context = ProfileContext(identity: try XCTUnwrap(NativeNotificationProfile(record)).identity,
+                                     transportMode: .relay)
+        let domain = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        let key = try XCTUnwrap(NativeNotificationLocator(notificationPayload())).request
+        let payload = try JSONValue.parse(Data(#"{"title":"Still synchronizes"}"#.utf8))
+        let refused = PushRemovalProbeSession(identity: context.identity, results: [nil], failure: .serverRejected)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let result = try await NativeRelayLifecycle.shared.confirmInProcessSessionForTesting(
+            store: domain, context: context,
+            session: ReplyCheckpointSession(identity: context.identity, key: key, payload: payload),
+            serverStateCache: FileServerStateCache(identity: context.identity,
+                                                  fileURL: directory.appendingPathComponent("cache.json")),
+            pushRemovalSession: refused, enrollmentStore: enrollment)
+        XCTAssertTrue(result.relayConfirmed, "A notification drain failure must not block inbox synchronization.")
+        XCTAssertTrue(try enrollment.hasPushDeparture(for: context.identity))
+        let retry = PushRemovalProbeSession(identity: context.identity, results: [.removed])
+        try await enrollment.retryPendingPushRemoval(using: retry)
+        let failed = await refused.sent
+        let later = await retry.sent
+        XCTAssertEqual(failed, later, "The nonfatal failure preserves the same pending operation.")
+        await NativeRelayLifecycle.shared.deactivate()
     }
 
     func testPushRemoveWireAndAuthenticatedSendWithoutResync() async throws {
@@ -5119,17 +5219,23 @@ private actor PushRemovalProbeSession: AuthenticatedPushRemovalSession {
     nonisolated let authenticatedIdentity: ProfileIdentity
     private var results: [PushRemovalResult?]
     private let status: PushBindingStatus?
+    private let failure: InstallationTransportError?
     private(set) var sent: [PushRemovalOperation] = []
 
-    init(identity: ProfileIdentity, results: [PushRemovalResult?], status: PushBindingStatus? = nil) {
+    init(identity: ProfileIdentity, results: [PushRemovalResult?], status: PushBindingStatus? = nil,
+         failure: InstallationTransportError? = nil) {
         authenticatedIdentity = identity
         self.results = results
         self.status = status
+        self.failure = failure
     }
 
     func removePush(_ operation: PushRemovalOperation) async throws -> PushRemovalResult {
         sent.append(operation)
-        guard !results.isEmpty, let result = results.removeFirst() else { throw URLError(.notConnectedToInternet) }
+        guard !results.isEmpty, let result = results.removeFirst() else {
+            if let failure { throw failure }
+            throw URLError(.notConnectedToInternet)
+        }
         return result
     }
 
