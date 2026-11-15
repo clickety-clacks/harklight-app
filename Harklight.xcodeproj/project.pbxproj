@@ -39,6 +39,7 @@
 		27BF57CECC9F7EA25BA3A606 /* DetailChatButtonUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 13CD46E1416E0F7FD24B20D0 /* DetailChatButtonUITests.swift */; };
 		2B49E00075AB3899F518B1B1 /* HarklightNativeRelay in Frameworks */ = {isa = PBXBuildFile; productRef = 48453C5BED656765F891BB5E /* HarklightNativeRelay */; };
 		2B9EAF5E923B2C17ED08834B /* HarklightDesignTokenTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 243B726F46E033478D1B2661 /* HarklightDesignTokenTests.swift */; };
+		2DEFEBC9537467FF109639E3 /* ProgressRenderedUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 01CB210035380D4BC90B8748 /* ProgressRenderedUITests.swift */; };
 		2E752EA1DA5A57AE05A31D54 /* SenderDisplayNameTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C17B3B57916A04428E6452B3 /* SenderDisplayNameTests.swift */; };
 		3159C4C0B3F750B499B401A8 /* Fraunces-OFL.txt in Resources */ = {isa = PBXBuildFile; fileRef = 7439D887DF795765C58615C0 /* Fraunces-OFL.txt */; };
 		319EAF9999590E9ABF47A0E3 /* InboxPageUpdateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3EF494FB38C79AB936DB141C /* InboxPageUpdateTests.swift */; };
@@ -125,7 +126,6 @@
 		8F888AF86629DF2F1675EBD3 /* TwoDeviceServerCacheUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 39E1BB13CC8FEFD5FAA3AF27 /* TwoDeviceServerCacheUITests.swift */; };
 		8F92F083F4EC747848ADD5E8 /* NativeInstallationIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C4F9E78BF2506606ABA7742 /* NativeInstallationIdentity.swift */; };
 		9072EE5810907591F4C3C287 /* HarklightBuildProvenance.plist in Resources */ = {isa = PBXBuildFile; fileRef = 1E47211C3CC07D39F1EF3FBF /* HarklightBuildProvenance.plist */; };
-		91EE07829E0F94DE7A0F3C69 /* ProgressRenderedUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 01CB210035380D4BC90B8748 /* ProgressRenderedUITests.swift */; };
 		91F4C2477F61CC4779FB93BB /* MessageMetadataPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2289126C589FCD4A3067908 /* MessageMetadataPresentation.swift */; };
 		92659970D70E5B3CC1071E00 /* ReleaseNotesUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5946B25CADAD9A33BE947C43 /* ReleaseNotesUITests.swift */; };
 		951BF18BADBA6FF3FA97F22F /* NativeFocusReporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 22007CF1FAC9CED79D1B37D4 /* NativeFocusReporter.swift */; };
@@ -1063,6 +1063,7 @@
 			files = (
 				AA58624DC49964D8D5B07CB8 /* ConversationSampleUITests.swift in Sources */,
 				126F282E796145EE11CF606D /* FreeRenderedUITests.swift in Sources */,
+				2DEFEBC9537467FF109639E3 /* ProgressRenderedUITests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -1130,7 +1131,6 @@
 				1A2F9ADEFDF798A834AA3BE8 /* InboxStockTabsUITests.swift in Sources */,
 				A22F0A38C5F61DA2314976D5 /* IsolatedRelayActionUITests.swift in Sources */,
 				37E4C22CB53D4BD1BA7598C9 /* NativeClientDiagnosticsVersionUITests.swift in Sources */,
-				91EE07829E0F94DE7A0F3C69 /* ProgressRenderedUITests.swift in Sources */,
 				92659970D70E5B3CC1071E00 /* ReleaseNotesUITests.swift in Sources */,
 				32A67CA965A95B84B97E81AB /* ReplyDraftPersistenceUITests.swift in Sources */,
 				54ACD1CE7D0378293FA793B3 /* RetractionExpiryRelaunchUITests.swift in Sources */,
