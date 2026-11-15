@@ -1430,8 +1430,11 @@ final class NativeGuidedTLSTests: XCTestCase {
         let key = RequestKey(accountScope: context.identity.personID, senderID: ExactText("sender"),
                              messageID: ExactText("reply"))
         let selector = try XCTUnwrap(domain.inspect(context: domain.context, request: key).requests.first?.selector)
-        let receipt = try domain.submit(SubmitIntent(context: domain.context, selector: selector, intentID: UUID(),
-            inputs: [.compatibilityText(action: ExactText("reply"), text: ExactText("While replay is open"))]))
+        let receipt: IntentReceipt
+        do {
+            receipt = try domain.submit(SubmitIntent(context: domain.context, selector: selector, intentID: UUID(),
+                inputs: [.compatibilityText(action: ExactText("reply"), text: ExactText("While replay is open"))]))
+        } catch { XCTFail("Submit failed: \(error)"); throw error }
         let sendStarted = expectation(description: "The tap's send has begun")
         let send = Task { @MainActor in
             try await lifecycle.sendOriginalOperationForUserTap(receipt.intentID, expected: context,
@@ -1461,7 +1464,7 @@ final class NativeGuidedTLSTests: XCTestCase {
         try? await send.value
         let cancelled = await refresh.value
         XCTAssertFalse(cancelled.relayConfirmed, "Deactivation cannot confirm an unfinished replay.")
-        XCTAssertNotNil(try store.lookupIntent(receipt.intentID, context: context),
+        XCTAssertNotNil(try? store.lookupIntent(receipt.intentID, context: context),
                         "The unsent answer stays saved for the next connection.")
         XCTAssertEqual(relay.connectionCount, liveConnections)
     }
@@ -1515,7 +1518,10 @@ final class NativeGuidedTLSTests: XCTestCase {
             case "discussion":
                 answers.append(Data(text.utf8))
                 return [ok + ",\"seq\":\(answers.snapshot().count + 10),\"event_id\":\"chat-turn\"}\n"]
-            default: return [ok + "}\n"]
+            default:
+                // Optional features this relay does not model (inbox view,
+                // reconciliation, push status) are unsupported here.
+                return ["{\"v\":1,\"type\":\"error\",\"ref\":\"\(ref)\",\"reason\":\"unknown_type\"}\n"]
             }
         }
     }
@@ -1924,7 +1930,12 @@ final class NativeGuidedTLSTests: XCTestCase {
         let starts = try requests.snapshot().map { try JSONValue.parse($0) }.filter {
             $0.uniqueValue(named: "type")?.stringValue?.rawValue == "conversation_open"
         }.compactMap { $0.uniqueValue(named: "since")?.integerValue }
-        XCTAssertEqual(starts, [0, 1, 2], "Reconnect requests only each uncommitted suffix.")
+        // Each reconnect asks only for the uncommitted suffix. Once the
+        // acknowledged catch-up completes, any later catch-up starts at the
+        // committed position 3 and never asks for saved history again.
+        XCTAssertEqual(Array(starts.prefix(3)), [0, 1, 2], "Reconnect requests only each uncommitted suffix.")
+        XCTAssertTrue(starts.dropFirst(3).allSatisfy { $0 == 3 },
+                      "A catch-up after the committed prefix starts at that prefix: \(starts)")
         let loaded = try await FileServerStateCache(identity: context.identity, fileURL: cacheURL).load()
         let snapshot = try XCTUnwrap(loaded)
         XCTAssertEqual(snapshot.conversationCursor, 3)
@@ -4960,13 +4971,14 @@ private final class LocalRelayWebSocket: @unchecked Sendable {
     private let closeAfterReply: @Sendable (String) -> Bool
     // All connection ownership is serialized on queue, including close().
     private var connections: [NWConnection] = []
-    private var acceptedConnections = 0
+    private var sessions = Set<ObjectIdentifier>()
     private let fencesEarlierConnections: Bool
-    /// Every TLS connection the relay has accepted, including closed ones.
-    var connectionCount: Int { queue.sync { acceptedConnections } }
+    /// Relay sessions opened: connections that sent at least one message,
+    /// including ones since closed.
+    var connectionCount: Int { queue.sync { sessions.count } }
 
     /// `fencesEarlierConnections` models the Server's one relay session per
-    /// device: a new connection closes every earlier one.
+    /// device: when a new connection starts its session, every earlier one closes.
     init(expectedDevice: String,
          fencesEarlierConnections: Bool = false,
          closeAfterReply: @escaping @Sendable (String) -> Bool = { _ in false },
@@ -5006,12 +5018,7 @@ private final class LocalRelayWebSocket: @unchecked Sendable {
             }
             listener.newConnectionHandler = { [weak self] connection in
                 guard let self else { return }
-                if fencesEarlierConnections {
-                    connections.forEach { $0.cancel() }
-                    connections.removeAll()
-                }
                 connections.append(connection)
-                acceptedConnections += 1
                 connection.start(queue: queue)
                 receive(connection)
             }
@@ -5025,6 +5032,10 @@ private final class LocalRelayWebSocket: @unchecked Sendable {
             let metadata = context?.protocolMetadata(definition: NWProtocolWebSocket.definition)
                 as? NWProtocolWebSocket.Metadata
             if metadata?.opcode == .text, let data, let text = String(data: data, encoding: .utf8) {
+                if sessions.insert(ObjectIdentifier(connection)).inserted, fencesEarlierConnections {
+                    connections.filter { $0 !== connection }.forEach { $0.cancel() }
+                    connections.removeAll { $0 !== connection }
+                }
                 let frames = reply(text)
                 if closeAfterReply(text) {
                     sendThenClose(frames[...], on: connection)
