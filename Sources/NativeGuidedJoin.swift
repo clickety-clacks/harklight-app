@@ -357,9 +357,11 @@ final class NativeGuidedJoinStore {
         // Server's current tuple under the same secret until cancellation is
         // confirmed; never renew as a way of fulfilling cancellation intent.
         while true {
+            let sentCode = currentCode
+            let sentDeadline = currentDeadline
             let body = try JSONSerialization.data(withJSONObject: [
-                "status_secret": attempt.statusSecret, "approval_code": currentCode,
-                "expected_device_id": attempt.deviceID, "expected_expires_at": currentDeadline
+                "status_secret": attempt.statusSecret, "approval_code": sentCode,
+                "expected_device_id": attempt.deviceID, "expected_expires_at": sentDeadline
             ], options: [.sortedKeys])
             let reply = try await transport.request(url, method: "POST", body: body,
                                                     rootDER: attempt.invitation.trustedRootDER)
@@ -370,10 +372,7 @@ final class NativeGuidedJoinStore {
                conflict.current.state == "pending" || conflict.current.state == "expired" {
                 let response = conflict.current
                 guard let responseCode = response.approvalCode,
-                      let responseDeadline = response.expiresAt,
-                      responseCode != currentCode || responseDeadline != currentDeadline else {
-                    throw NativeJoinError.invalidResponse
-                }
+                      let responseDeadline = response.expiresAt else { throw NativeJoinError.invalidResponse }
                 guard NativeAuthorityBinding.samePerson(response.personID, attempt.invitation.personID),
                       response.deviceID == attempt.deviceID,
                       response.statusExpiresAt != nil, (response.requestGeneration ?? 0) > 0 else {
@@ -382,6 +381,11 @@ final class NativeGuidedJoinStore {
                 attempt = try apply(response, to: attempt)
                 guard attempt.phase == .pending || attempt.phase == .expired, let code = attempt.approvalCode,
                       let deadline = attempt.approvalExpiresAt else { return attempt }
+                // `apply` deliberately ignores an older generation. Compare
+                // the effective saved tuple after applying the reply, so a
+                // stale Server response cannot make this loop resend the same
+                // cancellation request forever.
+                guard code != sentCode || deadline != sentDeadline else { throw NativeJoinError.invalidResponse }
                 currentCode = code
                 currentDeadline = deadline
                 continue

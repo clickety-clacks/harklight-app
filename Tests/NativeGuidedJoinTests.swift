@@ -687,6 +687,50 @@ final class NativeGuidedJoinTests: XCTestCase {
         XCTAssertEqual(cancelled.cancellationRequested, true)
     }
 
+    func testStaleCancellationRejectsUnchangedEffectiveTupleAfterOneRequest() async throws {
+        for staleGeneration in [Int64(1), Int64(2)] {
+            let fixture = try Fixture()
+            defer { fixture.cleanup() }
+            let transport = FakeTransport()
+            let store = NativeGuidedJoinStore(namespace: fixture.namespace, transport: transport)
+            var original = try store.prepare(fixture.invitation, deviceLabel: "My phone")
+            fixture.retainForCleanup(original)
+            let now = Int64(Date().timeIntervalSince1970 * 1000)
+            original.phase = .pending
+            original.approvalCode = "FGHIJK2345"
+            original.approvalExpiresAt = now + 60_000
+            original.statusExpiresAt = now + 86_400_000
+            original.requestGeneration = 2
+            try fixture.saveLegacyAttempt(original)
+
+            var calls = 0
+            transport.handler = { url, _, body in
+                XCTAssertEqual(url.path, "/enroll/cancel")
+                let fields = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(body)) as? [String: Any])
+                XCTAssertEqual(fields["approval_code"] as? String, original.approvalCode)
+                XCTAssertEqual(fields["expected_expires_at"] as? Int64, original.approvalExpiresAt)
+                calls += 1
+                let isOlderGeneration = staleGeneration < original.requestGeneration!
+                return try response(["error": "stale_request", "current": [
+                    "state": "pending", "person_id": fixture.invitation.personID,
+                    "device_id": original.deviceID,
+                    "approval_code": isOlderGeneration ? "ABCDEF2345" : original.approvalCode!,
+                    "expires_at": isOlderGeneration ? now - 60_000 : original.approvalExpiresAt!,
+                    "status_expires_at": original.statusExpiresAt!, "request_generation": staleGeneration
+                ]], status: 409)
+            }
+
+            do {
+                _ = try await store.cancel()
+                XCTFail("A reply that cannot advance the effective tuple must stop cancellation reconciliation")
+            } catch NativeJoinError.invalidResponse {}
+            XCTAssertEqual(calls, 1)
+            XCTAssertEqual(try store.loadAttempt()?.cancellationRequested, true)
+            XCTAssertEqual(try store.loadAttempt()?.approvalCode, original.approvalCode)
+            XCTAssertEqual(try store.loadAttempt()?.requestGeneration, original.requestGeneration)
+        }
+    }
+
     func testCanonicallySimilarButDifferentWireAccountCannotApproveThisInstallation() async throws {
         let fixture = try Fixture()
         defer { fixture.cleanup() }
