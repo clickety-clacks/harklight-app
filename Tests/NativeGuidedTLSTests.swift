@@ -5079,6 +5079,15 @@ private final class LocalRelayWebSocket: @unchecked Sendable {
             connections.removeAll()
         }
     }
+
+    /// Ends every open connection, as a network change or Server restart
+    /// would, while still accepting new ones.
+    func dropConnections() {
+        queue.sync {
+            connections.forEach { $0.cancel() }
+            connections.removeAll()
+        }
+    }
 }
 
 private final class DiagnosticEventRecorder: @unchecked Sendable {
