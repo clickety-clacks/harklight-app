@@ -573,28 +573,30 @@ struct NativeEnrollmentStore {
 
     func retryPendingPushRemoval(using session: any AuthenticatedPushRemovalSession) async throws {
         let identity = session.authenticatedIdentity
-        guard let operation = try pushRemovalState(for: identity)?.operation else { return }
-        let result = try await session.removePush(operation)
-        guard try pushRemovalState(for: identity)?.operation == operation else {
-            throw NativeJoinError.superseded
-        }
-        if result == .stale {
-            let status = try await session.currentPushBindingStatus()
+        while let operation = try pushRemovalState(for: identity)?.operation {
+            let result = try await session.removePush(operation)
             guard try pushRemovalState(for: identity)?.operation == operation else {
                 throw NativeJoinError.superseded
             }
-            if let status {
-                guard status.revision >= operation.revision, status.revision < UInt64(Int64.max) - 1 else {
-                    throw NativeEnrollmentError.invalidServerResponse
+            if result == .stale {
+                let status = try await session.currentPushBindingStatus()
+                guard try pushRemovalState(for: identity)?.operation == operation else {
+                    throw NativeJoinError.superseded
                 }
-                let next = try PushRemovalOperation(revision: status.revision + 1)
-                try savePushRemoval(PushRemovalState(operation: next), for: identity)
-                throw NativeEnrollmentError.invalidServerResponse
+                if let status {
+                    guard status.revision >= operation.revision, status.revision < UInt64(Int64.max) - 1 else {
+                        throw NativeEnrollmentError.invalidServerResponse
+                    }
+                    let next = try PushRemovalOperation(revision: status.revision + 1)
+                    try savePushRemoval(PushRemovalState(operation: next), for: identity)
+                    continue
+                }
+                // The server reports no binding remaining.
             }
-            // The server reports no binding remaining.
+            // Keep the departure marker so reconnect cannot register pushes again.
+            try savePushRemoval(PushRemovalState(operation: nil), for: identity)
+            return
         }
-        // Keep the departure marker so reconnect cannot register pushes again.
-        try savePushRemoval(PushRemovalState(operation: nil), for: identity)
     }
 
     /// The authenticated server is the authority; an older server with no field

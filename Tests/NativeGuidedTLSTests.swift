@@ -619,10 +619,10 @@ final class NativeGuidedTLSTests: XCTestCase {
         let identity = try XCTUnwrap(NativeNotificationProfile(record)).identity
         try store.preparePushRemoval(for: record)
         let status = PushBindingStatus(revision: 12, state: "ready", bindingID: notificationBindingID, profile: .current)
-        let stale = PushRemovalProbeSession(identity: identity, results: [.stale], status: status)
+        let stale = PushRemovalProbeSession(identity: identity, results: [.stale, nil], status: status)
         do {
             try await store.retryPendingPushRemoval(using: stale)
-            XCTFail("The stale operation must report the refreshed pending revision.")
+            XCTFail("The fixture loses the reply after reloading and sending the newer revision.")
         } catch {}
         let disabled = PushRemovalProbeSession(identity: identity, results: [.disabled])
         try await NativeEnrollmentStore(service: service).retryPendingPushRemoval(using: disabled)
