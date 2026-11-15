@@ -1475,6 +1475,7 @@ final class NativeGuidedTLSTests: XCTestCase {
                                     conversationCursor: Int, answers: ConversationFrameCollector,
                                     conversationStarted: XCTestExpectation? = nil,
                                     holdsConversationCatchUp: Bool = false,
+                                    countsAdmissions: Bool = false,
                                     answerReply: @escaping @Sendable (Int) -> String = { count in
                                         "{\"v\":1,\"type\":\"ok\",\"seq\":\(count + 10)}\n"
                                     }) throws -> LocalRelayWebSocket {
@@ -1486,6 +1487,7 @@ final class NativeGuidedTLSTests: XCTestCase {
                 answers.append(Data(text.utf8))
                 return [answerReply(answers.snapshot().count)]
             }
+            if countsAdmissions, kind == "inbox_start" { answers.append(Data(text.utf8)) }
             guard let ref = value.uniqueValue(named: "ref")?.stringValue?.rawValue else { return [] }
             let ok = "{\"v\":1,\"type\":\"ok\",\"ref\":\"\(ref)\""
             let checkpoint = ",\"paging_version\":1,\"snapshot_id\":\"single-session\",\"high_water\":\(rows.count)"
@@ -1527,6 +1529,10 @@ final class NativeGuidedTLSTests: XCTestCase {
 
     private func isAcceptedIntent(_ intentID: UUID, store: ClientRepository, context: ProfileContext) throws -> Bool {
         Self.hasAcceptedDisposition(try store.snapshot(context: context).intents[intentID]?.disposition)
+    }
+
+    nonisolated private static func admissions(in frames: ConversationFrameCollector) -> Int {
+        frames.types.filter { $0 == "inbox_start" }.count
     }
 
     nonisolated private static func hasAcceptedDisposition(_ disposition: IntentDisposition??) -> Bool {
@@ -1722,6 +1728,56 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertEqual(sent.first?.uniqueValue(named: "op_id"), sent.last?.uniqueValue(named: "op_id"),
                        "The resend repeats the exact saved operation.")
         XCTAssertEqual(relay.connectionCount, liveConnections, "The resend used the live connection.")
+        await lifecycle.deactivate()
+    }
+
+    func testOneReconnectAdmitsOnceWhenASubmissionAndARefreshBothSeeTheDrop() async throws {
+        let namespace = "Harklight.live-connection-single-admission." + UUID().uuidString
+        let identity = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
+        defer {
+            SecItemDelete([kSecClass as String: kSecClassCertificate,
+                           kSecAttrLabel as String: identity.label] as CFDictionary)
+            SecItemDelete([kSecClass as String: kSecClassKey,
+                           kSecAttrApplicationTag as String: Data(namespace.utf8)] as CFDictionary)
+        }
+        let answers = ConversationFrameCollector()
+        let relay = try singleSessionRelay(expectedDevice: identity.deviceID, originPort: 443,
+                                           conversationCursor: 0, answers: answers, countsAdmissions: true)
+        defer { relay.close() }
+        let port = try await relay.start()
+        let context = ProfileContext(identity: ProfileIdentity(trustedRelayAuthority: ExactText("localhost"),
+            personID: ExactText("single-admission-person"), deviceID: ExactText(identity.deviceID)),
+            transportMode: .relay)
+        let store = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        let lifecycle = NativeRelayLifecycle()
+        try await lifecycle.activate(store: store, context: context,
+            relayURL: XCTUnwrap(URL(string: "wss://localhost:\(port)/relay")),
+            clientIdentity: identity.value, trustedRootDER: relay.rootDER)
+        let first = await lifecycle.refreshResultFromTrustedRelay()
+        XCTAssertTrue(first.relayConfirmed)
+        let connectionsBeforeDrop = relay.connectionCount
+        let admissionsBeforeDrop = Self.admissions(in: answers)
+
+        // The live connection ends; a tap and a refresh both meet the failure at once.
+        relay.dropConnections()
+        let domain = AttentionDomainPort(store: store)
+        let reply = try domain.submit(SubmitIntent(context: domain.context,
+            selector: liveRequestSelector("reply", domain: domain, context: context), intentID: UUID(),
+            inputs: [.compatibilityText(action: ExactText("reply"), text: ExactText("After the drop"))])).intentID
+        let send = Task { @MainActor in try await lifecycle.sendOriginalOperationForUserTap(reply, expected: context) }
+        let refresh = Task { @MainActor in await lifecycle.refreshResultFromTrustedRelay() }
+        let pushRefresh = Task { @MainActor in await lifecycle.refreshResultFromTrustedRelay(checkBlockedPush: true) }
+        try? await send.value
+        let refreshed = await refresh.value
+        _ = await pushRefresh.value
+        XCTAssertTrue(refreshed.relayConfirmed)
+        let accepted = expectation(for: NSPredicate { _, _ in
+            Self.hasAcceptedDisposition(try? store.snapshot(context: context).intents[reply]?.disposition)
+        }, evaluatedWith: nil)
+        await fulfillment(of: [accepted], timeout: 5)
+        XCTAssertEqual(relay.connectionCount, connectionsBeforeDrop + 1, "One reconnect opens one connection.")
+        XCTAssertEqual(Self.admissions(in: answers), admissionsBeforeDrop + 1,
+                       "The reconnect admits exactly one relay session (one inbox_start).")
         await lifecycle.deactivate()
     }
 

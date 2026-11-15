@@ -59,6 +59,8 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
     private let task: URLSessionWebSocketTask
     private let pingCoordinator: WebSocketPingCoordinator
     private var isClosed = false
+    private var lastSentRequestType: NativeDiagnosticRelayRequestType?
+    private var lastSentOperationID: UUID?
     private var connectionFailure: (any Error)?
     private let profileContext: ProfileContext
     private let onProgress: @Sendable (NativeRelayProgressEvent) -> Void
@@ -903,7 +905,25 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
         guard let text = String(data: frame, encoding: .utf8), text.hasSuffix("\n") else {
             throw InstallationTransportError.unexpectedServerFrame
         }
+        let outgoing = try? JSONValue.parse(frame)
+        lastSentRequestType = NativeDiagnosticRelayRequestType(
+            wireType: outgoing?.uniqueValue(named: "type")?.stringValue?.rawValue)
+        lastSentOperationID = outgoing?.uniqueValue(named: "op_id")?.stringValue
+            .flatMap { UUID(uuidString: $0.rawValue) }
         try await task.send(.string(text))
+    }
+
+    /// Every error reply is recorded with its Server reason code, the type of
+    /// the request it answered and that request's operation ID. Exchanges on a
+    /// connection are serialized, so the last request sent is the one answered.
+    private func recordErrorReply(_ frame: Data) {
+        guard let value = try? JSONValue.parse(frame),
+              value.uniqueValue(named: "type")?.stringValue?.rawValue == "error" else { return }
+        onDiagnostic(NativeClientDiagnosticEvent(area: .relay, phase: .relayErrorReply, transition: .rejected,
+            causeCode: NativeDiagnosticCauseCode.serverReason(
+                value.uniqueValue(named: "reason")?.stringValue?.rawValue),
+            attemptID: attemptID, transportAttemptID: attemptID,
+            operationID: lastSentOperationID, relayRequestType: lastSentRequestType ?? .other))
     }
 
     private func receive() async throws -> Data {
@@ -925,7 +945,10 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
     private func receiveTaskFrame() async throws -> Data {
         do {
             switch try await task.receive() {
-            case let .string(text): return Data(text.utf8)
+            case let .string(text):
+                let frame = Data(text.utf8)
+                recordErrorReply(frame)
+                return frame
             case .data: throw InstallationTransportError.unexpectedServerFrame
             @unknown default: throw InstallationTransportError.unexpectedServerFrame
             }

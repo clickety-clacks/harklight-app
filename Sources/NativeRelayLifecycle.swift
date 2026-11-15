@@ -950,6 +950,7 @@ final class NativeRelayLifecycle {
                                 rootDER: Data,
                                 serverStateCache: (any ServerStateCaching)?)?
     private var answerFlights: [UUID: (token: UUID, task: Task<Void, Error>)] = [:]
+    private var reconnectFlight: (token: UUID, task: Task<Void, Error>)?
     private var discussionFlights: [UUID: (token: UUID, task: Task<DiscussionOperationResult, Error>)] = [:]
     private var discussionTransports: [UUID: URLSessionInstallationSession] = [:]
     private var fileTransports: [UUID: URLSessionInstallationSession] = [:]
@@ -1030,7 +1031,7 @@ final class NativeRelayLifecycle {
                 _ = await self.refreshFlights.afterCurrent { [weak self] in
                     guard let self, self.refreshGeneration == generation else { return .unavailable }
                     do {
-                        if self.transport === current { try await self.reconnect(generation: generation) }
+                        try await self.reconnect(replacing: current, generation: generation)
                     } catch { return .failed(error: error) }
                     return await self.performRefresh(generation: generation)
                 }
@@ -1652,7 +1653,7 @@ final class NativeRelayLifecycle {
                     guard let self, self.refreshGeneration == generation else { return }
                     _ = await self.refreshFlights.afterCurrent { [weak self] in
                         guard let self, self.refreshGeneration == generation else { return .unavailable }
-                        do { try await self.reconnect(generation: generation) }
+                        do { try await self.reconnect(replacing: nil, generation: generation) }
                         catch { return .failed(error: error) }
                         return await self.performRefresh(generation: generation)
                     }
@@ -1801,6 +1802,8 @@ final class NativeRelayLifecycle {
     private func performRefreshAttempt(generation: UUID,
                                        checkBlockedPush: Bool) async -> NativeRelayRefreshResult {
         var needsReconnect = false
+        // The connection that failed; nil when a rebuild needs a fresh one anyway.
+        var failedTransport: URLSessionInstallationSession?
         // Set after discarding saved Server state. Cleared by a socket
         // interruption, or when the rebuilt connection got further than the
         // previous failure (its accepted checkpoint moved the cursor past the
@@ -1810,8 +1813,13 @@ final class NativeRelayLifecycle {
         var rebuiltSavedServerState = false
         var cursorAtLastRebuild: UInt64 = 0
         while refreshGeneration == generation && !Task.isCancelled {
+            var attempted: URLSessionInstallationSession?
             do {
-                if needsReconnect { try await reconnect(generation: generation) }
+                if needsReconnect {
+                    try await reconnect(replacing: failedTransport, generation: generation)
+                    needsReconnect = false
+                }
+                attempted = transport
                 recordDiagnostic(.relay, .projectionRefresh, .began, attemptID: activeTransportAttemptID)
                 let result = try await refreshOnce(generation: generation,
                                                    checkBlockedPush: checkBlockedPush)
@@ -1833,6 +1841,7 @@ final class NativeRelayLifecycle {
                     // rebuild from the Server on a fresh connection.
                     rebuiltSavedServerState = true
                     needsReconnect = true
+                    failedTransport = nil
                     continue
                 }
                 guard Self.isInterruptedConnection(error) else {
@@ -1847,6 +1856,7 @@ final class NativeRelayLifecycle {
                                  attemptID: activeTransportAttemptID)
                 rebuiltSavedServerState = false
                 needsReconnect = true
+                failedTransport = attempted
             }
         }
         return .unavailable
@@ -2047,7 +2057,27 @@ final class NativeRelayLifecycle {
         }
     }
 
-    private func reconnect(generation: UUID) async throws {
+    /// Replaces the live connection once per failure. Callers that saw the
+    /// same failed connection share one replacement, and a caller whose failed
+    /// connection was already replaced uses that replacement, so a reconnect
+    /// admits exactly one new relay session.
+    private func reconnect(replacing failed: URLSessionInstallationSession?, generation: UUID) async throws {
+        if let flight = reconnectFlight {
+            try await flight.task.value
+            return
+        }
+        if let failed, let current = transport, current !== failed { return }
+        let token = UUID()
+        let task = Task { @MainActor [weak self] in
+            guard let self else { throw NativeRelayCoreError.inactive }
+            try await self.replaceLiveConnection(generation: generation)
+        }
+        reconnectFlight = (token, task)
+        defer { if reconnectFlight?.token == token { reconnectFlight = nil } }
+        try await task.value
+    }
+
+    private func replaceLiveConnection(generation: UUID) async throws {
         guard refreshGeneration == generation else { throw NativeRelayCoreError.inactive }
         guard let configuration else { throw NativeRelayCoreError.inactive }
         let transportAttemptID = UUID()
