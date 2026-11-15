@@ -31,7 +31,7 @@ A feature too big for one short-lived branch lands on `main` in small, reviewed 
 - **Removal is part of the feature.** Once the feature is accepted, delete the flag, the off path and its tests in a follow-up pull request, and remove its register row. The feature isn't done until its flag is gone.
 - Flags are for unfinished features. Don't use them for per-user settings or permanent configuration.
 
-The server owns the remote flag configuration; this section only describes how the app reads flags. Remote flag values arrive from the server in the resynced frame on connect. When a flag is absent from that frame, the app uses its built-in default.
+The server owns the remote flag configuration; this section only describes how the app reads flags. Remote flag values arrive from the server in the resynced frame on connect, under `resynced.feature_flags`. When a flag is absent from that frame, the app uses its built-in default.
 
 ### Feature-flag register
 
@@ -43,7 +43,7 @@ Add a row when you add a flag, update it when the default changes, and delete th
 
 ## Project generation
 
-- The Xcode project is generated from `project.yml` with XcodeGen, pinned at version 2.45.4. Use that version.
+- The Xcode project is generated from `project.yml` with XcodeGen. Use version 2.45.4 locally. This is a convention, not an enforced pin: CI currently runs an unpinned `brew install xcodegen` in all three jobs, so CI and local versions can drift.
 - When you add or remove source files, regenerate and commit `Harklight.xcodeproj` in the same change.
 - `Scripts/verify.sh` is the test wrapper: `Scripts/verify.sh build` and `Scripts/verify.sh test`. It runs `xcodegen generate` itself.
 
