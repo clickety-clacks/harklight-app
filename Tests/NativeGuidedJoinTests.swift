@@ -642,11 +642,12 @@ final class NativeGuidedJoinTests: XCTestCase {
         var original = try store.prepare(fixture.invitation, deviceLabel: "My phone")
         fixture.retainForCleanup(original)
         let now = Int64(Date().timeIntervalSince1970 * 1000)
+        let initialTuple = (code: "ABCDEF2345", deadline: now - 120_000, generation: Int64(1))
         original.phase = .expired
-        original.approvalCode = "ABCDEF2345"
-        original.approvalExpiresAt = now - 120_000
+        original.approvalCode = initialTuple.code
+        original.approvalExpiresAt = initialTuple.deadline
         original.statusExpiresAt = now + 1_800_000
-        original.requestGeneration = 1
+        original.requestGeneration = initialTuple.generation
         try fixture.saveLegacyAttempt(original)
 
         let currentTuples: [(code: String, deadline: Int64, generation: Int64)] = [
@@ -659,8 +660,7 @@ final class NativeGuidedJoinTests: XCTestCase {
             XCTAssertEqual(url.path, "/enroll/cancel", "Cancellation reconciliation never invokes renewal")
             XCTAssertEqual(try store.loadAttempt()?.cancellationRequested, true)
             let fields = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(body)) as? [String: Any])
-            let expectedTuple = calls == 0 ?
-                (code: original.approvalCode!, deadline: original.approvalExpiresAt!) : currentTuples[calls - 1]
+            let expectedTuple = calls == 0 ? initialTuple : currentTuples[calls - 1]
             XCTAssertEqual(fields["status_secret"] as? String, original.statusSecret)
             XCTAssertEqual(fields["expected_device_id"] as? String, original.deviceID)
             XCTAssertEqual(fields["approval_code"] as? String, expectedTuple.code)
