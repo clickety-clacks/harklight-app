@@ -1775,8 +1775,11 @@ final class NativeGuidedTLSTests: XCTestCase {
         let pushRefresh = Task { @MainActor in await lifecycle.refreshResultFromTrustedRelay(checkBlockedPush: true) }
         try? await send.value
         let refreshed = await refresh.value
-        _ = await pushRefresh.value
-        XCTAssertTrue(refreshed.relayConfirmed)
+        let pushRefreshed = await pushRefresh.value
+        XCTAssertTrue(refreshed.relayConfirmed || pushRefreshed.relayConfirmed,
+                      lifecycle.refreshFailureMessage(for: context) ?? "no failure message")
+        XCTAssertTrue(refreshed.relayConfirmed,
+                      "first refresh: \(lifecycle.refreshFailureMessage(for: context) ?? "no failure message")")
         let accepted = expectation(for: NSPredicate { _, _ in
             Self.hasAcceptedDisposition(try? store.snapshot(context: context).intents[reply]?.disposition)
         }, evaluatedWith: nil)
