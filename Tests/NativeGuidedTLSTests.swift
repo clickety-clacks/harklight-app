@@ -1378,7 +1378,7 @@ final class NativeGuidedTLSTests: XCTestCase {
         let conversationStarted = expectation(description: "Post-ACK conversation replay is still open")
         let frames = ConversationFrameCollector()
         let seenPayload = #"{"title":"Information","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"seen","label":"Seen","kind":"value","value":{"acknowledgment":"seen"}}]}}"#
-        let replyPayload = #"{"title":"Question","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"reply","label":"Reply","kind":"text","placeholder":"Reply"}]}}"#
+        let replyPayload = #"{"title":"Question","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"reply","label":"Reply","kind":"text"}]}}"#
         // Fences like the Server: a second relay connection would close the live one.
         let relay = try LocalRelayWebSocket(expectedDevice: identity.deviceID, fencesEarlierConnections: true) { text in
             guard let value = try? JSONValue.parse(Data(text.utf8)),
@@ -1497,7 +1497,7 @@ final class NativeGuidedTLSTests: XCTestCase {
             switch kind {
             case "inbox_start":
                 let seen = #"{"title":"Information","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"seen","label":"Seen","kind":"value","value":{"acknowledgment":"seen"}}]}}"#
-                let question = #"{"title":"Question","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"reply","label":"Reply","kind":"text","placeholder":"Reply"}]}}"#
+                let question = #"{"title":"Question","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"reply","label":"Reply","kind":"text"}]}}"#
                 let items = rows.enumerated().map { index, row in
                     "{\"acceptance\":{\"v\":1,\"type\":\"delivery\",\"seq\":\(index + 1),\"sender_id\":\"sender\",\"message_id\":\"\(row)\",\"origin\":\"origin\",\"as\":\"message\",\"message\":\(row == "seen" ? seen : question)}}"
                 }.joined(separator: ",")
