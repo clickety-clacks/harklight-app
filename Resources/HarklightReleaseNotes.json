@@ -222,8 +222,8 @@
         {
           "id": "faster-catch-up-large-inboxes",
           "symbol": "bolt",
-          "title": "Faster, cooler catch-up on large inboxes",
-          "detail": "Catching up with the server on a large inbox takes much less work, so the phone stays cooler. This fix is pending formal testing."
+          "title": "Faster catch-up on large inboxes",
+          "detail": "Catching up with the server on a large inbox now takes much less work, which should help the phone run cooler. This fix is pending formal testing."
         }
       ]
     }
