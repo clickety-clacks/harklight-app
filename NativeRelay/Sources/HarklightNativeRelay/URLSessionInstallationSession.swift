@@ -101,7 +101,8 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
                 onFocusReportingReady: @escaping @Sendable () -> Void = {},
                 onFocusReportingUnsupported: @escaping @Sendable () -> Void = {},
                 onViewShow: @escaping @Sendable (Data) -> Void = { _ in },
-                onDiagnostic: @escaping NativeClientDiagnosticSink = { _ in }) throws {
+                onDiagnostic: @escaping NativeClientDiagnosticSink = { _ in },
+                opensRelaySocket: Bool = true) throws {
         guard profile.transportMode == .relay,
               relayURL.scheme == "wss",
               relayURL.path == "/relay",
@@ -150,7 +151,10 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
         let session = URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
         urlSession = session
         task = session.webSocketTask(with: relayURL, protocols: ["attention-relay/1"])
-        task.resume()
+        // The Server keeps one relay session per device and closes the others
+        // when a new one opens. An HTTPS-only session (file download) must
+        // therefore never open a relay WebSocket of its own.
+        if opensRelaySocket { task.resume() }
     }
 
     public func resync(_ request: Data, consume: @Sendable (Data) async throws -> Void) async throws {
