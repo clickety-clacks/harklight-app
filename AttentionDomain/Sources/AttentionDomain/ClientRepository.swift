@@ -2603,6 +2603,14 @@ public final class ClientRepository: @unchecked Sendable {
                     }
                 }
                 try recordInboxTerminalProjection(terminal, into: &next)
+                // The Server holds this operation's terminal: it is settled,
+                // whether or not its message is loaded yet, so it leaves the
+                // queue instead of waiting for a replay that may never cover it.
+                dropUnsentAnswer(for: submission.requestKey, in: &next)
+                if var published = next.replayPublishedIntents {
+                    published.removeValue(forKey: submission.intentID)
+                    next.replayPublishedIntents = published
+                }
                 touchedKeys.insert(submission.requestKey)
                 refreshedKeys.insert(submission.requestKey)
             case .operationConflict:
@@ -2632,10 +2640,12 @@ public final class ClientRepository: @unchecked Sendable {
                     refreshedKeys.insert(submission.requestKey)
                 }
             case .refused:
+                // An accepted operation whose message is now gone or closed is
+                // retired: the Server has nothing left to settle for it.
                 guard receipt.result == nil, receipt.terminal == nil,
                       let reason = receipt.reason,
                       InboxOperationRefusalReason(rawValue: reason) != nil,
-                      !Self.isAccepted(submission) else {
+                      !Self.isAccepted(submission) || reason == "not_found" || reason == "closed" else {
                     throw AttentionStoreError.inboxPageConflict
                 }
                 Self.recordInboxOperationFailure(submission, reason: reason, in: &next)

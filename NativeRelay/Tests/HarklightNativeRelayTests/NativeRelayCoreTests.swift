@@ -1656,6 +1656,95 @@ final class NativeRelayCoreTests: XCTestCase {
         XCTAssertEqual(try turns(), 3)
     }
 
+    func testBuild227SavedStateWithAnOlderRelayAckConnectsAndClearsEveryPendingAnswer() async throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+            personID: ExactText("person-227"), deviceID: ExactText("device-227"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let persistence = MemoryPendingActionPersistence()
+        let store = try ClientRepository(context: context, persistence: persistence)
+        let payload = try JSONValue.parse(data(#"{"title":"Question","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"yes","label":"Yes","kind":"value","value":{"ok":true}}]}}"#))
+        func key(_ id: String) -> RequestKey {
+            RequestKey(accountScope: identity.personID, senderID: ExactText("sender"), messageID: ExactText(id))
+        }
+        let loaded = (1...5).map { key("loaded-\($0)") }
+        let unloaded = (1...2).map { key("unloaded-\($0)") }
+        let gone = (1...2).map { key("gone-\($0)") }
+        let all = loaded + unloaded + gone
+        for (index, request) in all.enumerated() {
+            _ = try store.apply(RelayEvent(sequence: UInt64(index + 1),
+                body: .delivery(StoredRequest(key: request, originalPayload: payload), .message)), context: context)
+        }
+        // Each answer was accepted by the relay; its terminal never reached the device.
+        let port = AttentionDomainPort(store: store)
+        var operations: [RequestKey: (intent: UUID, op: UUID, seq: UInt64)] = [:]
+        for (index, request) in all.enumerated() {
+            let selector = try XCTUnwrap(port.inspect(context: port.context, request: request).requests.first?.selector)
+            let receipt = try port.submit(SubmitIntent(context: port.context, selector: selector,
+                intentID: UUID(), inputs: [.compatibilityValue(action: ExactText("yes"))]))
+            let sequence = UInt64(20 + index)
+            try store.recordAcceptedOperation(receipt.intentID, operationID: receipt.opID,
+                                              terminalSequence: sequence, context: context)
+            operations[request] = (receipt.intentID, receipt.opID, sequence)
+        }
+        // The saved conversation cursor is ahead of the relay's stored ACK.
+        let chat = key("conversation")
+        let binding = ConversationBinding(request: chat, revision: 1)
+        try store.applyConversation(ConversationEvent(sequence: 1, binding: binding,
+            fact: .request(sessionHandle: ExactText("session"), payload: .object([]))), context: context)
+        try store.applyConversation(ConversationEvent(sequence: 2, binding: binding,
+            fact: .turn(ConversationTurn(id: ExactText("saved"), binding: binding, author: .person,
+                sessionHandle: ExactText("session"), text: ExactText("Saved"), kind: .discussion))), context: context)
+        // Relaunch from the pending file, as the app does.
+        let relaunched = try ClientRepository(context: context, persistence: persistence)
+        XCTAssertEqual(try relaunched.inboxOperationInventory(context: context).count, all.count)
+        try relaunched.applyConversation(ConversationEvent(sequence: 1, binding: binding,
+            fact: .request(sessionHandle: ExactText("session"), payload: .object([]))), context: context)
+        try relaunched.applyConversation(ConversationEvent(sequence: 2, binding: binding,
+            fact: .turn(ConversationTurn(id: ExactText("saved"), binding: binding, author: .person,
+                sessionHandle: ExactText("session"), text: ExactText("Saved"), kind: .discussion))), context: context)
+
+        let session = AckRuleConversationSession(identity, storedAck: 1, history: 4)
+        session.snapshotHighWater = 40
+        session.initialItems = loaded.enumerated().map { snapshotItem($1, payload: payload, sequence: UInt64($0 + 1)) }
+        session.nextItemCursor = "older"
+        session.frames = [data(#"{"v":1,"type":"resynced","seq":40}"#)]
+        for request in loaded + unloaded {
+            let op = try XCTUnwrap(operations[request])
+            session.reconciliationOverrides[op.op] = try JSONValue.parse(data(#"{"op_id":"\#(op.op.uuidString.lowercased())","status":"committed","result":{"v":1,"type":"ok","seq":\#(op.seq),"duplicate":true},"terminal":{"v":1,"type":"lifecycle","seq":\#(op.seq),"sender_id":"sender","message_id":"\#(request.messageID.rawValue)","origin":"other-installation","state":"answered","at":\#(op.seq)}}"#))
+        }
+        for request in gone {
+            let op = try XCTUnwrap(operations[request])
+            session.reconciliationOverrides[op.op] = try JSONValue.parse(data(#"{"op_id":"\#(op.op.uuidString.lowercased())","status":"refused","reason":"not_found"}"#))
+        }
+
+        let core = try NativeRelayCore(store: relaunched, context: context, session: session)
+        _ = try await core.resyncAndDrainOutbox()
+
+        XCTAssertEqual(session.refusedAcks.first, 4, "The older relay ACK refuses the saved position.")
+        XCTAssertEqual(session.acceptedAcks, [4], "After the rebuild the ACK lands and the connect completes.")
+        XCTAssertTrue(try relaunched.inboxOperationInventory(context: context).isEmpty,
+                      "Every terminal the Server holds has been applied: nothing is left to reconcile.")
+        XCTAssertTrue(try relaunched.acceptedOperationsAwaitingTerminalReplay(context: context).isEmpty)
+        let settled = try relaunched.snapshot(context: context)
+        for request in loaded {
+            XCTAssertEqual(settled.remoteStates[request]?.state, .answered, "\(request.messageID.rawValue) shows answered.")
+        }
+        for request in loaded + unloaded {
+            XCTAssertNil(settled.intents[operations[request]!.intent],
+                         "\(request.messageID.rawValue): the Server's terminal settles the operation, loaded or not.")
+        }
+        for request in gone {
+            XCTAssertEqual(settled.intents[operations[request]!.intent]?.disposition, .refusedNotFound,
+                           "A not_found operation is retired, not left pending.")
+        }
+        XCTAssertTrue(session.sent.isEmpty, "Accepted answers are never resent.")
+
+        // The next launch has nothing pending and nothing to reconcile.
+        let next = try ClientRepository(context: context, persistence: persistence)
+        XCTAssertTrue(try next.inboxOperationInventory(context: context).isEmpty)
+        XCTAssertTrue(try next.snapshot(context: context).outbox.isEmpty)
+    }
+
     func testConversationResetsResumeEachPersistedSuffixAcrossRelaunches() async throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
             personID: ExactText("person"), deviceID: ExactText("device"))
