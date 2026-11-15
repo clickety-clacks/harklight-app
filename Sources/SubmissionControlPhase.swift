@@ -19,7 +19,9 @@ struct SubmissionControlPhase: Equatable, Sendable {
         case confirmed
         /// It did not go through, or the outcome is unknown after a dropped
         /// connection. Retry resends the same operation when `retryable`.
-        case failed(retryable: Bool)
+        /// `editable` only where the server definitively did not take it, so
+        /// a fresh operation cannot record a second answer.
+        case failed(retryable: Bool, editable: Bool)
         /// The server refused it for a reason a retry cannot fix.
         case refused(RefusalReason)
     }
@@ -61,8 +63,9 @@ struct SubmissionControlPhase: Equatable, Sendable {
             let phase: Phase = switch submission.disposition {
             case .pending: .sending
             case .accepted: .confirmed
-            case .lost, .failed, .unsupported: .failed(retryable: !closedOnServer)
-            case .repairRequired: .failed(retryable: false)
+            case .lost: .failed(retryable: !closedOnServer, editable: false)
+            case .failed, .unsupported: .failed(retryable: !closedOnServer, editable: !closedOnServer)
+            case .repairRequired: .failed(retryable: false, editable: false)
             case .staleRevision: .refused(.changed)
             case .refusedClosed, .refusedNotFound: .refused(.closed)
             case .refusedByRetraction: .refused(.retracted)
@@ -94,6 +97,9 @@ struct SubmissionDisplay {
     var phase: SubmissionControlPhase?
     /// Resends the same operation; nil when this phase cannot be retried.
     var retry: (() -> Void)?
+    /// Turns a failed written reply back into a draft; the next send is a
+    /// new operation. Nil until the store offers it.
+    var edit: (() -> Void)? = nil
 
     var isSendingAny: Bool { phase?.phase == .sending }
 
@@ -108,8 +114,14 @@ struct SubmissionDisplay {
 
     /// The retry action for a failed control of this kind, when it can retry.
     func retryAction(_ kind: SubmissionControlPhase.Kind) -> (() -> Void)? {
-        guard phase?.kind == kind, case .failed(retryable: true) = phase?.phase else { return nil }
+        guard phase?.kind == kind, case .failed(retryable: true, _) = phase?.phase else { return nil }
         return retry
+    }
+
+    /// Whether a failed send of this kind may become a draft again (Edit).
+    func canEdit(_ kind: SubmissionControlPhase.Kind) -> Bool {
+        guard edit != nil, phase?.kind == kind, case .failed(_, editable: true) = phase?.phase else { return false }
+        return true
     }
 
     /// A one-line reason, only where the person can't already see it.
@@ -146,7 +158,7 @@ enum SubmissionPhaseTestHook {
         case "sending": phase = .sending
         case "confirmed": phase = .confirmed
         case "refusedChanged": phase = .refused(.changed)
-        default: phase = .failed(retryable: true)
+        default: phase = .failed(retryable: true, editable: true)
         }
         return SubmissionControlPhase(kind: kind, phase: phase, operationID: UUID(), since: .distantPast)
     }

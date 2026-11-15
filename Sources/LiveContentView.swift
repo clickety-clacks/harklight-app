@@ -407,6 +407,7 @@ private struct ReplyChoiceCard: View {
 
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.harklightMessageType) private var messageType
+    @Environment(\.harklightSubmissionDisplay) private var submission
 
     private var messageColors: HarklightMessageColors {
         HarklightDesignSystem.palette(for: colorScheme).message(messageType)
@@ -415,7 +416,11 @@ private struct ReplyChoiceCard: View {
     var body: some View {
         let radius = HarklightDesignSystem.shape(.card)
         let shape = RoundedRectangle(cornerRadius: radius)
-        let showsEditor = !isReadOnly && (isEditing || selected)
+        // A failed written reply is locked: Retry resends exactly what is shown,
+        // and Edit (where the server definitively did not take it) makes it a
+        // draft again.
+        let failedHere = selected && submission.isFailed(.answer)
+        let showsEditor = !isReadOnly && !failedHere && (isEditing || selected)
         let showsPane = showsEditor || !text.isEmpty
         let card = VStack(alignment: .leading, spacing: 0) {
             MessageChoiceLabel(title: title, detail: detail, selected: selected,
@@ -448,6 +453,27 @@ private struct ReplyChoiceCard: View {
                     .padding(.vertical, 14)
                     .background(messageColors.replyPane)
             }
+            if failedHere {
+                HStack(spacing: 16) {
+                    Image(systemName: "exclamationmark.circle")
+                        .font(.system(size: 18, weight: .regular))
+                        .foregroundStyle(HarklightDesignSystem.palette(for: colorScheme).coral)
+                        .accessibilityLabel("Did not send")
+                    Spacer(minLength: 0)
+                    if submission.canEdit(.answer), let edit = submission.edit {
+                        Button("Edit", action: edit)
+                            .accessibilityIdentifier("request-reply-edit")
+                    }
+                    if let retry = submission.retryAction(.answer) {
+                        Button("Retry", action: retry)
+                            .fontWeight(.semibold)
+                            .accessibilityIdentifier("request-reply-retry")
+                    }
+                }
+                .tint(messageColors.beam)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(selected ? messageColors.pickedFill : messageColors.raised, in: shape)
@@ -457,7 +483,7 @@ private struct ReplyChoiceCard: View {
                                                        dash: selected ? [] : [4, 3])))
         .animation(.smooth(duration: 0.25), value: selected)
 
-        if showsEditor || isReadOnly {
+        if showsEditor || isReadOnly || failedHere {
             card
                 .accessibilityElement(children: .contain)
                 .accessibilityIdentifier(target.editorCardIdentifier)

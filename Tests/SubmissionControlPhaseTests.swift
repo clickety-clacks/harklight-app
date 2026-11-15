@@ -12,10 +12,10 @@ final class SubmissionControlPhaseTests: XCTestCase {
         let cases: [(IntentDisposition, SubmissionControlPhase.Phase)] = [
             (.pending, .sending),
             (.accepted(sequence: 2), .confirmed),
-            (.lost, .failed(retryable: true)),
-            (.failed, .failed(retryable: true)),
-            (.unsupported, .failed(retryable: true)),
-            (.repairRequired, .failed(retryable: false)),
+            (.lost, .failed(retryable: true, editable: false)),
+            (.failed, .failed(retryable: true, editable: true)),
+            (.unsupported, .failed(retryable: true, editable: true)),
+            (.repairRequired, .failed(retryable: false, editable: false)),
             (.staleRevision(currentRevision: 2), .refused(.changed)),
             (.refusedClosed, .refused(.closed)),
             (.refusedNotFound, .refused(.closed)),
@@ -41,7 +41,7 @@ final class SubmissionControlPhaseTests: XCTestCase {
     func testRetryIsUnavailableOnceTheServerClosedTheMessage() {
         let closed = RemoteRequestState(state: .answered)
         XCTAssertEqual(project([submission(.lost)], remote: [key: closed])[key]?.phase,
-                       .failed(retryable: false))
+                       .failed(retryable: false, editable: false))
     }
 
     func testKindComesFromTheOperation() {
