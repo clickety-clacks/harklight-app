@@ -551,7 +551,7 @@ enum SampleCatalog {
                                  title: content.title, body: content.body, options: content.options,
                                  deadline: index.isMultiple(of: 3) ? (variation == 1 ? "Due yesterday" : "By 5 PM") : nil,
                                  missed: variation == 1 && index.isMultiple(of: 3), revised: variation == 2,
-                                 chatUnread: variation == 0 && index.isMultiple(of: 2), hasChat: variation != 1,
+                                 chatUnread: variation == 0 && index.isMultiple(of: 2), hasChat: variation != 1 || kind == .approval,
                                  tier: variation == 0 && kind == .approval ? .top
                                     : variation == 0 && kind == .pictureChoice ? .low : .middle,
                                  fixtureCreatedAtMilliseconds: 1_790_000_000_000
