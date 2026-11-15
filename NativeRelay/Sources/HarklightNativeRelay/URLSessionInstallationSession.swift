@@ -59,6 +59,8 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
     private let task: URLSessionWebSocketTask
     private let pingCoordinator: WebSocketPingCoordinator
     private var isClosed = false
+    private var lastSentRequestType: NativeDiagnosticRelayRequestType?
+    private var lastSentOperationID: UUID?
     private var connectionFailure: (any Error)?
     private let profileContext: ProfileContext
     private let onProgress: @Sendable (NativeRelayProgressEvent) -> Void
@@ -101,7 +103,8 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
                 onFocusReportingReady: @escaping @Sendable () -> Void = {},
                 onFocusReportingUnsupported: @escaping @Sendable () -> Void = {},
                 onViewShow: @escaping @Sendable (Data) -> Void = { _ in },
-                onDiagnostic: @escaping NativeClientDiagnosticSink = { _ in }) throws {
+                onDiagnostic: @escaping NativeClientDiagnosticSink = { _ in },
+                opensRelaySocket: Bool = true) throws {
         guard profile.transportMode == .relay,
               relayURL.scheme == "wss",
               relayURL.path == "/relay",
@@ -150,7 +153,10 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
         let session = URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
         urlSession = session
         task = session.webSocketTask(with: relayURL, protocols: ["attention-relay/1"])
-        task.resume()
+        // The Server keeps one relay session per device and closes the others
+        // when a new one opens. An HTTPS-only session (file download) must
+        // therefore never open a relay WebSocket of its own.
+        if opensRelaySocket { task.resume() }
     }
 
     public func resync(_ request: Data, consume: @Sendable (Data) async throws -> Void) async throws {
@@ -450,7 +456,7 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
             diagnose(.answer, .originalOperationDelivery,
                      NativeDiagnosticCauseCode.unresolvedTransition(for: error), error: error,
                      operationID: operationID, receipt: .unknown)
-            close()
+            retire(after: error)
             return .unresolved
         }
         if isNoCommentOperation {
@@ -483,7 +489,7 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
                 diagnose(.answer, .originalOperationDelivery,
                          NativeDiagnosticCauseCode.unresolvedTransition(for: error), error: error,
                          operationID: operationID, receipt: .unknown)
-                close()
+                retire(after: error)
                 return .unresolved
             }
             let responseType = value.uniqueValue(named: "type")?.stringValue?.rawValue
@@ -659,7 +665,7 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
             diagnose(.conversation, .discussionSubmission,
                      NativeDiagnosticCauseCode.unresolvedTransition(for: error), error: error,
                      operationID: operationID, receipt: .unknown)
-            close()
+            retire(after: error)
             return .unresolved
         }
     }
@@ -769,6 +775,14 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
             close()
             throw error
         }
+    }
+
+    /// Closes a connection that failed under a submission, keeping the actual
+    /// failure so the live connection's other users see it (and reconnect on
+    /// a real interruption) instead of a bare cancellation.
+    private func retire(after error: Error) {
+        if !isClosed, connectionFailure == nil { connectionFailure = error }
+        close()
     }
 
     public func close() {
@@ -899,7 +913,25 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
         guard let text = String(data: frame, encoding: .utf8), text.hasSuffix("\n") else {
             throw InstallationTransportError.unexpectedServerFrame
         }
+        let outgoing = try? JSONValue.parse(frame)
+        lastSentRequestType = NativeDiagnosticRelayRequestType(
+            wireType: outgoing?.uniqueValue(named: "type")?.stringValue?.rawValue)
+        lastSentOperationID = outgoing?.uniqueValue(named: "op_id")?.stringValue
+            .flatMap { UUID(uuidString: $0.rawValue) }
         try await task.send(.string(text))
+    }
+
+    /// Every error reply is recorded with its Server reason code, the type of
+    /// the request it answered and that request's operation ID. Exchanges on a
+    /// connection are serialized, so the last request sent is the one answered.
+    private func recordErrorReply(_ frame: Data) {
+        guard let value = try? JSONValue.parse(frame),
+              value.uniqueValue(named: "type")?.stringValue?.rawValue == "error" else { return }
+        onDiagnostic(NativeClientDiagnosticEvent(area: .relay, phase: .relayErrorReply, transition: .rejected,
+            causeCode: NativeDiagnosticCauseCode.serverReason(
+                value.uniqueValue(named: "reason")?.stringValue?.rawValue),
+            attemptID: attemptID, transportAttemptID: attemptID,
+            operationID: lastSentOperationID, relayRequestType: lastSentRequestType ?? .other))
     }
 
     private func receive() async throws -> Data {
@@ -921,7 +953,10 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
     private func receiveTaskFrame() async throws -> Data {
         do {
             switch try await task.receive() {
-            case let .string(text): return Data(text.utf8)
+            case let .string(text):
+                let frame = Data(text.utf8)
+                recordErrorReply(frame)
+                return frame
             case .data: throw InstallationTransportError.unexpectedServerFrame
             @unknown default: throw InstallationTransportError.unexpectedServerFrame
             }
