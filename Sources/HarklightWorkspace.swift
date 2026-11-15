@@ -768,10 +768,11 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         if warnings.isEmpty { isWarningPresented = false }
     }
 
-    /// Search filters only the search tab's list; Inbox and Replied always
-    /// show everything.
+    /// On iPhone search filters only the Search tab's list; Inbox and Replied
+    /// always show everything. On iPad the list's own search field filters it
+    /// in place, so detail position and next/previous follow the same results.
     private var activeSearch: String {
-        rootTab == .search ? search : ""
+        rootTab == .search || usesListSearch ? search : ""
     }
 
     private var orderedIDs: [InboxSelection] {

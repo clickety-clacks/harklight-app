@@ -280,6 +280,8 @@ final class InboxStockTabsUITests: XCTestCase {
         row.tap()
         XCTAssertTrue(app.buttons["request-heading"].waitForExistence(timeout: 5),
                       "The detail is visible beside the master list.")
+        let fullTotal = positionTotal(in: app)
+        XCTAssertNotNil(fullTotal, app.debugDescription)
 
         XCTAssertFalse(app.tabBars.buttons["Search"].exists,
                        "iPad has no Search tab.\n\(app.debugDescription)")
@@ -293,9 +295,25 @@ final class InboxStockTabsUITests: XCTestCase {
         XCTAssertLessThanOrEqual(field.frame.maxX, list.frame.maxX + 8)
         field.tap()
         field.typeText("Archive\n")
-        XCTAssertTrue(app.descendants(matching: .any)["sample-approval-0"].waitForExistence(timeout: 5),
+        let match = app.descendants(matching: .any)["sample-approval-0"]
+        XCTAssertTrue(match.waitForExistence(timeout: 5),
                       "Typing filters the list in place.\n\(app.debugDescription)")
+        match.tap()
+        XCTAssertTrue(app.buttons["request-heading"].waitForExistence(timeout: 5), app.debugDescription)
+        let filteredTotal = positionTotal(in: app)
+        XCTAssertNotNil(filteredTotal, app.debugDescription)
+        if let fullTotal, let filteredTotal {
+            XCTAssertLessThan(filteredTotal, fullTotal,
+                              "Detail position counts the search results, not the whole Inbox.")
+        }
         attachScreenshot("iPad list search beside detail", from: app)
+    }
+
+    /// The total in the detail's "N of M" position pill.
+    private func positionTotal(in app: XCUIApplication) -> Int? {
+        let pill = app.staticTexts.matching(NSPredicate(format: "label MATCHES %@", "^[0-9]+ of [0-9]+$")).firstMatch
+        guard pill.waitForExistence(timeout: 5) else { return nil }
+        return pill.label.split(separator: " ").last.flatMap { Int($0) }
     }
 
     func testNotificationRouteClearsListSearchAndOpensTheTargetRequest() {
