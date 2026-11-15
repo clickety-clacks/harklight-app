@@ -1781,6 +1781,41 @@ final class NativeGuidedTLSTests: XCTestCase {
         await lifecycle.deactivate()
     }
 
+    func testEveryRelayErrorReplyIsRecordedWithReasonRequestTypeAndOperation() async throws {
+        let namespace = "Harklight.relay-error-reply-diagnostic." + UUID().uuidString
+        let identity = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
+        defer {
+            SecItemDelete([kSecClass as String: kSecClassCertificate,
+                           kSecAttrLabel as String: identity.label] as CFDictionary)
+            SecItemDelete([kSecClass as String: kSecClassKey,
+                           kSecAttrApplicationTag as String: Data(namespace.utf8)] as CFDictionary)
+        }
+        let relay = try LocalRelayWebSocket(expectedDevice: identity.deviceID) { text in
+            guard text.contains("\"type\":\"answer\"") else { return [] }
+            return [#"{"v":1,"type":"error","reason":"closed"}"# + "\n"]
+        }
+        defer { relay.close() }
+        let port = try await relay.start()
+        let context = ProfileContext(identity: ProfileIdentity(
+            trustedRelayAuthority: ExactText("localhost"), personID: ExactText("test-person"),
+            deviceID: ExactText(identity.deviceID)), transportMode: .relay)
+        let events = DiagnosticEventRecorder()
+        let session = try URLSessionInstallationSession(
+            profile: context, relayURL: XCTUnwrap(URL(string: "wss://localhost:\(port)/relay")),
+            clientIdentity: TrustedKeychainIdentity(identity.value), trustedRootDER: relay.rootDER,
+            onDiagnostic: { events.append($0) })
+        let operationID = UUID()
+        let frame = #"{"v":1,"type":"answer","op_id":"\#(operationID.uuidString.lowercased())","sender_id":"sender","request_id":"request","request_revision":1,"answer":null}"#
+        let result = try await session.sendOriginalOperation(Data((frame + "\n").utf8), operationID: operationID)
+        await session.close()
+        XCTAssertEqual(result, .refusedClosed(operationID: operationID))
+        let replies = events.values.filter { $0.phase == .relayErrorReply }
+        XCTAssertEqual(replies.count, 1, "The error reply is recorded once.")
+        XCTAssertEqual(replies.first?.causeCode, "server_closed")
+        XCTAssertEqual(replies.first?.relayRequestType, .answer)
+        XCTAssertEqual(replies.first?.operationID, operationID)
+    }
+
     func testFileDownloadSessionOpensNoRelayConnection() async throws {
         let namespace = "Harklight.download-no-relay-socket." + UUID().uuidString
         let identity = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
@@ -5043,6 +5078,19 @@ private final class LocalRelayWebSocket: @unchecked Sendable {
             connections.forEach { $0.cancel() }
             connections.removeAll()
         }
+    }
+}
+
+private final class DiagnosticEventRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var events: [NativeClientDiagnosticEvent] = []
+    var values: [NativeClientDiagnosticEvent] {
+        lock.lock(); defer { lock.unlock() }
+        return events
+    }
+
+    func append(_ event: NativeClientDiagnosticEvent) {
+        lock.lock(); events.append(event); lock.unlock()
     }
 }
 
