@@ -13,14 +13,15 @@ struct SubmissionControlPhase: Equatable, Sendable {
     enum RefusalReason: Equatable, Sendable { case changed, closed, retracted }
 
     enum Phase: Equatable, Sendable {
-        /// Saved or in flight, with no server result yet.
+        /// Saved, in flight, or recovering after a dropped connection: the
+        /// server has not durably accepted it yet.
         case sending
-        /// The server accepted this operation.
+        /// The server durably accepted it. A later refusal from the message's
+        /// final state turns it into `refused`.
         case confirmed
-        /// It did not go through, or the outcome is unknown after a dropped
-        /// connection. Retry resends the same operation when `retryable`.
-        /// `editable` only where the server definitively did not take it, so
-        /// a fresh operation cannot record a second answer.
+        /// The store gave up on it. Retry resends the same operation when
+        /// `retryable`. `editable` only where the server definitively did not
+        /// take it, so a fresh operation cannot record a second answer.
         case failed(retryable: Bool, editable: Bool)
         /// The server refused it for a reason a retry cannot fix.
         case refused(RefusalReason)
@@ -30,6 +31,13 @@ struct SubmissionControlPhase: Equatable, Sendable {
     let phase: Phase
     let operationID: UUID
     let since: Date
+
+    /// An operation answering an older version than the message's current
+    /// one. The store keeps it as history; nothing recovers it.
+    static func isRetiredByNewerVersion(_ submission: Submission, in snapshot: AttentionStoreSnapshot) -> Bool {
+        guard let current = snapshot.conversationThreads[submission.requestKey]?.currentRevision else { return false }
+        return (submission.requestRevision ?? 1) < current
+    }
 
     static func project(snapshot: AttentionStoreSnapshot) -> [RequestKey: Self] {
         var result: [RequestKey: Self] = [:]
@@ -62,8 +70,25 @@ struct SubmissionControlPhase: Equatable, Sendable {
             let closedOnServer = snapshot.remoteStates[key]?.isTerminal == true
             let phase: Phase = switch submission.disposition {
             case .pending: .sending
-            case .accepted: .confirmed
-            case .lost: .failed(retryable: !closedOnServer, editable: false)
+            // Durable acceptance is the server's confirmation. A final state
+            // that is not an answer (expired, cleared, superseded) refuses it.
+            case .accepted:
+                if closedOnServer, let state = snapshot.remoteStates[key]?.state,
+                   state != .answered, state != .noComment {
+                    .refused(.closed)
+                } else {
+                    .confirmed
+                }
+            // A dropped connection leaves the outcome unknown and the store
+            // still recovering the same operation, so it is still sending.
+            // A newer open version of the message retires an earlier answer
+            // as lost too; that one is history, and the message changed.
+            case .lost:
+                if Self.isRetiredByNewerVersion(submission, in: snapshot) {
+                    .refused(.changed)
+                } else {
+                    closedOnServer ? .refused(.closed) : .sending
+                }
             case .failed, .unsupported: .failed(retryable: !closedOnServer, editable: !closedOnServer)
             case .repairRequired: .failed(retryable: false, editable: false)
             case .staleRevision: .refused(.changed)
