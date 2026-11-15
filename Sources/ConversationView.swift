@@ -145,43 +145,45 @@ struct ConversationPanel: View {
                     Label(thread.isRetracted ? store.retractionLabel(key) : "Request \(terminal.rawValue)", systemImage: "checkmark.circle")
                         .font(.caption).padding(8)
                 }
-                ConversationUploadCleanupStatus(store: store, key: key, revision: revision)
-                if let error = store.conversationError {
-                    Text(error).font(.caption).foregroundStyle(.hkSecondary).padding(.horizontal)
-                }
-                if let message = store.conversationUnavailableMessage {
-                    Text(message)
-                        .font(.callout)
-                        .foregroundStyle(.hkSecondary)
-                        .padding()
-                        .accessibilityIdentifier("conversation-unavailable")
-                } else if let discussionUnavailableReason {
-                    Label(discussionUnavailableReason, systemImage: "lock")
-                        .font(.callout)
-                        .foregroundStyle(.hkSecondary)
-                        .padding(.horizontal)
-                        .accessibilityIdentifier("conversation-read-only-reason")
-                } else if store.isReadOnly {
-                    if case .saved = draft.disposition {
-                        ReadOnlyConversationDraftView(draft: draft) { file in
-                            fileError = nil
-                            inspectedFile = file
-                            inspectedFileRevision = revision
-                        }
-                            .padding(verticalSizeClass == .compact ? 4 : 12)
+                if thread.terminal == nil && thread.allowsDiscussion {
+                    ConversationUploadCleanupStatus(store: store, key: key, revision: revision)
+                    if let error = store.conversationError {
+                        Text(error).font(.caption).foregroundStyle(.hkSecondary).padding(.horizontal)
                     }
-                } else {
-                    ConversationAvailabilityNotice(
-                        observation: thread.latestReportedAvailabilityObservation)
-                        .padding(.horizontal)
-                    ConversationComposer(store: store, key: key, revision: revision,
-                        inspect: { file, fileRevision in
-                            fileError = nil
-                            inspectedFile = file
-                            inspectedFileRevision = fileRevision
-                        }, onContentTouch: { activatePassivePushContent() })
-                        .padding(verticalSizeClass == .compact ? 4 : 12)
-                        .simultaneousGesture(TapGesture().onEnded { activatePassivePushContent() })
+                    if let message = store.conversationUnavailableMessage {
+                        Text(message)
+                            .font(.callout)
+                            .foregroundStyle(.hkSecondary)
+                            .padding()
+                            .accessibilityIdentifier("conversation-unavailable")
+                    } else if let discussionUnavailableReason {
+                        Label(discussionUnavailableReason, systemImage: "lock")
+                            .font(.callout)
+                            .foregroundStyle(.hkSecondary)
+                            .padding(.horizontal)
+                            .accessibilityIdentifier("conversation-read-only-reason")
+                    } else if store.isReadOnly {
+                        if case .saved = draft.disposition {
+                            ReadOnlyConversationDraftView(draft: draft) { file in
+                                fileError = nil
+                                inspectedFile = file
+                                inspectedFileRevision = revision
+                            }
+                                .padding(verticalSizeClass == .compact ? 4 : 12)
+                        }
+                    } else {
+                        ConversationAvailabilityNotice(
+                            observation: store.discussionAvailability(for: key))
+                            .padding(.horizontal)
+                        ConversationComposer(store: store, key: key, revision: revision,
+                            inspect: { file, fileRevision in
+                                fileError = nil
+                                inspectedFile = file
+                                inspectedFileRevision = fileRevision
+                            }, onContentTouch: { activatePassivePushContent() })
+                            .padding(verticalSizeClass == .compact ? 4 : 12)
+                            .simultaneousGesture(TapGesture().onEnded { activatePassivePushContent() })
+                    }
                 }
             } else {
                 Group {
@@ -396,7 +398,9 @@ private struct ConversationHistoryContent: View, Equatable {
                     }
                     ForEach(pendingSubmissions) { pending in
                         ConversationPendingSubmissionView(submission: pending,
-                            retryEnabled: !store.isReadOnly && !store.isSendingDiscussion(for: key, revision: pending.revision),
+                            isClosed: thread.terminal != nil || !thread.allowsDiscussion,
+                            retryEnabled: store.canSendDiscussion(for: key) && !store.isSendingDiscussion(for: key, revision: pending.revision),
+                            editEnabled: store.canEditDiscussionDraft(for: key),
                             retry: { store.sendDiscussion(for: key, revision: pending.revision) },
                             edit: { store.editRejectedDiscussion(for: key, revision: pending.revision) },
                             inspect: { file in inspect(file, pending.revision) })
@@ -571,7 +575,9 @@ struct ConversationPendingSubmission: Identifiable, Equatable {
 
 private struct ConversationPendingSubmissionView: View {
     let submission: ConversationPendingSubmission
+    let isClosed: Bool
     let retryEnabled: Bool
+    let editEnabled: Bool
     let retry: () -> Void
     let edit: () -> Void
     let inspect: (ConversationFile) -> Void
@@ -591,13 +597,13 @@ private struct ConversationPendingSubmissionView: View {
                 .buttonStyle(.plain)
             }
             ConversationDraftStatus(disposition: submission.disposition)
-            if case let .rejected(reason) = submission.disposition {
+            if case let .rejected(reason) = submission.disposition, !isClosed {
                 HStack {
                     Button("Retry", action: retry)
                         .disabled(!retryEnabled || ["closed", "not_found", "unknown_message"].contains(reason.rawValue))
                         .accessibilityIdentifier("conversation-pending-retry")
                     Button("Edit", action: edit)
-                        .disabled(!retryEnabled)
+                        .disabled(!editEnabled)
                         .accessibilityIdentifier("conversation-pending-edit")
                 }
             }
@@ -1070,14 +1076,15 @@ enum ConversationSentChatStatusPresentation {
 }
 
 enum ConversationAvailabilityNoticePresentation: Equatable {
-    case none
+    case connected
+    case unconfirmed
     case nothingListening
     case noOneWillGetThis
 
     static func notice(for observation: ConversationAvailabilityObservation?) -> Self {
-        guard let observation else { return .none }
+        guard let observation else { return .unconfirmed }
         switch observation.state {
-        case .listening: return .none
+        case .listening: return .connected
         case .notListening: return .nothingListening
         case .unsupported, .gone: return .noOneWillGetThis
         }
@@ -1090,13 +1097,17 @@ private struct ConversationAvailabilityNotice: View {
     var body: some View {
         Group {
             switch ConversationAvailabilityNoticePresentation.notice(for: observation) {
-            case .none:
-                EmptyView()
+            case .connected:
+                Label("Chat · Connected", systemImage: "checkmark.circle")
+                    .foregroundStyle(.hkSecondary)
+            case .unconfirmed:
+                Label("Messaging · Connection unconfirmed", systemImage: "exclamationmark.circle")
+                    .foregroundStyle(.hkAmber)
             case .nothingListening:
-                Label("Nothing's listening right now", systemImage: "exclamationmark.circle.fill")
+                Label("Messaging · Not listening", systemImage: "exclamationmark.circle.fill")
                     .foregroundStyle(.hkAmber)
             case .noOneWillGetThis:
-                Label("No one will get this", systemImage: "xmark.circle.fill")
+                Label("Nobody can receive", systemImage: "xmark.circle.fill")
                     .foregroundStyle(.hkCoral)
             }
         }

@@ -1437,18 +1437,29 @@ final class LivePresentationStore {
         return canSendToCurrentServer && request(for: key)?.inboxStateIsCurrent == true
     }
     func canEditDiscussionDraft(for key: RequestKey) -> Bool {
-        guard !isReadOnly, conversationThreads[key] != nil else { return false }
-        if profileContext.transportMode == .relay,
-           attentionStore.requiresConfirmedServerProjection,
-           !canUseCurrentServerState(for: key) {
-            return true
-        }
-        return conversationThreads[key]?.allowsDiscussion == true
+        guard !isReadOnly, let thread = conversationThreads[key] else { return false }
+        return thread.terminal == nil && thread.allowsDiscussion
     }
+
+    /// Only the current authenticated projection can establish listening.
+    /// A retained negative report can still explain why nobody can receive.
+    func discussionAvailability(for key: RequestKey) -> ConversationAvailabilityObservation? {
+        guard let observation = conversationThreads[key]?.latestReportedAvailabilityObservation else { return nil }
+        switch observation.state {
+        case .gone, .unsupported:
+            return observation
+        case .listening, .notListening:
+            guard NativeRelayLifecycle.shared.hasConfirmedServerSnapshot(for: profileContext),
+                  conversationAvailabilityState == .available else { return nil }
+            return observation
+        }
+    }
+
     func canSendDiscussion(for key: RequestKey) -> Bool {
         guard (canSendToCurrentServer || isLocalExample) && !isReadOnly,
               let thread = conversationThreads[key],
-              thread.allowsDiscussion else { return false }
+              thread.terminal == nil, thread.allowsDiscussion else { return false }
+        guard isLocalExample || discussionAvailability(for: key)?.state == .listening else { return false }
         return thread.drafts[thread.currentRevision]?.isPermanentlyRefused != true
     }
     @ObservationIgnored var notificationProjectionDidChange: (() -> Void)?
@@ -1940,7 +1951,7 @@ final class LivePresentationStore {
     @discardableResult
     func updateConversation(for key: RequestKey, revision: UInt64, text: String? = nil,
                             files: [ConversationFile]? = nil) -> Bool {
-        guard !isReadOnly else { return false }
+        guard canEditDiscussionDraft(for: key) else { return false }
         do {
             if let text, files == nil {
                 guard var thread = conversationThreads[key] else { throw ConversationError.missingRequest }
@@ -2164,7 +2175,7 @@ final class LivePresentationStore {
     }
 
     func editRejectedDiscussion(for key: RequestKey, revision: UInt64) {
-        guard !isReadOnly else { return }
+        guard canEditDiscussionDraft(for: key) else { return }
         var draft = conversationDraft(for: key, revision: revision)
         guard case .rejected = draft.disposition else { return }
         do {
