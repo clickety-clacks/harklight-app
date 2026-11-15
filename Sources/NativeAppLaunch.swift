@@ -1603,6 +1603,7 @@ final class LivePresentationStore {
             diagnostics: diagnostics, conversationAvailability: conversationAvailability,
             clearedRetractionDefaults: clearedRetractionDefaults,
             newMessageAreaDefaults: newMessageAreaDefaults, preparedInitialState: initial)
+        presentation.reportUnprojectable(initial.snapshot)
         mainActorWorkNanoseconds += DispatchTime.now().uptimeNanoseconds - mainActorSegmentStartedAt
         let activationPreparationNanoseconds = DispatchTime.now().uptimeNanoseconds - activationStartedAt
         return (presentation, Double(mainActorWorkNanoseconds) / 1_000_000,
@@ -3373,7 +3374,18 @@ final class LivePresentationStore {
         actionErrorRequest = nil
     }
 
+    @ObservationIgnored private var reportedUnprojectableKeys = Set<RequestKey>()
+
+    /// A request shown as unsupported because its scene could not be
+    /// projected is reported once; the rest of the inbox is unaffected.
+    private func reportUnprojectable(_ snapshot: PresentationSnapshot) {
+        let newKeys = snapshot.unprojectableRequestKeys.filter { reportedUnprojectableKeys.insert($0).inserted }
+        guard !newKeys.isEmpty else { return }
+        diagnose(.localStore, .projectionRefresh, .observed, causeCode: "unprojectable_request_shown_unsupported")
+    }
+
     private func adopt(_ snapshot: PresentationSnapshot) {
+        reportUnprojectable(snapshot)
         let previousRoutingStates = noReplyRoutingStates(for: presentation.requests)
         let locallyReconciledRead = locallyReconciledConversationReadRevisions.remove(snapshot.revision) != nil
         locallyReconciledConversationReadRevisions = Set(
@@ -3423,6 +3435,7 @@ final class LivePresentationStore {
             guard presentation.revision <= snapshot.revision else {
                 return Double(mainActorWorkNanoseconds) / 1_000_000
             }
+            reportUnprojectable(snapshot)
             let messageSeed = messageAreaStore?.reconciliationSeed()
             let replySeed = replyAreaStore?.reconciliationSeed()
             let previousRequests = presentation.requests
