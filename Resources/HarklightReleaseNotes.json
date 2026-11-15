@@ -217,7 +217,7 @@
           "id": "damaged-saved-data-recovery",
           "symbol": "arrow.uturn.backward.circle",
           "title": "Recover from damaged saved data",
-          "detail": "If data saved on this device is damaged, Harklight now recovers by itself and keeps your unsent work. This fix is pending formal testing."
+          "detail": "If data saved on this device is damaged, Harklight now recovers by itself and keeps any unsent work that is still intact. This fix is pending formal testing."
         }
       ]
     }
