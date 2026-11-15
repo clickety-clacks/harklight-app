@@ -11,8 +11,8 @@ final class SubmissionControlPhaseTests: XCTestCase {
     func testEachOperationOutcomeMapsToOneControlPhase() {
         let cases: [(IntentDisposition, SubmissionControlPhase.Phase)] = [
             (.pending, .sending),
-            (.accepted(sequence: 2), .confirmed),
-            (.lost, .failed(retryable: true, editable: false)),
+            (.accepted(sequence: 2), .sending),
+            (.lost, .sending),
             (.failed, .failed(retryable: true, editable: true)),
             (.unsupported, .failed(retryable: true, editable: true)),
             (.repairRequired, .failed(retryable: false, editable: false)),
@@ -38,10 +38,12 @@ final class SubmissionControlPhaseTests: XCTestCase {
         XCTAssertEqual(project([expired])[key]?.phase, .refused(.closed))
     }
 
-    func testRetryIsUnavailableOnceTheServerClosedTheMessage() {
-        let closed = RemoteRequestState(state: .answered)
-        XCTAssertEqual(project([submission(.lost)], remote: [key: closed])[key]?.phase,
-                       .failed(retryable: false, editable: false))
+    func testTheMessagesFinalStateEndsSending() {
+        let answered = [key: RemoteRequestState(state: .answered)]
+        XCTAssertEqual(project([submission(.accepted(sequence: 2))], remote: answered)[key]?.phase, .confirmed)
+        XCTAssertEqual(project([submission(.lost)], remote: answered)[key]?.phase, .refused(.closed))
+        XCTAssertEqual(project([submission(.failed)], remote: answered)[key]?.phase,
+                       .failed(retryable: false, editable: false), "No Retry once the message is closed.")
     }
 
     func testKindComesFromTheOperation() {
@@ -83,9 +85,9 @@ final class SubmissionControlPhaseTests: XCTestCase {
 
         try domain.recordUnresolvedOperation(receipt.intentID, operationID: receipt.opID, context: context)
         try live.refreshFromDurableStore()
-        XCTAssertEqual(live.submissionPhases[key]?.phase, .failed(retryable: true, editable: false))
+        XCTAssertEqual(live.submissionPhases[key]?.phase, .sending)
         XCTAssertFalse(live.releaseFailedSubmissionForEdit(key),
-                       "A lost send may have arrived, so it keeps its operation for Retry.")
+                       "A lost send may have arrived, so it keeps its operation.")
         XCTAssertThrowsError(try domain.releaseFailedOperationForEdit(receipt.intentID, context: context))
 
         try domain.recordAnswerNotDelivered(receipt.intentID, operationID: receipt.opID, context: context)
@@ -148,23 +150,38 @@ final class SubmissionControlPhaseTests: XCTestCase {
     }
 
     @MainActor
-    func testLostChoiceKeepsItsRetryWhileTheOtherChoicesStayLocked() throws {
+    func testADroppedConnectionKeepsSendingUntilTheAnswerIsFinal() throws {
         let fixture = try liveFixture(payload: try choicePayload())
         let receipt = try fixture.submit([.compatibilityValue(action: ExactText("a"))])
+        XCTAssertEqual(try fixture.refresh().submissionPhase?.phase, .sending)
+
+        // The connection drops mid-send: the outcome is unknown and the store
+        // keeps the same operation for recovery.
         try fixture.domain.recordUnresolvedOperation(receipt.intentID, operationID: receipt.opID,
                                                      context: fixture.context)
-        let detail = try fixture.refresh()
-        XCTAssertEqual(detail.submissionPhase?.phase, .failed(retryable: true, editable: false))
-        XCTAssertTrue(detail.controlsReadOnly, "A lost send may have arrived, so other answers stay locked.")
-        XCTAssertFalse(detail.unlocksAfterDefinitiveFailure)
-        XCTAssertNotNil(detail.submissionDisplay.retryAction(.answer), "The picked choice offers Retry.")
-
+        var detail = try fixture.refresh()
+        XCTAssertEqual(detail.submissionPhase?.phase, .sending, "Recovering is still sending, not failed.")
+        XCTAssertNil(detail.submissionDisplay.retryAction(.answer), "No Retry or failure mark while recovering.")
+        XCTAssertFalse(detail.submissionDisplay.isFailed(.answer))
+        XCTAssertTrue(detail.controlsReadOnly, "Other answers stay locked while it may have arrived.")
         fixture.live.selectAction(ExactText("b"), input: nil, for: fixture.key)
-        XCTAssertEqual(try fixture.intents.map(\.operationID), [receipt.opID],
-                       "Picking another choice cannot replace a lost send.")
-        XCTAssertTrue(fixture.live.retrySubmissionFromUser(fixture.key))
-        XCTAssertEqual(try fixture.intents.map(\.operationID), [receipt.opID],
-                       "Retry resends the same operation.")
+        XCTAssertEqual(try fixture.intents.map(\.operationID), [receipt.opID])
+
+        // Reconnect: the same operation is sent again, then accepted.
+        _ = try fixture.domain.queueOriginalOperationForUserTap(receipt.intentID, context: fixture.context)
+        XCTAssertEqual(try fixture.refresh().submissionPhase?.phase, .sending)
+        try fixture.domain.recordAcceptedOperation(receipt.intentID, operationID: receipt.opID,
+                                                   terminalSequence: 2, context: fixture.context)
+        detail = try fixture.refresh()
+        XCTAssertEqual(detail.submissionPhase?.phase, .sending,
+                       "Accepted is not final: it keeps Sending until the answered state arrives.")
+        XCTAssertTrue(detail.submissionDisplay.isSending(.answer))
+
+        try finish(fixture, intentID: receipt.intentID, state: .answered)
+        detail = try fixture.refresh()
+        XCTAssertEqual(fixture.live.request(for: fixture.key)?.lifecycleStatus, .answered)
+        XCTAssertFalse(detail.submissionDisplay.isSendingAny, "The final state ends Sending.")
+        XCTAssertFalse(detail.submissionDisplay.isFailed(.answer))
     }
 
     @MainActor
@@ -175,6 +192,7 @@ final class SubmissionControlPhaseTests: XCTestCase {
                                                     context: fixture.context)
         let detail = try fixture.refresh()
         XCTAssertEqual(detail.submissionPhase?.phase, .failed(retryable: true, editable: true))
+        XCTAssertTrue(detail.submissionDisplay.isFailed(.answer), "A send the store gave up on shows failed.")
         XCTAssertFalse(detail.controlsReadOnly, "The other choices open again.")
         XCTAssertNotNil(detail.submissionDisplay.retryAction(.answer))
 
@@ -252,7 +270,7 @@ final class SubmissionControlPhaseTests: XCTestCase {
     }
 
     @MainActor
-    func testASentNoCommentKeepsItsRowWhileSendingAndAfterALostSend() throws {
+    func testASentNoCommentKeepsSendingThroughADropAndAcceptanceUntilFinal() throws {
         let fixture = try liveFixture(payload: try choicePayload())
         let receipt = try fixture.port.submitNoComment(context: fixture.port.context, selector: fixture.selector,
                                                        intentID: UUID())
@@ -264,10 +282,29 @@ final class SubmissionControlPhaseTests: XCTestCase {
         try fixture.domain.recordUnresolvedOperation(receipt.intentID, operationID: receipt.opID,
                                                      context: fixture.context)
         detail = try fixture.refresh()
-        XCTAssertTrue(detail.showsNoCommentRow, "The No comment row carries its Retry.")
-        XCTAssertNotNil(detail.submissionDisplay.retryAction(.noComment))
-        XCTAssertTrue(fixture.live.retrySubmissionFromUser(fixture.key))
-        XCTAssertEqual(try fixture.intents.map(\.operationID), [receipt.opID])
+        XCTAssertEqual(detail.submissionPhase?.phase, .sending)
+        XCTAssertTrue(detail.showsNoCommentRow)
+        XCTAssertNil(detail.submissionDisplay.retryAction(.noComment))
+
+        _ = try fixture.domain.queueOriginalOperationForUserTap(receipt.intentID, context: fixture.context)
+        try fixture.domain.recordAcceptedOperation(receipt.intentID, operationID: receipt.opID,
+                                                   terminalSequence: 2, context: fixture.context)
+        detail = try fixture.refresh()
+        XCTAssertEqual(detail.submissionPhase?.phase, .sending, "Accepted No comment keeps Sending.")
+        XCTAssertTrue(detail.showsNoCommentRow)
+
+        try finish(fixture, intentID: receipt.intentID, state: .noComment)
+        detail = try fixture.refresh()
+        XCTAssertEqual(fixture.live.request(for: fixture.key)?.lifecycleStatus, .noComment)
+        XCTAssertFalse(detail.submissionDisplay.isSendingAny)
+    }
+
+    /// The server's final state for the message, carrying this operation's answer.
+    @MainActor
+    private func finish(_ fixture: LiveFixture, intentID: UUID, state: TerminalState) throws {
+        let answer = try XCTUnwrap(fixture.domain.snapshot(context: fixture.context).intents[intentID]).answer
+        _ = try fixture.domain.apply(RelayEvent(sequence: 2,
+            body: .terminal(fixture.key, state, state == .noComment ? nil : answer)), context: fixture.context)
     }
 
     @MainActor

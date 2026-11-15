@@ -13,14 +13,15 @@ struct SubmissionControlPhase: Equatable, Sendable {
     enum RefusalReason: Equatable, Sendable { case changed, closed, retracted }
 
     enum Phase: Equatable, Sendable {
-        /// Saved or in flight, with no server result yet.
+        /// Not final yet: saved, in flight, recovering after a dropped
+        /// connection, or accepted while the message's final state is still
+        /// on its way. It never claims more than the server has confirmed.
         case sending
-        /// The server accepted this operation.
+        /// The message reached its final state with this answer.
         case confirmed
-        /// It did not go through, or the outcome is unknown after a dropped
-        /// connection. Retry resends the same operation when `retryable`.
-        /// `editable` only where the server definitively did not take it, so
-        /// a fresh operation cannot record a second answer.
+        /// The store gave up on it. Retry resends the same operation when
+        /// `retryable`. `editable` only where the server definitively did not
+        /// take it, so a fresh operation cannot record a second answer.
         case failed(retryable: Bool, editable: Bool)
         /// The server refused it for a reason a retry cannot fix.
         case refused(RefusalReason)
@@ -62,8 +63,11 @@ struct SubmissionControlPhase: Equatable, Sendable {
             let closedOnServer = snapshot.remoteStates[key]?.isTerminal == true
             let phase: Phase = switch submission.disposition {
             case .pending: .sending
-            case .accepted: .confirmed
-            case .lost: .failed(retryable: !closedOnServer, editable: false)
+            // Accepted is not final: keep Sending until the answered state arrives.
+            case .accepted: closedOnServer ? .confirmed : .sending
+            // A dropped connection leaves the outcome unknown and the store
+            // still recovering the same operation, so it is still sending.
+            case .lost: closedOnServer ? .refused(.closed) : .sending
             case .failed, .unsupported: .failed(retryable: !closedOnServer, editable: !closedOnServer)
             case .repairRequired: .failed(retryable: false, editable: false)
             case .staleRevision: .refused(.changed)
