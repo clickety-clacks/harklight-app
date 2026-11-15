@@ -540,6 +540,8 @@ struct InboxRequestRow: Identifiable {
     var declaredMessageType: MessageTypeValue? = nil
     var declaredMessageKind: MessageKindValue? = nil
     var progress: MessageProgress? = nil
+    // Server classification survives the optional Progress presentation.
+    var hasProgressMarker = false
     var canMarkSeen = false
     var canNoComment = false
     var noCommentUnavailable = false

@@ -49,6 +49,7 @@ final class ProgressInboxTests: XCTestCase {
         XCTAssertNotNil(live.request(for: key)?.messageProgress, "The flag must not delete Server data")
         let ordinary = try XCTUnwrap(live.inboxRow(for: key))
         XCTAssertNil(ordinary.progress, "OFF restores ordinary row rendering and controls")
+        XCTAssertTrue(ordinary.hasProgressMarker, "Server badge classification survives the UI flag")
         XCTAssertEqual(ordinary.title, "Work in progress")
         XCTAssertEqual(ordinary.bodyText, "Keep this message visible")
         let offItems = live.inboxRows.map(InboxItem.request)
@@ -65,7 +66,7 @@ final class ProgressInboxTests: XCTestCase {
             XCTAssertEqual(selections, [.request(key)], "OFF restores both old-server and server-ranked lists")
         }
         XCTAssertEqual(InboxBadge.count(requests: live.inboxRows, samples: SampleLibrary(),
-                                       showsLocalExamples: false), 1)
+                                       showsLocalExamples: false), 0, "Visible Progress rows stay excluded to match the Server APNs badge")
 
         flags.replace(RemoteFeatureFlagSnapshot(field: .object([
             JSONMember("progress_inbox", .bool(true))

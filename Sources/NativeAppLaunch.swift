@@ -2476,6 +2476,7 @@ final class LivePresentationStore {
             declaredMessageType: request.messageType,
             declaredMessageKind: request.messageKind,
             progress: progress,
+            hasProgressMarker: request.messageProgress != nil,
             canMarkSeen: progress == nil && canSendToCurrentServer &&
                 !retracted && request.lifecycleStatus == .open &&
                 request.intentReceipt == nil && request.informationalSeenStatus == .available,
