@@ -31,15 +31,32 @@ struct SubmissionControlPhase: Equatable, Sendable {
 
     static func project(snapshot: AttentionStoreSnapshot) -> [RequestKey: Self] {
         var result: [RequestKey: Self] = [:]
+        func kind(of submission: Submission) -> Kind {
+            if submission.isNoComment { return .noComment }
+            if snapshot.requests[submission.requestKey]?.hasExplicitInformationalSeenAction == true { return .seen }
+            return .answer
+        }
+        // Fixture builds keep their sends in fixture sessions rather than the
+        // relay outbox; the same phases apply.
+        for (key, session) in snapshot.fixtureSessions {
+            switch session.lifecycle {
+            case .open:
+                continue
+            case let .pending(submission):
+                result[key] = Self(kind: kind(of: submission), phase: .sending,
+                                   operationID: submission.operationID,
+                                   since: submission.submittedAt ?? .distantPast)
+            case let .terminal(terminal, submission):
+                let ownAnswer = (terminal.state == .answered || terminal.state == .noComment) &&
+                    terminal.ownOutcome == .accepted
+                result[key] = Self(kind: kind(of: submission),
+                                   phase: ownAnswer ? .confirmed : .refused(.closed),
+                                   operationID: submission.operationID,
+                                   since: submission.submittedAt ?? .distantPast)
+            }
+        }
         for submission in snapshot.intents.values {
             let key = submission.requestKey
-            let kind: Kind = if submission.isNoComment {
-                .noComment
-            } else if snapshot.requests[key]?.hasExplicitInformationalSeenAction == true {
-                .seen
-            } else {
-                .answer
-            }
             let closedOnServer = snapshot.remoteStates[key]?.isTerminal == true
             let phase: Phase = switch submission.disposition {
             case .pending: .sending
@@ -56,7 +73,7 @@ struct SubmissionControlPhase: Equatable, Sendable {
                     .refused(.closed)
                 }
             }
-            let candidate = Self(kind: kind, phase: phase, operationID: submission.operationID,
+            let candidate = Self(kind: kind(of: submission), phase: phase, operationID: submission.operationID,
                                  since: submission.submittedAt ?? .distantPast)
             if let previous = result[key] {
                 // The most recent operation from this message wins; equal

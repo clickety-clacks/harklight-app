@@ -133,10 +133,10 @@ final class SampleResponse {
                 localStatus = "No comment was not accepted"
             } else {
                 switch request.intentReceipt?.localState {
-                case .some(.refusedByRetraction): localStatus = "Answer refused · request retracted"
+                case .some(.refusedByRetraction): localStatus = "This message was retracted."
                 case .some(.terminalUnconfirmed): localStatus = "Submission unconfirmed · saved draft retained"
                 case .some(.notDelivered): localStatus = "Answer not delivered"
-                case .some(.refusedClosed): localStatus = "This request was already closed"
+                case .some(.refusedClosed): localStatus = "This message was closed."
                 case .some(.refusedNotFound): localStatus = "This request is no longer available"
                 case .some(.unsupported): localStatus = "No comment was not accepted"
                 case .some(.repairRequired): localStatus = "Answer needs recovery"

@@ -2444,10 +2444,10 @@ final class LivePresentationStore {
         return switch state {
         case .durable, .queuedForRelay: nil
         case .accepted: "Answer accepted"
-        case .refusedByRetraction: "Answer refused · request retracted"
+        case .refusedByRetraction: "This message was retracted."
         case .terminalUnconfirmed: "Submission unconfirmed · saved draft retained"
         case .notDelivered: "Answer not delivered"
-        case .refusedClosed: "This request was already closed"
+        case .refusedClosed: "This message was closed."
         case .refusedNotFound: "This request is no longer available"
         case .unsupported: "No comment was not accepted"
         case .repairRequired: "Answer needs recovery"

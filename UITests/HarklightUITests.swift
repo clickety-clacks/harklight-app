@@ -92,9 +92,14 @@ final class HarklightUITests: XCTestCase {
                           "The reply stays visibly pending rather than appearing accepted.")
             row.tap()
         }
-        XCTAssertTrue(lifecycle.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertEqual(lifecycle.label, "Pending",
-                       "A local submission remains pending until its fixture outcome is explicitly simulated.")
+        // The send itself shows the state: the check spins until the outcome
+        // is simulated, with no Pending line under the answers.
+        let sending = app.buttons["request-finish"]
+        XCTAssertTrue(sending.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertEqual(sending.label, "Sending",
+                       "A local submission keeps sending until its fixture outcome is explicitly simulated.")
+        XCTAssertFalse(sending.isEnabled)
+        XCTAssertFalse(lifecycle.exists, "No Pending status line under the answers.")
         XCTAssertTrue(app.buttons["fixture-outcome-menu"].waitForExistence(timeout: 5),
                       "The local outcome simulation appears on the ordinary pending fixture card.")
         assertExactFacilitiesReceipt(in: app, point: submittedPoint)
@@ -132,8 +137,10 @@ final class HarklightUITests: XCTestCase {
         let detail = app.scrollViews["message-card-scroll"]
         if listVisibleAlongsideDetail {
             XCTAssertTrue(detail.waitForExistence(timeout: 5), app.debugDescription)
-            XCTAssertTrue(lifecycle.waitForExistence(timeout: 5), app.debugDescription)
-            XCTAssertEqual(lifecycle.label, "Pending")
+            let sending = app.buttons["request-finish"]
+            XCTAssertTrue(sending.waitForExistence(timeout: 5), app.debugDescription)
+            XCTAssertEqual(sending.label, "Sending")
+            XCTAssertFalse(lifecycle.exists, "No Pending status line under the answers.")
         } else {
             XCTAssertTrue(detail.waitForNonExistence(timeout: 5),
                           "The single-pane submit returns to the list even while refresh is running.")
@@ -858,16 +865,16 @@ final class HarklightUITests: XCTestCase {
         let detail = app.scrollViews["message-card-scroll"]
         if listVisibleAlongsideDetail {
             XCTAssertTrue(detail.waitForExistence(timeout: 5), app.debugDescription)
-            XCTAssertTrue(status.waitForExistence(timeout: 5), app.debugDescription)
+            // The check itself spins while the local answer is sending.
+            XCTAssertTrue(finish.waitForExistence(timeout: 5), app.debugDescription)
+            XCTAssertEqual(finish.label, "Sending",
+                           "The local answer keeps sending until its fixture outcome is explicitly simulated.")
         } else {
             XCTAssertTrue(detail.waitForNonExistence(timeout: 5),
                           "A successful checkmark submission returns single-pane detail immediately.")
             XCTAssertTrue(workspaceTab("Inbox", in: app).isSelected, app.debugDescription)
         }
-        if status.exists {
-            XCTAssertEqual(status.label, "Pending",
-                           "The local answer stays pending until its fixture outcome is explicitly simulated.")
-        }
+        XCTAssertFalse(status.exists, "No Pending status line under the answers.")
         return selectedPoint
     }
 

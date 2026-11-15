@@ -1497,6 +1497,11 @@ struct LiveRequestDetail: View {
     }
 
     private func finishSeenAction() {
+        // A failed Seen resends the same operation.
+        if let retry = submissionDisplay.retryAction(.seen) {
+            retry()
+            return
+        }
         if let localExample {
             guard localExample.canFinishLocally else { return }
             localExample.finishLocally()
@@ -1535,8 +1540,15 @@ struct LiveRequestDetail: View {
                     Text("Seen")
                 }
                     .padding(.horizontal, 6)
+            } else if seenActionIsPending || submissionDisplay.isSending(.seen) {
+                // The check spins while Seen is sending.
+                ProgressView()
+                    .tint(HarklightDesignSystem.palette(for: colorScheme).text)
+            } else if submissionDisplay.isFailed(.seen) {
+                Image(systemName: "exclamationmark.circle")
+                    .foregroundStyle(HarklightDesignSystem.palette(for: colorScheme).coral)
             } else {
-                Image(systemName: seenActionIsPending ? "clock" : "checkmark")
+                Image(systemName: "checkmark")
                     .foregroundStyle(seenToolbarTint == nil
                                      ? HarklightDesignSystem.palette(for: colorScheme).text
                                      : HarklightDesignSystem.palette(for: colorScheme).onBeam)
@@ -1691,7 +1703,7 @@ struct LiveRequestDetail: View {
                                  answeredFromThisDevice: Bool,
                                  localState: LocalIntentState? = nil,
                                  answerNotDelivered: Bool = false) -> String? {
-        if localState == .refusedClosed { return "This request was already closed" }
+        if localState == .refusedClosed { return "This message was closed." }
         if localState == .refusedNotFound { return "This request is no longer available" }
         if answerNotDelivered || localState == .notDelivered { return "Answer not delivered" }
         if localState == .terminalUnconfirmed ||

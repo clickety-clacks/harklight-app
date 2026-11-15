@@ -124,7 +124,7 @@ final class InboxStockTabsUITests: XCTestCase {
 
         let notSentArea = app.descendants(matching: .any)["awaiting-reply-area-sample-textChoice-0"]
         XCTAssertTrue(notSentArea.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(notSentArea.label.contains("Not sent"), notSentArea.label)
+        XCTAssertTrue(notSentArea.label.contains("Did not send"), notSentArea.label)
         XCTAssertLessThan(awaitingArea.frame.minY, notSentArea.frame.minY,
                           "The more recently sent item is first in the New area.")
 
