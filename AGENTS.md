@@ -7,7 +7,8 @@ Read [HARKLIGHT_GUIDANCE.md](HARKLIGHT_GUIDANCE.md) before adding, changing, or 
 `main` is the only long-lived branch. Everything is built on it, and every release is tagged from it.
 
 - Work on a short-lived branch cut from current `main`. Merge it back within a day or two through a pull request. If a change can't land that quickly, make it smaller, or land it behind a feature flag (below). Never keep it on a long-running branch.
-- Keep `main` releasable at every commit. A pull request merges only when CI passes and an independent reviewer who didn't write it has reviewed it clean.
+- Keep `main` releasable at every commit. A pull request merges to `main` when its checks show no failure that `main` doesn't already have. Don't hold it for review: independent review by someone who didn't write it runs alongside the work, and any finding gets fixed in a follow-up pull request. Hold work back only when the next step would be hard to undo or would reach real users.
+- Where hosted CI is queued and not running, an exact-head local build plus focused tests through `Scripts/verify.sh` stands in for it. A job that runs and fails on something new blocks the merge.
 - Rebase or merge `main` into your branch often, so it never drifts far from `main`.
 - Delete the branch when it merges.
 - Don't create release, candidate, integration or notes branches. A release is a tag on a `main` commit, and its release notes land on `main` like any other change.
@@ -16,7 +17,7 @@ Read [HARKLIGHT_GUIDANCE.md](HARKLIGHT_GUIDANCE.md) before adding, changing, or 
 ## Builds and releases
 
 - Every merge to `main` triggers an Xcode Cloud build that goes to internal TestFlight automatically. There is nothing to start and nothing to approve. Agents never start Xcode Cloud workflows by hand.
-- "Release through CI with no human approval" means this build path only: the Xcode Cloud internal TestFlight build on every merge to `main`. App Store or external TestFlight distribution is a separate step outside this process and needs its own existing authority; this document grants none.
+- Internal TestFlight builds, made automatically on every merge to `main`, follow the owner's ship-to-me rule and are not a release. A release for this app means App Store or public/external TestFlight distribution. It is a separate step outside the automatic build path and needs its own existing authority; this document grants none. Every change in a release must have a clean independent review before that release is tagged.
 - If a shipped build is bad, ship a fix or revert from `main` as the next build. Don't hand-patch a build.
 
 ## Large features behind a feature flag
@@ -26,6 +27,7 @@ A feature too big for one short-lived branch lands on `main` in small, reviewed 
 - **Off by default.** A new flag ships off, so `main` and every build behave exactly as before until the flag is turned on.
 - **One flag per feature.** A feature that seems to need many flags is usually better split into smaller features.
 - **The old path keeps working.** While the flag is off, existing behavior must be unchanged and still covered by the checks. Test both the on and off states of anything the flag touches.
+- **Off means the previous behavior, never missing content.** A flag turned off restores the old behavior; it never hides data. For example, with `progress_inbox` off, Progress messages appear as ordinary messages in the normal list.
 - **Recorded.** Every flag has a row in the register below: name, owner, default, and removal condition.
 - **Turning it on is a reviewed change.** Making a flag default to on is its own small pull request.
 - **Removal is part of the feature.** Once the feature is accepted, delete the flag, the off path and its tests in a follow-up pull request, and remove its register row. The feature isn't done until its flag is gone.
