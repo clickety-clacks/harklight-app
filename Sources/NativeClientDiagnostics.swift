@@ -238,6 +238,7 @@ final class NativeClientDiagnosticJournal {
             if let tag = event.requestTag { fields.append("request_tag_sha256=\(tag)") }
             if let revision = event.requestRevision { fields.append("request_revision=\(revision)") }
             if let receipt = event.receiptState { fields.append("receipt_state=\(receipt.rawValue)") }
+            if let requestType = event.relayRequestType { fields.append("relay_request_type=\(requestType.rawValue)") }
             if let recovery = event.localRecovery {
                 fields.append("kept_operations=\(recovery.keptOperations)")
                 fields.append("dropped_entries=\(recovery.droppedEntries)")

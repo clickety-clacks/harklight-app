@@ -338,7 +338,13 @@ final class NativeGuidedJoinCoordinator {
     @discardableResult
     func retryAutomaticallyIfNeeded() async -> Bool {
         guard shouldAutomaticallyRetry() else { return false }
-        await retry()
+        // An approved account still finishing has no join attempt left to
+        // refresh; retrying means reconnecting that exact approved record.
+        if screen == .approvedFinishing, currentAccount?.isApproved == true {
+            await retryApprovedConnection()
+        } else {
+            await retry()
+        }
         return true
     }
 

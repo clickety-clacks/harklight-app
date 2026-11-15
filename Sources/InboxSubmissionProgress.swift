@@ -89,13 +89,16 @@ struct InboxSubmissionProgress: Equatable, Sendable {
             case .pending:
                 state = .awaiting
             case .lost:
-                // The outcome is unknown after a dropped connection: Not sent
-                // with Retry, matching the control. Retry resends the same
-                // operation, and a replay showing it arrived settles it.
-                state = .notSent
+                // Still on its way, matching the control: a dropped connection
+                // leaves the same operation recovering. Not sent is only for a
+                // send the store gave up on. One retired by a newer version of
+                // the message is history, not in flight.
+                guard snapshot.remoteStates[key]?.isTerminal != true,
+                      !SubmissionControlPhase.isRetiredByNewerVersion(submission, in: snapshot) else { continue }
+                state = .awaiting
             case .accepted:
-                // Answers stop waiting when this operation is confirmed by the
-                // Server. Unlike chat, they do not wait for an origin reply.
+                // Durable acceptance is the server's confirmation; answers do
+                // not wait for an origin reply or the message's final state.
                 continue
             case .terminal, .refusedClosed, .refusedNotFound, .staleRevision, .refusedByRetraction:
                 // Not a Retry case: the message's own closed, retracted or

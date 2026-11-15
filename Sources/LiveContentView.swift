@@ -621,11 +621,21 @@ struct LiveContentView: View {
                 clearRetractedRequest: { store.clearRetracted($0) },
                 requestDetail: { key, context in
                     if let request = store.request(for: key) {
+                        if let progress = request.messageProgress {
+                            if request.isResolved || store.inboxRow(for: key)?.isRetracted == true {
+                                ContentUnavailableView("Progress unavailable", systemImage: "checkmark.circle")
+                            } else {
+                                ProgressMessageDetail(title: request.title?.rawValue ?? "Message",
+                                    sender: request.senderDisplayName?.rawValue ?? key.senderID.rawValue,
+                                    bodyText: request.body?.rawValue, progress: progress)
+                            }
+                        } else {
                         LiveRequestDetail(request: request, store: store, context: context,
                             fixtureStore: fixtureStore,
                             testNotificationRouter: testNotificationRouter,
                             testOpenForegroundChatIndicator: testOpenForegroundChatIndicator,
                             testConversationSheetDidAppear: testConversationSheetDidAppear)
+                        }
                     } else {
                         ContentUnavailableView("Request unavailable", systemImage: "questionmark.folder")
                     }
@@ -1628,7 +1638,17 @@ struct LiveRequestDetail: View {
     }
 
     private var showsAnsweredConfirmation: Bool {
-        answerIsComplete && !isSupersedesReadOnly
+        (answerIsComplete || isDurablyAccepted(.answer)) && !isSupersedesReadOnly
+    }
+
+    /// The server durably accepted this message's answer or No comment: that
+    /// is its confirmation, so the control becomes its card without waiting
+    /// for the final state. A later refusal changes the phase and reverts it.
+    func isDurablyAccepted(_ kind: SubmissionControlPhase.Kind) -> Bool {
+        guard localExample == nil, request.informationalSeenStatus == nil,
+              !storePresentationSnapshot.isRetracted,
+              submissionPhase?.kind == kind else { return false }
+        return submissionPhase?.phase == .confirmed
     }
 
     /// A custom answer form that has been answered or got No comment shows its
@@ -1665,7 +1685,8 @@ struct LiveRequestDetail: View {
 
     private var showsNoCommentConfirmation: Bool {
         Self.showsNoCommentConfirmation(lifecycleStatus: request.lifecycleStatus,
-                                       isSupersedesReadOnly: isSupersedesReadOnly)
+                                       isSupersedesReadOnly: isSupersedesReadOnly) ||
+            (isDurablyAccepted(.noComment) && !isSupersedesReadOnly)
     }
 
     static func showsNoCommentConfirmation(lifecycleStatus: AppLifecycleStatus,
