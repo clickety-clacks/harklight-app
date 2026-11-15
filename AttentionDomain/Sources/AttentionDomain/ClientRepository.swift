@@ -119,7 +119,14 @@ public final class FilePendingActionPersistence: PendingActionPersistence, @unch
                 switch try? PropertyListDecoder().decode(RetiredUnsentInput.self, from: retiredBytes) {
                 case let input? where input.profileIdentity == identity:
                     var pending = ClientSessionState(profileIdentity: identity)
-                    pending.intents = input.intents.values
+                    // Only the unsent queue moves across. An accepted, refused
+                    // or settled intent is a Server fact, rebuilt from the Server.
+                    pending.intents = input.intents.values.filter {
+                        switch $0.value.disposition {
+                        case .pending, .lost: true
+                        default: false
+                        }
+                    }
                     pending.intentByRequest = salvagedActiveIndex(input.intentByRequest.values,
                                                                  operations: pending.intents, cancelled: nil)
                     pending.drafts = input.drafts.values
