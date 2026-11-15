@@ -351,6 +351,7 @@ final class ReplyEditorDraftSession {
     }
 }
 
+@MainActor
 private func liveChoiceButton<Label: View>(style: MessageChoiceStyle?,
                                            selected: Bool = false,
                                            perform action: @escaping () -> Void,
