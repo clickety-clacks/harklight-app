@@ -1009,6 +1009,12 @@ struct ConversationState: Codable, Equatable {
             ? (chatReadPositions?[thread.request] ?? 0) : nil
     }
 
+    /// A local example has no server, so its own store is the read authority.
+    mutating func recordLocalExampleReadPosition(for request: RequestKey, position: UInt64) {
+        guard position > (chatReadPositions?[request] ?? 0) else { return }
+        mergeReadPosition(request, position: position)
+    }
+
     private func applyThreadFact(_ event: ConversationEvent, to thread: inout ConversationThread) throws {
         let binding = event.binding
         switch event.fact {

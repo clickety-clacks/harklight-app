@@ -242,6 +242,13 @@ public final class ClientRepository: @unchecked Sendable {
         conversation.cursor = cached.conversationCursor
         conversation.events = cached.conversationEvents
         conversation.threads = cached.conversations
+        if let confirmed = cached.chatReadPositions {
+            // Thread read positions come from the confirmed map; queued reads
+            // are shown from the pending-action queue.
+            for key in Array(conversation.threads.keys) {
+                conversation.threads[key]?.accountReadThroughConversationSequence = confirmed[key] ?? 0
+            }
+        }
         conversation.chatReadPositions = cached.chatReadPositions
         conversation.chatReadPositionSupport = cached.chatReadPositions != nil
         next.server.conversation = conversation
@@ -3180,8 +3187,16 @@ public final class ClientRepository: @unchecked Sendable {
                 previousRevision: previousRevision, revision: state.revision, didCommit: false)
         }
 
-        let pending = conversation.prepareReadPosition(for: request, operationID: UUID(),
-            position: turn.conversationSequence ?? 0)
+        let pending: PendingConversationReadPosition?
+        if context.transportMode == .fixture {
+            // A local example has no server, so its own store records the read.
+            conversation.recordLocalExampleReadPosition(for: request,
+                position: turn.conversationSequence ?? 0)
+            pending = nil
+        } else {
+            pending = conversation.prepareReadPosition(for: request, operationID: UUID(),
+                position: turn.conversationSequence ?? 0)
+        }
         if conversation == (state.conversation ?? ConversationState()) {
             return ConversationReadUpdate(pendingPosition: pending,
                 thread: conversation.threads[request], previousRevision: previousRevision,
@@ -4212,6 +4227,15 @@ private struct ClientSessionState {
         get {
             guard var value = server.conversation else { return nil }
             value.pendingChatReadPositions = pendingReadPositions
+            // A queued read shows at once. The server value returns only if the
+            // read leaves the queue without the server accepting it.
+            for (key, pending) in pendingReadPositions where value.chatReadPositionSupport == true {
+                guard var thread = value.threads[key] else { continue }
+                thread.accountReadThroughConversationSequence = max(
+                    thread.accountReadThroughConversationSequence ?? 0,
+                    pending.readThroughConversationSequence)
+                value.threads[key] = thread
+            }
             for key in Array(value.threads.keys) {
                 guard let queued = pendingConversations[key] else { continue }
                 value.threads[key]?.drafts = queued.drafts
@@ -4225,6 +4249,15 @@ private struct ClientSessionState {
             guard var value = newValue else {
                 server.conversation = nil
                 return
+            }
+            // Keep the getter's queued-read projection out of the server cache.
+            let projectedReads = Set(pendingReadPositions.keys)
+                .union((value.pendingChatReadPositions ?? [:]).keys)
+            if value.chatReadPositionSupport == true {
+                for key in projectedReads where value.threads[key] != nil {
+                    value.threads[key]?.accountReadThroughConversationSequence =
+                        value.chatReadPositions?[key] ?? 0
+                }
             }
             pendingReadPositions = value.pendingChatReadPositions ?? [:]
             value.pendingChatReadPositions = nil

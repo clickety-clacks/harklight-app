@@ -492,8 +492,9 @@ final class ServerCacheReplacementTests: XCTestCase {
         try repository.finishConversationReplay(at: 1, chatReadPositions: [], context: context)
         let pending = try XCTUnwrap(repository.markConversationRead(key, through: turn.id, context: context))
         var thread = try XCTUnwrap(repository.conversationSnapshot(context: context).threads[key])
-        XCTAssertEqual(thread.accountReadThroughConversationSequence, 0)
-        XCTAssertTrue(thread.hasUnreadAgentReply)
+        XCTAssertEqual(thread.accountReadThroughConversationSequence, 1,
+                       "A queued read shows at once while the server confirms it.")
+        XCTAssertFalse(thread.hasUnreadAgentReply)
 
         try repository.acceptConversationReadPosition(pending, serverPosition: 1, context: context)
         thread = try XCTUnwrap(repository.conversationSnapshot(context: context).threads[key])
@@ -502,6 +503,50 @@ final class ServerCacheReplacementTests: XCTestCase {
         thread = try XCTUnwrap(repository.conversationSnapshot(context: context).threads[key])
         XCTAssertEqual(thread.accountReadThroughConversationSequence, 0)
         XCTAssertTrue(thread.hasUnreadAgentReply, "No local read maximum overrides the server snapshot.")
+    }
+
+    func testQueuedReadStaysOutOfTheServerCacheAndRollsBackWhenRetired() throws {
+        let context = context()
+        let key = key("chat", context: context)
+        let persistence = MemoryPendingActionPersistence()
+        let repository = try ClientRepository(context: context, persistence: persistence)
+        _ = try repository.apply(RelayEvent(sequence: 1,
+            body: .delivery(request(key, title: "Chat"), .message),
+            conversation: RelayConversationMetadata(revision: 1, sessionHandle: ExactText("session"))), context: context)
+        let binding = ConversationBinding(request: key, revision: 1)
+        let turn = ConversationTurn(id: ExactText("reply"), binding: binding, author: .origin,
+            sessionHandle: ExactText("session"), text: ExactText("Reply"), kind: .reply)
+        _ = try repository.applyConversation(ConversationEvent(sequence: 1,
+            binding: binding, fact: .turn(turn)), context: context)
+        try repository.finishConversationReplay(at: 1, chatReadPositions: [], context: context)
+        let pending = try XCTUnwrap(repository.markConversationRead(key, through: turn.id, context: context))
+
+        func cacheRoundTrip(_ source: ClientRepository) throws -> (ServerStateCacheSnapshot, ClientRepository) {
+            let cached = ServerStateCacheSnapshot.make(identity: context.identity,
+                from: try source.snapshot(context: context),
+                conversations: try source.conversationSnapshot(context: context))
+            let restored = try ClientRepository(context: context, persistence: persistence)
+            try restored.restoreCachedServerState(try cached.attentionDomainState(for: context.identity),
+                                                  context: context)
+            return (cached, restored)
+        }
+
+        let (cached, restored) = try cacheRoundTrip(repository)
+        XCTAssertEqual(cached.conversations.first?.thread.accountReadThroughConversationSequence, 0,
+                       "The server cache keeps only the confirmed read position.")
+        XCTAssertEqual(cached.chatReadPositions?[key] ?? 0, 0)
+        var thread = try XCTUnwrap(restored.conversationSnapshot(context: context).threads[key])
+        XCTAssertFalse(thread.hasUnreadAgentReply, "After restart the queued read still shows from the queue.")
+
+        try restored.retireConversationReadPosition(pending, context: context)
+        thread = try XCTUnwrap(restored.conversationSnapshot(context: context).threads[key])
+        XCTAssertTrue(thread.hasUnreadAgentReply, "A refused read restores the unread badge.")
+        XCTAssertEqual(thread.accountReadThroughConversationSequence, 0)
+
+        let (_, relaunched) = try cacheRoundTrip(restored)
+        thread = try XCTUnwrap(relaunched.conversationSnapshot(context: context).threads[key])
+        XCTAssertTrue(thread.hasUnreadAgentReply, "A restart after the refusal keeps the reply unread.")
+        XCTAssertTrue(try relaunched.conversationSnapshot(context: context).pendingChatReadPositions.isEmpty)
     }
 
     private func context() -> ProfileContext {
