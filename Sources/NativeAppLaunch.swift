@@ -1244,6 +1244,7 @@ private struct PreparedLivePresentationInitialState: Sendable {
     let requestsByKey: [RequestKey: PresentedRequest]
     let conversationThreads: [RequestKey: ConversationThread]
     let submissionProgress: [RequestKey: InboxSubmissionProgress]
+    let submissionPhases: [RequestKey: SubmissionControlPhase]
     let conversationFiles: ConversationFileStorage?
     let messageLedger: NewMessageAreaLedger
     let replyLedger: ReplyItemLedger
@@ -1267,6 +1268,7 @@ private struct PreparedLivePresentationUpdate: Sendable {
     let requestsByKey: [RequestKey: PresentedRequest]
     let conversationThreads: [RequestKey: ConversationThread]
     let submissionProgress: [RequestKey: InboxSubmissionProgress]
+    let submissionPhases: [RequestKey: SubmissionControlPhase]
     let messageArea: VersionedPreparedNewMessageAreaReconciliation?
     let replyItemArea: VersionedPreparedReplyItemAreaReconciliation?
     let failedResponseWarnings: [RequestKey: LivePresentationStore.FailedResponseWarning]
@@ -1324,6 +1326,9 @@ final class LivePresentationStore {
     }
 
     private(set) var submissionProgress: [RequestKey: InboxSubmissionProgress] = [:]
+    /// Each message's latest answer, No comment or Seen, for the control that
+    /// sent it. A pure projection of the store, refreshed with submissionProgress.
+    private(set) var submissionPhases: [RequestKey: SubmissionControlPhase] = [:]
     private(set) var conversationThreads: [RequestKey: ConversationThread]
     @ObservationIgnored private var pendingConversationTextByBinding: [ConversationBinding: String] = [:]
     private(set) var conversationError: String?
@@ -1587,6 +1592,7 @@ final class LivePresentationStore {
                 conversationThreads: conversationThreads,
                 submissionProgress: InboxSubmissionProgress.project(
                     snapshot: attentionSnapshot, threads: conversationThreads),
+                submissionPhases: SubmissionControlPhase.project(snapshot: attentionSnapshot),
                 conversationFiles: conversationFiles,
                 messageLedger: messageLedger, replyLedger: replyLedger,
                 preparedMessageArea: preparedMessageArea, preparedReplyArea: preparedReplyArea,
@@ -1652,9 +1658,15 @@ final class LivePresentationStore {
         self.requestsByKey = preparedInitialState?.requestsByKey ??
             Dictionary(uniqueKeysWithValues: snapshot.requests.map { ($0.key, $0) })
         self.conversationThreads = conversationThreads
-        self.submissionProgress = try preparedInitialState?.submissionProgress ??
-            InboxSubmissionProgress.project(snapshot: store.snapshot(context: context),
-                                            threads: conversationThreads)
+        if let preparedInitialState {
+            self.submissionProgress = preparedInitialState.submissionProgress
+            self.submissionPhases = preparedInitialState.submissionPhases
+        } else {
+            let attentionSnapshot = try store.snapshot(context: context)
+            self.submissionProgress = InboxSubmissionProgress.project(snapshot: attentionSnapshot,
+                                                                      threads: conversationThreads)
+            self.submissionPhases = SubmissionControlPhase.project(snapshot: attentionSnapshot)
+        }
         self.conversationProjectionRevision = snapshot.revision
         self.conversationFiles = conversationFiles
         self.selectedRequestKey = nil
@@ -3390,9 +3402,10 @@ final class LivePresentationStore {
         if !locallyReconciledRead {
             do {
                 conversationThreads = try port.conversations(context: port.context).threads
+                let attentionSnapshot = try attentionStore.snapshot(context: profileContext)
                 submissionProgress = InboxSubmissionProgress.project(
-                    snapshot: try attentionStore.snapshot(context: profileContext),
-                    threads: conversationThreads)
+                    snapshot: attentionSnapshot, threads: conversationThreads)
+                submissionPhases = SubmissionControlPhase.project(snapshot: attentionSnapshot)
                 conversationProjectionRevision = snapshot.revision
             }
             catch {
@@ -3493,6 +3506,7 @@ final class LivePresentationStore {
                     conversationThreads: conversationThreads,
                     submissionProgress: InboxSubmissionProgress.project(
                         snapshot: attentionSnapshot, threads: conversationThreads),
+                    submissionPhases: SubmissionControlPhase.project(snapshot: attentionSnapshot),
                     messageArea: messageArea, replyItemArea: replyItemArea,
                     failedResponseWarnings: failedResponseWarnings,
                     warningGeneration: warningGeneration,
@@ -3542,6 +3556,7 @@ final class LivePresentationStore {
             } else {
                 conversationThreads = prepared.conversationThreads
                 submissionProgress = prepared.submissionProgress
+                submissionPhases = prepared.submissionPhases
                 conversationProjectionRevision = snapshot.revision
             }
             locallyReconciledConversationReadRevisions = Set(
