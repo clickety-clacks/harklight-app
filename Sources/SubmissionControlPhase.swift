@@ -135,18 +135,20 @@ extension EnvironmentValues {
     @Entry var harklightSubmissionDisplay = SubmissionDisplay()
 }
 
-/// UI-test hook: `--harklight-test-submission-phase=<messageID>:<kind>:<phase>`
-/// stands in for the store's projection on one message, so each state can be
+/// UI-test hook: `--harklight-test-submission-phase=<messageID>:<kind>:<phase>`,
+/// repeatable, stands in for the store's projection on that message, so each state can be
 /// captured on fixture builds. Kinds: answer, noComment, seen. Phases:
-/// sending, confirmed, failed, refusedChanged. Inactive in normal launches.
+/// sending, confirmed, failed, refusedChanged. Debug builds only.
 enum SubmissionPhaseTestHook {
+    private static let testOperationID = UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1))
+
     static func phase(for key: RequestKey) -> SubmissionControlPhase? {
+        #if DEBUG
         let prefix = "--harklight-test-submission-phase="
-        guard let argument = ProcessInfo.processInfo.arguments.first(where: { $0.hasPrefix(prefix) }) else {
-            return nil
-        }
-        let parts = argument.dropFirst(prefix.count).split(separator: ":").map(String.init)
-        guard parts.count == 3, parts[0] == key.messageID.rawValue else { return nil }
+        guard let parts = ProcessInfo.processInfo.arguments
+            .filter({ $0.hasPrefix(prefix) })
+            .map({ $0.dropFirst(prefix.count).split(separator: ":").map(String.init) })
+            .first(where: { $0.count == 3 && $0[0] == key.messageID.rawValue }) else { return nil }
         let kind: SubmissionControlPhase.Kind
         switch parts[1] {
         case "noComment": kind = .noComment
@@ -160,6 +162,9 @@ enum SubmissionPhaseTestHook {
         case "refusedChanged": phase = .refused(.changed)
         default: phase = .failed(retryable: true, editable: true)
         }
-        return SubmissionControlPhase(kind: kind, phase: phase, operationID: UUID(), since: .distantPast)
+        return SubmissionControlPhase(kind: kind, phase: phase, operationID: testOperationID, since: .distantPast)
+        #else
+        return nil
+        #endif
     }
 }
