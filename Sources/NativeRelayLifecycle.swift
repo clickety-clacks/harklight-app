@@ -1837,10 +1837,14 @@ final class NativeRelayLifecycle {
     private func performRefreshAttempt(generation: UUID,
                                        checkBlockedPush: Bool) async -> NativeRelayRefreshResult {
         var needsReconnect = false
-        // Set after discarding saved Server state, cleared by the next socket
-        // interruption. It stops back-to-back rebuilds when a fresh rebuild
-        // fails again, so that failure is reported instead of looping.
+        // Set after discarding saved Server state. Cleared by a socket
+        // interruption, or when the rebuilt connection got further than the
+        // previous failure (its accepted checkpoint moved the cursor past the
+        // cursor seen at that failure). Only a rebuild that fails again with
+        // no progress is reported; the next foreground, push, network change,
+        // answer or relaunch rebuilds again.
         var rebuiltSavedServerState = false
+        var cursorAtLastRebuild: UInt64 = 0
         while refreshGeneration == generation && !Task.isCancelled {
             do {
                 if needsReconnect { try await reconnect(generation: generation) }
@@ -1855,6 +1859,10 @@ final class NativeRelayLifecycle {
                 guard refreshGeneration == generation, !Task.isCancelled else { return .unavailable }
                 foregroundProgress.recordFailure(error)
                 confirmedRelayContext = nil
+                if rebuiltSavedServerState, let cursor = savedRelayCursor(), cursor > cursorAtLastRebuild {
+                    rebuiltSavedServerState = false
+                    cursorAtLastRebuild = cursor
+                }
                 if !rebuiltSavedServerState, NativeRelayCoreError.isInvalidSavedServerState(error),
                    discardSavedServerState(after: error) {
                     // Saved Server state is a cache. Report it, drop it, and
@@ -1878,6 +1886,13 @@ final class NativeRelayLifecycle {
             }
         }
         return .unavailable
+    }
+
+    /// A rebuild starts from cursor 0; only an accepted Server checkpoint or
+    /// replayed events move it, so it measures progress made from the Server.
+    private func savedRelayCursor() -> UInt64? {
+        guard let expected = context, let configuration else { return nil }
+        return try? configuration.store.snapshot(context: expected).cursor
     }
 
     /// Records the validation failure and discards saved Server-owned inbox
