@@ -50,6 +50,12 @@ final class InboxStockTabsUITests: XCTestCase {
         XCTAssertFalse(detail.exists, "Search must not pick its first matching message.")
         row.tap()
         XCTAssertTrue(detail.waitForExistence(timeout: 5), app.debugDescription)
+        if UIDevice.current.userInterfaceIdiom == .pad {
+            // iPad keeps the searched list beside the opened message.
+            XCTAssertTrue(row.isHittable, "The searched list stays beside the opened message.")
+            attachScreenshot("Search list beside explicitly opened detail", from: app)
+            return
+        }
         let back = workspaceBackButton(in: app)
         XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
         back.tap()
@@ -314,6 +320,13 @@ final class InboxStockTabsUITests: XCTestCase {
         XCTAssertTrue(targetHeading.label.contains("Unfamiliar interface"),
                       "The notification target is presented in the visible detail: \(targetHeading.label)")
 
+        if UIDevice.current.userInterfaceIdiom == .pad {
+            // iPad shows the list beside the routed message, with its query cleared.
+            XCTAssertTrue(inboxTab.isSelected, app.debugDescription)
+            XCTAssertTrue(app.descendants(matching: .any)["request-row-facilities-01"]
+                .waitForExistence(timeout: 5), "The routed notification clears the list query.")
+            return
+        }
         let back = workspaceBackButton(in: app)
         XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
         back.tap()
