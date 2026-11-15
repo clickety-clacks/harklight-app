@@ -2036,7 +2036,8 @@ struct InboxList: View {
             return
         }
         if tab == .inbox,
-           ProgressInboxProjection.rows(rows, search: search).contains(where: {
+           ProgressInboxProjection.rows(rows, search: search,
+               enabled: NativeRelayLifecycle.shared.featureFlags.isEnabled(.progressInbox)).contains(where: {
                InboxSelection.request($0.key) == lastViewedSelection
            }) {
             isProgressExpanded = true
@@ -2403,7 +2404,10 @@ struct InboxList: View {
     @ViewBuilder
     private func listContent(for tab: InboxWorkspaceTab,
                              using proxy: ScrollViewProxy) -> some View {
-        let progressRows = tab == .inbox ? ProgressInboxProjection.rows(rows, search: search) : []
+        let progressRows = tab == .inbox
+            ? ProgressInboxProjection.rows(rows, search: search,
+                enabled: NativeRelayLifecycle.shared.featureFlags.isEnabled(.progressInbox))
+            : []
         let shownProgressRows = ProgressInboxProjection.shown(progressRows, expanded: isProgressExpanded)
         let normalEntries = normalListEntries
         let historyIDs = freeHistoryIDs

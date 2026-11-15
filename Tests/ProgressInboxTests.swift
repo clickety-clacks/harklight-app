@@ -19,6 +19,16 @@ final class ProgressInboxTests: XCTestCase {
         return row
     }
 
+    func testRemoteFlagHidesProgressAndRestoresItWithoutChangingOrdinaryRows() throws {
+        let progress = try row("work")
+        let ordinary = try row("ordinary", marked: false)
+        let items = [progress, ordinary].map(InboxItem.request)
+        XCTAssertTrue(ProgressInboxProjection.rows(items, search: "", enabled: false).isEmpty)
+        XCTAssertEqual(ProgressInboxProjection.rows(items, search: "", enabled: true).map(\.key),
+                       [progress.key])
+        XCTAssertEqual(InboxListProjection.filteredRows(items, in: .inbox, search: "").count, 1)
+    }
+
     func testProgressSortsByAgentTimeThenIdentityWithUnavailableLast() throws {
         let a = try row("a")
         let b = try row("b")

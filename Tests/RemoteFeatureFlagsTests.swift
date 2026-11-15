@@ -47,6 +47,20 @@ final class RemoteFeatureFlagsTests: XCTestCase {
             Data("{\"v\":1,\"type\":\"resynced\",\"seq\":0\(member)}".utf8))
     }
 
+    func testApprovedProductionDefaultsAndRemoteProgressOverride() throws {
+        let flags = RemoteFeatureFlags()
+        XCTAssertTrue(flags.isEnabled(.progressInbox))
+        XCTAssertFalse(flags.isEnabled(.serverMatchedPushRouting))
+        XCTAssertFalse(flags.isEnabled(.priorityLevelEditing))
+        let id = UUID()
+        flags.connect(context: context(), connectionID: id)
+        let field = try JSONValue.parse(Data(#"{"progress_inbox":false,"server_matched_push_routing":true,"priority_level_editing":true}"#.utf8))
+        flags.replace(RemoteFeatureFlagSnapshot(field: field), connectionID: id)
+        XCTAssertFalse(flags.isEnabled(.progressInbox))
+        XCTAssertTrue(flags.isEnabled(.serverMatchedPushRouting))
+        XCTAssertTrue(flags.isEnabled(.priorityLevelEditing))
+    }
+
     func testPresentBooleansOverrideBothDefaultsAndUnknownNamesAreHarmless() throws {
         let flags = RemoteFeatureFlags()
         let id = UUID()

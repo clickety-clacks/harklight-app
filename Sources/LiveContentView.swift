@@ -622,7 +622,8 @@ struct LiveContentView: View {
                 requestDetail: { key, context in
                     if let request = store.request(for: key) {
                         if let progress = request.messageProgress {
-                            if request.isResolved || store.inboxRow(for: key)?.isRetracted == true {
+                            if !NativeRelayLifecycle.shared.featureFlags.isEnabled(.progressInbox) ||
+                                request.isResolved || store.inboxRow(for: key)?.isRetracted == true {
                                 ContentUnavailableView("Progress unavailable", systemImage: "checkmark.circle")
                             } else {
                                 ProgressMessageDetail(title: request.title?.rawValue ?? "Message",
