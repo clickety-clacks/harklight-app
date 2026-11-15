@@ -206,6 +206,12 @@
           "symbol": "arrow.triangle.2.circlepath",
           "title": "Replies you read while catching up stay read",
           "detail": "Reading a reply while Harklight is still catching up with the server marks it read at once. The server is told when catch-up finishes. This fix is pending formal testing."
+        },
+        {
+          "id": "message-open-during-catch-up",
+          "symbol": "eye",
+          "title": "Messages you open while catching up count as viewed",
+          "detail": "Opening a message while Harklight is still catching up with the server records your view at once. The server is told when the connection is free. This fix is pending formal testing."
         }
       ]
     }

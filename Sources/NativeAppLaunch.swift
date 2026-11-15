@@ -2495,9 +2495,10 @@ final class LivePresentationStore {
     /// operation is stored before any best-effort relay send; a reconnect will
     /// retry it with the same message identity and revision.
     func reportMessageContentOpened(_ request: PresentedRequest) {
+        // Catch-up never gates the report. The saved open waits in the outbox
+        // until the relay can send it, and the server's reply settles it.
         guard permitsDelivery, !isReadOnly, !isLocalExample,
-              request.requestRevision > 0,
-              canUseCurrentServerState(for: request.key) else { return }
+              request.requestRevision > 0 else { return }
         do {
             _ = try attentionStore.enqueueMessageOpen(request.key,
                                                        requestRevision: request.requestRevision,
