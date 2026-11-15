@@ -484,6 +484,9 @@ public struct PresentationSnapshot: Equatable, Sendable {
     public let inboxViewListItems: [InboxViewListItem]?
     public let inboxFreeOrderVersion: Int?
     public let requests: [PresentedRequest]
+    /// Requests shown as unsupported because their scene could not be
+    /// projected. One such request never stops the rest from showing.
+    public let unprojectableRequestKeys: [RequestKey]
 
     public var showsBasicOrderMarker: Bool {
         inboxViewBasis == ExactText("fallback")
@@ -496,7 +499,8 @@ public struct PresentationSnapshot: Equatable, Sendable {
                 inboxViewBasis: ExactText? = nil,
                 inboxViewListItems: [InboxViewListItem]? = nil,
                 inboxFreeOrderVersion: Int? = nil,
-                requests: [PresentedRequest]) {
+                requests: [PresentedRequest],
+                unprojectableRequestKeys: [RequestKey] = []) {
         self.revision = revision
         self.cursor = cursor
         self.replayBarrier = replayBarrier
@@ -505,6 +509,7 @@ public struct PresentationSnapshot: Equatable, Sendable {
         self.inboxViewListItems = inboxViewListItems
         self.inboxFreeOrderVersion = inboxFreeOrderVersion
         self.requests = requests
+        self.unprojectableRequestKeys = unprojectableRequestKeys
     }
 }
 
@@ -929,6 +934,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
                            remoteStates: snapshot.remoteStates)
         } ?? [:]
         let intentsByRequest = Dictionary(grouping: snapshot.intents.values, by: \.requestKey)
+        var unprojectable: [RequestKey] = []
         let requests = try orderedRequests.map { item in
             let session = snapshot.fixtureSessions[item.request.key]
             let thread = snapshot.conversationThreads[item.request.key]
@@ -1035,7 +1041,8 @@ public final class AttentionDomainPort: @unchecked Sendable {
                                                         interface: currentRevisionRequest.interface(deliveredFileNames: deliveredFileNames))
                             : nil,
                         inboxViewEntry: inboxViewEntry,
-                        inboxReplyScores: Self.replyScores(for: item.request.key, in: currentView))
+                        inboxReplyScores: Self.replyScores(for: item.request.key, in: currentView),
+                        onUnprojectableScene: { unprojectable.append(item.request.key) })
         }
         let displayRequests = requests.sorted { left, right in
             if left.inboxStateIsCurrent != right.inboxStateIsCurrent {
@@ -1092,7 +1099,8 @@ public final class AttentionDomainPort: @unchecked Sendable {
                                     inboxViewBasis: snapshot.inboxView?.basis,
                                     inboxViewListItems: snapshot.inboxView?.listItems,
                                     inboxFreeOrderVersion: snapshot.inboxView?.freeOrderVersion,
-                                    requests: sourceOrderedRequests)
+                                    requests: sourceOrderedRequests,
+                                    unprojectableRequestKeys: unprojectable)
     }
 
     private static func viewSlots(for keys: [RequestKey],
@@ -1183,7 +1191,8 @@ public final class AttentionDomainPort: @unchecked Sendable {
                          currentRevisionByWhenMilliseconds: Int? = nil,
                          defaultAnswerAction: ProjectedActionReference? = nil,
                          inboxViewEntry: InboxViewEntry? = nil,
-                         inboxReplyScores: [UInt64: Double] = [:]) throws -> PresentedRequest {
+                         inboxReplyScores: [UInt64: Double] = [:],
+                         onUnprojectableScene: () -> Void = {}) throws -> PresentedRequest {
         let status: AppLifecycleStatus
         let receiptFacts: ReceiptPresentationFacts?
         switch session?.lifecycle {
@@ -1277,7 +1286,22 @@ public final class AttentionDomainPort: @unchecked Sendable {
                                                   authorizedAnswer: nil) {
                 admittedScene = neutral
             } else {
-                throw AttentionStoreError.invalidProjection
+                // Not reachable for a parsed document: result points are
+                // accepted only in the answered-with-result scene, which is
+                // chosen only when every point resolves. If it ever happens,
+                // show this one request as unsupported and report it; a
+                // rebuild would bring the same item back.
+                onUnprojectableScene()
+                var readable: [JSONMember] = []
+                if case let .object(members) = request.originalPayload {
+                    readable = members.filter { ["title", "body"].contains($0.key.rawValue) }
+                }
+                return try present(StoredRequest(key: request.key, originalPayload: .object(readable))
+                                       .assigningAcceptanceOrder(acceptanceOrder),
+                                   acceptanceOrder: acceptanceOrder, draft: draft, deliveredFiles: [],
+                                   session: session, remote: remote, submission: submission, selector: selector,
+                                   requestRevision: requestRevision, inboxStateIsCurrent: inboxStateIsCurrent,
+                                   inboxViewEntry: inboxViewEntry, inboxReplyScores: inboxReplyScores)
             }
             let inputs = document.inputs.map { input in
                 let kind: ProjectedInputKind
@@ -1458,7 +1482,8 @@ private extension PresentationSnapshot {
                              inboxViewBasis: inboxViewBasis,
                              inboxViewListItems: inboxViewListItems,
                              inboxFreeOrderVersion: inboxFreeOrderVersion,
-                             requests: requests.filter { $0.key == key })
+                             requests: requests.filter { $0.key == key },
+                             unprojectableRequestKeys: unprojectableRequestKeys.filter { $0 == key })
     }
 }
 

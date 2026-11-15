@@ -1960,6 +1960,339 @@ final class NativeRelayCoreTests: XCTestCase {
         XCTAssertEqual(rebuiltCache?.cursor, 10, "The rebuilt state replaces the cache file.")
     }
 
+    func testUnreadablePendingActionsAreReplacedAndTheAccountStillConnects() async throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                                       personID: ExactText("person-unreadable"),
+                                       deviceID: ExactText("installation-unreadable"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let key = RequestKey(accountScope: identity.personID,
+                             senderID: ExactText("sender"), messageID: ExactText("after-recovery"))
+        let payload = try JSONValue.parse(data(#"{"title":"Question","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"yes","label":"Yes","kind":"value","value":{"ok":true}}]}}"#))
+
+        // Another account's valid queue stored under this account, then bytes
+        // that are not a queue at all. Neither may stop the account opening.
+        let otherIdentity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                                            personID: ExactText("person-other"),
+                                            deviceID: ExactText("installation-other"))
+        let otherPersistence = MemoryPendingActionPersistence()
+        let otherContext = ProfileContext(identity: otherIdentity, transportMode: .relay)
+        _ = try ClientRepository(context: otherContext, persistence: otherPersistence)
+            .enqueueMessageOpen(RequestKey(accountScope: otherIdentity.personID, senderID: ExactText("sender"),
+                                           messageID: ExactText("other")),
+                                requestRevision: 1, context: otherContext)
+        let foreignQueue = try XCTUnwrap(otherPersistence.load(identity: otherIdentity))
+        for (unreadable, kind) in [(foreignQueue, PendingActionsRecovery.Kind.replacedForeign),
+                                   (Data("not a saved queue".utf8), .replacedUnreadable)] {
+            let persistence = MemoryPendingActionPersistence()
+            try persistence.commit(unreadable, identity: identity)
+
+            let store = try ClientRepository(context: context, persistence: persistence)
+            XCTAssertEqual(store.pendingActionsRecoveries.map(\.kind), [kind], "The replacement is recorded for diagnostics.")
+            let opened = try store.snapshot(context: context)
+            XCTAssertTrue(opened.intents.isEmpty)
+            XCTAssertTrue(opened.pendingMessageOpens.isEmpty, "Nothing from the unreadable file is resent.")
+            let relaunched = try ClientRepository(context: context, persistence: persistence)
+            XCTAssertTrue(relaunched.pendingActionsRecoveries.isEmpty,
+                         "The replacement is a valid empty queue, so a relaunch opens normally.")
+
+            let session = Session(identity)
+            session.snapshotHighWater = 3
+            session.initialItems = [snapshotItem(key, payload: payload, sequence: 3)]
+            session.frames = [data(#"{"v":1,"type":"resynced","seq":3}"#)]
+            let core = try NativeRelayCore(store: relaunched, context: context, session: session)
+            let high = try await core.resyncAndDrainOutbox()
+            XCTAssertEqual(high, 3)
+            XCTAssertEqual(Set(try relaunched.snapshot(context: context).requests.keys), [key],
+                           "The account connects and loads its inbox from the Server.")
+        }
+    }
+
+    func testCorruptQueueFileAndUndecodableLegacyFileStillOpenTheAccount() throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                                       personID: ExactText("person-files"),
+                                       deviceID: ExactText("installation-files"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let persistence = FilePendingActionPersistence(directoryURL: directory)
+        _ = try ClientRepository(context: context, persistence: persistence)
+            .enqueueMessageOpen(RequestKey(accountScope: identity.personID, senderID: ExactText("sender"),
+                                           messageID: ExactText("queued")), requestRevision: 1, context: context)
+        let current = try XCTUnwrap(FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+            .first { $0.lastPathComponent.hasSuffix(".pending-actions.plist") })
+        let retired = directory.appendingPathComponent(
+            current.lastPathComponent.replacingOccurrences(of: ".pending-actions.plist", with: ".plist"))
+        try Data("truncated".utf8).write(to: current)
+
+        let opened = try ClientRepository(context: context, persistence: persistence)
+        XCTAssertEqual(opened.pendingActionsRecoveries.map(\.kind), [.replacedUnreadable])
+        XCTAssertTrue(try opened.snapshot(context: context).pendingMessageOpens.isEmpty)
+        XCTAssertTrue(try ClientRepository(context: context, persistence: persistence).pendingActionsRecoveries.isEmpty,
+                     "The replaced file opens normally on the next launch.")
+
+        // A legacy file left from an old version that no longer decodes.
+        try FileManager.default.removeItem(at: current)
+        try Data("not a legacy queue".utf8).write(to: retired)
+        let migrated = try ClientRepository(context: context, persistence: persistence)
+        XCTAssertTrue(try migrated.snapshot(context: context).intents.isEmpty)
+        XCTAssertEqual(migrated.pendingActionsRecoveries.map(\.kind), [.legacyUnreadable],
+                       "The unreadable legacy file is recorded, not lost silently.")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: retired.path),
+                       "The undecodable legacy file is dropped, so later launches do not retry it.")
+        XCTAssertNoThrow(try ClientRepository(context: context, persistence: persistence))
+    }
+
+    func testUnpresentableRestoredCacheIsDiscardedSoTheInboxOpensWithTheQueueKept() throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                                       personID: ExactText("person-unpresentable"),
+                                       deviceID: ExactText("installation-unpresentable"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let store = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        let key = RequestKey(accountScope: identity.personID,
+                             senderID: ExactText("sender"), messageID: ExactText("cached"))
+        let payload = try JSONValue.parse(data(#"{"title":"Question","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"yes","label":"Yes","kind":"value","value":{"ok":true}}]}}"#))
+        _ = try store.apply(RelayEvent(sequence: 1,
+            body: .delivery(StoredRequest(key: key, originalPayload: payload), .message)), context: context)
+        let port = AttentionDomainPort(store: store)
+        let selector = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first?.selector)
+        let unsent = try port.submit(SubmitIntent(context: port.context, selector: selector,
+            intentID: UUID(), inputs: [.compatibilityValue(action: ExactText("yes"))]))
+
+        // A restored cache whose request has lost its inbox order cannot be
+        // presented; before this fix that failed activation on every launch.
+        try store.restoreCachedServerState(CachedAttentionServerState(identity: identity,
+            requests: [key: StoredRequest(key: key, originalPayload: payload)], remoteStates: [:],
+            cursor: 1, conversationCursor: 0, conversations: [:], inboxView: nil,
+            currentRequestKeys: [key]), context: context)
+        XCTAssertThrowsError(try port.observe(context: port.context)) { error in
+            XCTAssertTrue(NativeRelayCoreError.isInvalidSavedServerState(error),
+                          "An unpresentable restored cache is rebuilt, not a dead end: \(error)")
+        }
+
+        try store.discardServerState(context: context)
+        XCTAssertNoThrow(try port.observe(context: port.context), "The inbox opens and waits for the rebuild.")
+        XCTAssertEqual(try store.snapshot(context: context).intents[unsent.intentID]?.operationID, unsent.opID,
+                       "The unsent answer is kept for the rebuilt connection.")
+    }
+
+    func testPartlyDamagedQueueKeepsEveryIntactEntryUnderItsOriginalOperationID() throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                                       personID: ExactText("person-partial"),
+                                       deviceID: ExactText("installation-partial"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let persistence = MemoryPendingActionPersistence()
+        let store = try ClientRepository(context: context, persistence: persistence)
+        let key = RequestKey(accountScope: identity.personID, senderID: ExactText("sender"), messageID: ExactText("intact"))
+        let payload = try JSONValue.parse(data(#"{"title":"Question","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"yes","label":"Yes","kind":"value","value":{"ok":true}}]}}"#))
+        _ = try store.apply(RelayEvent(sequence: 1,
+            body: .delivery(StoredRequest(key: key, originalPayload: payload), .message)), context: context)
+        let port = AttentionDomainPort(store: store)
+        let selector = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first?.selector)
+        let unsent = try port.submit(SubmitIntent(context: port.context, selector: selector,
+            intentID: UUID(), inputs: [.compatibilityValue(action: ExactText("yes"))]))
+        let open = try store.enqueueMessageOpen(key, requestRevision: 1, context: context)
+
+        // Damage unrelated entries inside an otherwise valid file: a bogus
+        // operation pair and a bogus message open.
+        var root = try XCTUnwrap(PropertyListSerialization.propertyList(
+            from: XCTUnwrap(persistence.load(identity: identity)), format: nil) as? [String: Any])
+        root["operations"] = (root["operations"] as? [Any] ?? []) + ["not-an-operation-id", "garbage"]
+        root["messageOpens"] = (root["messageOpens"] as? [Any] ?? []) + ["garbage"]
+        try persistence.commit(PropertyListSerialization.data(fromPropertyList: root, format: .binary, options: 0),
+                               identity: identity)
+
+        let reopened = try ClientRepository(context: context, persistence: persistence)
+        let snapshot = try reopened.snapshot(context: context)
+        XCTAssertEqual(snapshot.intents[unsent.intentID]?.operationID, unsent.opID,
+                       "The intact unsent answer survives with its original operation ID.")
+        XCTAssertEqual(snapshot.intents[unsent.intentID]?.disposition, .pending)
+        XCTAssertEqual(snapshot.pendingMessageOpens, [open], "The intact message open survives.")
+        XCTAssertEqual(reopened.pendingActionsRecoveries,
+                       [PendingActionsRecovery(kind: .partlyRecovered, keptOperations: 1, droppedEntries: 2)],
+                       "What was kept and dropped is recorded.")
+        let relaunched = try ClientRepository(context: context, persistence: persistence)
+        XCTAssertTrue(relaunched.pendingActionsRecoveries.isEmpty, "The salvaged queue was rewritten whole.")
+        XCTAssertEqual(try relaunched.snapshot(context: context).intents[unsent.intentID]?.operationID, unsent.opID)
+    }
+
+    func testDamagedActiveIndexKeepsTheIntactAnswerResendableAcrossRelaunch() async throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                                       personID: ExactText("person-index"),
+                                       deviceID: ExactText("installation-index"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let persistence = MemoryPendingActionPersistence()
+        let store = try ClientRepository(context: context, persistence: persistence)
+        let key = RequestKey(accountScope: identity.personID, senderID: ExactText("sender"), messageID: ExactText("indexed"))
+        let payload = try JSONValue.parse(data(#"{"title":"Question","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"yes","label":"Yes","kind":"value","value":{"ok":true}}]}}"#))
+        _ = try store.apply(RelayEvent(sequence: 1,
+            body: .delivery(StoredRequest(key: key, originalPayload: payload), .message)), context: context)
+        let port = AttentionDomainPort(store: store)
+        let selector = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first?.selector)
+        let unsent = try port.submit(SubmitIntent(context: port.context, selector: selector,
+            intentID: UUID(), inputs: [.compatibilityValue(action: ExactText("yes"))]))
+        let original = try XCTUnwrap(store.lookupIntent(unsent.intentID, context: context))
+
+        let saved = try XCTUnwrap(persistence.load(identity: identity))
+        // The answer itself is intact. Its index entry is either malformed
+        // (the file no longer decodes whole) or simply missing (it still does).
+        for damage in ["malformed entry", "empty index"] {
+            var root = try XCTUnwrap(PropertyListSerialization.propertyList(from: saved, format: nil) as? [String: Any])
+            var index = try XCTUnwrap(root["activeOperations"] as? [Any])
+            XCTAssertEqual(index.count, 2, "One request mapped to one operation.")
+            if damage == "malformed entry" { index[1] = "not-an-intent-id" } else { index = [] }
+            root["activeOperations"] = index
+            try persistence.commit(PropertyListSerialization.data(fromPropertyList: root, format: .binary, options: 0),
+                                   identity: identity)
+
+            let reopened = try ClientRepository(context: context, persistence: persistence)
+            XCTAssertEqual(reopened.pendingActionsRecoveries.first?.kind, .partlyRecovered, damage)
+            let relaunched = try ClientRepository(context: context, persistence: persistence)
+            XCTAssertTrue(relaunched.pendingActionsRecoveries.isEmpty, "The repaired queue was rewritten (\(damage)).")
+            let kept = try XCTUnwrap(relaunched.lookupIntent(unsent.intentID, context: context),
+                                     "The intact answer survives the rewrite and a relaunch (\(damage)).")
+            XCTAssertEqual(kept.operationID, original.operationID)
+            XCTAssertEqual(kept.wireFrame, original.wireFrame)
+
+            let session = Session(identity)
+            session.snapshotHighWater = 1
+            session.initialItems = [snapshotItem(key, payload: payload, sequence: 1)]
+            session.frames = [data(#"{"v":1,"type":"resynced","seq":1}"#)]
+            let core = try NativeRelayCore(store: relaunched, context: context, session: session)
+            _ = try await core.resyncAndDrainOutbox()
+            XCTAssertEqual(session.sent.map(\.1), [original.operationID],
+                           "It is resent under its original operation ID (\(damage)).")
+            XCTAssertEqual(session.sent.first?.0, original.wireFrame)
+        }
+    }
+
+    func testOneDamagedChatDraftKeepsTheThreadsOtherQueuedWork() throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                                       personID: ExactText("person-thread"),
+                                       deviceID: ExactText("installation-thread"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let persistence = MemoryPendingActionPersistence()
+        let store = try ClientRepository(context: context, persistence: persistence)
+        let key = RequestKey(accountScope: identity.personID, senderID: ExactText("sender"), messageID: ExactText("chat"))
+        let payload = try JSONValue.parse(data(#"{"title":"Question"}"#))
+        func deliver(to repository: ClientRepository) throws {
+            _ = try repository.apply(RelayEvent(sequence: 1,
+                body: .delivery(StoredRequest(key: key, originalPayload: payload), .message)), context: context)
+            for revision in [UInt64(1), 2] {
+                try repository.applyConversation(ConversationEvent(sequence: revision,
+                    binding: ConversationBinding(request: key, revision: revision),
+                    fact: .request(sessionHandle: ExactText("session"), payload: payload)), context: context)
+            }
+        }
+        try deliver(to: store)
+        for revision in [UInt64(1), 2] {
+            try store.saveConversationDraft(ConversationDraft(binding: ConversationBinding(request: key, revision: revision),
+                text: ExactText("draft \(revision)")), context: context)
+        }
+        // Revision 1's message was sent and awaits its outcome: it must resend
+        // under the same operation ID after recovery.
+        let sending = try store.prepareDiscussion(ConversationBinding(request: key, revision: 1), context: context)
+
+        // Damage only revision 2's draft inside the thread's queued work.
+        var root = try XCTUnwrap(PropertyListSerialization.propertyList(
+            from: XCTUnwrap(persistence.load(identity: identity)), format: nil) as? [String: Any])
+        var conversations = try XCTUnwrap(root["conversations"] as? [Any])
+        var actions = try XCTUnwrap(conversations[1] as? [String: Any])
+        if var drafts = actions["drafts"] as? [Any] {
+            let position = try XCTUnwrap(stride(from: 0, to: drafts.count, by: 2)
+                .first { (drafts[$0] as? NSNumber)?.uint64Value == 2 })
+            drafts[position + 1] = "garbage"
+            actions["drafts"] = drafts
+        } else {
+            var drafts = try XCTUnwrap(actions["drafts"] as? [String: Any])
+            drafts["2"] = "garbage"
+            actions["drafts"] = drafts
+        }
+        conversations[1] = actions
+        root["conversations"] = conversations
+        try persistence.commit(PropertyListSerialization.data(fromPropertyList: root, format: .binary, options: 0),
+                               identity: identity)
+
+        let reopened = try ClientRepository(context: context, persistence: persistence)
+        XCTAssertEqual(reopened.pendingActionsRecoveries,
+                       [PendingActionsRecovery(kind: .partlyRecovered, keptOperations: 0, droppedEntries: 1)])
+        let relaunched = try ClientRepository(context: context, persistence: persistence)
+        try deliver(to: relaunched)
+        let thread = try XCTUnwrap(relaunched.conversationSnapshot(context: context).threads[key])
+        XCTAssertEqual(thread.drafts[1]?.text, ExactText("draft 1"), "The thread's intact draft survives.")
+        XCTAssertEqual(thread.drafts[1]?.disposition, .submitting(sending),
+                       "It is still queued to resend under its original operation ID.")
+        XCTAssertNil(thread.drafts[2])
+    }
+
+    func testLargeValidQueueFileIsKept() throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                                       personID: ExactText("person-large"),
+                                       deviceID: ExactText("installation-large"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let persistence = FilePendingActionPersistence(directoryURL: directory)
+        let key = RequestKey(accountScope: identity.personID, senderID: ExactText("sender"), messageID: ExactText("large"))
+        let open = try ClientRepository(context: context, persistence: persistence)
+            .enqueueMessageOpen(key, requestRevision: 1, context: context)
+        // Size is not corruption: a valid file larger than 64 MiB still opens.
+        var root = try XCTUnwrap(PropertyListSerialization.propertyList(
+            from: XCTUnwrap(persistence.load(identity: identity)), format: nil) as? [String: Any])
+        root["unrelatedPadding"] = Data(count: 65 * 1_048_576)
+        try persistence.commit(PropertyListSerialization.data(fromPropertyList: root, format: .binary, options: 0),
+                               identity: identity)
+
+        let reopened = try ClientRepository(context: context, persistence: persistence)
+        XCTAssertTrue(reopened.pendingActionsRecoveries.isEmpty)
+        XCTAssertEqual(try reopened.snapshot(context: context).pendingMessageOpens, [open])
+    }
+
+    func testConflictingSavedPageStateIsRebuiltSoPagingContinuesWithTheQueueKept() async throws {
+        let (context, store, session) = try setup()
+        func key(_ id: String) -> RequestKey {
+            RequestKey(accountScope: context.identity.personID, senderID: ExactText("sender"), messageID: ExactText(id))
+        }
+        let payload = try JSONValue.parse(data(#"{"title":"Question","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"yes","label":"Yes","kind":"value","value":{"ok":true}}]}}"#))
+        session.snapshotHighWater = 4
+        session.initialItems = [snapshotItem(key("newest"), payload: payload, sequence: 4)]
+        session.nextItemCursor = "older"
+        session.frames = [data(#"{"v":1,"type":"resynced","seq":4}"#)]
+        let core = try NativeRelayCore(store: store, context: context, session: session)
+        _ = try await core.resyncAndDrainOutbox()
+
+        let port = AttentionDomainPort(store: store)
+        let selector = try XCTUnwrap(port.inspect(context: port.context, request: key("newest")).requests.first?.selector)
+        let unsent = try port.submit(SubmitIntent(context: port.context, selector: selector,
+            intentID: UUID(), inputs: [.compatibilityValue(action: ExactText("yes"))]))
+
+        // The saved page state says "newest" is already loaded; the next page
+        // contains it again, so the saved state cannot accept that page.
+        session.olderPages["older"] = [snapshotItem(key("newest"), payload: payload, sequence: 4)]
+        do {
+            _ = try await core.fetchNextInboxPage()
+            XCTFail("The page conflicts with the saved page state.")
+        } catch {
+            XCTAssertTrue(NativeRelayCoreError.isInvalidSavedServerState(error),
+                          "A page that conflicts with saved state is rebuilt, not a dead end: \(error)")
+        }
+
+        let afterConflict = try store.snapshot(context: context)
+        XCTAssertEqual(afterConflict.cursor, 0, "The core discarded the saved state by itself.")
+        XCTAssertNil(afterConflict.inboxCheckpoint)
+        XCTAssertEqual(afterConflict.intents[unsent.intentID]?.operationID, unsent.opID,
+                       "The unsent answer is kept through the rebuild.")
+        // The lifecycle reconnects here; a fresh core on a fresh connection.
+        session.olderPages["older"] = [snapshotItem(key("older"), payload: payload, sequence: 2)]
+        session.result = .accepted(operationID: unsent.opID, terminalSequence: 5)
+        let rebuilt = try NativeRelayCore(store: store, context: context, session: session)
+        _ = try await rebuilt.resyncAndDrainOutbox()
+        let paged = try await rebuilt.fetchNextInboxPage()
+        XCTAssertTrue(paged, "Paging continues after the rebuild.")
+        XCTAssertEqual(Set(try store.snapshot(context: context).requests.keys), [key("newest"), key("older")])
+        XCTAssertEqual(session.sent.map(\.1), [unsent.opID],
+                       "The kept answer is resent once under its original operation ID.")
+    }
+
     func testAcceptedAnswerRemainsInReceiptInventoryWithoutOrdinaryResend() throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
                                        personID: ExactText("person-accepted-cache"),

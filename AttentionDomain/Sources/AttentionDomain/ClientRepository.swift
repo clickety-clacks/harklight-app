@@ -8,6 +8,41 @@ import Darwin
 public protocol PendingActionPersistence: AnyObject, Sendable {
     func load(identity: ProfileIdentity) throws -> Data?
     func commit(_ data: Data, identity: ProfileIdentity) throws
+    /// What the last load had to drop or salvage, if anything, so the
+    /// repository can record it. Reading it clears it.
+    func takeLoadRecoveries(identity: ProfileIdentity) -> [PendingActionsRecovery]
+}
+
+extension PendingActionPersistence {
+    public func takeLoadRecoveries(identity: ProfileIdentity) -> [PendingActionsRecovery] { [] }
+}
+
+/// What launch had to salvage or drop from the saved queue. Counts and
+/// section names only: never queue content.
+public struct PendingActionsRecovery: Equatable, Sendable {
+    public enum Kind: String, Equatable, Sendable {
+        /// The queue file no longer decoded whole; intact entries were kept.
+        case partlyRecovered = "pending_actions_partly_recovered"
+        /// No entry could be read; the queue was replaced with an empty one.
+        case replacedUnreadable = "pending_actions_replaced_unreadable"
+        /// The queue belonged to another account and was not used.
+        case replacedForeign = "pending_actions_replaced_foreign"
+        case legacyPartlyImported = "legacy_pending_actions_partly_imported"
+        case legacyUnreadable = "legacy_pending_actions_unreadable"
+        case legacyForeign = "legacy_pending_actions_foreign"
+    }
+
+    public let kind: Kind
+    public let keptOperations: Int
+    public let droppedEntries: Int
+    public let lostSections: [String]
+
+    public init(kind: Kind, keptOperations: Int = 0, droppedEntries: Int = 0, lostSections: [String] = []) {
+        self.kind = kind
+        self.keptOperations = keptOperations
+        self.droppedEntries = droppedEntries
+        self.lostSections = lostSections
+    }
 }
 
 public final class MemoryPendingActionPersistence: PendingActionPersistence, @unchecked Sendable {
@@ -43,10 +78,24 @@ public final class MemoryPendingActionPersistence: PendingActionPersistence, @un
 public final class FilePendingActionPersistence: PendingActionPersistence, @unchecked Sendable {
     public let directoryURL: URL
     private let fileManager: FileManager
+    private let noteLock = NSLock()
+    private var recoveries: [String: [PendingActionsRecovery]] = [:]
 
     public init(directoryURL: URL, fileManager: FileManager = .default) {
         self.directoryURL = directoryURL
         self.fileManager = fileManager
+    }
+
+    public func takeLoadRecoveries(identity: ProfileIdentity) -> [PendingActionsRecovery] {
+        noteLock.lock()
+        defer { noteLock.unlock() }
+        return recoveries.removeValue(forKey: identity.storageKey) ?? []
+    }
+
+    private func recordRecovery(_ recovery: PendingActionsRecovery, identity: ProfileIdentity) {
+        noteLock.lock()
+        defer { noteLock.unlock() }
+        recoveries[identity.storageKey, default: []].append(recovery)
     }
 
     public static func applicationSupport() throws -> FilePendingActionPersistence {
@@ -64,17 +113,30 @@ public final class FilePendingActionPersistence: PendingActionPersistence, @unch
             if !fileManager.fileExists(atPath: url.path) {
                 // One-time transfer of user input only. The decoder has no
                 // server-record fields and cannot restore the retired cache.
-                let input = try PropertyListDecoder().decode(RetiredUnsentInput.self,
-                    from: Data(contentsOf: retired))
-                if input.profileIdentity == identity {
+                // Each section is salvaged on its own; what cannot be read is
+                // recorded for the repository instead of blocking every launch.
+                let retiredBytes = try Data(contentsOf: retired)
+                switch try? PropertyListDecoder().decode(RetiredUnsentInput.self, from: retiredBytes) {
+                case let input? where input.profileIdentity == identity:
                     var pending = ClientSessionState(profileIdentity: identity)
-                    pending.intents = input.intents ?? [:]
-                    pending.intentByRequest = input.intentByRequest ?? [:]
-                    pending.drafts = input.drafts ?? [:]
-                    pending.pendingConversations = input.conversation?.threads ?? [:]
+                    pending.intents = input.intents.values
+                    pending.intentByRequest = salvagedActiveIndex(input.intentByRequest.values,
+                                                                 operations: pending.intents, cancelled: nil)
+                    pending.drafts = input.drafts.values
+                    pending.pendingConversations = input.threads.values.mapValues(\.actions)
                     let encoder = PropertyListEncoder()
                     encoder.outputFormat = .binary
                     try commit(encoder.encode(PersistedPendingActions(state: pending)), identity: identity)
+                    let dropped = input.droppedEntries
+                    if dropped > 0 || !input.lostSections.isEmpty {
+                        recordRecovery(PendingActionsRecovery(kind: .legacyPartlyImported,
+                            keptOperations: pending.intentByRequest.count, droppedEntries: dropped,
+                            lostSections: input.lostSections), identity: identity)
+                    }
+                case .some:
+                    recordRecovery(PendingActionsRecovery(kind: .legacyForeign), identity: identity)
+                case nil:
+                    recordRecovery(PendingActionsRecovery(kind: .legacyUnreadable), identity: identity)
                 }
             }
             // Delete only after the separate queue was committed. A restart
@@ -83,11 +145,7 @@ public final class FilePendingActionPersistence: PendingActionPersistence, @unch
         }
         guard fileManager.fileExists(atPath: url.path) else { return nil }
         do {
-            let data = try Data(contentsOf: url, options: .mappedIfSafe)
-            guard data.count <= 64 * 1_048_576 else {
-                throw AttentionStoreError.persistence("The profile store exceeds its recovery size limit.")
-            }
-            return data
+            return try Data(contentsOf: url, options: .mappedIfSafe)
         } catch let error as AttentionStoreError {
             throw error
         } catch {
@@ -183,21 +241,71 @@ public final class ClientRepository: @unchecked Sendable {
         self.conversationFileReferences = conversationFileReferences
         self.maximumWireFrameBytes = max(0, maximumWireFrameBytes)
         state = ClientSessionState(profileIdentity: context.identity)
-        if let bytes = try persistence.load(identity: context.identity) {
-            let queue = try PropertyListDecoder().decode(PersistedPendingActions.self, from: bytes)
-            guard queue.version == 1, queue.profileIdentity == context.identity else {
-                throw AttentionStoreError.persistence("The pending actions do not belong to this account.")
-            }
+        // A read failure (storage unavailable, file protection while locked)
+        // is not evidence the queue is bad, so it still throws.
+        let bytes = try persistence.load(identity: context.identity)
+        var recoveries = persistence.takeLoadRecoveries(identity: context.identity)
+        defer { pendingActionsRecoveries = recoveries }
+        guard let bytes else { return }
+        if let queue = try? PropertyListDecoder().decode(PersistedPendingActions.self, from: bytes),
+           queue.version == 1, queue.profileIdentity == context.identity {
             state.intents = queue.operations
-            state.intentByRequest = queue.activeOperations
             state.fencedIntents = queue.cancelledOperations
+            // The file decoded whole, but its index can still be missing an
+            // entry. Restore it from the intact operations themselves, so an
+            // intact answer stays resendable and survives the next commit.
+            state.intentByRequest = salvagedActiveIndex(queue.activeOperations,
+                operations: queue.operations, cancelled: queue.cancelledOperations)
             state.drafts = queue.answerDrafts
             state.pendingMessageOpens = queue.messageOpens
             state.pendingConversations = queue.conversations
             state.pendingReadPositions = queue.readPositions
-            acceptedAwaitingTerminalReplay = Self.acceptedAwaitingTerminalReplay(in: state)
+            if state.intentByRequest != queue.activeOperations {
+                recoveries.append(PendingActionsRecovery(kind: .partlyRecovered,
+                    keptOperations: state.intentByRequest.count,
+                    droppedEntries: state.intents.count - state.intentByRequest.count))
+                try persistence.commit(Self.queueBytes(for: state), identity: context.identity)
+            }
+        } else if let salvaged = try? PropertyListDecoder().decode(SalvagedPendingActions.self, from: bytes),
+                  salvaged.version == 1, salvaged.profileIdentity == context.identity {
+            // The file no longer decodes whole. Keep every entry that still
+            // decodes, under its original operation ID, and record the rest.
+            state.intents = salvaged.operations.values
+            state.fencedIntents = salvaged.cancelledOperations?.values
+            state.intentByRequest = salvagedActiveIndex(salvaged.activeOperations.values,
+                operations: state.intents, cancelled: state.fencedIntents)
+            state.drafts = salvaged.answerDrafts.values
+            state.pendingMessageOpens = salvaged.messageOpens?.values
+            state.pendingConversations = salvaged.conversations.values.mapValues(\.actions)
+            state.pendingReadPositions = salvaged.readPositions.values
+            let unattributed = state.intents.count - state.intentByRequest.count
+            recoveries.append(PendingActionsRecovery(kind: .partlyRecovered,
+                keptOperations: state.intentByRequest.count,
+                droppedEntries: salvaged.droppedEntries + unattributed,
+                lostSections: salvaged.lostSections))
+            try persistence.commit(Self.queueBytes(for: state), identity: context.identity)
+        } else {
+            // No entry can be attributed to this account: unreadable bytes,
+            // or another account's queue, whose operations are never sent
+            // from this one. Record it and open with an empty queue.
+            let foreign = (try? PropertyListDecoder().decode(QueueOwner.self, from: bytes))
+                .map { $0.profileIdentity != context.identity } ?? false
+            recoveries.append(PendingActionsRecovery(kind: foreign ? .replacedForeign : .replacedUnreadable))
+            try persistence.commit(Self.queueBytes(for: state), identity: context.identity)
         }
+        acceptedAwaitingTerminalReplay = Self.acceptedAwaitingTerminalReplay(in: state)
     }
+
+    /// What launch had to salvage or replace in the saved queue. The app
+    /// records it; it never blocks launch.
+    public private(set) var pendingActionsRecoveries: [PendingActionsRecovery] = []
+
+    private static func queueBytes(for state: ClientSessionState) throws -> Data {
+        let encoder = PropertyListEncoder()
+        encoder.outputFormat = .binary
+        return try encoder.encode(PersistedPendingActions(state: state))
+    }
+
 
     /// Replaces the disposable server cache. Pending user requests stay in the
     /// separate queue and cannot supply a missing server request or revision.
@@ -4302,15 +4410,218 @@ private struct ClientSessionState {
 /// every server-owned field from the retired store's schema.
 private struct RetiredUnsentInput: Decodable {
     let profileIdentity: ProfileIdentity
-    let drafts: [RequestKey: RequestDraft]?
-    let intents: [UUID: Submission]?
-    let intentByRequest: [RequestKey: UUID]?
-    let conversation: ConversationInput?
+    let drafts: SalvagedDictionary<RequestKey, RequestDraft>
+    let intents: SalvagedDictionary<UUID, Submission>
+    let intentByRequest: SalvagedDictionary<RequestKey, UUID>
+    let threads: SalvagedDictionary<RequestKey, SalvagedConversationActions>
+    let lostSections: [String]
 
-    struct ConversationInput: Decodable {
+    var droppedEntries: Int {
+        drafts.dropped + intents.dropped + intentByRequest.dropped + threads.dropped +
+            threads.values.values.reduce(0) { $0 + $1.dropped }
+    }
+
+    private enum CodingKeys: String, CodingKey { case profileIdentity, drafts, intents, intentByRequest, conversation }
+    private enum ConversationKeys: String, CodingKey { case threads }
+
+    init(from decoder: Decoder) throws {
         // Decode only user input from each historical thread. Request content,
         // accepted turns, read positions and the conversation cursor are ignored.
-        let threads: [RequestKey: PendingConversationActions]
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        profileIdentity = try container.decode(ProfileIdentity.self, forKey: .profileIdentity)
+        var lost: [String] = []
+        func section<K, V>(_ key: CodingKeys) -> SalvagedDictionary<K, V> {
+            guard container.contains(key) else { return SalvagedDictionary() }
+            do { return try container.decode(SalvagedDictionary<K, V>.self, forKey: key) }
+            catch { lost.append(key.stringValue); return SalvagedDictionary() }
+        }
+        drafts = section(.drafts)
+        intents = section(.intents)
+        intentByRequest = section(.intentByRequest)
+        if container.contains(.conversation) {
+            do {
+                threads = try container.nestedContainer(keyedBy: ConversationKeys.self, forKey: .conversation)
+                    .decode(SalvagedDictionary<RequestKey, SalvagedConversationActions>.self, forKey: .threads)
+            } catch {
+                lost.append(CodingKeys.conversation.stringValue)
+                threads = SalvagedDictionary()
+            }
+        } else {
+            threads = SalvagedDictionary()
+        }
+        lostSections = lost
+    }
+}
+
+/// Swift encodes a dictionary whose keys are not String or Int as one
+/// unkeyed array of alternating keys and values. Decode each pair on its
+/// own, so one damaged entry costs only that entry.
+private struct SalvagedDictionary<Key: Decodable & Hashable, Value: Decodable>: Decodable {
+    private(set) var values: [Key: Value] = [:]
+    private(set) var dropped = 0
+
+    init() {}
+
+    init(from decoder: Decoder) throws {
+        guard var container = try? decoder.unkeyedContainer() else {
+            // String- and Int-keyed dictionaries are encoded as keyed containers.
+            let keyed = try decoder.container(keyedBy: SalvageCodingKey.self)
+            guard let keyType = Key.self as? any LosslessStringConvertible.Type else {
+                throw DecodingError.typeMismatch(Key.self, DecodingError.Context(codingPath: decoder.codingPath,
+                    debugDescription: "Unsupported dictionary key type."))
+            }
+            for codingKey in keyed.allKeys {
+                if let key = keyType.init(codingKey.stringValue) as? Key,
+                   let value = try? keyed.decode(Value.self, forKey: codingKey) {
+                    values[key] = value
+                } else {
+                    dropped += 1
+                }
+            }
+            return
+        }
+        while !container.isAtEnd {
+            let key = Self.decodeOrSkip(Key.self, from: &container)
+            guard !container.isAtEnd else { dropped += 1; break }
+            let value = Self.decodeOrSkip(Value.self, from: &container)
+            if let key, let value { values[key] = value } else { dropped += 1 }
+        }
+    }
+
+    static func decodeOrSkip<T: Decodable>(_ type: T.Type, from container: inout UnkeyedDecodingContainer) -> T? {
+        if let value = try? container.decode(T.self) { return value }
+        // A failed decode does not advance the container; consume the element.
+        _ = try? container.decode(SkippedElement.self)
+        return nil
+    }
+}
+
+private struct SalvagedArray<Element: Decodable>: Decodable {
+    private(set) var values: [Element] = []
+    private(set) var dropped = 0
+
+    init() {}
+
+    init(from decoder: Decoder) throws {
+        var container = try decoder.unkeyedContainer()
+        while !container.isAtEnd {
+            if let value = SalvagedDictionary<Int, Element>.decodeOrSkip(Element.self, from: &container) {
+                values.append(value)
+            } else {
+                dropped += 1
+            }
+        }
+    }
+}
+
+private struct SkippedElement: Decodable {
+    init(from decoder: Decoder) throws {}
+}
+
+private struct SalvageCodingKey: CodingKey {
+    let stringValue: String
+    let intValue: Int?
+    init?(stringValue: String) { self.stringValue = stringValue; intValue = Int(stringValue) }
+    init?(intValue: Int) { stringValue = String(intValue); self.intValue = intValue }
+}
+
+/// Only the account a queue file names, to tell another account's queue
+/// from unreadable bytes when recording why it was replaced.
+private struct QueueOwner: Decodable {
+    let profileIdentity: ProfileIdentity
+}
+
+/// One thread's queued Chat work, salvaged draft by draft and upload by
+/// upload, so one damaged entry does not drop the thread's other work.
+private struct SalvagedConversationActions: Decodable {
+    let actions: PendingConversationActions
+    let dropped: Int
+
+    private enum CodingKeys: String, CodingKey { case drafts, answerDrafts, uploadGroups, uploadCleanups }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        var dropped = 0
+        func section<K: Decodable & Hashable, V: Decodable>(_ key: CodingKeys) -> [K: V]? {
+            guard container.contains(key) else { return nil }
+            guard let salvaged = try? container.decode(SalvagedDictionary<K, V>.self, forKey: key) else {
+                dropped += 1
+                return [:]
+            }
+            dropped += salvaged.dropped
+            return salvaged.values
+        }
+        let drafts: [UInt64: ConversationDraft]? = section(.drafts)
+        let answerDrafts: [UInt64: RequestDraft]? = section(.answerDrafts)
+        let uploadGroups: [UUID: ConversationUploadGroup]? = section(.uploadGroups)
+        let uploadCleanups: [UUID: ConversationUploadCleanup]? = section(.uploadCleanups)
+        actions = PendingConversationActions(drafts: drafts ?? [:], answerDrafts: answerDrafts,
+                                             uploadGroups: uploadGroups, uploadCleanups: uploadCleanups)
+        self.dropped = dropped
+    }
+}
+
+/// The active index maps each request to its one live operation. When the
+/// saved index lost an entry, an intact operation is still the live one for
+/// its request if it is the only operation for that request and was not
+/// cancelled, so restore that mapping instead of dropping the operation.
+private func salvagedActiveIndex(_ saved: [RequestKey: UUID],
+                                 operations: [UUID: Submission],
+                                 cancelled: [UUID: RequestKey]?) -> [RequestKey: UUID] {
+    var index = saved.filter { operations[$0.value]?.requestKey == $0.key }
+    let byRequest = Dictionary(grouping: operations.values.filter { cancelled?[$0.intentID] == nil },
+                               by: \.requestKey)
+    for (key, candidates) in byRequest where index[key] == nil && candidates.count == 1 {
+        index[key] = candidates[0].intentID
+    }
+    return index
+}
+
+/// The current queue file read section by section and entry by entry, for
+/// a file that no longer decodes whole. The account and version must still
+/// match: another account's operations are never sent from this one.
+private struct SalvagedPendingActions: Decodable {
+    let version: Int
+    let profileIdentity: ProfileIdentity
+    let operations: SalvagedDictionary<UUID, Submission>
+    let activeOperations: SalvagedDictionary<RequestKey, UUID>
+    let cancelledOperations: SalvagedDictionary<UUID, RequestKey>?
+    let answerDrafts: SalvagedDictionary<RequestKey, RequestDraft>
+    let messageOpens: SalvagedArray<PendingMessageOpen>?
+    let conversations: SalvagedDictionary<RequestKey, SalvagedConversationActions>
+    let readPositions: SalvagedDictionary<RequestKey, PendingConversationReadPosition>
+    let lostSections: [String]
+
+    var droppedEntries: Int {
+        operations.dropped + activeOperations.dropped + (cancelledOperations?.dropped ?? 0) +
+            answerDrafts.dropped + (messageOpens?.dropped ?? 0) + conversations.dropped + readPositions.dropped +
+            conversations.values.values.reduce(0) { $0 + $1.dropped }
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case version, profileIdentity, operations, activeOperations, cancelledOperations,
+             answerDrafts, messageOpens, conversations, readPositions
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        version = try container.decode(Int.self, forKey: .version)
+        profileIdentity = try container.decode(ProfileIdentity.self, forKey: .profileIdentity)
+        var lost: [String] = []
+        func section<T: Decodable>(_ key: CodingKeys, _ empty: T) -> T {
+            guard container.contains(key) else { return empty }
+            do { return try container.decode(T.self, forKey: key) }
+            catch { lost.append(key.stringValue); return empty }
+        }
+        operations = section(.operations, SalvagedDictionary())
+        activeOperations = section(.activeOperations, SalvagedDictionary())
+        cancelledOperations = container.contains(.cancelledOperations)
+            ? section(.cancelledOperations, SalvagedDictionary()) : nil
+        answerDrafts = section(.answerDrafts, SalvagedDictionary())
+        messageOpens = container.contains(.messageOpens) ? section(.messageOpens, SalvagedArray()) : nil
+        conversations = section(.conversations, SalvagedDictionary())
+        readPositions = section(.readPositions, SalvagedDictionary())
+        lostSections = lost
     }
 }
 
@@ -4364,6 +4675,14 @@ private struct PendingConversationActions: Codable {
         answerDrafts = thread.answerDrafts
         uploadGroups = thread.uploadGroups
         uploadCleanups = thread.uploadCleanups
+    }
+
+    init(drafts: [UInt64: ConversationDraft], answerDrafts: [UInt64: RequestDraft]?,
+         uploadGroups: [UUID: ConversationUploadGroup]?, uploadCleanups: [UUID: ConversationUploadCleanup]?) {
+        self.drafts = drafts
+        self.answerDrafts = answerDrafts
+        self.uploadGroups = uploadGroups
+        self.uploadCleanups = uploadCleanups
     }
 }
 
