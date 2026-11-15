@@ -1450,8 +1450,8 @@ final class NativeGuidedTLSTests: XCTestCase {
             XCTAssertFalse(refreshCompleted)
         }
         await fulfillment(of: [fileCompleted], timeout: 5)
-        try await download.value
-        XCTAssertEqual(try Data(contentsOf: destination), fileBytes)
+        do { try await download.value } catch { XCTFail("Download failed: \(error)") }
+        XCTAssertEqual(try? Data(contentsOf: destination), fileBytes)
         XCTAssertEqual(relay.connectionCount, liveConnections,
                        "Neither the tap nor the download opened a second relay connection.")
         XCTAssertTrue(frames.snapshot().isEmpty,
@@ -1496,7 +1496,7 @@ final class NativeGuidedTLSTests: XCTestCase {
                 let seen = #"{"title":"Information","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"seen","label":"Seen","kind":"value","value":{"acknowledgment":"seen"}}]}}"#
                 let question = #"{"title":"Question","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"reply","label":"Reply","kind":"text","placeholder":"Reply"}]}}"#
                 let items = rows.enumerated().map { index, row in
-                    "{\"acceptance\":{\"v\":1,\"type\":\"delivery\",\"seq\":\(index + 1),\"sender_id\":\"sender\",\"message_id\":\"\(row)\",\"origin\":\"origin\",\"as\":\"message\",\"message\":\(row == "seen" ? seen : question),\"request_revision\":1}}"
+                    "{\"acceptance\":{\"v\":1,\"type\":\"delivery\",\"seq\":\(index + 1),\"sender_id\":\"sender\",\"message_id\":\"\(row)\",\"origin\":\"origin\",\"as\":\"message\",\"message\":\(row == "seen" ? seen : question)}}"
                 }.joined(separator: ",")
                 return [ok + checkpoint + ",\"items\":[\(items)],\"next_cursor\":null,\"receipt_cursor\":null}\n"]
             case "inbox_checkpoint_ack":
@@ -1575,7 +1575,7 @@ final class NativeGuidedTLSTests: XCTestCase {
             relayURL: XCTUnwrap(URL(string: "wss://localhost:\(port)/relay")),
             clientIdentity: identity.value, trustedRootDER: relay.rootDER)
         let first = await lifecycle.refreshResultFromTrustedRelay()
-        XCTAssertTrue(first.relayConfirmed)
+        XCTAssertTrue(first.relayConfirmed, lifecycle.refreshFailureMessage(for: context) ?? "no failure message")
         let liveConnections = relay.connectionCount
 
         // While the live connection is idle, each submission goes out at once on it.
@@ -1705,7 +1705,7 @@ final class NativeGuidedTLSTests: XCTestCase {
             relayURL: XCTUnwrap(URL(string: "wss://localhost:\(port)/relay")),
             clientIdentity: identity.value, trustedRootDER: relay.rootDER)
         let first = await lifecycle.refreshResultFromTrustedRelay()
-        XCTAssertTrue(first.relayConfirmed)
+        XCTAssertTrue(first.relayConfirmed, lifecycle.refreshFailureMessage(for: context) ?? "no failure message")
         let liveConnections = relay.connectionCount
 
         let domain = AttentionDomainPort(store: store)
@@ -1754,7 +1754,7 @@ final class NativeGuidedTLSTests: XCTestCase {
             relayURL: XCTUnwrap(URL(string: "wss://localhost:\(port)/relay")),
             clientIdentity: identity.value, trustedRootDER: relay.rootDER)
         let first = await lifecycle.refreshResultFromTrustedRelay()
-        XCTAssertTrue(first.relayConfirmed)
+        XCTAssertTrue(first.relayConfirmed, lifecycle.refreshFailureMessage(for: context) ?? "no failure message")
         let connectionsBeforeDrop = relay.connectionCount
         let admissionsBeforeDrop = Self.admissions(in: answers)
 
