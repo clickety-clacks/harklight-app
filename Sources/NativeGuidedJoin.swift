@@ -353,10 +353,10 @@ final class NativeGuidedJoinStore {
         // represented as an observed approval tuple or sent to an owner.
         var currentCode = attempt.approvalCode ?? String(repeating: "A", count: 10)
         var currentDeadline = attempt.approvalExpiresAt ?? 1
-        // A concurrent renewal can make the saved tuple stale. Reconcile the
-        // current tuple under the same secret and retry cancellation once;
-        // never renew as a way of fulfilling cancellation intent.
-        for retry in 0...1 {
+        // A concurrent renewal can make the saved tuple stale. Follow the
+        // Server's current tuple under the same secret until cancellation is
+        // confirmed; never renew as a way of fulfilling cancellation intent.
+        while true {
             let body = try JSONSerialization.data(withJSONObject: [
                 "status_secret": attempt.statusSecret, "approval_code": currentCode,
                 "expected_device_id": attempt.deviceID, "expected_expires_at": currentDeadline
@@ -369,9 +369,13 @@ final class NativeGuidedJoinStore {
                conflict.error == "stale_request",
                conflict.current.state == "pending" || conflict.current.state == "expired" {
                 let response = conflict.current
+                guard let responseCode = response.approvalCode,
+                      let responseDeadline = response.expiresAt,
+                      responseCode != currentCode || responseDeadline != currentDeadline else {
+                    throw NativeJoinError.invalidResponse
+                }
                 guard NativeAuthorityBinding.samePerson(response.personID, attempt.invitation.personID),
                       response.deviceID == attempt.deviceID,
-                      response.approvalCode != nil, response.expiresAt != nil,
                       response.statusExpiresAt != nil, (response.requestGeneration ?? 0) > 0 else {
                     throw NativeJoinError.invalidResponse
                 }
@@ -380,13 +384,11 @@ final class NativeGuidedJoinStore {
                       let deadline = attempt.approvalExpiresAt else { return attempt }
                 currentCode = code
                 currentDeadline = deadline
-                if retry == 1 { return attempt }
                 continue
             }
             try acceptStatus(reply.statusCode, data: reply.data)
             return try apply(JSONDecoder().decode(EnrollmentReply.self, from: reply.data), to: attempt)
         }
-        return attempt
     }
 
     func departure() throws -> NativeAccountDeparture? {
