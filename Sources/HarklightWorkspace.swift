@@ -2,6 +2,75 @@ import SwiftUI
 import UIKit
 import AttentionDomain
 
+/// Read the framework's current presentation rather than inferring it from
+/// orientation or size class. Hiding an overlaid primary column leaves the
+/// split view's automatic layout policy intact when the window changes size.
+@MainActor
+private final class InboxSplitPresentation {
+    weak var reader: UIViewController?
+
+
+}
+
+private struct InboxSplitPresentationReader: UIViewControllerRepresentable {
+    let presentation: InboxSplitPresentation
+
+    func makeUIViewController(context: Context) -> Reader {
+        Reader(presentation: presentation)
+    }
+
+    func updateUIViewController(_ controller: Reader, context: Context) {}
+
+    final class Reader: UIViewController {
+        let presentation: InboxSplitPresentation
+
+        init(presentation: InboxSplitPresentation) {
+            self.presentation = presentation
+            super.init(nibName: nil, bundle: nil)
+        }
+
+        required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+        override func loadView() {
+            let probe = Probe()
+            probe.reader = self
+            probe.backgroundColor = .clear
+            probe.isAccessibilityElement = UIDiagnostics.shared.enabled
+            probe.accessibilityIdentifier = "inbox-split-presentation"
+            probe.accessibilityLabel = "Inbox split presentation"
+            view = probe
+        }
+
+        override func viewDidAppear(_ animated: Bool) {
+            super.viewDidAppear(animated)
+            presentation.reader = self
+        }
+
+        override func viewDidLayoutSubviews() {
+            super.viewDidLayoutSubviews()
+            if view.window != nil { presentation.reader = self }
+        }
+    }
+
+    final class Probe: UIView {
+        weak var reader: UIViewController?
+
+        override var accessibilityValue: String? {
+            get {
+                guard let split = reader?.splitViewController else { return "presentation=unknown" }
+                if split.isCollapsed { return "presentation=compact" }
+                switch split.displayMode {
+                case .oneOverSecondary, .twoOverSecondary: return "presentation=overlay"
+                case .oneBesideSecondary, .twoBesideSecondary: return "presentation=sideBySide"
+                case .secondaryOnly: return "presentation=detailOnly"
+                default: return "presentation=other"
+                }
+            }
+            set {}
+        }
+    }
+}
+
 extension HarklightMessageType {
     /// The design type of a message from its wire type and kind, as the app
     /// and the web page share it. An untyped legacy message is an fyi when it
@@ -719,6 +788,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     @Environment(\.colorScheme) private var colorScheme
     @State private var selection: InboxSelection?
     @State private var preferredCompactColumn: NavigationSplitViewColumn = .sidebar
+    @State private var splitPresentation = InboxSplitPresentation()
     @State private var relatedMessageNavigationPath: [RelatedMessageTarget] = []
     @State private var isWarningPresented = false
     @State private var settings = false
@@ -1173,6 +1243,11 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                       triggerNotification: exposesNotificationTestAction
                           ? { triggerNotificationTestAction() } : nil)
             .modifier(InboxListSearchFieldModifier(active: usesListSearch, text: searchTextBinding))
+            .background(alignment: .topLeading) {
+                InboxSplitPresentationReader(presentation: splitPresentation)
+                    .frame(width: 1, height: 1)
+                    .allowsHitTesting(false)
+            }
         } detail: {
             NavigationStack(path: $relatedMessageNavigationPath) {
                 detailContent(for: selection, inlineChat: inlineChat,
