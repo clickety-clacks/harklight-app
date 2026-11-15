@@ -403,6 +403,25 @@ final class NativeGuidedTLSTests: XCTestCase {
         let matching = try XCTUnwrap(NativeNotificationLocator(payload(server: current)))
         XCTAssertEqual(matching.serverID, current)
         XCTAssertNotNil(matching.profile(in: [record]))
+        let context = ProfileContext(identity: try XCTUnwrap(NativeNotificationProfile(record)).identity,
+                                     transportMode: .relay)
+        let domain = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        let message = try JSONValue.parse(Data(#"{"title":"Target"}"#.utf8))
+        try domain.apply(RelayEvent(sequence: 1,
+            body: .delivery(StoredRequest(key: matching.request, originalPayload: message), .message)),
+            context: context)
+        let port = AttentionDomainPort(store: domain)
+        let requests = try port.observe(context: port.context).requests
+        let suite = "Harklight.server-routing." + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let router = NativeNotificationRouter(defaults: defaults)
+        router.receive(try payload(server: current), opened: true)
+        XCTAssertEqual(router.resolve(records: [record], context: context, requests: requests, synchronized: true),
+                       matching.request, "A matching tap opens its exact message.")
+        router.receive(try payload(server: other), opened: true)
+        XCTAssertNil(router.resolve(records: [record], context: context, requests: requests, synchronized: true))
+        XCTAssertNil(router.intent?.locator, "A left-server tap falls back to the inbox.")
         let legacy = try XCTUnwrap(NativeNotificationLocator(payload(server: nil)))
         XCTAssertNil(legacy.serverID)
         XCTAssertNotNil(legacy.profile(in: [record]))
@@ -410,7 +429,8 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertEqual(unknown.serverID, other)
         XCTAssertNil(unknown.profile(in: [record]), "A server we have left falls back to inbox.")
         record.serverID = nil
-        XCTAssertNotNil(matching.profile(in: [record]), "Older servers use active-account resolution.")
+        XCTAssertNil(matching.profile(in: [record]), "An explicit origin must match a known current server.")
+        XCTAssertNotNil(legacy.profile(in: [record]), "A missing push origin keeps active-account resolution.")
         XCTAssertNil(NativeNotificationLocator(try payload(server: "invalid")))
     }
 
@@ -434,6 +454,187 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertNil(try store.load()?.serverID, "Do not retain stale identity when the server no longer exposes it.")
         let invalid = try JSONValue.parse(Data(#"{"server":"ABCDEF"}"#.utf8))
         XCTAssertThrowsError(try RelayServerIdentity.read(from: invalid))
+    }
+
+    func testSignOutAndSwitchAwayRemovePushBeforeRelayTeardown() async throws {
+        for switching in [false, true] {
+            let namespace = "Harklight.departure-order." + UUID().uuidString
+            defer { deleteEnrollmentRecord(service: namespace) }
+            let installation = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
+            defer {
+                SecItemDelete([kSecClass as String: kSecClassCertificate,
+                               kSecAttrLabel as String: installation.label] as CFDictionary)
+                SecItemDelete([kSecClass as String: kSecClassKey,
+                               kSecAttrApplicationTag as String: Data(namespace.utf8)] as CFDictionary)
+            }
+            let relay = try LocalRelayWebSocket(expectedDevice: installation.deviceID) { text in
+                let value = try? JSONValue.parse(Data(text.utf8))
+                XCTAssertEqual(value?.uniqueValue(named: "type")?.stringValue?.rawValue, "push_remove")
+                XCTAssertEqual(value?.uniqueValue(named: "revision")?.integerValue, 4)
+                return [#"{"v":1,"type":"ok","ref":"native-push-remove","revision":4}"#]
+            }
+            defer { relay.close() }
+            let port = try await relay.start()
+            var record = NativeEnrollmentRecord(host: "localhost", enrollmentPort: 18444, relayPort: Int(port),
+                trustedRootDER: relay.rootDER, identityLabel: installation.label, deviceID: installation.deviceID,
+                approvalCode: "ABCDEF2345", statusSecret: String(repeating: "a", count: 64),
+                expiresAt: 1, statusExpiresAt: 2, personID: "test-person")
+            record.pushBinding = NativePushBinding(address: String(repeating: "a", count: 64),
+                                                  operationID: UUID(), revision: 3, accepted: true)
+            try saveEnrollmentRecord(record, service: namespace)
+            let enrollment = NativeEnrollmentStore(service: namespace)
+            let transport = ArchiveRemovalTransport()
+            transport.peopleByDevice = [record.deviceID: "test-person"]
+            let join = NativeGuidedJoinStore(namespace: namespace, transport: transport)
+            let context = ProfileContext(identity: ProfileIdentity(trustedRelayAuthority: ExactText("localhost"),
+                personID: ExactText("test-person"), deviceID: ExactText(record.deviceID)), transportMode: .relay)
+            let domain = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+            let live = try LivePresentationStore(store: domain, context: context)
+            let app = NativeAppLaunch(arguments: [], enrollmentStore: enrollment, joinStore: join,
+                                      initialState: .live(live), initialEnrollmentRecord: record)
+            let lifecycle = NativeRelayLifecycle.shared
+            try await lifecycle.activate(store: domain, context: context,
+                relayURL: XCTUnwrap(URL(string: "wss://localhost:\(port)/relay")),
+                clientIdentity: installation.value, trustedRootDER: relay.rootDER)
+            var removalObserved = false
+            // At /device/remove the pending push operation must already be
+            // acknowledged on the relay, for both departure entry points.
+            transport.onRemove = {
+                XCTAssertTrue(try enrollment.hasPushDeparture(for: context.identity))
+                let probe = PushRemovalProbeSession(identity: context.identity, results: [nil])
+                try await enrollment.retryPendingPushRemoval(using: probe)
+                let remaining = await probe.sent
+                XCTAssertTrue(remaining.isEmpty, "Push removal must be confirmed before device removal.")
+                removalObserved = true
+            }
+            if switching {
+                let root = "-----BEGIN CERTIFICATE-----\n" +
+                    relay.rootDER.base64EncodedString(options: [.lineLength64Characters, .endLineWithLineFeed]) +
+                    "-----END CERTIFICATE-----\n"
+                let invitation = NativeJoinInvitation(v: 1, personID: "replacement", serverName: "Other server",
+                    enrollmentURL: URL(string: "https://other.example:18444/enroll")!,
+                    relayURL: URL(string: "wss://other.example:18443/relay")!, caPEM: root,
+                    caSHA256: NativeEndpointMigrationPolicy.rootSHA256(relay.rootDER),
+                    inviteToken: String(repeating: "d", count: 64),
+                    expiresAt: Int64(Date().timeIntervalSince1970 * 1000) + 60_000,
+                    personName: "Replacement", inviterName: "Owner")
+                let fragment = try JSONEncoder().encode(invitation).base64EncodedString()
+                    .replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")
+                    .replacingOccurrences(of: "=", with: "")
+                await app.receiveInvitation(try XCTUnwrap(URL(string: "harklight://join#\(fragment)")))
+                app.guidedJoin.considerReplacement()
+                await app.guidedJoin.confirmReplacement()
+            } else {
+                await app.disconnectCurrentAccount()
+            }
+            XCTAssertTrue(removalObserved)
+            XCTAssertFalse(lifecycle.isActive(for: context), "Both departure paths tear down after push_remove.")
+            await lifecycle.deactivate()
+        }
+    }
+
+    func testPushRemoveWireAndAuthenticatedSendWithoutResync() async throws {
+        let namespace = "Harklight.push-remove-tls." + UUID().uuidString
+        let installation = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
+        defer {
+            SecItemDelete([kSecClass as String: kSecClassCertificate,
+                           kSecAttrLabel as String: installation.label] as CFDictionary)
+            SecItemDelete([kSecClass as String: kSecClassKey,
+                           kSecAttrApplicationTag as String: Data(namespace.utf8)] as CFDictionary)
+        }
+        let operation = try PushRemovalOperation(revision: 8)
+        let relay = try LocalRelayWebSocket(expectedDevice: installation.deviceID) { text in
+            let value = try? JSONValue.parse(Data(text.utf8))
+            XCTAssertEqual(value?.uniqueValue(named: "type")?.stringValue?.rawValue, "push_remove",
+                           "Removal does not need a preceding resync.")
+            XCTAssertEqual(value?.uniqueValue(named: "op_id")?.stringValue?.rawValue,
+                           operation.operationID.uuidString.lowercased())
+            if case let .object(fields)? = value {
+                XCTAssertEqual(Set(fields.map { $0.key.rawValue }),
+                               Set(["v", "type", "ref", "op_id", "revision"]))
+            }
+            return [#"{"v":1,"type":"ok","ref":"native-push-remove","revision":8}"#]
+        }
+        defer { relay.close() }
+        let port = try await relay.start()
+        let context = ProfileContext(identity: ProfileIdentity(trustedRelayAuthority: ExactText("localhost"),
+            personID: ExactText("test-person"), deviceID: ExactText(installation.deviceID)), transportMode: .relay)
+        let session = try URLSessionInstallationSession(profile: context,
+            relayURL: XCTUnwrap(URL(string: "wss://localhost:\(port)/relay")),
+            clientIdentity: TrustedKeychainIdentity(installation.value), trustedRootDER: relay.rootDER)
+        let first = try await session.removePush(operation)
+        let duplicate = try await session.removePush(operation)
+        XCTAssertEqual(first, .removed)
+        XCTAssertEqual(duplicate, .removed)
+        await session.close()
+        let forbidden = try JSONValue.parse(Data(#"{"v":1,"type":"error","ref":"native-push-remove","reason":"forbidden"}"#.utf8))
+        XCTAssertEqual(try operation.result(forbidden), .disabled)
+        let wrongRevision = try JSONValue.parse(Data(#"{"v":1,"type":"ok","ref":"native-push-remove","revision":7}"#.utf8))
+        XCTAssertThrowsError(try operation.result(wrongRevision))
+        let wrongRef = try JSONValue.parse(Data(#"{"v":1,"type":"ok","ref":"other","revision":8}"#.utf8))
+        XCTAssertThrowsError(try operation.result(wrongRef))
+    }
+
+    func testPendingPushRemovalSurvivesOfflineDepartureAndRetriesSameOperationOnReconnect() async throws {
+        let service = "Harklight.pending-push-remove." + UUID().uuidString
+        defer { deleteEnrollmentRecord(service: service) }
+        let record = notificationRecord()
+        try saveEnrollmentRecord(record, service: service)
+        let store = NativeEnrollmentStore(service: service)
+        let identity = try XCTUnwrap(NativeNotificationProfile(record)).identity
+        try store.preparePushRemoval(for: record)
+        let offline = PushRemovalProbeSession(identity: identity, results: [nil])
+        do {
+            try await store.retryPendingPushRemoval(using: offline)
+            XCTFail("The simulated connection failed before acknowledgement.")
+        } catch {}
+        let reopened = NativeEnrollmentStore(service: service)
+        XCTAssertTrue(try reopened.hasPushDeparture(for: identity))
+        XCTAssertNil(try reopened.pendingPushRegistration(address: record.pushBinding!.address, for: record.deviceID))
+        let reconnected = PushRemovalProbeSession(identity: identity, results: [.removed])
+        try await reopened.retryPendingPushRemoval(using: reconnected)
+        let first = await offline.sent
+        let retried = await reconnected.sent
+        XCTAssertEqual(first, retried, "Unknown outcome must reuse the durable operation, including its revision.")
+        XCTAssertEqual(retried.first?.revision, record.pushBinding!.revision + 1)
+        try await reopened.retryPendingPushRemoval(using: reconnected)
+        let afterConfirmation = await reconnected.sent
+        XCTAssertEqual(afterConfirmation.count, 1)
+        XCTAssertNil(try reopened.pendingPushRegistration(address: record.pushBinding!.address, for: record.deviceID),
+                     "Reconnecting after departure must not register pushes again.")
+        let other = ProfileIdentity(trustedRelayAuthority: ExactText("other.example"),
+                                    personID: identity.personID, deviceID: identity.deviceID)
+        let foreign = PushRemovalProbeSession(identity: other, results: [.removed])
+        try await reopened.retryPendingPushRemoval(using: foreign)
+        let foreignSends = await foreign.sent
+        XCTAssertTrue(foreignSends.isEmpty, "A pending departure cannot travel through another server's relay.")
+    }
+
+    func testDisabledPushRemovalCompletesAndStaleRemovalReloadsRevision() async throws {
+        let service = "Harklight.push-remove-revisions." + UUID().uuidString
+        defer { deleteEnrollmentRecord(service: service) }
+        let record = notificationRecord()
+        try saveEnrollmentRecord(record, service: service)
+        let store = NativeEnrollmentStore(service: service)
+        let identity = try XCTUnwrap(NativeNotificationProfile(record)).identity
+        try store.preparePushRemoval(for: record)
+        let status = PushBindingStatus(revision: 12, state: "ready", bindingID: notificationBindingID, profile: .current)
+        let stale = PushRemovalProbeSession(identity: identity, results: [.stale], status: status)
+        do {
+            try await store.retryPendingPushRemoval(using: stale)
+            XCTFail("The stale operation must report the refreshed pending revision.")
+        } catch {}
+        let disabled = PushRemovalProbeSession(identity: identity, results: [.disabled])
+        try await NativeEnrollmentStore(service: service).retryPendingPushRemoval(using: disabled)
+        let oldSends = await stale.sent
+        let newSends = await disabled.sent
+        let old = try XCTUnwrap(oldSends.first)
+        let refreshed = try XCTUnwrap(newSends.first)
+        XCTAssertEqual(refreshed.revision, 13)
+        XCTAssertNotEqual(old.operationID, refreshed.operationID)
+        try await store.retryPendingPushRemoval(using: disabled)
+        let sent = await disabled.sent
+        XCTAssertEqual(sent.count, 1, "Push-disabled servers finish departure without a retry loop.")
     }
 
     func testPushBindingReplyCorrelationAndDurableSameOperationRecovery() throws {
@@ -4454,12 +4655,14 @@ private final class InvitationApprovalPollingTransport: NativeJoinTransport {
 @MainActor
 private final class ArchiveRemovalTransport: NativeJoinTransport {
     var peopleByDevice: [String: String] = [:]
+    var onRemove: (() async throws -> Void)?
 
     func request(_ url: URL, method: String, body: Data?, rootDER: Data) async throws -> NativeJoinResponse {
         NativeJoinResponse(statusCode: 200, data: Data("{\"state\":\"reachable\"}".utf8))
     }
 
     func remove(_ url: URL, body: Data, rootDER: Data, identity: SecIdentity) async throws -> NativeJoinResponse {
+        try await onRemove?()
         let fields = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: String])
         let device = fields["expected_device_id"] ?? ""
         let payload: [String: Any] = ["state": "removed", "person_id": peopleByDevice[device] ?? "",
@@ -4910,4 +5113,25 @@ private actor AsyncTestSignal {
         waiters.removeAll()
         pending.forEach { $0.resume() }
     }
+}
+
+private actor PushRemovalProbeSession: AuthenticatedPushRemovalSession {
+    nonisolated let authenticatedIdentity: ProfileIdentity
+    private var results: [PushRemovalResult?]
+    private let status: PushBindingStatus?
+    private(set) var sent: [PushRemovalOperation] = []
+
+    init(identity: ProfileIdentity, results: [PushRemovalResult?], status: PushBindingStatus? = nil) {
+        authenticatedIdentity = identity
+        self.results = results
+        self.status = status
+    }
+
+    func removePush(_ operation: PushRemovalOperation) async throws -> PushRemovalResult {
+        sent.append(operation)
+        guard !results.isEmpty, let result = results.removeFirst() else { throw URLError(.notConnectedToInternet) }
+        return result
+    }
+
+    func currentPushBindingStatus() async throws -> PushBindingStatus? { status }
 }

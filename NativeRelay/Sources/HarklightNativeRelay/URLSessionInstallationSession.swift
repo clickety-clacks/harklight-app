@@ -50,7 +50,7 @@ public struct TrustedKeychainIdentity: @unchecked Sendable {
 /// CA are supplied by the native profile owner. No PEM/key bytes enter this API.
 /// URLSession presents the identity only to this exact `wss:/relay` endpoint.
 public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSession,
-    AuthenticatedInboxEventStreamSession, AuthenticatedConversationEventSession {
+    AuthenticatedInboxEventStreamSession, AuthenticatedConversationEventSession, AuthenticatedPushRemovalSession {
     public nonisolated let authenticatedIdentity: ProfileIdentity
     public nonisolated let relayEndpointHost: String
     public nonisolated let supportsPostCheckpointInboxEvents = true
@@ -727,6 +727,24 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
             diagnose(.notifications, .pushRegistration,
                      NativeDiagnosticCauseCode.failureTransition(for: error),
                      error: error, operationID: operationID)
+            close()
+            throw error
+        }
+    }
+
+    public func removePush(_ operation: PushRemovalOperation) async throws -> PushRemovalResult {
+        await socketExchangeGate.enter()
+        defer { socketExchangeGate.leave() }
+        do {
+            try await send(operation.frame())
+            while true {
+                let value = try JSONValue.parse(try await receive())
+                switch value.uniqueValue(named: "type")?.stringValue?.rawValue {
+                case "delivery", "lifecycle", "conversation": continue
+                default: return try operation.result(value)
+                }
+            }
+        } catch {
             close()
             throw error
         }

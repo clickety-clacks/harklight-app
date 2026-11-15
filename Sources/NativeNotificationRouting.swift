@@ -72,7 +72,7 @@ struct NativeNotificationLocator: Codable, Equatable {
         let matches = records.filter { record in
             // A push from a server we have left must not open a message in a
             // different account. Missing identity preserves legacy resolution.
-            if let serverID, let knownServer = record.serverID, serverID != knownServer { return false }
+            if let serverID, serverID != record.serverID { return false }
             return (record.notificationBindings ?? []).contains { $0.bindingID == bindingID }
         }
         guard matches.count == 1, let record = matches.first,

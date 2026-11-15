@@ -89,3 +89,59 @@ public enum PushBindingReply {
         return id
     }
 }
+
+public struct PushRemovalOperation: Codable, Equatable, Sendable {
+    public let operationID: UUID
+    public let revision: UInt64
+
+    public init(operationID: UUID = UUID(), revision: UInt64) throws {
+        guard revision > 0, revision < UInt64(Int64.max) else {
+            throw InstallationTransportError.unexpectedServerFrame
+        }
+        self.operationID = operationID
+        self.revision = revision
+    }
+
+    public func frame() throws -> Data {
+        guard operationID.uuidString.split(separator: "-")[2].first == "4",
+              revision > 0, revision < UInt64(Int64.max) else {
+            throw InstallationTransportError.unexpectedServerFrame
+        }
+        var frame = try JSONSerialization.data(withJSONObject: [
+            "v": 1, "type": "push_remove", "ref": "native-push-remove",
+            "op_id": operationID.uuidString.lowercased(), "revision": revision
+        ])
+        frame.append(0x0a)
+        return frame
+    }
+
+    public func result(_ value: JSONValue) throws -> PushRemovalResult {
+        guard value.uniqueValue(named: "v")?.integerValue == 1,
+              value.uniqueValue(named: "ref")?.stringValue?.rawValue == "native-push-remove" else {
+            throw InstallationTransportError.unexpectedServerFrame
+        }
+        switch value.uniqueValue(named: "type")?.stringValue?.rawValue {
+        case "ok":
+            guard case let .number(number)? = value.uniqueValue(named: "revision"),
+                  UInt64(number.lexeme) == revision else {
+                throw InstallationTransportError.unexpectedServerFrame
+            }
+            return .removed
+        case "error":
+            switch value.uniqueValue(named: "reason")?.stringValue?.rawValue.lowercased() {
+            case "forbidden": return .disabled
+            case "stale_push_binding": return .stale
+            default: throw InstallationTransportError.serverRejected
+            }
+        default: throw InstallationTransportError.unexpectedServerFrame
+        }
+    }
+}
+
+public enum PushRemovalResult: Sendable, Equatable { case removed, disabled, stale }
+
+public protocol AuthenticatedPushRemovalSession: Sendable {
+    var authenticatedIdentity: ProfileIdentity { get }
+    func removePush(_ operation: PushRemovalOperation) async throws -> PushRemovalResult
+    func currentPushBindingStatus() async throws -> PushBindingStatus?
+}

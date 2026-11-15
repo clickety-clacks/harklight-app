@@ -1249,6 +1249,20 @@ final class NativeRelayLifecycle {
         for session in sessions { await session.close() }
     }
 
+    func removePushBeforeDeparture(for record: NativeEnrollmentRecord,
+                                   enrollment: NativeEnrollmentStore) async {
+        guard let transport, let context, record.matchesNotificationIdentity(context.identity) else {
+            recordDiagnostic(.notifications, .pushRegistration, .failed, error: NativeRelayCoreError.inactive)
+            return
+        }
+        do {
+            try await enrollment.retryPendingPushRemoval(using: transport)
+        } catch {
+            recordDiagnostic(.notifications, .pushRegistration, .failed, error: error,
+                             attemptID: activeTransportAttemptID)
+        }
+    }
+
     func deactivate() async {
         pathMonitor?.cancel()
         pathMonitor = nil
@@ -2011,6 +2025,12 @@ final class NativeRelayLifecycle {
         guard let core, let transport, let context else { throw NativeRelayCoreError.inactive }
         resumeSavedAnswers()
         resumeSavedDiscussions()
+        // A departure interrupted offline is settled on the next connection
+        // before replay or any attempt to restore the APNs registration.
+        try await enrollment.retryPendingPushRemoval(using: transport)
+        guard refreshGeneration == generation, self.context == context else {
+            throw NativeRelayCoreError.inactive
+        }
         try await refreshConfirmedProjection(core: core, context: context, generation: generation)
         try enrollment.updateServerID(await transport.serverID, for: context.identity)
         if let configuration {
@@ -2029,6 +2049,7 @@ final class NativeRelayLifecycle {
             self?.recordDiagnostic(.notifications, .pushRegistration, .failed,
                                    error: error, attemptID: self?.activeTransportAttemptID)
         }) {
+            if try enrollment.hasPushDeparture(for: context.identity) { return .notAttempted }
             let currentAddress = try DevelopmentPushRegistration.addressStore().load()
             if let currentAddress,
                let binding = try enrollment.pendingPushRegistration(address: currentAddress,

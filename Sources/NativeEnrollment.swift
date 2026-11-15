@@ -452,6 +452,7 @@ struct NativeEnrollmentStore {
               var record = try load(),
               record.isApproved,
               record.deviceID == deviceID else { return nil }
+        if try pushRemovalState(for: notificationIdentity(record)) != nil { return nil }
         if let existing = record.pushBinding, existing.address == address {
             return existing.accepted ? nil : existing
         }
@@ -493,6 +494,7 @@ struct NativeEnrollmentStore {
               existing.address == address,
               existing.revision == status.revision else { return nil }
 
+        if try hasPushDeparture(for: notificationIdentity(record)) { return nil }
         let associations = (record.notificationBindings ?? []).filter {
             $0.operationID == existing.operationID && $0.revision == existing.revision
         }
@@ -512,12 +514,94 @@ struct NativeEnrollmentStore {
         return binding
     }
 
+    private struct PushRemovalState: Codable {
+        var operation: PushRemovalOperation?
+    }
+
+    private func notificationIdentity(_ record: NativeEnrollmentRecord) throws -> ProfileIdentity {
+        guard let person = record.personID else { throw NativeJoinError.superseded }
+        return ProfileIdentity(trustedRelayAuthority: ExactText(record.profileAuthority),
+                               personID: ExactText(person), deviceID: ExactText(record.deviceID))
+    }
+
+    private func pushRemovalKey(_ identity: ProfileIdentity) throws -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        let bytes = try encoder.encode(identity)
+        return "push-departure-" + SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private func pushRemovalState(for identity: ProfileIdentity) throws -> PushRemovalState? {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: try pushRemovalKey(identity),
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
+        ]
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        if status == errSecItemNotFound { return nil }
+        guard status == errSecSuccess, let bytes = result as? Data else {
+            throw NativeEnrollmentError.identityStorage
+        }
+        return try JSONDecoder().decode(PushRemovalState.self, from: bytes)
+    }
+
+    private func savePushRemoval(_ state: PushRemovalState, for identity: ProfileIdentity) throws {
+        try saveData(JSONEncoder().encode(state), account: pushRemovalKey(identity))
+    }
+
+    func hasPushDeparture(for identity: ProfileIdentity) throws -> Bool {
+        try pushRemovalState(for: identity) != nil
+    }
+
+    func finishPushDeparture(for record: NativeEnrollmentRecord) throws {
+        try savePushRemoval(PushRemovalState(operation: nil), for: notificationIdentity(record))
+    }
+
+    /// The pending operation is independent of the current enrollment so an
+    /// offline departure survives replacement with a different account.
+    func preparePushRemoval(for record: NativeEnrollmentRecord) throws {
+        let identity = try notificationIdentity(record)
+        if try pushRemovalState(for: identity) != nil { return }
+        let revision = record.pushBinding?.revision ?? 0
+        guard revision < UInt64(Int64.max) - 1 else { throw NativeEnrollmentError.invalidServerResponse }
+        let operation = try PushRemovalOperation(revision: revision + 1)
+        try savePushRemoval(PushRemovalState(operation: operation), for: identity)
+    }
+
+    func retryPendingPushRemoval(using session: any AuthenticatedPushRemovalSession) async throws {
+        let identity = session.authenticatedIdentity
+        guard let operation = try pushRemovalState(for: identity)?.operation else { return }
+        let result = try await session.removePush(operation)
+        guard try pushRemovalState(for: identity)?.operation == operation else {
+            throw NativeJoinError.superseded
+        }
+        if result == .stale {
+            let status = try await session.currentPushBindingStatus()
+            guard try pushRemovalState(for: identity)?.operation == operation else {
+                throw NativeJoinError.superseded
+            }
+            if let status {
+                guard status.revision >= operation.revision, status.revision < UInt64(Int64.max) - 1 else {
+                    throw NativeEnrollmentError.invalidServerResponse
+                }
+                let next = try PushRemovalOperation(revision: status.revision + 1)
+                try savePushRemoval(PushRemovalState(operation: next), for: identity)
+                throw NativeEnrollmentError.invalidServerResponse
+            }
+            // The server reports no binding remaining.
+        }
+        // Keep the departure marker so reconnect cannot register pushes again.
+        try savePushRemoval(PushRemovalState(operation: nil), for: identity)
+    }
+
     /// The authenticated server is the authority; an older server with no field
     /// resets the cached identity to unknown.
     func updateServerID(_ serverID: String?, for identity: ProfileIdentity) throws {
-        guard var record = try load(), record.matchesNotificationIdentity(identity) else {
-            throw NativeJoinError.superseded
-        }
+        guard var record = try load() else { return }
+        guard record.matchesNotificationIdentity(identity) else { throw NativeJoinError.superseded }
         guard record.serverID != serverID else { return }
         record.serverID = serverID
         try save(record)

@@ -122,6 +122,7 @@ final class NativeGuidedJoinStore {
     private let namespace: String
     private let transport: any NativeJoinTransport
     private let enrollment: NativeEnrollmentStore
+    var removePushBeforeDeparture: ((NativeEnrollmentRecord) async -> Void)?
 
     init(namespace: String = "co.clicketyclacks.Harklight.native-enrollment",
          transport: any NativeJoinTransport = PinnedNativeJoinTransport()) {
@@ -499,11 +500,13 @@ final class NativeGuidedJoinStore {
         guard let current, current.isApproved, sameInstallation(current, record) else {
             throw NativeJoinError.superseded
         }
+        // The coordinator may predate the latest authenticated server metadata.
+        let record = current
         if let saved = try self.departure() {
             if sameInstallation(saved.record, record) {
                 if saved.removed, saved.replacement == replacement { return saved }
                 if !saved.removed {
-                    let updated = NativeAccountDeparture(record: saved.record,
+                    let updated = NativeAccountDeparture(record: record,
                                                         replacement: replacement,
                                                         removed: false)
                     try saveData(JSONEncoder().encode(updated), account: "guided-departure")
@@ -523,7 +526,7 @@ final class NativeGuidedJoinStore {
         }
         if let saved = try savedDeparture(for: record) {
             guard !saved.removed else { throw NativeJoinError.superseded }
-            let updated = NativeAccountDeparture(record: saved.record,
+            let updated = NativeAccountDeparture(record: record,
                                                 replacement: replacement,
                                                 removed: false)
             if try self.departure()?.archiveID != saved.archiveID {
@@ -548,6 +551,8 @@ final class NativeGuidedJoinStore {
         }
         guard departure.replacement == replacement else { throw NativeJoinError.superseded }
         if !departure.removed {
+            try enrollment.preparePushRemoval(for: departure.record)
+            await removePushBeforeDeparture?(departure.record)
             let material = try enrollment.material(from: record)
             guard let url = URL(string: "https://\(record.host):\(record.enrollmentPort)/device/remove") else {
                 throw NativeJoinError.invalidResponse
@@ -570,6 +575,7 @@ final class NativeGuidedJoinStore {
                   receipt.deviceID == record.deviceID, receipt.enrollmentRevision > 0 else {
                 throw NativeJoinError.wrongApproval
             }
+            try enrollment.finishPushDeparture(for: record)
             var confirmedDeparture = try savedDeparture(for: record) ?? departure
             confirmedDeparture.removed = true
             try saveDeparture(confirmedDeparture)
