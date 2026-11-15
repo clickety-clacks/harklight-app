@@ -85,40 +85,27 @@ struct InboxSubmissionProgress: Equatable, Sendable {
             guard !submission.isNoComment,
                   snapshot.requests[key]?.hasExplicitInformationalSeenAction != true else { continue }
             let state: State
-            let detail: String?
             switch submission.disposition {
-            case .pending, .lost:
+            case .pending:
                 state = .awaiting
-                detail = nil
+            case .lost:
+                // The outcome is unknown after a dropped connection: Not sent
+                // with Retry, matching the control. Retry resends the same
+                // operation, and a replay showing it arrived settles it.
+                state = .notSent
             case .accepted:
                 // Answers stop waiting when this operation is confirmed by the
                 // Server. Unlike chat, they do not wait for an origin reply.
                 continue
-            case let .terminal(terminal, _, _):
-                state = .notSent
-                switch terminal {
-                case .answered: detail = "This request was already answered"
-                case .noComment: detail = "No comment was already recorded"
-                case .cleared: detail = "This request was cleared"
-                case .expired: detail = "This request expired"
-                case .superseded: detail = "This request was replaced"
-                }
-            case .refusedClosed:
-                state = .notSent
-                detail = "This request was already closed"
-            case .refusedNotFound:
-                state = .notSent
-                detail = "This request is no longer available"
-            case .staleRevision:
-                state = .notSent
-                detail = "This request has changed"
-            case .refusedByRetraction:
-                state = .notSent
-                detail = "This request was retracted"
+            case .terminal, .refusedClosed, .refusedNotFound, .staleRevision, .refusedByRetraction:
+                // Not a Retry case: the message's own closed, retracted or
+                // current state shows instead of a not-sent mark.
+                continue
             case .failed, .unsupported, .repairRequired:
+                // Retry is the indicator; no reason line for a plain failure.
                 state = .notSent
-                detail = "Not accepted"
             }
+            let detail: String? = nil
             include(key, state: state, date: submission.submittedAt, detail: detail)
         }
         return result

@@ -965,6 +965,34 @@ public final class ClientRepository: @unchecked Sendable {
         try commit(next)
     }
 
+    /// Drops a failed or unsupported operation so its saved draft can be
+    /// edited and sent as a new operation. Never a lost one: the server may
+    /// already have accepted it, so it keeps its identity for Retry.
+    public func releaseFailedOperationForEdit(_ intentID: UUID,
+                                              context suppliedContext: ProfileContext) throws {
+        writerLock.lock()
+        defer { writerLock.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard let submission = state.intents[intentID] else { throw AttentionStoreError.intentMissing }
+        switch submission.disposition {
+        case .failed, .unsupported: break
+        default: throw AttentionStoreError.intentConflict
+        }
+        var next = state
+        next.intents.removeValue(forKey: intentID)
+        if next.intentByRequest[submission.requestKey] == intentID {
+            next.intentByRequest.removeValue(forKey: submission.requestKey)
+        }
+        next.outboxOrder.removeAll { $0 == intentID }
+        if var published = next.replayPublishedIntents {
+            published.removeValue(forKey: intentID)
+            next.replayPublishedIntents = published
+        }
+        try commit(next)
+    }
+
     public func recordAcceptedOperation(_ intentID: UUID,
                                         operationID: UUID,
                                         terminalSequence: UInt64,

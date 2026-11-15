@@ -307,6 +307,10 @@ public struct PresentedRequest: Equatable, Sendable {
     /// The submitted answer projected from its durable intent, not from
     /// editable draft storage.
     public let submittedAnswer: RequestDraft?
+    /// What a definitively failed operation sent, while it is the request's
+    /// latest one. That operation is not the presented submission, so this is
+    /// how its control keeps showing the sent answer until Edit or a new answer.
+    public let failedAnswer: RequestDraft?
     /// Whether this device's retained answer attempt was definitively refused
     /// after the sender retracted the request. This narrow presentation fact
     /// survives account-terminal projections that hide the full local receipt.
@@ -320,6 +324,8 @@ public struct PresentedRequest: Equatable, Sendable {
     public let messageType: MessageTypeValue?
     /// Explicit sender-stated message kind, if recognized from the current message.
     public let messageKind: MessageKindValue?
+    /// Progress from this admitted revision; malformed marked FYIs stay marked.
+    public let messageProgress: MessageProgress?
     /// The server's account-wide terminal outcome, when supported.
     public let accountAnswerOutcome: AccountAnswerOutcome?
     /// The first value action matching a default outcome in the current revision.
@@ -373,6 +379,7 @@ public struct PresentedRequest: Equatable, Sendable {
                 selector: BoundDocumentSelector?,
                 draft: RequestDraft,
                 submittedAnswer: RequestDraft? = nil,
+                failedAnswer: RequestDraft? = nil,
                 ownAnswerWasRefusedByRetraction: Bool = false,
                 lifecycleStatus: AppLifecycleStatus,
                 receiptFacts: ReceiptPresentationFacts?,
@@ -381,6 +388,7 @@ public struct PresentedRequest: Equatable, Sendable {
                 informationalSeenStatus: InformationalSeenStatus? = nil,
                 messageType: MessageTypeValue? = nil,
                 messageKind: MessageKindValue? = nil,
+                messageProgress: MessageProgress? = nil,
                 accountAnswerOutcome: AccountAnswerOutcome? = nil,
                 defaultAnswerAction: ProjectedActionReference? = nil,
                 attentionTier: AttentionTier = .middle,
@@ -411,6 +419,7 @@ public struct PresentedRequest: Equatable, Sendable {
         self.selector = selector
         self.draft = draft
         self.submittedAnswer = submittedAnswer
+        self.failedAnswer = failedAnswer
         self.ownAnswerWasRefusedByRetraction = ownAnswerWasRefusedByRetraction
         self.lifecycleStatus = lifecycleStatus
         self.receiptFacts = receiptFacts
@@ -419,6 +428,7 @@ public struct PresentedRequest: Equatable, Sendable {
         self.informationalSeenStatus = informationalSeenStatus
         self.messageType = messageType
         self.messageKind = messageKind
+        self.messageProgress = messageProgress
         self.accountAnswerOutcome = accountAnswerOutcome
         self.defaultAnswerAction = defaultAnswerAction
         self.attentionTier = attentionTier
@@ -1005,6 +1015,13 @@ public final class AttentionDomainPort: @unchecked Sendable {
                 ?? session?.lifecycle.submissionValue.flatMap { value in
                     matchesCurrentRevision(value) ? value : nil
                 }
+            let failedSubmission = submission != nil ? nil : currentIntents.filter { candidate in
+                switch candidate.disposition {
+                case .failed: true
+                case .unsupported: candidate.isNoComment
+                default: false
+                }
+            }.max { ($0.submittedAt ?? .distantPast) < ($1.submittedAt ?? .distantPast) }
             // A newer saved attempt supersedes the earlier unsupported result
             // while its own delivery outcome is pending.
             let noCommentUnavailable = hasUnsupportedNoComment && submission == nil
@@ -1025,6 +1042,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
                         session: session,
                         remote: snapshot.remoteStates[item.request.key],
                         submission: submission,
+                        failedSubmission: failedSubmission,
                         selector: selectors?[item.request.key],
                         requestRevision: presentedRevision,
                         staleAnswerRevision: staleAnswerRevision,
@@ -1180,6 +1198,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
                          session: RequestSession?,
                          remote: RemoteRequestState?,
                          submission: Submission?,
+                         failedSubmission: Submission? = nil,
                          selector: BoundDocumentSelector?,
                          requestRevision: UInt64 = 1,
                          staleAnswerRevision: StaleAnswerRevision? = nil,
@@ -1356,6 +1375,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
                                 draft: draft,
                                 submittedAnswer: hasAccountTerminal || (session == nil && status != .pending) ? nil :
                                     submittedAnswer(for: submission, interface: interface),
+                                failedAnswer: submittedAnswer(for: failedSubmission, interface: interface),
                                 ownAnswerWasRefusedByRetraction: ownAnswerWasRefusedByRetraction,
                                 lifecycleStatus: status,
                                 receiptFacts: hasAccountTerminal ? nil : receiptFacts,
@@ -1365,6 +1385,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
                                     status: status, remote: remote, submission: submission),
                                 messageType: request.messageType,
                                 messageKind: request.messageKind,
+                                messageProgress: MessageProgress.read(from: request.originalPayload),
                                 accountAnswerOutcome: remote?.accountAnswerOutcome,
                                 defaultAnswerAction: defaultAnswerAction,
                                 attentionTier: .middle,
