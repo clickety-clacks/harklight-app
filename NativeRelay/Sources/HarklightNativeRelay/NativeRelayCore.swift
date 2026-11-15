@@ -125,6 +125,9 @@ public enum NativeRelayCoreError: Error, Equatable {
     /// errors about the person's own input are not in this class.
     public static func isInvalidSavedServerState(_ error: any Error) -> Bool {
         if let error = error as? NativeRelayCoreError { return error == .invalidReplay || error == .eventRejected }
+        // The relay refused an acknowledgement because its stored position
+        // disagrees with the saved cursor.
+        if let error = error as? InstallationTransportError, error == .acknowledgementBehind { return true }
         if let error = error as? ConversationError {
             switch error {
             case .gap, .conflict: return true
@@ -1665,22 +1668,14 @@ public actor NativeRelayCore {
                 using: transport, wire: wire)
             flushCommittedLiveReplyArrivals()
             try await saveServerStateCache()
-            do { try await transport.acknowledgeConversation(wire.acknowledge(high)) }
-            catch InstallationTransportError.acknowledgementBehind {
-                diagnose(.conversation, .acknowledgement, .retrying,
-                         error: InstallationTransportError.acknowledgementBehind)
-                high = try await replayConversation(since: 0, using: transport, wire: wire)
-                flushCommittedLiveReplyArrivals()
-                try await saveServerStateCache()
-                try await transport.acknowledgeConversation(wire.acknowledge(high))
-            }
+            high = try await acknowledgeConversationRebuildingIfRefused(high, using: transport, wire: wire)
             if drainReadPositions,
                try await sendPendingConversationReadPositions(using: transport) {
                 high = try await replayConversation(since: store.conversationSnapshot(context: context).cursor,
                     using: transport, wire: wire)
                 flushCommittedLiveReplyArrivals()
                 try await saveServerStateCache()
-                try await transport.acknowledgeConversation(wire.acknowledge(high))
+                high = try await acknowledgeConversationRebuildingIfRefused(high, using: transport, wire: wire)
             }
             diagnose(.conversation, .acknowledgement, .completed)
             diagnose(.conversation, .conversationReplay, .completed)
@@ -1838,6 +1833,36 @@ public actor NativeRelayCore {
         // foreground or push resync replays from it.
         try? await replayConversationAndAcknowledge(using: transport)
         flushCommittedLiveReplyArrivals()
+    }
+
+    /// The relay refuses a conversation acknowledgement when its stored
+    /// position disagrees with the saved conversation cursor (for example the
+    /// app saved a cursor and lost the connection before acknowledging it).
+    /// The saved projection is only a cache: discard it, keeping the person's
+    /// drafts and read positions, replay the whole history from the Server and
+    /// acknowledge that. If the relay still refuses, its stored position is
+    /// ahead of its own history; the projection now holds that whole history,
+    /// so record it and carry on rather than ending the connection.
+    private func acknowledgeConversationRebuildingIfRefused(_ high: UInt64,
+        using transport: any AuthenticatedConversationSession, wire: ConversationWire) async throws -> UInt64 {
+        do {
+            try await transport.acknowledgeConversation(wire.acknowledge(high))
+            return high
+        } catch InstallationTransportError.acknowledgementBehind {
+            diagnose(.conversation, .acknowledgement, .retrying,
+                     error: InstallationTransportError.acknowledgementBehind)
+        }
+        try store.discardConversationProjection(context: context)
+        let rebuilt = try await replayConversation(since: 0, using: transport, wire: wire)
+        flushCommittedLiveReplyArrivals()
+        try await saveServerStateCache()
+        do {
+            try await transport.acknowledgeConversation(wire.acknowledge(rebuilt))
+        } catch InstallationTransportError.acknowledgementBehind {
+            diagnose(.conversation, .acknowledgement, .observed,
+                     causeCode: "conversation_ack_refused_after_rebuild")
+        }
+        return rebuilt
     }
 
     private func replayConversation(since cursor: UInt64, using transport: any AuthenticatedConversationSession,

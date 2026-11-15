@@ -411,6 +411,21 @@ public final class ClientRepository: @unchecked Sendable {
         acceptedAwaitingTerminalReplay = Self.acceptedAwaitingTerminalReplay(in: state)
     }
 
+    /// The saved conversation projection disagrees with the relay. Discard it
+    /// so a replay from the Server rebuilds it; the person's Chat drafts,
+    /// uploads and read positions are kept in their own queues.
+    public func discardConversationProjection(context suppliedContext: ProfileContext) throws {
+        writerLock.lock()
+        defer { writerLock.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard suppliedContext.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
+        var next = state
+        next.server.conversation = nil
+        try commit(next)
+    }
+
     public func invalidate() {
         writerLock.lock()
         defer { writerLock.unlock() }
