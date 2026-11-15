@@ -2132,32 +2132,37 @@ final class NativeRelayCoreTests: XCTestCase {
             intentID: UUID(), inputs: [.compatibilityValue(action: ExactText("yes"))]))
         let original = try XCTUnwrap(store.lookupIntent(unsent.intentID, context: context))
 
-        // The answer itself is intact; only its entry in the active index is damaged.
-        var root = try XCTUnwrap(PropertyListSerialization.propertyList(
-            from: XCTUnwrap(persistence.load(identity: identity)), format: nil) as? [String: Any])
-        var index = try XCTUnwrap(root["activeOperations"] as? [Any])
-        XCTAssertEqual(index.count, 2, "One request mapped to one operation.")
-        index[1] = "not-an-intent-id"
-        root["activeOperations"] = index
-        try persistence.commit(PropertyListSerialization.data(fromPropertyList: root, format: .binary, options: 0),
-                               identity: identity)
+        let saved = try XCTUnwrap(persistence.load(identity: identity))
+        // The answer itself is intact. Its index entry is either malformed
+        // (the file no longer decodes whole) or simply missing (it still does).
+        for damage in ["malformed entry", "empty index"] {
+            var root = try XCTUnwrap(PropertyListSerialization.propertyList(from: saved, format: nil) as? [String: Any])
+            var index = try XCTUnwrap(root["activeOperations"] as? [Any])
+            XCTAssertEqual(index.count, 2, "One request mapped to one operation.")
+            if damage == "malformed entry" { index[1] = "not-an-intent-id" } else { index = [] }
+            root["activeOperations"] = index
+            try persistence.commit(PropertyListSerialization.data(fromPropertyList: root, format: .binary, options: 0),
+                                   identity: identity)
 
-        let reopened = try ClientRepository(context: context, persistence: persistence)
-        XCTAssertEqual(reopened.pendingActionsRecoveries.first?.kind, .partlyRecovered)
-        let relaunched = try ClientRepository(context: context, persistence: persistence)
-        let kept = try XCTUnwrap(relaunched.lookupIntent(unsent.intentID, context: context),
-                                 "The intact answer survives the rewrite and a relaunch.")
-        XCTAssertEqual(kept.operationID, original.operationID)
-        XCTAssertEqual(kept.wireFrame, original.wireFrame)
+            let reopened = try ClientRepository(context: context, persistence: persistence)
+            XCTAssertEqual(reopened.pendingActionsRecoveries.first?.kind, .partlyRecovered, damage)
+            let relaunched = try ClientRepository(context: context, persistence: persistence)
+            XCTAssertTrue(relaunched.pendingActionsRecoveries.isEmpty, "The repaired queue was rewritten (\(damage)).")
+            let kept = try XCTUnwrap(relaunched.lookupIntent(unsent.intentID, context: context),
+                                     "The intact answer survives the rewrite and a relaunch (\(damage)).")
+            XCTAssertEqual(kept.operationID, original.operationID)
+            XCTAssertEqual(kept.wireFrame, original.wireFrame)
 
-        let session = Session(identity)
-        session.snapshotHighWater = 1
-        session.initialItems = [snapshotItem(key, payload: payload, sequence: 1)]
-        session.frames = [data(#"{"v":1,"type":"resynced","seq":1}"#)]
-        let core = try NativeRelayCore(store: relaunched, context: context, session: session)
-        _ = try await core.resyncAndDrainOutbox()
-        XCTAssertEqual(session.sent.map(\.1), [original.operationID], "It is resent under its original operation ID.")
-        XCTAssertEqual(session.sent.first?.0, original.wireFrame)
+            let session = Session(identity)
+            session.snapshotHighWater = 1
+            session.initialItems = [snapshotItem(key, payload: payload, sequence: 1)]
+            session.frames = [data(#"{"v":1,"type":"resynced","seq":1}"#)]
+            let core = try NativeRelayCore(store: relaunched, context: context, session: session)
+            _ = try await core.resyncAndDrainOutbox()
+            XCTAssertEqual(session.sent.map(\.1), [original.operationID],
+                           "It is resent under its original operation ID (\(damage)).")
+            XCTAssertEqual(session.sent.first?.0, original.wireFrame)
+        }
     }
 
     func testOneDamagedChatDraftKeepsTheThreadsOtherQueuedWork() throws {

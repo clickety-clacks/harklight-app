@@ -250,12 +250,22 @@ public final class ClientRepository: @unchecked Sendable {
         if let queue = try? PropertyListDecoder().decode(PersistedPendingActions.self, from: bytes),
            queue.version == 1, queue.profileIdentity == context.identity {
             state.intents = queue.operations
-            state.intentByRequest = queue.activeOperations
             state.fencedIntents = queue.cancelledOperations
+            // The file decoded whole, but its index can still be missing an
+            // entry. Restore it from the intact operations themselves, so an
+            // intact answer stays resendable and survives the next commit.
+            state.intentByRequest = salvagedActiveIndex(queue.activeOperations,
+                operations: queue.operations, cancelled: queue.cancelledOperations)
             state.drafts = queue.answerDrafts
             state.pendingMessageOpens = queue.messageOpens
             state.pendingConversations = queue.conversations
             state.pendingReadPositions = queue.readPositions
+            if state.intentByRequest != queue.activeOperations {
+                recoveries.append(PendingActionsRecovery(kind: .partlyRecovered,
+                    keptOperations: state.intentByRequest.count,
+                    droppedEntries: state.intents.count - state.intentByRequest.count))
+                try persistence.commit(Self.queueBytes(for: state), identity: context.identity)
+            }
         } else if let salvaged = try? PropertyListDecoder().decode(SalvagedPendingActions.self, from: bytes),
                   salvaged.version == 1, salvaged.profileIdentity == context.identity {
             // The file no longer decodes whole. Keep every entry that still
