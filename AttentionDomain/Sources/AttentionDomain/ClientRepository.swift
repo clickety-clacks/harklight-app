@@ -235,6 +235,7 @@ public final class ClientRepository: @unchecked Sendable {
     private var selectorBindings: [UUID: SelectorBinding] = [:]
     private var changeObservers: [UUID: AsyncStream<UInt64>.Continuation] = [:]
     private var isInvalidated = false
+    private var conversationAckRefusalMarker: UInt64?
 
     var profileContext: ProfileContext { context }
     public var requiresConfirmedServerProjection: Bool { context.transportMode == .relay }
@@ -409,6 +410,42 @@ public final class ClientRepository: @unchecked Sendable {
         next.drafts = state.drafts.filter { $0.value.hasEdits || unsentKeys.contains($0.key) }
         try commit(next)
         acceptedAwaitingTerminalReplay = Self.acceptedAwaitingTerminalReplay(in: state)
+    }
+
+    /// The saved conversation projection disagrees with the relay. Discard it
+    /// so a replay from the Server rebuilds it; the person's Chat drafts,
+    /// uploads and read positions are kept in their own queues.
+    public func discardConversationProjection(context suppliedContext: ProfileContext) throws {
+        writerLock.lock()
+        defer { writerLock.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard suppliedContext.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
+        var next = state
+        next.server.conversation = nil
+        try commit(next)
+    }
+
+    /// The conversation position at which a rebuild from the whole Server
+    /// history was still refused by the relay, for this app session. Kept in
+    /// memory only: a relaunch verifies the history once more.
+    public var conversationAckRefusedAfterRebuild: UInt64? {
+        lock.lock()
+        defer { lock.unlock() }
+        return conversationAckRefusalMarker
+    }
+
+    public func recordConversationAckRefusedAfterRebuild(at position: UInt64) {
+        lock.lock()
+        defer { lock.unlock() }
+        conversationAckRefusalMarker = position
+    }
+
+    public func clearConversationAckRefusal() {
+        lock.lock()
+        defer { lock.unlock() }
+        conversationAckRefusalMarker = nil
     }
 
     public func invalidate() {
@@ -2588,6 +2625,14 @@ public final class ClientRepository: @unchecked Sendable {
                     }
                 }
                 try recordInboxTerminalProjection(terminal, into: &next)
+                // The Server holds this operation's terminal: it is settled,
+                // whether or not its message is loaded yet, so it leaves the
+                // queue instead of waiting for a replay that may never cover it.
+                dropUnsentAnswer(for: submission.requestKey, in: &next)
+                if var published = next.replayPublishedIntents {
+                    published.removeValue(forKey: submission.intentID)
+                    next.replayPublishedIntents = published
+                }
                 touchedKeys.insert(submission.requestKey)
                 refreshedKeys.insert(submission.requestKey)
             case .operationConflict:
@@ -2617,10 +2662,12 @@ public final class ClientRepository: @unchecked Sendable {
                     refreshedKeys.insert(submission.requestKey)
                 }
             case .refused:
+                // An accepted operation whose message is now gone or closed is
+                // retired: the Server has nothing left to settle for it.
                 guard receipt.result == nil, receipt.terminal == nil,
                       let reason = receipt.reason,
                       InboxOperationRefusalReason(rawValue: reason) != nil,
-                      !Self.isAccepted(submission) else {
+                      !Self.isAccepted(submission) || reason == "not_found" || reason == "closed" else {
                     throw AttentionStoreError.inboxPageConflict
                 }
                 Self.recordInboxOperationFailure(submission, reason: reason, in: &next)

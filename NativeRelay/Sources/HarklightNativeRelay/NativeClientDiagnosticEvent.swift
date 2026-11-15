@@ -385,7 +385,8 @@ public enum NativeDiagnosticCauseCode {
         "relay_acknowledged", "follow_on_replay_not_reached", "original_operation_terminal_not_observed",
         "original_operation_state_unavailable", "saved_server_state_rebuilt", "unprojectable_request_shown_unsupported",
         "pending_actions_partly_recovered", "pending_actions_replaced_unreadable", "pending_actions_replaced_foreign",
-        "legacy_pending_actions_partly_imported", "legacy_pending_actions_unreadable", "legacy_pending_actions_foreign"
+        "legacy_pending_actions_partly_imported", "legacy_pending_actions_unreadable", "legacy_pending_actions_foreign",
+        "conversation_ack_refused_after_rebuild"
     ]
 
     private static let serverReasons: Set<String> = [
