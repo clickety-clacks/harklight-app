@@ -75,8 +75,9 @@ final class SubmissionControlPhaseTests: XCTestCase {
         let payload = try JSONValue.parse(Data(#"{"title":"Question","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"reply","label":"Reply","kind":"text"}]}}"#.utf8))
         let domain = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
         try domain.restoreCachedServerState(CachedAttentionServerState(identity: context.identity,
-            requests: [key: StoredRequest(key: key, originalPayload: payload)], remoteStates: [:], cursor: 1,
-            conversationCursor: 0, conversations: [:], inboxView: nil, currentRequestKeys: [key]), context: context)
+            requests: try Self.deliveredRequests(key: key, payload: payload, context: context), remoteStates: [:],
+            cursor: 1, conversationCursor: 0, conversations: [:], inboxView: nil, currentRequestKeys: [key]),
+            context: context)
         let port = AttentionDomainPort(store: domain)
         let selector = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first?.selector)
         let receipt = try port.submit(SubmitIntent(context: port.context, selector: selector, intentID: UUID(),
@@ -140,12 +141,23 @@ final class SubmissionControlPhaseTests: XCTestCase {
                              messageID: ExactText("question"))
         let domain = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
         try domain.restoreCachedServerState(CachedAttentionServerState(identity: context.identity,
-            requests: [key: StoredRequest(key: key, originalPayload: payload)], remoteStates: [:], cursor: 1,
-            conversationCursor: 0, conversations: [:], inboxView: nil, currentRequestKeys: [key]), context: context)
+            requests: try Self.deliveredRequests(key: key, payload: payload, context: context), remoteStates: [:],
+            cursor: 1, conversationCursor: 0, conversations: [:], inboxView: nil, currentRequestKeys: [key]),
+            context: context)
         let port = AttentionDomainPort(store: domain)
         let selector = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first?.selector)
         return LiveFixture(context: context, key: key, domain: domain, port: port, selector: selector,
                            live: try LivePresentationStore(store: domain, context: context))
+    }
+
+    /// Requests as the store keeps them after a delivery, with their durable
+    /// order, for a cache restore.
+    private static func deliveredRequests(key: RequestKey, payload: JSONValue,
+                                          context: ProfileContext) throws -> [RequestKey: StoredRequest] {
+        let previous = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        _ = try previous.apply(RelayEvent(sequence: 1,
+            body: .delivery(StoredRequest(key: key, originalPayload: payload), .message)), context: context)
+        return try previous.snapshot(context: context).requests
     }
 
     private func choicePayload() throws -> JSONValue {
