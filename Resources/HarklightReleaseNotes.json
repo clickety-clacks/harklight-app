@@ -212,6 +212,12 @@
           "symbol": "eye",
           "title": "Messages you open while catching up count as viewed",
           "detail": "Opening a message while Harklight is still catching up with the server records your view at once. The server is told when the connection is free. This fix is pending formal testing."
+        },
+        {
+          "id": "damaged-saved-data-recovery",
+          "symbol": "arrow.uturn.backward.circle",
+          "title": "Recover from damaged saved data",
+          "detail": "If data saved on this device is damaged, Harklight now recovers by itself and keeps any unsent work that is still intact. This fix is pending formal testing."
         }
       ]
     }
