@@ -768,10 +768,11 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         if warnings.isEmpty { isWarningPresented = false }
     }
 
-    /// Search filters only the search tab's list; Inbox and Replied always
-    /// show everything.
+    /// On iPhone search filters only the Search tab's list; Inbox and Replied
+    /// always show everything. On iPad the list's own search field filters it
+    /// in place, so detail position and next/previous follow the same results.
     private var activeSearch: String {
-        rootTab == .search ? search : ""
+        rootTab == .search || usesListSearch ? search : ""
     }
 
     private var orderedIDs: [InboxSelection] {
@@ -1157,7 +1158,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                   isWarningPresented: warningPresentationBinding(for: tab),
                   selected: navigationSelection,
                       workspaceTab: $workspaceTab,
-                      search: searching ? $search : .constant(""),
+                      search: searching || usesListSearch ? $search : .constant(""),
                       lastViewedSelection: lastViewedSelection,
                       restoreLastViewed: restoreLastViewedOnReturn,
                       didRestoreLastViewed: { restoreLastViewedOnReturn = false },
@@ -1170,6 +1171,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                       notificationPendingPresentation: notificationPendingListPresentation,
                       triggerNotification: exposesNotificationTestAction
                           ? { triggerNotificationTestAction() } : nil)
+            .modifier(InboxListSearchFieldModifier(active: usesListSearch, text: searchTextBinding))
         } detail: {
             NavigationStack(path: $relatedMessageNavigationPath) {
                 detailContent(for: selection, inlineChat: inlineChat,
@@ -1203,6 +1205,17 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
 
     /// On iPad the open message's type tint runs behind the floating list
     /// panel to the screen edge; with nothing open the page shows.
+    /// iPad searches with a field at the top of the list; iPhone uses the
+    /// Search tab.
+    private var usesListSearch: Bool { UIDevice.current.userInterfaceIdiom == .pad }
+
+    private var searchTextBinding: Binding<String> {
+        Binding(get: { search }, set: { value in
+            search = value
+            NativePushedViewCoordinator.shared.noteReplyTextChanged()
+        })
+    }
+
     private var splitBackground: Color {
         let palette = HarklightDesignSystem.palette(for: colorScheme)
         guard let selection, let item = rows.first(where: { $0.id == selection }) else {
@@ -1291,17 +1304,19 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                                    geometry: geometry)
                 }
 
-                // The search role gives the system's round search button at the
-                // trailing end. It searches the list the person came from.
-                Tab(value: .search, role: .search) {
-                    inboxSplitView(for: workspaceTab, inlineChat: inlineChat,
-                                   geometry: geometry, searching: true)
-                        .id(workspaceTab)
-                        .searchable(text: Binding(get: { search }, set: { value in
-                            search = value
-                            NativePushedViewCoordinator.shared.noteReplyTextChanged()
-                        }), prompt: "Search messages")
-                        .searchFocused($searchFieldFocused)
+                // On iPhone the search role gives the system's round search
+                // button at the trailing end; it searches the list the person
+                // came from. On iPad search is a field at the top of the list
+                // instead (usesListSearch): after a search in the system search
+                // tab, iPad reply editors could no longer take the keyboard.
+                if !usesListSearch {
+                    Tab(value: .search, role: .search) {
+                        inboxSplitView(for: workspaceTab, inlineChat: inlineChat,
+                                       geometry: geometry, searching: true)
+                            .id(workspaceTab)
+                            .searchable(text: searchTextBinding, prompt: "Search messages")
+                            .searchFocused($searchFieldFocused)
+                    }
                 }
             }
             .tabViewSearchActivation(.searchTabSelection)
@@ -3353,5 +3368,19 @@ private struct ReplyItemNormalRowContent: View {
         .inboxRowSurface(priority: priority, openType: selected ? .request : nil)
         .accessibilityElement(children: .combine)
         .accessibilityLabel(String(localized: "Chat reply from \(senderLabel) about \(MessageMarkdown.visibleText(parentTitle))"))
+    }
+}
+
+/// The iPad list's own search field, in the list column.
+private struct InboxListSearchFieldModifier: ViewModifier {
+    let active: Bool
+    let text: Binding<String>
+
+    func body(content: Content) -> some View {
+        if active {
+            content.searchable(text: text, placement: .sidebar, prompt: "Search messages")
+        } else {
+            content
+        }
     }
 }
