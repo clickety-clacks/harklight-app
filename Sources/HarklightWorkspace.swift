@@ -1098,7 +1098,8 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             .frame(maxWidth: .infinity)
             if inlineChat, !pushedChatFallsBackToMessage, case let .request(key)? = item,
                !dismissedInlineChatRequests.contains(key), let conversationStore,
-               let request = conversationStore.request(for: key), request.messageProgress == nil {
+               let request = conversationStore.request(for: key),
+               !conversationStore.progressInboxEnabled || request.messageProgress == nil {
                 Group {
                     Rectangle().fill(.hkLine).frame(width: 1).ignoresSafeArea()
                     ConversationPanel(store: conversationStore, key: key,
