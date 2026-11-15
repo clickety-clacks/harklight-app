@@ -16,7 +16,7 @@ Read [HARKLIGHT_GUIDANCE.md](HARKLIGHT_GUIDANCE.md) before adding, changing, or 
 ## Builds and releases
 
 - Every merge to `main` triggers an Xcode Cloud build that goes to internal TestFlight automatically. There is nothing to start and nothing to approve. Agents never start Xcode Cloud workflows by hand.
-- Releases are tagged from `main` and go out through CI with no human approval. Don't ask for approval before tagging. Escalate only for a real problem: a failing check you can't fix, or a build that would break something users rely on.
+- "Release through CI with no human approval" means this build path only: the Xcode Cloud internal TestFlight build on every merge to `main`. App Store or external TestFlight distribution is a separate step outside this process and needs its own existing authority; this document grants none.
 - If a shipped build is bad, ship a fix or revert from `main` as the next build. Don't hand-patch a build.
 
 ## Large features behind a feature flag
@@ -31,7 +31,7 @@ A feature too big for one short-lived branch lands on `main` in small, reviewed 
 - **Removal is part of the feature.** Once the feature is accepted, delete the flag, the off path and its tests in a follow-up pull request, and remove its register row. The feature isn't done until its flag is gone.
 - Flags are for unfinished features. Don't use them for per-user settings or permanent configuration.
 
-Remote flag values arrive from the server in the resynced frame on connect. When a flag is absent from that frame, the app uses its built-in default.
+The server owns the remote flag configuration; this section only describes how the app reads flags. Remote flag values arrive from the server in the resynced frame on connect. When a flag is absent from that frame, the app uses its built-in default.
 
 ### Feature-flag register
 
