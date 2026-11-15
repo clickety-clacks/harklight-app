@@ -1058,15 +1058,14 @@ final class ConversationPresentationTests: XCTestCase {
             conversation: RelayConversationMetadata(revision: 1,
                 sessionHandle: ExactText("session"))), context: context)
         let saved = try previous.snapshot(context: context)
-        // A cold launch from the saved cache: catch-up has not confirmed the inbox yet.
+        // A cold launch from the saved cache whose current inbox does not yet
+        // include this request: catch-up has not confirmed it.
         let domain = try ClientRepository(context: context,
             persistence: MemoryPendingActionPersistence())
         try domain.restoreCachedServerState(CachedAttentionServerState(identity: context.identity,
             requests: saved.requests, remoteStates: [:], cursor: 1, conversationCursor: 0,
-            conversations: [:], inboxView: nil, currentRequestKeys: [key]), context: context)
+            conversations: [:], inboxView: nil, currentRequestKeys: []), context: context)
         let model = try LivePresentationStore(store: domain, context: context)
-        model.beginRefresh()
-        defer { model.endRefresh() }
         let request = try XCTUnwrap(model.request(for: key))
         XCTAssertFalse(model.canUseCurrentServerState(for: key),
                        "The inbox has not caught up with the server yet.")
