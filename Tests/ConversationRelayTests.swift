@@ -596,6 +596,47 @@ final class ConversationRelayTests: XCTestCase {
         await core.deactivate()
     }
 
+    func testRefusedReadRestoresUnreadUnlessTheServerCouldNotStoreIt() async throws {
+        let (context, _, store, session) = try setup()
+        session.conversation = [data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
+            data(#"{"v":1,"type":"conversation_resynced","conversation_seq":0,"chat_read_positions":[]}"#)]
+        let core = try NativeRelayCore(store: store, context: context, session: session)
+        _ = try await core.resyncAndDrainOutbox()
+
+        let key = RequestKey(accountScope: context.identity.personID,
+            senderID: ExactText("author"), messageID: ExactText("request"))
+        let binding = ConversationBinding(request: key, revision: 1)
+        let handle = ExactText("handle")
+        let discussion = ConversationTurn(id: ExactText("question"), binding: binding,
+            author: .person, sessionHandle: handle, text: ExactText("Question"), kind: .discussion)
+        let reply = ConversationTurn(id: ExactText("reply"), binding: binding,
+            author: .origin, sessionHandle: handle, text: ExactText("Reply"),
+            inReplyTo: discussion.id, kind: .reply)
+        for (sequence, turn) in [(1, discussion), (2, reply)] {
+            try store.applyConversation(ConversationEvent(sequence: UInt64(sequence),
+                binding: binding, fact: .turn(turn)), context: context)
+        }
+        try store.finishConversationReplay(at: 2, chatReadPositions: [], context: context)
+        _ = try XCTUnwrap(store.markConversationRead(key, through: reply.id, context: context))
+
+        session.conversationReadPositionResults = [.rejected(reason: ExactText("storage_unavailable"))]
+        await core.sendPendingConversationReadPositions()
+        var snapshot = try store.conversationSnapshot(context: context)
+        XCTAssertEqual(snapshot.pendingChatReadPositions.count, 1,
+                       "A read the server could not store stays queued.")
+        XCTAssertFalse(try XCTUnwrap(snapshot.threads[key]).hasUnreadAgentReply,
+                       "The queued read keeps showing while it waits.")
+
+        session.conversationReadPositionResults = [.rejected(reason: ExactText("closed"))]
+        await core.sendPendingConversationReadPositions()
+        snapshot = try store.conversationSnapshot(context: context)
+        XCTAssertTrue(snapshot.pendingChatReadPositions.isEmpty)
+        XCTAssertTrue(try XCTUnwrap(snapshot.threads[key]).hasUnreadAgentReply,
+                      "A definitive refusal restores the unread badge.")
+        XCTAssertEqual(session.conversationReadPositionRequests.count, 2)
+        await core.deactivate()
+    }
+
     func testMarkingAVisibleReplyDoesNotAdvanceThroughLaterReplies() async throws {
         let (context, _, store, session) = try setup()
         session.conversation = [data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),

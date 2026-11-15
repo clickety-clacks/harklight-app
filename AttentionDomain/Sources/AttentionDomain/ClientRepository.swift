@@ -242,6 +242,13 @@ public final class ClientRepository: @unchecked Sendable {
         conversation.cursor = cached.conversationCursor
         conversation.events = cached.conversationEvents
         conversation.threads = cached.conversations
+        if let confirmed = cached.chatReadPositions {
+            // Thread read positions come from the confirmed map; queued reads
+            // are shown from the pending-action queue.
+            for key in Array(conversation.threads.keys) {
+                conversation.threads[key]?.accountReadThroughConversationSequence = confirmed[key] ?? 0
+            }
+        }
         conversation.chatReadPositions = cached.chatReadPositions
         conversation.chatReadPositionSupport = cached.chatReadPositions != nil
         next.server.conversation = conversation

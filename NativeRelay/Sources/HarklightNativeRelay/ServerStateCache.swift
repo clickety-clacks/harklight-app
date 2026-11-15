@@ -88,6 +88,12 @@ public struct ServerStateCacheSnapshot: Codable, Equatable, Sendable {
                 thread.answerDrafts = nil
                 thread.uploadGroups = nil
                 thread.uploadCleanups = nil
+                // Save only the server's confirmed read position. A queued read
+                // lives in the pending-action queue, not in the server cache.
+                if conversations.chatReadPositionSupport == true {
+                    thread.accountReadThroughConversationSequence =
+                        conversations.chatReadPositions?[thread.request] ?? 0
+                }
                 return CachedServerConversation(thread: thread)
             }
         return ServerStateCacheSnapshot(identity: identity, cursor: cursorOverride ?? inbox.cursor,
