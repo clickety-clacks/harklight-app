@@ -7,7 +7,8 @@ Read [HARKLIGHT_GUIDANCE.md](HARKLIGHT_GUIDANCE.md) before adding, changing, or 
 `main` is the only long-lived branch. Everything is built on it, and every release is tagged from it.
 
 - Work on a short-lived branch cut from current `main`. Merge it back within a day or two through a pull request. If a change can't land that quickly, make it smaller, or land it behind a feature flag (below). Never keep it on a long-running branch.
-- Keep `main` releasable at every commit. A pull request merges only when CI passes and an independent reviewer who didn't write it has reviewed it clean.
+- Keep `main` releasable at every commit. A pull request merges to `main` when its checks show no failure that `main` doesn't already have. Don't hold it for review: independent review by someone who didn't write it runs alongside the work, and any finding gets fixed in a follow-up pull request. Hold work back only when the next step would be hard to undo or would reach real users.
+- Where hosted CI is queued and not running, an exact-head local build plus focused tests through `Scripts/verify.sh` stands in for it. A job that runs and fails on something new blocks the merge.
 - Rebase or merge `main` into your branch often, so it never drifts far from `main`.
 - Delete the branch when it merges.
 - Don't create release, candidate, integration or notes branches. A release is a tag on a `main` commit, and its release notes land on `main` like any other change.
@@ -16,7 +17,7 @@ Read [HARKLIGHT_GUIDANCE.md](HARKLIGHT_GUIDANCE.md) before adding, changing, or 
 ## Builds and releases
 
 - Every merge to `main` triggers an Xcode Cloud build that goes to internal TestFlight automatically. There is nothing to start and nothing to approve. Agents never start Xcode Cloud workflows by hand.
-- "Release through CI with no human approval" means this build path only: the Xcode Cloud internal TestFlight build on every merge to `main`. App Store or external TestFlight distribution is a separate step outside this process and needs its own existing authority; this document grants none.
+- Internal TestFlight builds, made automatically on every merge to `main`, follow the owner's ship-to-me rule and are not a release. A release for this app means App Store or public/external TestFlight distribution. It is a separate step outside the automatic build path and needs its own existing authority; this document grants none. Every change in a release must have a clean independent review before that release is tagged.
 - If a shipped build is bad, ship a fix or revert from `main` as the next build. Don't hand-patch a build.
 
 ## Large features behind a feature flag
