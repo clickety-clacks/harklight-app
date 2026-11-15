@@ -142,15 +142,9 @@ final class FirstOpenScrollResponsivenessTests: XCTestCase {
             store.markConversationRead(request, through: reply.id)
         }
         await waitForWriteCount(persistence, atLeast: writesBefore + 1)
-        XCTAssertTrue(store.hasUnreadAgentReply(request),
-                      "A queued read request must not replace the server read position.")
-        let pending = try XCTUnwrap(domain.conversationSnapshot(context: context).pendingChatReadPositions.first)
-        XCTAssertEqual(pending.readThroughConversationSequence, 3)
-        try domain.applyConversation(ConversationEvent(sequence: 4,
-            binding: ConversationBinding(request: request, revision: 0),
-            fact: .readPosition(eventID: ExactText("read-3"), readThroughConversationSequence: 3)), context: context)
         try store.refreshFromDurableStore()
-        XCTAssertFalse(store.hasUnreadAgentReply(request))
+        XCTAssertFalse(store.hasUnreadAgentReply(request),
+                       "A local example records a shown reply as read at once.")
 
         XCTAssertLessThan(mainActorDelay, persistenceDelay * 1_000 * 0.5,
                           "Opening a visible reply must not hold the detail scroll's main actor.")

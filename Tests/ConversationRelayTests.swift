@@ -625,8 +625,8 @@ final class ConversationRelayTests: XCTestCase {
             context: context))
         XCTAssertEqual(firstPending.readThroughConversationSequence, 2)
         var thread = try XCTUnwrap(try store.conversationSnapshot(context: context).threads[key])
-        XCTAssertEqual(thread.accountReadThroughConversationSequence, 0,
-                       "A queued read request does not change server read state.")
+        XCTAssertEqual(thread.accountReadThroughConversationSequence, 2,
+                       "A queued read shows at once while the server confirms it.")
         try store.acceptConversationReadPosition(firstPending, serverPosition: 2, context: context)
         thread = try XCTUnwrap(store.conversationSnapshot(context: context).threads[key])
         XCTAssertEqual(thread.accountReadThroughConversationSequence, 2)
@@ -637,8 +637,8 @@ final class ConversationRelayTests: XCTestCase {
             context: context))
         XCTAssertEqual(laterPending.readThroughConversationSequence, 3)
         thread = try XCTUnwrap(try store.conversationSnapshot(context: context).threads[key])
-        XCTAssertEqual(thread.accountReadThroughConversationSequence, 2)
-        XCTAssertTrue(thread.hasUnreadAgentReply)
+        XCTAssertEqual(thread.accountReadThroughConversationSequence, 3)
+        XCTAssertFalse(thread.hasUnreadAgentReply)
         try store.acceptConversationReadPosition(laterPending, serverPosition: 3, context: context)
         thread = try XCTUnwrap(store.conversationSnapshot(context: context).threads[key])
         XCTAssertEqual(thread.accountReadThroughConversationSequence, 3)

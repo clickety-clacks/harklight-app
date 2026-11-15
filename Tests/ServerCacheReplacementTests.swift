@@ -492,8 +492,9 @@ final class ServerCacheReplacementTests: XCTestCase {
         try repository.finishConversationReplay(at: 1, chatReadPositions: [], context: context)
         let pending = try XCTUnwrap(repository.markConversationRead(key, through: turn.id, context: context))
         var thread = try XCTUnwrap(repository.conversationSnapshot(context: context).threads[key])
-        XCTAssertEqual(thread.accountReadThroughConversationSequence, 0)
-        XCTAssertTrue(thread.hasUnreadAgentReply)
+        XCTAssertEqual(thread.accountReadThroughConversationSequence, 1,
+                       "A queued read shows at once while the server confirms it.")
+        XCTAssertFalse(thread.hasUnreadAgentReply)
 
         try repository.acceptConversationReadPosition(pending, serverPosition: 1, context: context)
         thread = try XCTUnwrap(repository.conversationSnapshot(context: context).threads[key])
