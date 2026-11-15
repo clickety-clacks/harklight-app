@@ -27,6 +27,7 @@ A feature too big for one short-lived branch lands on `main` in small, reviewed 
 - **Off by default.** A new flag ships off, so `main` and every build behave exactly as before until the flag is turned on.
 - **One flag per feature.** A feature that seems to need many flags is usually better split into smaller features.
 - **The old path keeps working.** While the flag is off, existing behavior must be unchanged and still covered by the checks. Test both the on and off states of anything the flag touches.
+- **Off means the previous behavior, never missing content.** A flag turned off restores the old behavior; it never hides data. For example, with `progress_inbox` off, Progress messages appear as ordinary messages in the normal list.
 - **Recorded.** Every flag has a row in the register below: name, owner, default, and removal condition.
 - **Turning it on is a reviewed change.** Making a flag default to on is its own small pull request.
 - **Removal is part of the feature.** Once the feature is accepted, delete the flag, the off path and its tests in a follow-up pull request, and remove its register row. The feature isn't done until its flag is gone.
