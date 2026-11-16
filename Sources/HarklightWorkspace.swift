@@ -2477,12 +2477,14 @@ struct InboxList: View {
                         .harklightType(.more)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.horizontal, HarklightDesignSystem.shape(.rowHorizontalPadding))
-                        .padding(.vertical, HarklightDesignSystem.shape(.rowVerticalPadding))
+                        .padding(.top, HarklightDesignSystem.shape(.newMoreTopPadding))
+                        .padding(.bottom, HarklightDesignSystem.shape(.newMoreBottomPadding))
                         .overlay(alignment: .bottom) {
                             Rectangle().fill(designPalette.line).frame(height: 1)
                                 .accessibilityHidden(true)
                         }
-                        .listRowBackground(rowSurface)
+                        .listRowBackground(UIDevice.current.userInterfaceIdiom == .phone
+                            ? designPalette.raised : rowSurface)
                         .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
                         .listRowSeparator(.hidden)
                         .accessibilityIdentifier("new-message-area-more")
@@ -2494,8 +2496,10 @@ struct InboxList: View {
                         .textCase(nil)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.horizontal, HarklightDesignSystem.shape(.rowHorizontalPadding))
-                        .padding(.top, 8)
-                        .padding(.bottom, 8)
+                        .padding(.top, HarklightDesignSystem.shape(.newHeaderTopPadding))
+                        .padding(.bottom, HarklightDesignSystem.shape(.newHeaderBottomPadding))
+                        .background(UIDevice.current.userInterfaceIdiom == .phone
+                            ? designPalette.raised : .clear)
                         .overlay(alignment: .bottom) {
                             Rectangle().fill(designPalette.line).frame(height: 1)
                                 .accessibilityHidden(true)
@@ -2839,7 +2843,7 @@ private struct NewMessageAreaRowContent: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: HarklightDesignSystem.shape(.newRowSpacing)) {
             Text(displayedSummary)
                 .harklightType(.newSummary)
                 .foregroundStyle(palette.text)
@@ -2861,7 +2865,7 @@ private struct NewMessageAreaRowContent: View {
             }
         }
         .padding(.horizontal, HarklightDesignSystem.shape(.rowHorizontalPadding))
-        .padding(.vertical, HarklightDesignSystem.shape(.rowVerticalPadding))
+        .padding(.vertical, HarklightDesignSystem.shape(.newRowVerticalPadding))
         .inboxRowSurface(priority: nil, openType: selected ? messageType : nil)
         .accessibilityElement(children: .combine)
         .task(id: summaryKey) {
