@@ -1350,6 +1350,8 @@ final class LivePresentationStore {
     }
     private(set) var sendingAnswerIntentIDs: Set<UUID> = []
     private(set) var retryingCleanupRequests: Set<RequestKey> = []
+    @ObservationIgnored private let featureFlags: RemoteFeatureFlags
+    var progressInboxEnabled: Bool { featureFlags.isEnabled(.progressInbox) }
     private(set) var presentation: PresentationSnapshot
     // Rows and detail controls repeatedly ask for the same request while rendering.
     // Replace this lookup with each snapshot instead of scanning/copying every request.
@@ -1496,12 +1498,14 @@ final class LivePresentationStore {
     @ObservationIgnored private var presentedStaleAnswerOperationIDs = Set<UUID>()
 
     convenience init(store: ClientRepository, context: ProfileContext,
+                     featureFlags: RemoteFeatureFlags = NativeRelayLifecycle.shared.featureFlags,
                      conversationAvailability: NativeConversationAvailability = NativeRelayLifecycle.shared.conversationAvailability,
                      diagnostics: NativeClientDiagnosticJournal? = nil,
                      clearedRetractionDefaults: UserDefaults = .standard,
                      newMessageAreaDefaults: UserDefaults? = nil) throws {
         guard context.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
         try self.init(store: store, context: context, permitsDelivery: true, diagnostics: diagnostics,
+                      featureFlags: featureFlags,
                       conversationAvailability: conversationAvailability,
                       clearedRetractionDefaults: clearedRetractionDefaults,
                       newMessageAreaDefaults: newMessageAreaDefaults)
@@ -1529,6 +1533,7 @@ final class LivePresentationStore {
     static func makeForActivationRecoveringSavedState(
         store: ClientRepository,
         context: ProfileContext,
+        featureFlags: RemoteFeatureFlags = NativeRelayLifecycle.shared.featureFlags,
         serverStateCache: any ServerStateCaching,
         diagnostics: NativeClientDiagnosticJournal? = nil,
         newMessageAreaDefaults: UserDefaults? = nil,
@@ -1537,7 +1542,7 @@ final class LivePresentationStore {
                         mainActorWorkMilliseconds: Double,
                         activationPreparationMilliseconds: Double) {
         do {
-            return try await makeForActivation(store: store, context: context, diagnostics: diagnostics,
+            return try await makeForActivation(store: store, context: context, featureFlags: featureFlags, diagnostics: diagnostics,
                 newMessageAreaDefaults: newMessageAreaDefaults, conversationFiles: conversationFiles)
         } catch let error where NativeRelayCoreError.isInvalidSavedServerState(error) {
             diagnostics?.record(area: .localStore, phase: .projectionRefresh, transition: .retrying,
@@ -1546,7 +1551,7 @@ final class LivePresentationStore {
             try await serverStateCache.discard()
             diagnostics?.record(area: .localStore, phase: .projectionRefresh, transition: .completed,
                                 causeCode: "saved_server_state_rebuilt")
-            return try await makeForActivation(store: store, context: context, diagnostics: diagnostics,
+            return try await makeForActivation(store: store, context: context, featureFlags: featureFlags, diagnostics: diagnostics,
                 newMessageAreaDefaults: newMessageAreaDefaults, conversationFiles: conversationFiles)
         }
     }
@@ -1554,6 +1559,7 @@ final class LivePresentationStore {
     static func makeForActivation(
         store: ClientRepository,
         context: ProfileContext,
+        featureFlags: RemoteFeatureFlags = NativeRelayLifecycle.shared.featureFlags,
         conversationAvailability: NativeConversationAvailability = NativeRelayLifecycle.shared.conversationAvailability,
         diagnostics: NativeClientDiagnosticJournal? = nil,
         clearedRetractionDefaults: UserDefaults = .standard,
@@ -1570,6 +1576,7 @@ final class LivePresentationStore {
         let replyLedgerData = newMessageAreaDefaults?.data(forKey: ReplyItemAreaStore.defaultsKey)
         let diagnosticEvents = diagnostics?.events ?? []
         mainActorWorkNanoseconds += DispatchTime.now().uptimeNanoseconds - mainActorSegmentStartedAt
+        let progressInboxEnabled = featureFlags.isEnabled(.progressInbox)
         let initial = try await Task.detached(priority: .userInitiated) {
             let port = AttentionDomainPort(store: store)
             let snapshot = try port.observe(context: port.context)
@@ -1581,7 +1588,7 @@ final class LivePresentationStore {
             let replyLedger = replyLedgerData.flatMap {
                 try? JSONDecoder().decode(ReplyItemLedger.self, from: $0)
             } ?? ReplyItemLedger()
-            let messages = Self.newMessageObservations(for: snapshot.requests)
+            let messages = Self.newMessageObservations(for: snapshot.requests, progressInboxEnabled: progressInboxEnabled)
             let revisions = Dictionary(uniqueKeysWithValues: snapshot.requests.map {
                 ($0.key, $0.requestRevision)
             })
@@ -1620,7 +1627,8 @@ final class LivePresentationStore {
         mainActorSegmentStartedAt = DispatchTime.now().uptimeNanoseconds
         let presentation = try LivePresentationStore(
             store: store, context: context, permitsDelivery: true,
-            diagnostics: diagnostics, conversationAvailability: conversationAvailability,
+            diagnostics: diagnostics, featureFlags: featureFlags,
+            conversationAvailability: conversationAvailability,
             clearedRetractionDefaults: clearedRetractionDefaults,
             newMessageAreaDefaults: newMessageAreaDefaults, preparedInitialState: initial)
         presentation.reportUnprojectable(initial.snapshot)
@@ -1633,10 +1641,12 @@ final class LivePresentationStore {
     private init(store: ClientRepository, context: ProfileContext,
                  permitsDelivery: Bool, isReadOnly: Bool = false,
                  diagnostics: NativeClientDiagnosticJournal? = nil,
+                 featureFlags: RemoteFeatureFlags = NativeRelayLifecycle.shared.featureFlags,
                  conversationAvailability: NativeConversationAvailability = NativeRelayLifecycle.shared.conversationAvailability,
                  clearedRetractionDefaults: UserDefaults = .standard,
                  newMessageAreaDefaults: UserDefaults? = nil,
                  preparedInitialState: PreparedLivePresentationInitialState? = nil) throws {
+        self.featureFlags = featureFlags
         self.clearedRetractionDefaults = clearedRetractionDefaults
         let areaStore = newMessageAreaDefaults.map {
             NewMessageAreaStore(defaults: $0, initialLedger: preparedInitialState?.messageLedger)
@@ -2330,16 +2340,16 @@ final class LivePresentationStore {
     private func reconcileNewMessageArea(_ requests: [PresentedRequest],
                                          using store: NewMessageAreaStore? = nil) {
         guard let store = store ?? messageAreaStore else { return }
-        let messages = Self.newMessageObservations(for: requests)
+        let messages = Self.newMessageObservations(for: requests, progressInboxEnabled: progressInboxEnabled)
         let revisions = Dictionary(uniqueKeysWithValues: requests.map { ($0.key, $0.requestRevision) })
         store.reconcile(messages, revisions: revisions,
                         accountScopes: [profileContext.identity.personID])
     }
 
     private nonisolated static func newMessageObservations(
-        for requests: [PresentedRequest]
+        for requests: [PresentedRequest], progressInboxEnabled: Bool
     ) -> [NewMessageAreaMessage] {
-        requests.filter { $0.messageProgress == nil }.map {
+        requests.filter { !progressInboxEnabled || $0.messageProgress == nil }.map {
             NewMessageAreaMessage(key: $0.key, acceptanceOrder: $0.acceptanceOrder,
                                   isResolved: $0.isResolved,
                                   hasSubmittedAnswer: $0.intentReceipt != nil)
@@ -2449,7 +2459,7 @@ final class LivePresentationStore {
         } else {
             localStatus = nil
         }
-        let progress = request.messageProgress
+        let progress = progressInboxEnabled ? request.messageProgress : nil
         let row = InboxRequestRow(key: request.key, requestRevision: request.requestRevision,
             title: request.title?.rawValue ?? "Message",
             sender: request.key.senderID.rawValue,
@@ -2466,6 +2476,7 @@ final class LivePresentationStore {
             declaredMessageType: request.messageType,
             declaredMessageKind: request.messageKind,
             progress: progress,
+            hasProgressMarker: request.messageProgress != nil,
             canMarkSeen: progress == nil && canSendToCurrentServer &&
                 !retracted && request.lifecycleStatus == .open &&
                 request.intentReceipt == nil && request.informationalSeenStatus == .available,
@@ -3613,11 +3624,12 @@ final class LivePresentationStore {
             let presentedStaleIDs = presentedStaleAnswerOperationIDs
             let capturedActionErrorRequest = actionErrorRequest
             let updateSnapshot = snapshot
+            let progressInboxEnabled = self.progressInboxEnabled
             var mainActorSegmentStartedAt = DispatchTime.now().uptimeNanoseconds
             let preparation = Task.detached(priority: .userInitiated) {
                 let conversationThreads = try port.conversations(context: port.context).threads
                 let attentionSnapshot = try store.snapshot(context: context)
-                let messages = Self.newMessageObservations(for: updateSnapshot.requests)
+                let messages = Self.newMessageObservations(for: updateSnapshot.requests, progressInboxEnabled: progressInboxEnabled)
                 let revisions = Dictionary(uniqueKeysWithValues: updateSnapshot.requests.map {
                     ($0.key, $0.requestRevision)
                 })

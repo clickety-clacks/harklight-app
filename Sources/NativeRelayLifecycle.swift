@@ -923,6 +923,7 @@ final class NativeRelayLifecycle {
     static let shared = NativeRelayLifecycle()
 
     let conversationAvailability = NativeConversationAvailability()
+    let featureFlags = RemoteFeatureFlags()
     private var core: NativeRelayCore? {
         didSet { conversationAvailability.reset() }
     }
@@ -1140,13 +1141,15 @@ final class NativeRelayLifecycle {
                                            serverStateCache: serverStateCache,
                                            onProgress: progressHandler(generation: generation,
                                                                        transportAttemptID: transportAttemptID),
-                                           onDiagnostic: diagnosticSink())
+                                           onDiagnostic: diagnosticSink(),
+                                           onFeatureFlags: featureFlagsHandler(connectionID: transportAttemptID))
         } catch {
             recordDiagnostic(.connection, .approvedConnection, .failed, error: error,
                              attemptID: transportAttemptID, transportAttemptID: transportAttemptID)
             await nextTransport.close()
             throw error
         }
+        featureFlags.reset()
         refreshGeneration = generation
         refreshFlights.reset()
         foregroundProgress.beginSession(transportAttemptID: transportAttemptID)
@@ -1175,6 +1178,7 @@ final class NativeRelayLifecycle {
         self.context = context
         activeTransportAttemptID = transportAttemptID
         focusTransportID = transportAttemptID
+        featureFlags.connect(context: context, connectionID: transportAttemptID)
         installFocusReportHandler(for: nextTransport, transportID: transportAttemptID)
         configuration = (store, context, relayURL, clientIdentity, trustedRootDER, serverStateCache)
         observeNetworkPath(generation: generation)
@@ -1217,7 +1221,8 @@ final class NativeRelayLifecycle {
             nextCore = try NativeRelayCore(store: current.store, context: current.context,
                                            session: nextTransport,
                                            automaticallySendsPendingOperations: false,
-                                           serverStateCache: current.serverStateCache)
+                                           serverStateCache: current.serverStateCache,
+                                           onFeatureFlags: featureFlagsHandler(connectionID: focusTransportID))
             try await nextTransport.verifyEndpoint()
             guard refreshGeneration == expectedGeneration,
                   core === priorCore, transport === priorTransport,
@@ -1232,6 +1237,7 @@ final class NativeRelayLifecycle {
             core = nextCore
             transport = nextTransport
             self.focusTransportID = focusTransportID
+            featureFlags.connect(context: current.context, connectionID: focusTransportID)
             installFocusReportHandler(for: nextTransport, transportID: focusTransportID)
             configuration = (current.store, current.context, relayURL, current.identity,
                              current.rootDER, current.serverStateCache)
@@ -1258,6 +1264,7 @@ final class NativeRelayLifecycle {
     }
 
     func deactivate() async {
+        featureFlags.reset()
         pathMonitor?.cancel()
         pathMonitor = nil
         connectionHealthTask?.cancel()
@@ -2111,6 +2118,7 @@ final class NativeRelayLifecycle {
         diagnosticJournal?.record(retryEvents)
         foregroundProgress.beginTransportAttempt(transportAttemptID)
         activeTransportAttemptID = transportAttemptID
+        featureFlags.connect(context: configuration.context, connectionID: transportAttemptID)
         let priorCore = core
         let priorTransport = transport
         core = nil
@@ -2155,7 +2163,8 @@ final class NativeRelayLifecycle {
                                            serverStateCache: configuration.serverStateCache,
                                            onProgress: progressHandler(generation: generation,
                                                                        transportAttemptID: transportAttemptID),
-                                           onDiagnostic: diagnosticSink())
+                                           onDiagnostic: diagnosticSink(),
+                                           onFeatureFlags: featureFlagsHandler(connectionID: transportAttemptID))
         } catch {
             recordDiagnostic(.connection, .approvedConnection, .failed, error: error,
                              attemptID: transportAttemptID, transportAttemptID: transportAttemptID)
@@ -2170,7 +2179,15 @@ final class NativeRelayLifecycle {
         self.transport = nextTransport
         self.core = nextCore
         focusTransportID = transportAttemptID
+        featureFlags.connect(context: configuration.context, connectionID: transportAttemptID)
         installFocusReportHandler(for: nextTransport, transportID: transportAttemptID)
+    }
+
+    private func featureFlagsHandler(connectionID: UUID)
+        -> @Sendable (RemoteFeatureFlagSnapshot) async -> Void {
+        { [weak self] snapshot in
+            await self?.featureFlags.replace(snapshot, connectionID: connectionID)
+        }
     }
 
     private func progressHandler(generation: UUID,

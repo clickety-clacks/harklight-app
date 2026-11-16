@@ -540,6 +540,8 @@ struct InboxRequestRow: Identifiable {
     var declaredMessageType: MessageTypeValue? = nil
     var declaredMessageKind: MessageKindValue? = nil
     var progress: MessageProgress? = nil
+    // Server classification survives the optional Progress presentation.
+    var hasProgressMarker = false
     var canMarkSeen = false
     var canNoComment = false
     var noCommentUnavailable = false
@@ -1098,7 +1100,8 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             .frame(maxWidth: .infinity)
             if inlineChat, !pushedChatFallsBackToMessage, case let .request(key)? = item,
                !dismissedInlineChatRequests.contains(key), let conversationStore,
-               let request = conversationStore.request(for: key), request.messageProgress == nil {
+               let request = conversationStore.request(for: key),
+               !conversationStore.progressInboxEnabled || request.messageProgress == nil {
                 Group {
                     Rectangle().fill(.hkLine).frame(width: 1).ignoresSafeArea()
                     ConversationPanel(store: conversationStore, key: key,
@@ -2036,7 +2039,8 @@ struct InboxList: View {
             return
         }
         if tab == .inbox,
-           ProgressInboxProjection.rows(rows, search: search).contains(where: {
+           ProgressInboxProjection.rows(rows, search: search,
+               enabled: NativeRelayLifecycle.shared.featureFlags.isEnabled(.progressInbox)).contains(where: {
                InboxSelection.request($0.key) == lastViewedSelection
            }) {
             isProgressExpanded = true
@@ -2403,7 +2407,10 @@ struct InboxList: View {
     @ViewBuilder
     private func listContent(for tab: InboxWorkspaceTab,
                              using proxy: ScrollViewProxy) -> some View {
-        let progressRows = tab == .inbox ? ProgressInboxProjection.rows(rows, search: search) : []
+        let progressRows = tab == .inbox
+            ? ProgressInboxProjection.rows(rows, search: search,
+                enabled: NativeRelayLifecycle.shared.featureFlags.isEnabled(.progressInbox))
+            : []
         let shownProgressRows = ProgressInboxProjection.shown(progressRows, expanded: isProgressExpanded)
         let normalEntries = normalListEntries
         let historyIDs = freeHistoryIDs

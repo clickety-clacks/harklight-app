@@ -621,7 +621,7 @@ struct LiveContentView: View {
                 clearRetractedRequest: { store.clearRetracted($0) },
                 requestDetail: { key, context in
                     if let request = store.request(for: key) {
-                        if let progress = request.messageProgress {
+                        if store.progressInboxEnabled, let progress = request.messageProgress {
                             if request.isResolved || store.inboxRow(for: key)?.isRetracted == true {
                                 ContentUnavailableView("Progress unavailable", systemImage: "checkmark.circle")
                             } else {

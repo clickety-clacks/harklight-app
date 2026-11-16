@@ -1,4 +1,5 @@
 import AttentionDomain
+import HarklightNativeRelay
 import XCTest
 @testable import Harklight
 
@@ -17,6 +18,62 @@ final class ProgressInboxTests: XCTestCase {
             row.progress = MessageProgress.read(from: try JSONValue.parse(Data(raw.utf8)))
         }
         return row
+    }
+
+    func testRemoteFlagOffRestoresOrdinaryRowsWithoutHidingProgressData() throws {
+        let context = ProfileContext(identity: ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+            personID: ExactText("flag-person"), deviceID: ExactText("flag-device")), transportMode: .relay)
+        let domain = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        let flags = RemoteFeatureFlags()
+        let id = UUID()
+        flags.connect(context: context, connectionID: id)
+        let live = try LivePresentationStore(store: domain, context: context, featureFlags: flags)
+        let key = RequestKey(accountScope: context.identity.personID,
+            senderID: ExactText("sender"), messageID: ExactText("progress-work"))
+        let payload = try JSONValue.parse(Data(#"""
+            {"title":"Work in progress","body":"Keep this message visible","message_type":"fyi",
+             "progress":{"updated_at":"2026-11-09T10:00:00Z","percent":45,"stage":"coding",
+                         "segments":[{"stage":"coding","width":45}]}}
+            """#.utf8))
+        _ = try domain.apply(RelayEvent(sequence: 1,
+            body: .delivery(StoredRequest(key: key, originalPayload: payload), .message)), context: context)
+        try live.refreshFromDurableStore()
+
+        let onItems = live.inboxRows.map(InboxItem.request)
+        XCTAssertEqual(ProgressInboxProjection.rows(onItems, search: "").map(\.key), [key])
+        XCTAssertTrue(InboxListProjection.filteredRows(onItems, in: .inbox, search: "").isEmpty)
+
+        flags.replace(RemoteFeatureFlagSnapshot(field: .object([
+            JSONMember("progress_inbox", .bool(false))
+        ])), connectionID: id)
+        XCTAssertFalse(live.progressInboxEnabled)
+        XCTAssertNotNil(live.request(for: key)?.messageProgress, "The flag must not delete Server data")
+        let ordinary = try XCTUnwrap(live.inboxRow(for: key))
+        XCTAssertNil(ordinary.progress, "OFF restores ordinary row rendering and controls")
+        XCTAssertTrue(ordinary.hasProgressMarker, "Server badge classification survives the UI flag")
+        XCTAssertEqual(ordinary.title, "Work in progress")
+        XCTAssertEqual(ordinary.bodyText, "Keep this message visible")
+        let offItems = live.inboxRows.map(InboxItem.request)
+        XCTAssertTrue(ProgressInboxProjection.rows(offItems, search: "", enabled: false).isEmpty)
+        XCTAssertEqual(InboxListProjection.filteredRows(offItems, in: .inbox, search: "").map(\.id),
+                       [.request(key)])
+        for serverItems in [nil, [InboxViewListItem(kind: .message, key: key)]] as [[InboxViewListItem]?] {
+            let entries = InboxNormalListProjection.entries(rows: offItems,
+                serverItems: serverItems, in: .inbox, search: "")
+            let selections = entries.flatMap { entry -> [InboxSelection] in
+                guard case let .message(message) = entry else { return [] }
+                return message.members.map(\.id)
+            }
+            XCTAssertEqual(selections, [.request(key)], "OFF restores both old-server and server-ranked lists")
+        }
+        XCTAssertEqual(InboxBadge.count(requests: live.inboxRows, samples: SampleLibrary(),
+                                       showsLocalExamples: false), 0, "Visible Progress rows stay excluded to match the Server APNs badge")
+
+        flags.replace(RemoteFeatureFlagSnapshot(field: .object([
+            JSONMember("progress_inbox", .bool(true))
+        ])), connectionID: id)
+        XCTAssertEqual(ProgressInboxProjection.rows(live.inboxRows.map(InboxItem.request),
+                                                   search: "").map(\.key), [key])
     }
 
     func testProgressSortsByAgentTimeThenIdentityWithUnavailableLast() throws {
