@@ -70,25 +70,35 @@ final class AdaptiveDuoNavigationUITests: XCTestCase {
         attachHierarchy("portrait-selection-hierarchy", app: app)
     }
 
-    func testSelectingAnotherMessageFromPortraitOverlayUpdatesDetailAndDismissesIt() {
-        assertReopenedListDismissesAfterSelection(presentation: "overlay")
+    func testSelectingAnotherMessageFromPortraitOverlayUpdatesDetailAndDismissesIt() throws {
+        try assertReopenedListDismissesAfterSelection(presentation: "overlay")
     }
 
-    func testSelectingAnotherMessageFromCompactListUpdatesDetailAndDismissesIt() {
-        assertReopenedListDismissesAfterSelection(presentation: "compact")
+    func testSelectingAnotherMessageFromCompactListUpdatesDetailAndDismissesIt() throws {
+        try assertReopenedListDismissesAfterSelection(presentation: "compact")
     }
 
-    private func assertReopenedListDismissesAfterSelection(presentation expected: String) {
+    private func assertReopenedListDismissesAfterSelection(presentation expected: String) throws {
         XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()
         app.launchArguments = ["--reset-attention-fixture", "--harklight-samples",
                                "--harklight-ui-diagnostics"]
+        if expected == "overlay" { app.launchArguments.append("--harklight-test-overlay") }
         app.launch()
 
         let facilities = app.descendants(matching: .any)["request-row-facilities-01"]
         let review = app.descendants(matching: .any)["request-row-review-01"]
         XCTAssertTrue(facilities.waitForExistence(timeout: 10), app.debugDescription)
         XCTAssertTrue(review.waitForExistence(timeout: 5), app.debugDescription)
+        let probe = splitPresentation(in: app)
+        XCTAssertTrue(probe.waitForExistence(timeout: 5), app.debugDescription)
+        let initial = probe.value as? String ?? ""
+        if expected == "overlay", initial == "presentation=compact" {
+            throw XCTSkip("A collapsed phone cannot present a regular-width overlay; the compact test covers it.")
+        }
+        if expected == "compact", initial != "presentation=compact" {
+            throw XCTSkip("This case requires a collapsed phone; the iPad cases cover expanded presentations.")
+        }
         facilities.tap()
 
         let card = app.scrollViews["message-card-scroll"]
@@ -97,11 +107,13 @@ final class AdaptiveDuoNavigationUITests: XCTestCase {
                       app.debugDescription)
         let sidebar = app.buttons["Show Sidebar"]
         let back = workspaceBackButton(in: app)
-        if sidebar.exists && sidebar.isHittable {
-            sidebar.tap()
-        } else {
-            XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
-            back.tap()
+        if !review.isHittable {
+            if sidebar.exists && sidebar.isHittable {
+                sidebar.tap()
+            } else {
+                XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
+                back.tap()
+            }
         }
         XCTAssertTrue(review.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(review.isHittable, app.debugDescription)

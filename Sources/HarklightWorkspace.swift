@@ -31,6 +31,7 @@ private struct InboxSplitPresentationReader: UIViewControllerRepresentable {
 
     final class Reader: UIViewController {
         let presentation: InboxSplitPresentation
+        private var configuredOverlayFixture = false
 
         init(presentation: InboxSplitPresentation) {
             self.presentation = presentation
@@ -52,6 +53,15 @@ private struct InboxSplitPresentationReader: UIViewControllerRepresentable {
         override func viewDidAppear(_ animated: Bool) {
             super.viewDidAppear(animated)
             presentation.reader = self
+            // Exercise a real UIKit overlay in UI tests even on iPads whose
+            // default automatic presentation tiles the columns in portrait.
+            if !configuredOverlayFixture, UIDiagnostics.shared.enabled,
+               ProcessInfo.processInfo.arguments.contains("--harklight-test-overlay"),
+               let split = splitViewController, !split.isCollapsed {
+                configuredOverlayFixture = true
+                split.preferredSplitBehavior = .overlay
+                split.show(.primary)
+            }
         }
 
         override func viewDidLayoutSubviews() {
