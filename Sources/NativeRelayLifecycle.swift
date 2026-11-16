@@ -2303,11 +2303,11 @@ final class NativeRelayLifecycle {
                                            serverStateCache: configuration.serverStateCache,
                                            onProgress: progressHandler(generation: generation,
                                                                        transportAttemptID: transportAttemptID),
-                                           onDiagnostic: diagnosticSink(),
                                            onPriorityLevelsChanged: priorityLevelsChangeHandler(for: configuration.context),
                                            onPriorityLevelsConnectionLost: priorityLevelsConnectionLostHandler(
                                                for: configuration.context, transportAttemptID: transportAttemptID),
                                            onPriorityLevelsFeatureEnabled: priorityLevelsFeatureEnabledHandler(),
+                                           onDiagnostic: diagnosticSink(),
                                            onFeatureFlags: featureFlagsHandler(connectionID: transportAttemptID))
         } catch {
             recordDiagnostic(.connection, .approvedConnection, .failed, error: error,
