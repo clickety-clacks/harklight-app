@@ -572,7 +572,7 @@ enum SampleCatalog {
         missed: false,
         revised: false,
         chatUnread: false,
-        hasChat: false,
+        hasChat: true,
         fixtureCreatedAtMilliseconds: 1_790_000_000_000)
 
     private static let markdownAcceptanceMessage = SampleMessage(

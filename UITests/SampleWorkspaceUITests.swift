@@ -72,7 +72,7 @@ final class SampleWorkspaceUITests: XCTestCase {
         }
     }
 
-    func testMessageDetailDetectedURLUsesSystemHandlerAndBodyCanBeCopied() {
+    func testMessageDetailDetectedURLAndSystemActionsInLightMode() {
         exerciseMessageDetectors(style: "Light")
     }
 
@@ -80,10 +80,72 @@ final class SampleWorkspaceUITests: XCTestCase {
         exerciseMessageDetectors(style: "Dark")
     }
 
+    func testMessageDetailCopiesSelectedWord() {
+        exerciseMessageCopy(selectWholeMessage: false)
+    }
+
+    func testMessageDetailCopiesWholeBody() {
+        exerciseMessageCopy(selectWholeMessage: true)
+    }
+
+    private func exerciseMessageCopy(selectWholeMessage: Bool) {
+        let app = XCUIApplication()
+        app.launchArguments = ["--reset-attention-fixture", "--harklight-samples",
+                               "--harklight-data-detector-acceptance"]
+        app.launch()
+        defer { app.terminate() }
+        XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
+        enterSearch("Detector acceptance", in: app)
+        let row = app.descendants(matching: .any)["sample-data-detector-acceptance"]
+        XCTAssertTrue(row.waitForExistence(timeout: 5))
+        row.staticTexts["Detector acceptance"].tap()
+        let body = app.textViews["request-message-body"]
+        XCTAssertTrue(body.waitForExistence(timeout: 5))
+        let baseline = selectWholeMessage ? "whole-message-baseline" : "selected-word-baseline"
+        UIPasteboard.general.string = baseline
+        XCTAssertEqual(UIPasteboard.general.string, baseline)
+        body.coordinate(withNormalizedOffset: CGVector(dx: 0.04, dy: 0.025)).press(forDuration: 1)
+        if selectWholeMessage {
+            let selectAll = app.menuItems["Select All"]
+            for _ in 0..<3 where !selectAll.exists {
+                let next = app.buttons["Next Page"]
+                guard next.exists else { break }
+                next.tap()
+            }
+            XCTAssertTrue(selectAll.waitForExistence(timeout: 5), app.debugDescription)
+            selectAll.tap()
+        }
+        let copy = app.menuItems["Copy"]
+        XCTAssertTrue(copy.waitForExistence(timeout: 5), app.debugDescription)
+        copy.tap()
+
+        // Paste is a user action inside the source app, so iOS pasteboard
+        // privacy does not require the background UI runner to read app data.
+        app.buttons["Chat"].tap()
+        let composer = app.textViews["sample-chat-composer"]
+        XCTAssertTrue(composer.waitForExistence(timeout: 5), app.debugDescription)
+        composer.tap()
+        composer.press(forDuration: 1)
+        let paste = app.menuItems["Paste"]
+        XCTAssertTrue(paste.waitForExistence(timeout: 5), app.debugDescription)
+        paste.tap()
+        let expected = selectWholeMessage ? detectorVisibleBody : "Select"
+        let pasted = expectation(for: NSPredicate(format: "value == %@", expected), evaluatedWith: composer)
+        wait(for: [pasted], timeout: 5)
+        XCTAssertEqual(composer.value as? String, expected)
+        capture(selectWholeMessage ? "whole-message-copied-and-pasted" : "selected-word-copied-and-pasted", app)
+        // Keep this a local unsent draft; never activate Send.
+    }
+
+    private var detectorVisibleBody: String {
+        "Select this sentence to verify that copying remains available.\nhttps://example.invalid/detector-acceptance\n+1 (415) 555-0136\n1 Infinite Loop, Cupertino, CA 95014\nNovember 4, 2027 at 2:00 PM."
+    }
+
     private func exerciseMessageDetectors(style: String) {
         let originalAppearance = XCUIDevice.shared.appearance
         defer { XCUIDevice.shared.appearance = originalAppearance }
         XCUIDevice.shared.appearance = style == "Dark" ? .dark : .light
+        XCTAssertEqual(XCUIDevice.shared.appearance, style == "Dark" ? .dark : .light)
         let app = XCUIApplication()
         app.launchArguments = ["--reset-attention-fixture", "--harklight-samples",
                                "--harklight-data-detector-acceptance", "--harklight-ui-diagnostics"]
@@ -97,34 +159,9 @@ final class SampleWorkspaceUITests: XCTestCase {
         XCTAssertTrue(body.waitForExistence(timeout: 5), app.debugDescription)
         // Copy preserves the visible Markdown-rendered paragraphs, whose spacing is
         // supplied by paragraph style rather than extra newline characters.
-        let expected = "Select this sentence to verify that copying remains available.\nhttps://example.invalid/detector-acceptance\n+1 (415) 555-0136\n1 Infinite Loop, Cupertino, CA 95014\nNovember 4, 2027 at 2:00 PM."
+        let expected = detectorVisibleBody
         XCTAssertEqual(body.value as? String, expected)
         capture("message-detectors-\(style)", app)
-
-        // A long press selects one word. Prove that path before explicitly
-        // selecting the whole body; the old test mistook "Select" for a failure.
-        UIPasteboard.general.string = "detector-selection-baseline"
-        XCTAssertEqual(UIPasteboard.general.string, "detector-selection-baseline")
-        body.coordinate(withNormalizedOffset: CGVector(dx: 0.04, dy: 0.025)).press(forDuration: 1)
-        let copy = app.menuItems["Copy"]
-        XCTAssertTrue(copy.waitForExistence(timeout: 5), app.debugDescription)
-        copy.tap()
-        XCTAssertEqual(UIPasteboard.general.string, "Select")
-
-        UIPasteboard.general.string = "detector-whole-message-baseline"
-        XCTAssertEqual(UIPasteboard.general.string, "detector-whole-message-baseline")
-        body.coordinate(withNormalizedOffset: CGVector(dx: 0.04, dy: 0.025)).press(forDuration: 1)
-        let selectAll = app.menuItems["Select All"]
-        for _ in 0..<3 where !selectAll.exists {
-            let next = app.buttons["Next Page"]
-            guard next.exists else { break }
-            next.tap()
-        }
-        XCTAssertTrue(selectAll.waitForExistence(timeout: 5), app.debugDescription)
-        selectAll.tap()
-        XCTAssertTrue(copy.waitForExistence(timeout: 5), app.debugDescription)
-        copy.tap()
-        XCTAssertEqual(UIPasteboard.general.string, expected)
 
         let url = app.links.matching(NSPredicate(format: "label CONTAINS %@",
             "example.invalid/detector-acceptance")).firstMatch

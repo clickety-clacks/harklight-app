@@ -4,6 +4,29 @@ import XCTest
 
 @MainActor
 final class MessageBodyUpdateTests: XCTestCase {
+    func testReadOnlyBodyCopiesSelectionAndWholeVisibleMessage() {
+        let view = SystemDetectedMessageBody.MessageTextView()
+        view.isEditable = false
+        view.isSelectable = true
+        let visible = "A bold message\nhttps://example.com\nNovember 4, 2027 at 2:00 PM."
+        view.text = visible
+        view.selectedRange = NSRange(location: 2, length: 4)
+        UIPasteboard.general.string = "selected-copy-baseline"
+        XCTAssertEqual(UIPasteboard.general.string, "selected-copy-baseline")
+        view.copy(nil)
+        XCTAssertEqual(UIPasteboard.general.string, "bold")
+
+        XCTAssertTrue(view.canPerformAction(#selector(view.selectAll(_:)), withSender: nil))
+        view.selectAll(nil)
+        XCTAssertEqual(view.selectedRange, NSRange(location: 0, length: (visible as NSString).length))
+        UIPasteboard.general.string = "whole-copy-baseline"
+        XCTAssertEqual(UIPasteboard.general.string, "whole-copy-baseline")
+        view.copy(nil)
+        XCTAssertEqual(UIPasteboard.general.string, visible)
+        XCTAssertFalse(view.canPerformAction(#selector(view.selectAll(_:)), withSender: nil))
+        XCTAssertFalse(view.isEditable)
+    }
+
     func testUnchangedMessagePreservesSelectionAndMarkdownTraits() throws {
         let view = UITextView()
         let renderer = SystemDetectedMessageBody.Coordinator()
