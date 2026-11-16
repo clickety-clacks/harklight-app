@@ -241,7 +241,7 @@
           "id": "quiet-on-servers-without-screen-reports",
           "symbol": "antenna.radiowaves.left.and.right",
           "title": "Fewer repeated requests to older servers",
-          "detail": "Harklight tells newer servers which screen you are on. A server that does not support this already declined quietly, with nothing shown. Harklight now stops asking that server once it has declined, also after reconnecting or retrying, until you relaunch or switch account. The diagnostics no longer list each connection and catch-up step twice. This change is pending formal testing."
+          "detail": "Harklight tells newer servers which screen you are on. A server that does not support this already declined quietly, with nothing shown. Harklight now stops asking that server once it has declined, also after reconnecting or retrying, until you relaunch or switch account. The diagnostics no longer duplicate entries when reconnecting. This change is pending formal testing."
         },
         {
           "id": "answers-keep-the-connection",
