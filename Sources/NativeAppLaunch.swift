@@ -105,7 +105,9 @@ final class NativeAppLaunch {
          },
          fetchInboxPageOperation: (@MainActor (LivePresentationStore) async -> Bool)? = nil) {
         #if DEBUG
-        let fixture = arguments.contains("--reset-attention-fixture") || arguments.contains("--attention-fixture")
+        let failureSeed = SubmissionFailureTestSeed.requestedKind(in: arguments)
+        let fixture = failureSeed != nil ||
+            arguments.contains("--reset-attention-fixture") || arguments.contains("--attention-fixture")
         #else
         let fixture = false
         #endif
@@ -134,7 +136,15 @@ final class NativeAppLaunch {
         if let initialState {
             state = initialState
         } else if fixture {
+            #if DEBUG
+            if let failureSeed, let seeded = try? SubmissionFailureTestSeed.makeStore(failureSeed) {
+                state = .live(seeded)
+            } else {
+                state = .fixture(PrototypeStore.loadFromBundle())
+            }
+            #else
             state = .fixture(PrototypeStore.loadFromBundle())
+            #endif
         } else if let standaloneDeparture {
             state = .disconnected(nil)
         } else {
