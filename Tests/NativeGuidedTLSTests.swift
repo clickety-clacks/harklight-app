@@ -5012,7 +5012,9 @@ private final class LocalRelayWebSocket: @unchecked Sendable {
     private let closeAfterReply: @Sendable (String) -> Bool
     // All connection ownership is serialized on queue, including close().
     private var connections: [NWConnection] = []
-    private var sessions = Set<ObjectIdentifier>()
+    // Kept alive so a later connection can never reuse a freed one's identity
+    // and go uncounted.
+    private var sessions: [NWConnection] = []
     private let fencesEarlierConnections: Bool
     /// Relay sessions opened: connections that sent at least one message,
     /// including ones since closed.
@@ -5073,9 +5075,12 @@ private final class LocalRelayWebSocket: @unchecked Sendable {
             let metadata = context?.protocolMetadata(definition: NWProtocolWebSocket.definition)
                 as? NWProtocolWebSocket.Metadata
             if metadata?.opcode == .text, let data, let text = String(data: data, encoding: .utf8) {
-                if sessions.insert(ObjectIdentifier(connection)).inserted, fencesEarlierConnections {
-                    connections.filter { $0 !== connection }.forEach { $0.cancel() }
-                    connections.removeAll { $0 !== connection }
+                if !sessions.contains(where: { $0 === connection }) {
+                    sessions.append(connection)
+                    if fencesEarlierConnections {
+                        connections.filter { $0 !== connection }.forEach { $0.cancel() }
+                        connections.removeAll { $0 !== connection }
+                    }
                 }
                 let frames = reply(text)
                 if closeAfterReply(text) {
