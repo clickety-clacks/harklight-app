@@ -931,6 +931,7 @@ public struct AttentionStoreSnapshot: Sendable {
     public let pendingRelayOverlays: [UInt64: RelayEvent]
     public let inboxReferences: [RequestKey: RemoteRequestState]
     public let pendingMessageOpens: [PendingMessageOpen]
+    public let priorityLevels: PriorityLevelsStoreState
 
     public init(requests: [RequestKey: StoredRequest],
                 drafts: [RequestKey: RequestDraft],
@@ -950,7 +951,8 @@ public struct AttentionStoreSnapshot: Sendable {
                 inboxCurrentKeys: Set<RequestKey>? = nil,
                 pendingRelayOverlays: [UInt64: RelayEvent] = [:],
                 inboxReferences: [RequestKey: RemoteRequestState] = [:],
-                pendingMessageOpens: [PendingMessageOpen] = []) {
+                pendingMessageOpens: [PendingMessageOpen] = [],
+                priorityLevels: PriorityLevelsStoreState = .empty) {
         self.conversationThreads = conversationThreads
         self.requests = requests
         self.drafts = drafts
@@ -970,6 +972,7 @@ public struct AttentionStoreSnapshot: Sendable {
         self.pendingRelayOverlays = pendingRelayOverlays
         self.inboxReferences = inboxReferences
         self.pendingMessageOpens = pendingMessageOpens
+        self.priorityLevels = priorityLevels
     }
 }
 
@@ -987,6 +990,8 @@ public struct CachedAttentionServerState: Sendable {
     public let chatReadPositions: [RequestKey: UInt64]?
     public let pendingRelayOverlays: [UInt64: RelayEvent]
     public let inboxReferences: [RequestKey: RemoteRequestState]
+    /// The last confirmed Server table; local drafts remain in the pending-action queue.
+    public let priorityLevels: [PriorityLevel]?
 
     public init(identity: ProfileIdentity, requests: [RequestKey: StoredRequest],
                 remoteStates: [RequestKey: RemoteRequestState],
@@ -998,7 +1003,8 @@ public struct CachedAttentionServerState: Sendable {
                 chatReadPositions: [RequestKey: UInt64]? = nil,
                 pendingRelayOverlays: [UInt64: RelayEvent] = [:],
                 inboxReferences: [RequestKey: RemoteRequestState] = [:],
-                conversationEvents: [UInt64: ConversationEvent] = [:]) {
+                conversationEvents: [UInt64: ConversationEvent] = [:],
+                priorityLevels: [PriorityLevel]? = nil) {
         self.identity = identity
         self.requests = requests
         self.remoteStates = remoteStates
@@ -1011,6 +1017,7 @@ public struct CachedAttentionServerState: Sendable {
         self.chatReadPositions = chatReadPositions
         self.pendingRelayOverlays = pendingRelayOverlays
         self.inboxReferences = inboxReferences
+        self.priorityLevels = priorityLevels
     }
 }
 
