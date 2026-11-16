@@ -851,6 +851,35 @@ final class NativeRelayCoreTests: XCTestCase {
         XCTAssertThrowsError(try store.queueOriginalOperationForUserTap(receipt.intentID, context: context))
     }
 
+    func testCheckpointPendingRefusalKeepsTheSameOperationQueuedAndNotAccepted() async throws {
+        let (context, store, session) = try setup()
+        let key = RequestKey(accountScope: context.identity.personID,
+                             senderID: ExactText("sender"), messageID: ExactText("checkpoint-answer"))
+        let payload = try JSONValue.parse(data(#"{"title":"Asked during catch-up"}"#))
+        _ = try store.apply(RelayEvent(sequence: 1,
+            body: .delivery(StoredRequest(key: key, originalPayload: payload), .message)), context: context)
+        let port = AttentionDomainPort(store: store)
+        let selector = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first?.selector)
+        let receipt = try port.submitNoComment(context: port.context, selector: selector, intentID: UUID())
+        let saved = try XCTUnwrap(store.lookupIntent(receipt.intentID, context: context))
+        session.result = .awaitingCheckpoint(operationID: receipt.opID)
+        let core = try NativeRelayCore(store: store, context: context, session: session)
+
+        try await core.sendOriginalOperationForUserTap(receipt.intentID)
+
+        XCTAssertEqual(session.sent.map(\.1), [receipt.opID], "The refused operation was sent once.")
+        XCTAssertEqual(session.sent.first?.0, saved.wireFrame)
+        let after = try XCTUnwrap(store.lookupIntent(receipt.intentID, context: context),
+                                  "A checkpoint refusal keeps the answer.")
+        XCTAssertEqual(after.disposition, .pending, "Not delivered yet, and not a definitive failure.")
+        XCTAssertEqual(after.operationID, receipt.opID)
+        XCTAssertEqual(after.wireFrame, saved.wireFrame, "The exact saved bytes stay queued.")
+        XCTAssertEqual(try store.snapshot(context: context).outbox.map(\.intentID), [receipt.intentID])
+        XCTAssertTrue(try store.acceptedOperationsAwaitingTerminalReplay(context: context).isEmpty,
+                      "The refused operation is never treated as accepted.")
+        XCTAssertNil(try store.snapshot(context: context).remoteStates[key]?.state)
+    }
+
     func testStaleAnswerDeclineReleasesTheRequestForItsCurrentRevision() async throws {
         let (context, store, session) = try setup()
         let key = RequestKey(accountScope: context.identity.personID,
