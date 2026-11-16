@@ -85,6 +85,10 @@ final class AdaptiveDuoNavigationUITests: XCTestCase {
                                "--harklight-ui-diagnostics"]
         if expected == "overlay" { app.launchArguments.append("--harklight-test-overlay") }
         app.launch()
+        let initialSidebar = app.buttons["Show Sidebar"]
+        if initialSidebar.waitForExistence(timeout: 3) && initialSidebar.isHittable {
+            initialSidebar.tap()
+        }
 
         let facilities = app.descendants(matching: .any)["request-row-facilities-01"]
         let review = app.descendants(matching: .any)["request-row-review-01"]
@@ -99,6 +103,8 @@ final class AdaptiveDuoNavigationUITests: XCTestCase {
         if expected == "compact", initial != "presentation=compact" {
             throw XCTSkip("This case requires a collapsed phone; the iPad cases cover expanded presentations.")
         }
+        XCTAssertEqual(initial, "presentation=\(expected)",
+                       "Establish the native presentation before the first selection too.")
         facilities.tap()
 
         let card = app.scrollViews["message-card-scroll"]
