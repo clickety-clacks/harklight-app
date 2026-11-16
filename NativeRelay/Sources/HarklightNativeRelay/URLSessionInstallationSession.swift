@@ -68,7 +68,7 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
     private let onFocusReportingUnsupported: @Sendable () -> Void
     private let onViewShow: @Sendable (Data) -> Void
     private let focusReportWire = FocusReportWire()
-    private var focusReportReplyRouter = FocusReportReplyRouter()
+    private var focusReportReplyRouter: FocusReportReplyRouter
     private let attemptID: UUID?
     private var postCheckpointReader: Task<Void, Never>?
     private var postCheckpointReaderOwnsSocket = false
@@ -103,7 +103,8 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
                 onFocusReportingUnsupported: @escaping @Sendable () -> Void = {},
                 onViewShow: @escaping @Sendable (Data) -> Void = { _ in },
                 onDiagnostic: @escaping NativeClientDiagnosticSink = { _ in },
-                opensRelaySocket: Bool = true) throws {
+                opensRelaySocket: Bool = true,
+                focusReportsSupported: Bool = true) throws {
         guard profile.transportMode == .relay,
               relayURL.scheme == "wss",
               relayURL.path == "/relay",
@@ -138,6 +139,7 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
         self.onViewShow = onViewShow
         self.attemptID = attemptID
         self.onDiagnostic = onDiagnostic
+        focusReportReplyRouter = FocusReportReplyRouter(supportsFocusReports: focusReportsSupported)
         let pingCoordinator = WebSocketPingCoordinator()
         self.pingCoordinator = pingCoordinator
         let delegate = DeviceTLSDelegate(host: host, identity: clientIdentity.value, root: root,
