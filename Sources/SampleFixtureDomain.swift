@@ -42,7 +42,9 @@ final class SampleFixtureDomain {
             return RequestKey(accountScope: context.identity.personID,
                 senderID: ExactText(message.sender), messageID: ExactText(message.id))
         }
-        let reportsByRequest = Dictionary(uniqueKeysWithValues: requests.map { ($0, .notListening) })
+        let reportsByRequest = Dictionary(uniqueKeysWithValues: requests.map {
+            ($0, SyntheticFixtureAvailabilityInput.Report.notListening)
+        })
         return SyntheticFixtureAvailabilityInput(reportsByRequest: reportsByRequest)
     }
 #endif
