@@ -72,6 +72,12 @@ struct NativeEnrollmentView: View {
         switch flow.screen {
         case .welcome:
             heading("Welcome to Harklight", symbol: "envelope.open")
+            NavigationLink {
+                FeatureCatalogueView()
+            } label: {
+                Label("Features", systemImage: "list.bullet.rectangle")
+            }
+            .accessibilityIdentifier("welcome-features")
             Text("To join a server, open the invitation link its owner sent you on this device.")
             card {
                 Text("I got a link").font(.headline)

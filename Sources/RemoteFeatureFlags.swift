@@ -24,6 +24,8 @@ final class RemoteFeatureFlags {
     private var context: ProfileContext?
     private var connectionID: UUID?
     private var values: [String: Bool] = [:]
+    private var lastSnapshot: RemoteFeatureFlagSnapshot?
+    private var snapshotConnectionID: UUID?
     private let reportError: @Sendable () -> Void
 
     init(reportError: @escaping @Sendable () -> Void = {
@@ -37,8 +39,35 @@ final class RemoteFeatureFlags {
         values[flag.name] ?? flag.defaultValue
     }
 
+    /// Evaluates only known catalogue features. This does not expose a flag map
+    /// or provide another way to resolve or override rollout behavior.
+    func evaluation(for feature: AppFeature, expected: ProfileContext) -> FeatureFlagEvaluation {
+        guard context == expected else { return .appDefault(for: feature) }
+        let flag = feature.flag
+        let freshness: FeatureFlagEvaluation.Freshness = snapshotConnectionID == connectionID
+            ? .latestSnapshot : .awaitingSnapshot
+        let fallback: FeatureFlagEvaluation.FallbackReason?
+        if values[flag.name] != nil {
+            fallback = nil
+        } else if lastSnapshot?.hasMalformedObject == true {
+            fallback = .malformedObject
+        } else if lastSnapshot?.malformedNames.contains(flag.name) == true {
+            fallback = .malformedValue
+        } else {
+            fallback = lastSnapshot == nil ? .noSnapshot : .missingValue
+        }
+        return FeatureFlagEvaluation(isEnabled: isEnabled(flag), builtInDefault: flag.defaultValue,
+            source: values[flag.name] == nil ? .appDefault : .server,
+            freshness: freshness, fallbackReason: fallback,
+            hasPreviousSnapshot: lastSnapshot != nil)
+    }
+
     func connect(context: ProfileContext, connectionID: UUID) {
-        if self.context != context { values = [:] }
+        if self.context != context {
+            values = [:]
+            lastSnapshot = nil
+            snapshotConnectionID = nil
+        }
         self.context = context
         self.connectionID = connectionID
     }
@@ -46,6 +75,8 @@ final class RemoteFeatureFlags {
     func replace(_ snapshot: RemoteFeatureFlagSnapshot, connectionID: UUID) {
         guard self.connectionID == connectionID else { return }
         values = snapshot.values
+        lastSnapshot = snapshot
+        snapshotConnectionID = connectionID
         if snapshot.hasMalformedValues { reportError() }
     }
 
@@ -53,5 +84,7 @@ final class RemoteFeatureFlags {
         context = nil
         connectionID = nil
         values = [:]
+        lastSnapshot = nil
+        snapshotConnectionID = nil
     }
 }
