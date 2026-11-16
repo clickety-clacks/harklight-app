@@ -2934,6 +2934,41 @@ public final class ClientRepository: @unchecked Sendable {
         }
     }
 
+    /// Local text awaiting explicit recovery, separate from a frozen submission
+    /// and from Server-owned history. Nil dismisses only this revision's text.
+    public func retainConversationText(_ text: ExactText?, for binding: ConversationBinding,
+                                       context suppliedContext: ProfileContext) throws {
+        writerLock.lock()
+        defer { writerLock.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        try validate(binding.request, in: context.identity)
+        var next = state
+        if let text {
+            guard let thread = next.conversation?.threads[binding.request],
+                  thread.revisions[binding.revision] != nil else { throw ConversationError.missingRequest }
+            if next.pendingConversations[binding.request] == nil {
+                next.pendingConversations[binding.request] = PendingConversationActions(thread: thread)
+            }
+            var retained = next.pendingConversations[binding.request]?.retainedUnsentText ?? [:]
+            retained[binding.revision] = text
+            next.pendingConversations[binding.request]?.retainedUnsentText = retained
+        } else {
+            next.pendingConversations[binding.request]?.retainedUnsentText?.removeValue(forKey: binding.revision)
+        }
+        try commit(next)
+    }
+
+    public func retainedConversationText(for request: RequestKey,
+                                         context suppliedContext: ProfileContext) throws -> [UInt64: ExactText] {
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        try validate(request, in: context.identity)
+        return state.pendingConversations[request]?.retainedUnsentText ?? [:]
+    }
+
     public func conversationSnapshot(context suppliedContext: ProfileContext) throws -> ConversationSnapshot {
         lock.lock()
         defer { lock.unlock() }
@@ -4481,7 +4516,9 @@ private struct ClientSessionState {
                         }
                     }
                 }
+                let retainedText = pendingConversations[key]?.retainedUnsentText
                 pendingConversations[key] = PendingConversationActions(thread: thread)
+                pendingConversations[key]?.retainedUnsentText = retainedText
                 thread.drafts = [:]
                 thread.answerDrafts = nil
                 thread.uploadGroups = nil
@@ -4625,7 +4662,7 @@ private struct SalvagedConversationActions: Decodable {
     let actions: PendingConversationActions
     let dropped: Int
 
-    private enum CodingKeys: String, CodingKey { case drafts, answerDrafts, uploadGroups, uploadCleanups }
+    private enum CodingKeys: String, CodingKey { case drafts, answerDrafts, uploadGroups, uploadCleanups, retainedUnsentText }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -4643,8 +4680,10 @@ private struct SalvagedConversationActions: Decodable {
         let answerDrafts: [UInt64: RequestDraft]? = section(.answerDrafts)
         let uploadGroups: [UUID: ConversationUploadGroup]? = section(.uploadGroups)
         let uploadCleanups: [UUID: ConversationUploadCleanup]? = section(.uploadCleanups)
-        actions = PendingConversationActions(drafts: drafts ?? [:], answerDrafts: answerDrafts,
-                                             uploadGroups: uploadGroups, uploadCleanups: uploadCleanups)
+        var recovered = PendingConversationActions(drafts: drafts ?? [:], answerDrafts: answerDrafts,
+                                                   uploadGroups: uploadGroups, uploadCleanups: uploadCleanups)
+        recovered.retainedUnsentText = section(.retainedUnsentText)
+        actions = recovered
         self.dropped = dropped
     }
 }
@@ -4753,6 +4792,7 @@ private struct PersistedPendingActions: Codable {
 /// User-authored work awaiting transport. No request content, server revisions,
 /// accepted turns, terminal state or read cursor is stored with this queue.
 private struct PendingConversationActions: Codable {
+    var retainedUnsentText: [UInt64: ExactText]?
     var drafts: [UInt64: ConversationDraft]
     var answerDrafts: [UInt64: RequestDraft]?
     var uploadGroups: [UUID: ConversationUploadGroup]?

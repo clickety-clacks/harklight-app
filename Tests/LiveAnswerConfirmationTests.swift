@@ -179,9 +179,10 @@ final class LiveAnswerConfirmationTests: XCTestCase {
 
         XCTAssertEqual(live.actionError, "Complete the response before sending your answer.")
         let snapshot = try store.snapshot(context: context)
-        XCTAssertEqual(snapshot.intents.count, 1,
-                       "Only the rejected No comment intent remains in history.")
-        XCTAssertEqual(snapshot.intents[noComment.intentID]?.disposition, .unsupported)
+        // Picking another answer after a definitive failure replaces it, so the
+        // next send is a new operation (approved submission-state behavior).
+        XCTAssertTrue(snapshot.intents.isEmpty,
+                      "Choosing Reply releases the rejected No comment; the blank Reply sends nothing.")
         XCTAssertTrue(snapshot.outbox.isEmpty,
                       "The blank Reply must not create a sendable ordinary answer.")
         XCTAssertEqual(snapshot.drafts[key], draftBeforeBlankReply,
@@ -276,11 +277,13 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         XCTAssertEqual(live.request(for: key)?.lifecycleStatus, .pending)
         XCTAssertFalse(live.request(for: key)?.noCommentUnavailable ?? true,
                        "A newly queued attempt replaces the prior unsupported result in the current status.")
-        let pendingRetryRow = try XCTUnwrap(live.inboxRows.first { $0.key == key })
-        XCTAssertTrue(pendingRetryRow.hasDeliveryWarning,
-                      "The known delivery failure remains visible until the retry is accepted.")
-        XCTAssertFalse(pendingRetryRow.belongsToReplied,
-                       "The known delivery failure keeps the row in Inbox until the retry is accepted.")
+        // Sending No comment again is a new operation that shows its own
+        // Sending state; the earlier unsupported result is released, not kept
+        // as a lingering warning (approved submission-state behavior).
+        XCTAssertEqual(try store.snapshot(context: context).intents.count, 1,
+                       "Only the new No comment operation remains.")
+        XCTAssertEqual(live.submissionPhases[key]?.kind, .noComment)
+        XCTAssertEqual(live.submissionPhases[key]?.phase, .sending)
     }
 
     func testAcceptedNoCommentIsFinalAndCannotBeResubmitted() async throws {

@@ -12,7 +12,7 @@ final class SubmissionControlPhaseTests: XCTestCase {
         let cases: [(IntentDisposition, SubmissionControlPhase.Phase)] = [
             (.pending, .sending),
             (.accepted(sequence: 2), .confirmed),
-            (.lost, .failed(retryable: true, editable: false)),
+            (.lost, .sending),
             (.failed, .failed(retryable: true, editable: true)),
             (.unsupported, .failed(retryable: true, editable: true)),
             (.repairRequired, .failed(retryable: false, editable: false)),
@@ -38,10 +38,15 @@ final class SubmissionControlPhaseTests: XCTestCase {
         XCTAssertEqual(project([expired])[key]?.phase, .refused(.closed))
     }
 
-    func testRetryIsUnavailableOnceTheServerClosedTheMessage() {
-        let closed = RemoteRequestState(state: .answered)
-        XCTAssertEqual(project([submission(.lost)], remote: [key: closed])[key]?.phase,
-                       .failed(retryable: false, editable: false))
+    func testTheMessagesFinalStateEndsSending() {
+        let answered = [key: RemoteRequestState(state: .answered)]
+        XCTAssertEqual(project([submission(.accepted(sequence: 2))], remote: answered)[key]?.phase, .confirmed)
+        XCTAssertEqual(project([submission(.accepted(sequence: 2))],
+                               remote: [key: RemoteRequestState(state: .expired)])[key]?.phase,
+                       .refused(.closed), "A final state that is not an answer reverts the confirmation.")
+        XCTAssertEqual(project([submission(.lost)], remote: answered)[key]?.phase, .refused(.closed))
+        XCTAssertEqual(project([submission(.failed)], remote: answered)[key]?.phase,
+                       .failed(retryable: false, editable: false), "No Retry once the message is closed.")
     }
 
     func testKindComesFromTheOperation() {
@@ -70,8 +75,9 @@ final class SubmissionControlPhaseTests: XCTestCase {
         let payload = try JSONValue.parse(Data(#"{"title":"Question","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"reply","label":"Reply","kind":"text"}]}}"#.utf8))
         let domain = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
         try domain.restoreCachedServerState(CachedAttentionServerState(identity: context.identity,
-            requests: [key: StoredRequest(key: key, originalPayload: payload)], remoteStates: [:], cursor: 1,
-            conversationCursor: 0, conversations: [:], inboxView: nil, currentRequestKeys: [key]), context: context)
+            requests: try Self.deliveredRequests(key: key, payload: payload, context: context), remoteStates: [:],
+            cursor: 1, conversationCursor: 0, conversations: [:], inboxView: nil, currentRequestKeys: [key]),
+            context: context)
         let port = AttentionDomainPort(store: domain)
         let selector = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first?.selector)
         let receipt = try port.submit(SubmitIntent(context: port.context, selector: selector, intentID: UUID(),
@@ -83,9 +89,9 @@ final class SubmissionControlPhaseTests: XCTestCase {
 
         try domain.recordUnresolvedOperation(receipt.intentID, operationID: receipt.opID, context: context)
         try live.refreshFromDurableStore()
-        XCTAssertEqual(live.submissionPhases[key]?.phase, .failed(retryable: true, editable: false))
+        XCTAssertEqual(live.submissionPhases[key]?.phase, .sending)
         XCTAssertFalse(live.releaseFailedSubmissionForEdit(key),
-                       "A lost send may have arrived, so it keeps its operation for Retry.")
+                       "A lost send may have arrived, so it keeps its operation.")
         XCTAssertThrowsError(try domain.releaseFailedOperationForEdit(receipt.intentID, context: context))
 
         try domain.recordAnswerNotDelivered(receipt.intentID, operationID: receipt.opID, context: context)
@@ -135,12 +141,23 @@ final class SubmissionControlPhaseTests: XCTestCase {
                              messageID: ExactText("question"))
         let domain = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
         try domain.restoreCachedServerState(CachedAttentionServerState(identity: context.identity,
-            requests: [key: StoredRequest(key: key, originalPayload: payload)], remoteStates: [:], cursor: 1,
-            conversationCursor: 0, conversations: [:], inboxView: nil, currentRequestKeys: [key]), context: context)
+            requests: try Self.deliveredRequests(key: key, payload: payload, context: context), remoteStates: [:],
+            cursor: 1, conversationCursor: 0, conversations: [:], inboxView: nil, currentRequestKeys: [key]),
+            context: context)
         let port = AttentionDomainPort(store: domain)
         let selector = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first?.selector)
         return LiveFixture(context: context, key: key, domain: domain, port: port, selector: selector,
                            live: try LivePresentationStore(store: domain, context: context))
+    }
+
+    /// Requests as the store keeps them after a delivery, with their durable
+    /// order, for a cache restore.
+    private static func deliveredRequests(key: RequestKey, payload: JSONValue,
+                                          context: ProfileContext) throws -> [RequestKey: StoredRequest] {
+        let previous = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        _ = try previous.apply(RelayEvent(sequence: 1,
+            body: .delivery(StoredRequest(key: key, originalPayload: payload), .message)), context: context)
+        return try previous.snapshot(context: context).requests
     }
 
     private func choicePayload() throws -> JSONValue {
@@ -148,23 +165,106 @@ final class SubmissionControlPhaseTests: XCTestCase {
     }
 
     @MainActor
-    func testLostChoiceKeepsItsRetryWhileTheOtherChoicesStayLocked() throws {
+    func testADroppedConnectionKeepsSendingThenShowsTheAnswerAtAcceptance() throws {
         let fixture = try liveFixture(payload: try choicePayload())
         let receipt = try fixture.submit([.compatibilityValue(action: ExactText("a"))])
+        XCTAssertEqual(try fixture.refresh().submissionPhase?.phase, .sending)
+
+        // The connection drops mid-send: the outcome is unknown and the store
+        // keeps the same operation for recovery.
         try fixture.domain.recordUnresolvedOperation(receipt.intentID, operationID: receipt.opID,
                                                      context: fixture.context)
-        let detail = try fixture.refresh()
-        XCTAssertEqual(detail.submissionPhase?.phase, .failed(retryable: true, editable: false))
-        XCTAssertTrue(detail.controlsReadOnly, "A lost send may have arrived, so other answers stay locked.")
-        XCTAssertFalse(detail.unlocksAfterDefinitiveFailure)
-        XCTAssertNotNil(detail.submissionDisplay.retryAction(.answer), "The picked choice offers Retry.")
-
+        var detail = try fixture.refresh()
+        XCTAssertEqual(detail.submissionPhase?.phase, .sending, "Recovering is still sending, not failed.")
+        XCTAssertNil(detail.submissionDisplay.retryAction(.answer), "No Retry or failure mark while recovering.")
+        XCTAssertFalse(detail.submissionDisplay.isFailed(.answer))
+        XCTAssertTrue(detail.controlsReadOnly, "Other answers stay locked while it may have arrived.")
         fixture.live.selectAction(ExactText("b"), input: nil, for: fixture.key)
-        XCTAssertEqual(try fixture.intents.map(\.operationID), [receipt.opID],
-                       "Picking another choice cannot replace a lost send.")
-        XCTAssertTrue(fixture.live.retrySubmissionFromUser(fixture.key))
-        XCTAssertEqual(try fixture.intents.map(\.operationID), [receipt.opID],
-                       "Retry resends the same operation.")
+        XCTAssertEqual(try fixture.intents.map(\.operationID), [receipt.opID])
+
+        // Reconnect: the same operation is sent again, then accepted.
+        _ = try fixture.domain.queueOriginalOperationForUserTap(receipt.intentID, context: fixture.context)
+        XCTAssertEqual(try fixture.refresh().submissionPhase?.phase, .sending)
+        try fixture.domain.recordAcceptedOperation(receipt.intentID, operationID: receipt.opID,
+                                                   terminalSequence: 2, context: fixture.context)
+        detail = try fixture.refresh()
+        XCTAssertEqual(detail.submissionPhase?.phase, .confirmed,
+                       "Durable acceptance is the server's confirmation.")
+        XCTAssertTrue(detail.isDurablyAccepted(.answer), "The control becomes the answered card.")
+        XCTAssertFalse(detail.submissionDisplay.isSendingAny)
+
+        try finish(fixture, intentID: receipt.intentID, state: .answered)
+        detail = try fixture.refresh()
+        XCTAssertEqual(fixture.live.request(for: fixture.key)?.lifecycleStatus, .answered)
+        XCTAssertFalse(detail.submissionDisplay.isSendingAny)
+        XCTAssertFalse(detail.submissionDisplay.isFailed(.answer))
+    }
+
+    @MainActor
+    func testAnAcceptedAnswerRevertsWhenTheFinalStateRefusesIt() throws {
+        let fixture = try liveFixture(payload: try choicePayload())
+        let receipt = try fixture.submit([.compatibilityValue(action: ExactText("a"))])
+        try fixture.domain.recordAcceptedOperation(receipt.intentID, operationID: receipt.opID,
+                                                   terminalSequence: 2, context: fixture.context)
+        XCTAssertTrue(try fixture.refresh().isDurablyAccepted(.answer))
+
+        try finish(fixture, intentID: receipt.intentID, state: .expired)
+        let detail = try fixture.refresh()
+        XCTAssertFalse(detail.isDurablyAccepted(.answer), "The answered card goes.")
+        XCTAssertFalse(detail.submissionDisplay.isSendingAny)
+        XCTAssertFalse(detail.submissionDisplay.isFailed(.answer), "A refusal is not a failure; no Retry.")
+        XCTAssertNil(detail.submissionDisplay.reasonLine, "Closed shows in place, with no extra line.")
+    }
+
+    @MainActor
+    func testANewerVersionRetiresTheOldAnswerAndTakesANewOne() throws {
+        let context = ProfileContext(identity: ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+            personID: ExactText("phase-revision"), deviceID: ExactText("device")), transportMode: .relay)
+        let domain = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        let key = RequestKey(accountScope: context.identity.personID, senderID: ExactText("sender"),
+                             messageID: ExactText("request"))
+        let first = try JSONValue.parse(Data(#"{"title":"First wording","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"old","label":"Old choice","kind":"text"}]}}"#.utf8))
+        let second = try JSONValue.parse(Data(#"{"title":"Revised wording","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"new","label":"New choice","kind":"text"}]}}"#.utf8))
+        try domain.apply(RelayEvent(sequence: 1, body: .delivery(StoredRequest(key: key, originalPayload: first), .message)),
+                         context: context)
+        try domain.applyConversation(ConversationEvent(sequence: 1, binding: ConversationBinding(request: key, revision: 1),
+            fact: .request(sessionHandle: ExactText("origin"), payload: first)), context: context)
+        let port = AttentionDomainPort(store: domain)
+        let oldSelector = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first?.selector)
+        let old = try port.submit(SubmitIntent(context: port.context, selector: oldSelector, intentID: UUID(),
+            inputs: [.compatibilityText(action: ExactText("old"), text: ExactText("Old answer"))]))
+        try domain.recordAcceptedOperation(old.intentID, operationID: old.opID, terminalSequence: 2, context: context)
+
+        // The sender sends a newer open version: the store retires the old
+        // answer as lost history.
+        try domain.applyConversation(ConversationEvent(sequence: 2, binding: ConversationBinding(request: key, revision: 2),
+            fact: .request(sessionHandle: ExactText("origin"), payload: second)), context: context)
+        try domain.setInboxView(InboxView(revision: ExactText("view-1"), entries: [
+            InboxViewEntry(key: key, priority: .high, thread: ExactText("release"))
+        ]), context: context)
+        let retired = try XCTUnwrap(domain.lookupIntent(old.intentID, context: context))
+        XCTAssertEqual(retired.disposition, .lost)
+        let live = try LivePresentationStore(store: domain, context: context)
+        XCTAssertEqual(live.submissionPhases[key]?.phase, .refused(.changed),
+                       "Retired history is not in flight: the message changed.")
+        XCTAssertEqual(SubmissionDisplay(phase: live.submissionPhases[key]).reasonLine,
+                       "This message changed. Answer again.")
+        XCTAssertNil(InboxSubmissionProgress.project(snapshot: try domain.snapshot(context: context),
+                                                     threads: [:])[key], "No row spinner for retired history.")
+
+        let newSelector = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first?.selector)
+        let next = try port.submit(SubmitIntent(context: port.context, selector: newSelector, intentID: UUID(),
+            inputs: [.compatibilityText(action: ExactText("new"), text: ExactText("New answer"))]))
+        XCTAssertEqual(try domain.lookupIntent(next.intentID, context: context)?.requestRevision, 2)
+        try live.refreshFromDurableStore()
+        XCTAssertEqual(live.submissionPhases[key]?.phase, .sending, "The new answer is the one in flight.")
+        XCTAssertEqual(live.submissionPhases[key]?.operationID, next.opID)
+    }
+
+    func testAChangedMessageShowsItsReasonLine() {
+        let display = SubmissionDisplay(phase: project([submission(.staleRevision(currentRevision: 2))])[key])
+        XCTAssertEqual(display.reasonLine, "This message changed. Answer again.")
+        XCTAssertNil(display.retryAction(.answer))
     }
 
     @MainActor
@@ -175,6 +275,7 @@ final class SubmissionControlPhaseTests: XCTestCase {
                                                     context: fixture.context)
         let detail = try fixture.refresh()
         XCTAssertEqual(detail.submissionPhase?.phase, .failed(retryable: true, editable: true))
+        XCTAssertTrue(detail.submissionDisplay.isFailed(.answer), "A send the store gave up on shows failed.")
         XCTAssertFalse(detail.controlsReadOnly, "The other choices open again.")
         XCTAssertNotNil(detail.submissionDisplay.retryAction(.answer))
 
@@ -252,7 +353,7 @@ final class SubmissionControlPhaseTests: XCTestCase {
     }
 
     @MainActor
-    func testASentNoCommentKeepsItsRowWhileSendingAndAfterALostSend() throws {
+    func testASentNoCommentKeepsSendingThroughADropThenShowsItsCardAtAcceptance() throws {
         let fixture = try liveFixture(payload: try choicePayload())
         let receipt = try fixture.port.submitNoComment(context: fixture.port.context, selector: fixture.selector,
                                                        intentID: UUID())
@@ -264,10 +365,29 @@ final class SubmissionControlPhaseTests: XCTestCase {
         try fixture.domain.recordUnresolvedOperation(receipt.intentID, operationID: receipt.opID,
                                                      context: fixture.context)
         detail = try fixture.refresh()
-        XCTAssertTrue(detail.showsNoCommentRow, "The No comment row carries its Retry.")
-        XCTAssertNotNil(detail.submissionDisplay.retryAction(.noComment))
-        XCTAssertTrue(fixture.live.retrySubmissionFromUser(fixture.key))
-        XCTAssertEqual(try fixture.intents.map(\.operationID), [receipt.opID])
+        XCTAssertEqual(detail.submissionPhase?.phase, .sending)
+        XCTAssertTrue(detail.showsNoCommentRow)
+        XCTAssertNil(detail.submissionDisplay.retryAction(.noComment))
+
+        _ = try fixture.domain.queueOriginalOperationForUserTap(receipt.intentID, context: fixture.context)
+        try fixture.domain.recordAcceptedOperation(receipt.intentID, operationID: receipt.opID,
+                                                   terminalSequence: 2, context: fixture.context)
+        detail = try fixture.refresh()
+        XCTAssertEqual(detail.submissionPhase?.phase, .confirmed)
+        XCTAssertTrue(detail.isDurablyAccepted(.noComment), "Accepted No comment shows its card.")
+
+        try finish(fixture, intentID: receipt.intentID, state: .noComment)
+        detail = try fixture.refresh()
+        XCTAssertEqual(fixture.live.request(for: fixture.key)?.lifecycleStatus, .noComment)
+        XCTAssertFalse(detail.submissionDisplay.isSendingAny)
+    }
+
+    /// The server's final state for the message, carrying this operation's answer.
+    @MainActor
+    private func finish(_ fixture: LiveFixture, intentID: UUID, state: TerminalState) throws {
+        let answer = try XCTUnwrap(fixture.domain.snapshot(context: fixture.context).intents[intentID]).answer
+        _ = try fixture.domain.apply(RelayEvent(sequence: 2,
+            body: .terminal(fixture.key, state, state == .answered ? answer : nil)), context: fixture.context)
     }
 
     @MainActor

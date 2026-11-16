@@ -1330,7 +1330,7 @@ final class LivePresentationStore {
     /// sent it. A pure projection of the store, refreshed with submissionProgress.
     private(set) var submissionPhases: [RequestKey: SubmissionControlPhase] = [:]
     private(set) var conversationThreads: [RequestKey: ConversationThread]
-    @ObservationIgnored private var pendingConversationTextByBinding: [ConversationBinding: String] = [:]
+    private var pendingConversationTextByBinding: [ConversationBinding: String] = [:]
     private(set) var conversationError: String?
     @ObservationIgnored private let conversationAvailability: NativeConversationAvailability
     var conversationAvailabilityState: NativeConversationAvailability.State {
@@ -1437,18 +1437,34 @@ final class LivePresentationStore {
         return canSendToCurrentServer && request(for: key)?.inboxStateIsCurrent == true
     }
     func canEditDiscussionDraft(for key: RequestKey) -> Bool {
-        guard !isReadOnly, conversationThreads[key] != nil else { return false }
-        if profileContext.transportMode == .relay,
-           attentionStore.requiresConfirmedServerProjection,
-           !canUseCurrentServerState(for: key) {
-            return true
-        }
-        return conversationThreads[key]?.allowsDiscussion == true
+        guard !isReadOnly, let thread = conversationThreads[key] else { return false }
+        return thread.terminal == nil && thread.allowsDiscussion
     }
+
+    /// Only the current authenticated projection can establish listening.
+    /// A retained negative report can still explain why nobody can receive.
+    func discussionAvailability(for key: RequestKey) -> ConversationAvailabilityObservation? {
+        guard let thread = conversationThreads[key] else { return nil }
+        return discussionAvailability(in: thread)
+    }
+
+    private func discussionAvailability(in thread: ConversationThread) -> ConversationAvailabilityObservation? {
+        guard let observation = thread.latestReportedAvailabilityObservation else { return nil }
+        switch observation.state {
+        case .gone, .unsupported:
+            return observation
+        case .listening, .notListening:
+            guard NativeRelayLifecycle.shared.hasConfirmedServerSnapshot(for: profileContext),
+                  conversationAvailabilityState == .available else { return nil }
+            return observation
+        }
+    }
+
     func canSendDiscussion(for key: RequestKey) -> Bool {
         guard (canSendToCurrentServer || isLocalExample) && !isReadOnly,
               let thread = conversationThreads[key],
-              thread.allowsDiscussion else { return false }
+              thread.terminal == nil, thread.allowsDiscussion else { return false }
+        guard isLocalExample || discussionAvailability(in: thread)?.state == .listening else { return false }
         return thread.drafts[thread.currentRevision]?.isPermanentlyRefused != true
     }
     @ObservationIgnored var notificationProjectionDidChange: (() -> Void)?
@@ -1937,13 +1953,47 @@ final class LivePresentationStore {
         pendingConversationTextByBinding[binding]
     }
 
+    func retainedConversationText(for key: RequestKey) -> [UInt64: ExactText] {
+        // Observe presentation adoption as well as transient failed-save input.
+        _ = conversationThreads[key]
+        var retained = (try? attentionStore.retainedConversationText(for: key, context: profileContext)) ?? [:]
+        for (binding, text) in pendingConversationTextByBinding where binding.request == key {
+            retained[binding.revision] = ExactText(text)
+        }
+        return retained
+    }
+
+    func dismissRetainedConversationText(for key: RequestKey, revision: UInt64) {
+        let binding = ConversationBinding(request: key, revision: revision)
+        do {
+            try attentionStore.retainConversationText(nil, for: binding, context: profileContext)
+            pendingConversationTextByBinding.removeValue(forKey: binding)
+            try refreshFromDurableStore()
+            conversationError = nil
+        } catch {
+            conversationError = "Your unsent text could not be dismissed. It remains available in this chat."
+            diagnose(.localStore, .draftSave, .failed, error: error, request: key, revision: revision)
+        }
+    }
+
+    func copyRetainedConversationText(for key: RequestKey, revision: UInt64) {
+        guard let text = retainedConversationText(for: key)[revision] else { return }
+        UIPasteboard.general.string = text.rawValue
+        dismissRetainedConversationText(for: key, revision: revision)
+    }
+
     @discardableResult
     func updateConversation(for key: RequestKey, revision: UInt64, text: String? = nil,
                             files: [ConversationFile]? = nil) -> Bool {
         guard !isReadOnly else { return false }
         do {
+            // Presentation adoption is asynchronous. Validate against the latest
+            // committed Server facts before changing the local draft.
+            guard var thread = try attentionStore.conversationSnapshot(context: profileContext).threads[key] else {
+                throw ConversationError.missingRequest
+            }
+            guard thread.terminal == nil, thread.allowsDiscussion else { throw ConversationError.closed }
             if let text, files == nil {
-                guard var thread = conversationThreads[key] else { throw ConversationError.missingRequest }
                 let binding = ConversationBinding(request: key, revision: revision)
                 let updated = try port.updateConversationDraftText(ExactText(text), for: binding,
                     context: port.context)
@@ -1953,7 +2003,7 @@ final class LivePresentationStore {
                 conversationError = nil
                 return true
             }
-            var draft = conversationDraft(for: key, revision: revision)
+            var draft = thread.drafts[revision] ?? ConversationDraft(binding: ConversationBinding(request: key, revision: revision))
             if let text { draft.text = ExactText(text) }
             if let files { draft.files = files }
             draft.disposition = .saved
@@ -1962,10 +2012,23 @@ final class LivePresentationStore {
             conversationError = nil
             return true
         } catch {
-            if let text { pendingConversationTextByBinding[ConversationBinding(request: key, revision: revision)] = text }
-            conversationError = "Your latest discussion edit could not be saved. It remains in this session; the earlier saved draft is unchanged."
+            if let text {
+                let binding = ConversationBinding(request: key, revision: revision)
+                pendingConversationTextByBinding[binding] = text
+                do {
+                    try attentionStore.retainConversationText(ExactText(text), for: binding, context: profileContext)
+                    conversationError = "Your unsent text is saved in this chat for copying. The earlier draft is unchanged."
+                } catch {
+                    conversationError = "Your latest discussion edit could not be saved. It remains in this session; the earlier saved draft is unchanged."
+                    diagnose(.localStore, .draftSave, .failed, error: error, request: key, revision: revision)
+                }
+            } else {
+                conversationError = "Your discussion edit could not be saved. The earlier saved draft is unchanged."
+            }
             diagnose(.localStore, .draftSave, .failed, error: error,
                      request: key, revision: revision)
+            do { try refreshFromDurableStore() }
+            catch { diagnose(.localStore, .projectionRefresh, .failed, error: error, request: key) }
             return false
         }
     }
@@ -2092,9 +2155,19 @@ final class LivePresentationStore {
     func sendDiscussion(for key: RequestKey, revision: UInt64,
                         onQueued: (() -> Void)? = nil,
                         onResult: ((Bool) -> Void)? = nil) {
-        guard !isReadOnly, conversationUnavailableMessage == nil,
-              canSendDiscussion(for: key) else { return }
+        guard !isReadOnly, conversationUnavailableMessage == nil else { return }
         do {
+            guard canSendToCurrentServer || isLocalExample,
+                  let thread = try attentionStore.conversationSnapshot(context: profileContext).threads[key] else {
+                throw ConversationError.missingRequest
+            }
+            guard thread.terminal == nil, thread.allowsDiscussion,
+                  thread.drafts[revision]?.isPermanentlyRefused != true else { throw ConversationError.closed }
+            guard isLocalExample || discussionAvailability(in: thread)?.state == .listening else {
+                conversationError = "The agent is not listening on this conversation. Your text and files are saved."
+                try refreshFromDurableStore()
+                return
+            }
             let binding = ConversationBinding(request: key, revision: revision)
             guard !hasPendingUploadCleanup(for: key, revision: revision),
                   !hasUnreadyUploadReference(for: key, revision: revision) else {
@@ -2160,14 +2233,18 @@ final class LivePresentationStore {
             diagnose(.conversation, .discussionSubmission, .failed, error: error,
                      operationID: discussionOperationID(for: key, revision: revision),
                      request: key, revision: revision, receiptState: .unknown)
+            do { try refreshFromDurableStore() }
+            catch { diagnose(.localStore, .projectionRefresh, .failed, error: error, request: key) }
         }
     }
 
     func editRejectedDiscussion(for key: RequestKey, revision: UInt64) {
         guard !isReadOnly else { return }
-        var draft = conversationDraft(for: key, revision: revision)
-        guard case .rejected = draft.disposition else { return }
         do {
+            guard let thread = try attentionStore.conversationSnapshot(context: profileContext).threads[key],
+                  thread.terminal == nil, thread.allowsDiscussion else { throw ConversationError.closed }
+            var draft = thread.drafts[revision] ?? ConversationDraft(binding: ConversationBinding(request: key, revision: revision))
+            guard case .rejected = draft.disposition else { return }
             draft.disposition = .saved
             // The repository clears the failed operation's frozen identity.
             // Retry retains that identity; Edit begins a different submission.
@@ -2176,6 +2253,9 @@ final class LivePresentationStore {
             conversationError = nil
         } catch {
             conversationError = "Your message could not be opened for editing. It is still saved."
+            diagnose(.localStore, .draftSave, .failed, error: error, request: key, revision: revision)
+            do { try refreshFromDurableStore() }
+            catch { diagnose(.localStore, .projectionRefresh, .failed, error: error, request: key) }
         }
     }
 

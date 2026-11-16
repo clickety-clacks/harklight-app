@@ -238,10 +238,16 @@
           "detail": "If the server's record of what this device has received no longer matches the device's own record, Harklight now reloads the chat history from the server and keeps connecting, and answers the server has already settled stop showing as pending. This fix is pending formal testing."
         },
         {
+          "id": "answers-keep-the-connection",
+          "symbol": "bolt.horizontal",
+          "title": "Answers no longer drop the connection",
+          "detail": "Answers, Seen, No comment, chat messages and file downloads now use the app's one connection to the server. Before, each one briefly opened a second connection, which made the server close the first, so the app reconnected and caught up again after every answer. An answer sent while the app is still catching up now waits for that catch-up and shows Sending. Server error replies are now recorded in the diagnostics with their reason. This fix is pending formal testing."
+        },
+        {
           "id": "answer-state-in-the-control",
           "symbol": "checkmark.circle",
           "title": "Your answer shows its own progress",
-          "detail": "The choice, reply, No comment or Seen you send now shows a spinner while it sends, then your answer when it arrives. If it does not go through, it shows a circled exclamation mark and Retry, and a failed reply can be edited. The old status lines below the answers are gone. This change is pending formal testing."
+          "detail": "The choice, reply, No comment or Seen you send now shows a spinner until the server confirms it, including while the connection drops and reconnects, then your answer. Only a send that really failed shows a circled exclamation mark and Retry, and a failed reply can be edited. The old status lines below the answers are gone. This change is pending formal testing."
         },
         {
           "id": "progress-section-and-detail",

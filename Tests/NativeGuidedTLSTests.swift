@@ -1124,7 +1124,10 @@ final class NativeGuidedTLSTests: XCTestCase {
         let structuredKey = RequestKey(accountScope: identity.personID, senderID: ExactText("sender"), messageID: ExactText("structured"))
         let legacyKey = RequestKey(accountScope: identity.personID, senderID: ExactText("sender"), messageID: ExactText("legacy"))
         let session = OrdinaryOrderingRelaySession(identity: identity)
-        let core = try NativeRelayCore(store: store, context: context, session: session)
+        // The lifecycle's refresh core never sends queued answers itself; a
+        // separate per-answer flight sends them (sendOriginalOperationForUserTap).
+        let core = try NativeRelayCore(store: store, context: context, session: session,
+                                       automaticallySendsPendingOperations: false)
 
         let firstHigh = try await core.resyncAndDrainOutbox()
         XCTAssertEqual(firstHigh, 3)
@@ -1284,78 +1287,7 @@ final class NativeGuidedTLSTests: XCTestCase {
         }
     }
 
-    func testAnswerAndSeenTransportDoNotWaitForAnotherConnectionsReplayAcknowledgement() async throws {
-        let namespace = "Harklight.independent-answer-test." + UUID().uuidString
-        let identity = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
-        defer {
-            SecItemDelete([kSecClass as String: kSecClassCertificate,
-                           kSecAttrLabel as String: identity.label] as CFDictionary)
-            SecItemDelete([kSecClass as String: kSecClassKey,
-                           kSecAttrApplicationTag as String: Data(namespace.utf8)] as CFDictionary)
-        }
-        let acknowledgementArrived = expectation(description: "Replay ACK request is held by relay")
-        let answersArrived = expectation(description: "Reply and Seen reach relay while ACK remains held")
-        answersArrived.expectedFulfillmentCount = 2
-        let relay = try LocalRelayWebSocket(expectedDevice: identity.deviceID) { text in
-            guard let value = try? JSONValue.parse(Data(text.utf8)) else { return [] }
-            if value.uniqueValue(named: "type")?.stringValue?.rawValue == "ack" {
-                acknowledgementArrived.fulfill()
-                return [] // Deliberately never confirm the replay cursor.
-            }
-            if value.uniqueValue(named: "type")?.stringValue?.rawValue == "answer" {
-                answersArrived.fulfill()
-                return ["{\"v\":1,\"type\":\"ok\",\"seq\":7}\n"]
-            }
-            return []
-        }
-        defer { relay.close() }
-        let port = try await relay.start()
-        let context = ProfileContext(identity: ProfileIdentity(
-            trustedRelayAuthority: ExactText("localhost"), personID: ExactText("test-person"),
-            deviceID: ExactText(identity.deviceID)), transportMode: .relay)
-        let url = try XCTUnwrap(URL(string: "wss://localhost:\(port)/relay"))
-        let replay = try URLSessionInstallationSession(profile: context, relayURL: url,
-            clientIdentity: TrustedKeychainIdentity(identity.value), trustedRootDER: relay.rootDER)
-        let sending = try URLSessionInstallationSession(profile: context, relayURL: url,
-            clientIdentity: TrustedKeychainIdentity(identity.value), trustedRootDER: relay.rootDER)
-        let heldAck = Task {
-            try await replay.acknowledge(Data(#"{"v":1,"type":"ack","seq":1,"ref":"native-ack"}"#.utf8))
-        }
-        await fulfillment(of: [acknowledgementArrived], timeout: 5)
-        let sendsCompleted = expectation(description: "Both send responses complete before replay ACK")
-        let sends = Task {
-            defer { sendsCompleted.fulfill() }
-            for answer in [JSONValue.null, .string(ExactText("Saved reply"))] {
-            let operation = UUID()
-            let frame = JSONValue.object([
-                JSONMember("v", .number(JSONNumber(lexeme: "1"))),
-                JSONMember("type", .string(ExactText("answer"))),
-                JSONMember("sender_id", .string(ExactText("sender"))),
-                JSONMember("message_id", .string(ExactText(operation.uuidString))),
-                JSONMember("request_revision", .number(JSONNumber(lexeme: "1"))),
-                JSONMember("op_id", .string(ExactText(operation.uuidString.lowercased()))),
-                JSONMember("answer", answer)
-            ])
-            let result = try await sending.sendOriginalOperation(Data((frame.jsonString + "\n").utf8), operationID: operation)
-            XCTAssertEqual(result, .accepted(operationID: operation, terminalSequence: 7))
-        }
-        }
-        await fulfillment(of: [answersArrived, sendsCompleted], timeout: 5)
-        // A responsive peer is alive even while the application ACK is held.
-        // Ping uses control frames and must not wait for that exchange gate.
-        try await replay.checkConnection()
-        relay.close()
-        do {
-            try await replay.checkConnection()
-            XCTFail("The actual closed connection must fail its health check")
-        } catch {}
-        await sending.close()
-        await replay.close()
-        try await sends.value
-        do { try await heldAck.value; XCTFail("The withheld cursor was never confirmed") } catch {}
-    }
-
-    func testLifecycleDeliversReplyAndSeenWhileConversationCatchUpRemainsOpen() async throws {
+    func testLifecycleKeepsOneRelayConnectionWhileConversationCatchUpRemainsOpen() async throws {
         let namespace = "Harklight.lifecycle-open-replay." + UUID().uuidString
         let identity = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
         defer {
@@ -1375,8 +1307,9 @@ final class NativeGuidedTLSTests: XCTestCase {
         let conversationStarted = expectation(description: "Post-ACK conversation replay is still open")
         let frames = ConversationFrameCollector()
         let seenPayload = #"{"title":"Information","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"seen","label":"Seen","kind":"value","value":{"acknowledgment":"seen"}}]}}"#
-        let replyPayload = #"{"title":"Question","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"reply","label":"Reply","kind":"text","placeholder":"Reply"}]}}"#
-        let relay = try LocalRelayWebSocket(expectedDevice: identity.deviceID) { text in
+        let replyPayload = #"{"title":"Question","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"reply","label":"Reply","kind":"text"}]}}"#
+        // Fences like the Server: a second relay connection would close the live one.
+        let relay = try LocalRelayWebSocket(expectedDevice: identity.deviceID, fencesEarlierConnections: true) { text in
             guard let value = try? JSONValue.parse(Data(text.utf8)),
                   let kind = value.uniqueValue(named: "type")?.stringValue?.rawValue else { return [] }
             if kind == "answer" {
@@ -1421,27 +1354,24 @@ final class NativeGuidedTLSTests: XCTestCase {
         }
         await fulfillment(of: [conversationStarted], timeout: 5)
         XCTAssertFalse(refreshCompleted)
+        let liveConnections = relay.connectionCount
         let domain = AttentionDomainPort(store: store)
-        let completed = expectation(description: "Lifecycle sends finish without completing catch-up")
-        let sends = Task { @MainActor in
-            defer { completed.fulfill() }
-            for message in ["reply", "seen"] {
-                let key = RequestKey(accountScope: context.identity.personID, senderID: ExactText("sender"),
-                                     messageID: ExactText(message))
-                let selector = try XCTUnwrap(domain.inspect(context: domain.context, request: key).requests.first?.selector)
-                let input: TypedInputRecord = message == "seen" ? .compatibilityValue(action: ExactText("seen")) :
-                    .compatibilityText(action: ExactText("reply"), text: ExactText("While replay is open"))
-                let receipt = try domain.submit(SubmitIntent(context: domain.context, selector: selector,
-                    intentID: UUID(), inputs: [input]))
-                let original = try XCTUnwrap(store.lookupIntent(receipt.intentID, context: context))
-                try await lifecycle.sendOriginalOperationForUserTap(receipt.intentID, expected: context)
-                XCTAssertEqual(try store.lookupIntent(receipt.intentID, context: context)?.operationID, original.operationID)
-                XCTAssertFalse(refreshCompleted)
-                XCTAssertNil(try store.snapshot(context: context).remoteStates[key]?.state,
-                             "Transport acceptance cannot invent the Server's terminal projection.")
-            }
+        let key = RequestKey(accountScope: context.identity.personID, senderID: ExactText("sender"),
+                             messageID: ExactText("reply"))
+        let selector = try XCTUnwrap(domain.inspect(context: domain.context, request: key).requests.first?.selector)
+        let receipt: IntentReceipt
+        do {
+            receipt = try domain.submit(SubmitIntent(context: domain.context, selector: selector, intentID: UUID(),
+                inputs: [.compatibilityText(action: ExactText("reply"), text: ExactText("While replay is open"))]))
+        } catch { XCTFail("Submit failed: \(error)"); throw error }
+        let sendStarted = expectation(description: "The tap's send has begun")
+        let send = Task { @MainActor in
+            try await lifecycle.sendOriginalOperationForUserTap(receipt.intentID, expected: context,
+                onSendCallStateChange: { sending in if sending { sendStarted.fulfill() } })
         }
-        await fulfillment(of: [completed], timeout: 5)
+        await fulfillment(of: [sendStarted], timeout: 5)
+
+        // A file still downloads during catch-up, over HTTPS only.
         let fileCompleted = expectation(description: "File downloads before catch-up finishes")
         let download = Task { @MainActor in
             defer { fileCompleted.fulfill() }
@@ -1452,17 +1382,521 @@ final class NativeGuidedTLSTests: XCTestCase {
             XCTAssertFalse(refreshCompleted)
         }
         await fulfillment(of: [fileCompleted], timeout: 5)
+        do { try await download.value } catch { XCTFail("Download failed: \(error)") }
+        XCTAssertEqual(try? Data(contentsOf: destination), fileBytes)
+        XCTAssertEqual(relay.connectionCount, liveConnections,
+                       "Neither the tap nor the download opened a second relay connection.")
+        XCTAssertTrue(frames.snapshot().isEmpty,
+                      "The answer waits for the live connection's catch-up instead of closing it.")
+
         await lifecycle.deactivate()
-        try await download.value
-        XCTAssertEqual(try Data(contentsOf: destination), fileBytes)
-        try await sends.value
+        try? await send.value
         let cancelled = await refresh.value
         XCTAssertFalse(cancelled.relayConfirmed, "Deactivation cannot confirm an unfinished replay.")
-        let submitted = try frames.snapshot().map { try JSONValue.parse($0) }
-        XCTAssertEqual(submitted.count, 2)
-        XCTAssertEqual(submitted.first?.uniqueValue(named: "answer"), .string(ExactText("While replay is open")))
-        XCTAssertEqual(submitted.last?.uniqueValue(named: "answer"), .null)
-        XCTAssertEqual(Set(submitted.compactMap { $0.uniqueValue(named: "op_id")?.stringValue }).count, 2)
+        XCTAssertNotNil(try? store.lookupIntent(receipt.intentID, context: context),
+                        "The unsent answer stays saved for the next connection.")
+        XCTAssertEqual(relay.connectionCount, liveConnections)
+    }
+
+    /// A relay that keeps one session per device, as the Server does: each new
+    /// connection closes the earlier ones. It serves three open requests
+    /// ("seen", "reply", "silent"), one chat thread ("chat") and one file.
+    /// `holdsConversationCatchUp` leaves the conversation catch-up open until
+    /// the test pushes its end; `answerReply` chooses each answer's response.
+    private func singleSessionRelay(expectedDevice: String, originPort: UInt16,
+                                    conversationCursor: Int, answers: ConversationFrameCollector,
+                                    conversationStarted: XCTestExpectation? = nil,
+                                    holdsConversationCatchUp: Bool = false,
+                                    countsAdmissions: Bool = false,
+                                    requests: ConversationFrameCollector? = nil,
+                                    answerReply: @escaping @Sendable (Int) -> String = { count in
+                                        "{\"v\":1,\"type\":\"ok\",\"seq\":\(count + 10)}\n"
+                                    }) throws -> LocalRelayWebSocket {
+        let rows = ["seen", "reply", "silent"]
+        return try LocalRelayWebSocket(expectedDevice: expectedDevice, fencesEarlierConnections: true) { text in
+            requests?.append(Data(text.utf8))
+            guard let value = try? JSONValue.parse(Data(text.utf8)),
+                  let kind = value.uniqueValue(named: "type")?.stringValue?.rawValue else { return [] }
+            if kind == "answer" || kind == "answer_no_comment" {
+                answers.append(Data(text.utf8))
+                return [answerReply(answers.snapshot().count)]
+            }
+            if countsAdmissions, kind == "inbox_start" { answers.append(Data(text.utf8)) }
+            guard let ref = value.uniqueValue(named: "ref")?.stringValue?.rawValue else { return [] }
+            let ok = "{\"v\":1,\"type\":\"ok\",\"ref\":\"\(ref)\""
+            let checkpoint = ",\"paging_version\":1,\"snapshot_id\":\"single-session\",\"high_water\":\(rows.count)"
+            switch kind {
+            case "inbox_start":
+                let seen = #"{"title":"Information","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"seen","label":"Seen","kind":"value","value":{"acknowledgment":"seen"}}]}}"#
+                let question = #"{"title":"Question","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"reply","label":"Reply","kind":"text"}]}}"#
+                let items = rows.enumerated().map { index, row in
+                    "{\"acceptance\":{\"v\":1,\"type\":\"delivery\",\"seq\":\(index + 1),\"sender_id\":\"sender\",\"message_id\":\"\(row)\",\"origin\":\"origin\",\"as\":\"message\",\"message\":\(row == "seen" ? seen : question)}}"
+                }.joined(separator: ",")
+                return [ok + checkpoint + ",\"items\":[\(items)],\"next_cursor\":null,\"receipt_cursor\":null}\n"]
+            case "inbox_checkpoint_ack":
+                return [ok + checkpoint + ",\"checkpoint_accepted\":true}\n"]
+            case "inbox_attach":
+                return [ok + checkpoint + ",\"checkpoint_accepted\":true,\"replay_started\":true}\n",
+                        "{\"v\":1,\"type\":\"resynced\",\"seq\":\(rows.count)}\n"]
+            case "conversation_open":
+                conversationStarted?.fulfill()
+                let open = ok + ",\"origin_https_port\":\(originPort)}\n"
+                if holdsConversationCatchUp { return [open] }
+                return [open, "{\"v\":1,\"type\":\"conversation_resynced\",\"conversation_seq\":\(conversationCursor)}\n"]
+            case "conversation_ack":
+                let acknowledged = value.uniqueValue(named: "conversation_seq")?.integerValue ?? -1
+                return [ok + ",\"conversation_seq\":\(acknowledged)}\n"]
+            case "discussion":
+                answers.append(Data(text.utf8))
+                return [ok + ",\"seq\":\(answers.snapshot().count + 10),\"event_id\":\"chat-turn\"}\n"]
+            default:
+                // Optional features this relay does not model (inbox view,
+                // reconciliation, push status) are unsupported here.
+                return ["{\"v\":1,\"type\":\"error\",\"ref\":\"\(ref)\",\"reason\":\"unknown_type\"}\n"]
+            }
+        }
+    }
+
+    private func liveRequestSelector(_ message: String, domain: AttentionDomainPort,
+                                     context: ProfileContext) throws -> BoundDocumentSelector {
+        let key = RequestKey(accountScope: context.identity.personID, senderID: ExactText("sender"),
+                             messageID: ExactText(message))
+        return try XCTUnwrap(domain.inspect(context: domain.context, request: key).requests.first?.selector)
+    }
+
+    private func isAcceptedIntent(_ intentID: UUID, store: ClientRepository, context: ProfileContext) throws -> Bool {
+        Self.hasAcceptedDisposition(try store.snapshot(context: context).intents[intentID]?.disposition)
+    }
+
+    nonisolated private static func admissions(in frames: ConversationFrameCollector) -> Int {
+        frames.types.filter { $0 == "inbox_start" }.count
+    }
+
+    nonisolated private static func hasAcceptedDisposition(_ disposition: IntentDisposition??) -> Bool {
+        if case .accepted?? = disposition { return true }
+        return false
+    }
+
+    func testSubmissionsUseTheLiveRelayConnectionWhichSurvivesThem() async throws {
+        let namespace = "Harklight.live-connection-submissions." + UUID().uuidString
+        let identity = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
+        defer {
+            SecItemDelete([kSecClass as String: kSecClassCertificate,
+                           kSecAttrLabel as String: identity.label] as CFDictionary)
+            SecItemDelete([kSecClass as String: kSecClassKey,
+                           kSecAttrApplicationTag as String: Data(namespace.utf8)] as CFDictionary)
+        }
+        let fileBytes = Data("Downloaded beside the live connection".utf8)
+        let fileHash = SHA256.hash(data: fileBytes).map { String(format: "%02x", $0) }.joined()
+        let origin = try LocalEnrollmentTLS(expectedDevice: identity.deviceID, replyBody: fileBytes,
+                                             responseFileHash: fileHash)
+        defer { origin.close() }
+        let originPort = try await origin.start()
+        let answers = ConversationFrameCollector()
+        let relay = try singleSessionRelay(expectedDevice: identity.deviceID, originPort: originPort,
+                                           conversationCursor: 1, answers: answers)
+        defer { relay.close() }
+        let port = try await relay.start()
+        let context = ProfileContext(identity: ProfileIdentity(trustedRelayAuthority: ExactText("localhost"),
+            personID: ExactText("live-submissions-person"), deviceID: ExactText(identity.deviceID)),
+            transportMode: .relay)
+        let store = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        let chat = ConversationBinding(request: RequestKey(accountScope: context.identity.personID,
+            senderID: ExactText("sender"), messageID: ExactText("chat")), revision: 1)
+        try store.applyConversation(ConversationEvent(sequence: 1, binding: chat,
+            fact: .request(sessionHandle: ExactText("session"), payload: .null)), context: context)
+        try store.saveConversationDraft(ConversationDraft(binding: chat, text: ExactText("Chat on the live connection")),
+                                        context: context)
+        let lifecycle = NativeRelayLifecycle()
+        try await lifecycle.activate(store: store, context: context,
+            relayURL: XCTUnwrap(URL(string: "wss://localhost:\(port)/relay")),
+            clientIdentity: identity.value, trustedRootDER: relay.rootDER)
+        let first = await lifecycle.refreshResultFromTrustedRelay()
+        XCTAssertTrue(first.relayConfirmed, lifecycle.refreshFailureMessage(for: context) ?? "no failure message")
+        let liveConnections = relay.connectionCount
+
+        // While the live connection is idle, each submission goes out at once on it.
+        let domain = AttentionDomainPort(store: store)
+        let reply = try domain.submit(SubmitIntent(context: domain.context,
+            selector: liveRequestSelector("reply", domain: domain, context: context), intentID: UUID(),
+            inputs: [.compatibilityText(action: ExactText("reply"), text: ExactText("Reply"))])).intentID
+        let seen = try domain.submit(SubmitIntent(context: domain.context,
+            selector: liveRequestSelector("seen", domain: domain, context: context), intentID: UUID(),
+            inputs: [.compatibilityValue(action: ExactText("seen"))])).intentID
+        let silent = try domain.submitNoComment(context: domain.context,
+            selector: liveRequestSelector("silent", domain: domain, context: context), intentID: UUID()).intentID
+        for (name, intent) in [("Reply", reply), ("Seen", seen), ("No comment", silent)] {
+            try await lifecycle.sendOriginalOperationForUserTap(intent, expected: context)
+            XCTAssertTrue(try isAcceptedIntent(intent, store: store, context: context), "\(name) was not accepted.")
+            XCTAssertEqual(relay.connectionCount, liveConnections, "\(name) opened another relay connection.")
+        }
+        let chatResult = try await lifecycle.submitDiscussion(chat, expected: context,
+            retainedFile: { _ in throw ConversationError.missingRequest })
+        XCTAssertEqual(chatResult, .accepted(turnID: ExactText("chat-turn")))
+        XCTAssertEqual(relay.connectionCount, liveConnections, "The chat message opened another relay connection.")
+
+        let destination = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: destination) }
+        let file = ConversationFile(id: ExactText("file"), name: ExactText("file.txt"),
+            byteCount: UInt64(fileBytes.count), sha256: ExactText(fileHash),
+            content: .uploaded(ExactText(UUID().uuidString)))
+        try await lifecycle.fetchConversationFile(file, to: destination, expected: context)
+        XCTAssertEqual(try Data(contentsOf: destination), fileBytes)
+        XCTAssertEqual(relay.connectionCount, liveConnections, "The download opened a relay connection.")
+
+        XCTAssertEqual(try answers.snapshot().compactMap {
+            try JSONValue.parse($0).uniqueValue(named: "type")?.stringValue?.rawValue }.sorted(),
+            ["answer", "answer", "answer_no_comment", "discussion"])
+        // The live connection survived all of them: the next refresh confirms on it.
+        let after = await lifecycle.refreshResultFromTrustedRelay()
+        XCTAssertTrue(after.relayConfirmed)
+        XCTAssertEqual(relay.connectionCount, liveConnections, "The live connection was never replaced.")
+        await lifecycle.deactivate()
+    }
+
+    func testSubmissionDuringCatchUpGoesOutWhenItCompletesAndShowsSendingMeanwhile() async throws {
+        let namespace = "Harklight.live-connection-catch-up-submission." + UUID().uuidString
+        let identity = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
+        defer {
+            SecItemDelete([kSecClass as String: kSecClassCertificate,
+                           kSecAttrLabel as String: identity.label] as CFDictionary)
+            SecItemDelete([kSecClass as String: kSecClassKey,
+                           kSecAttrApplicationTag as String: Data(namespace.utf8)] as CFDictionary)
+        }
+        let answers = ConversationFrameCollector()
+        let conversationStarted = expectation(description: "Conversation catch-up is open")
+        let relay = try singleSessionRelay(expectedDevice: identity.deviceID, originPort: 443,
+                                           conversationCursor: 0, answers: answers,
+                                           conversationStarted: conversationStarted, holdsConversationCatchUp: true)
+        defer { relay.close() }
+        let port = try await relay.start()
+        let context = ProfileContext(identity: ProfileIdentity(trustedRelayAuthority: ExactText("localhost"),
+            personID: ExactText("catch-up-submission-person"), deviceID: ExactText(identity.deviceID)),
+            transportMode: .relay)
+        let store = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        let lifecycle = NativeRelayLifecycle()
+        try await lifecycle.activate(store: store, context: context,
+            relayURL: XCTUnwrap(URL(string: "wss://localhost:\(port)/relay")),
+            clientIdentity: identity.value, trustedRootDER: relay.rootDER)
+        let refresh = Task { @MainActor in await lifecycle.refreshResultFromTrustedRelay() }
+        await fulfillment(of: [conversationStarted], timeout: 5)
+        let liveConnections = relay.connectionCount
+
+        let domain = AttentionDomainPort(store: store)
+        let reply = try domain.submit(SubmitIntent(context: domain.context,
+            selector: liveRequestSelector("reply", domain: domain, context: context), intentID: UUID(),
+            inputs: [.compatibilityText(action: ExactText("reply"), text: ExactText("During catch-up"))])).intentID
+        let sendingStates = SendingStateRecorder()
+        let sendStarted = expectation(description: "The tap shows Sending")
+        let send = Task { @MainActor in
+            try await lifecycle.sendOriginalOperationForUserTap(reply, expected: context,
+                onSendCallStateChange: { sending in
+                    sendingStates.append(sending)
+                    if sending { sendStarted.fulfill() }
+                })
+        }
+        await fulfillment(of: [sendStarted], timeout: 5)
+        XCTAssertEqual(sendingStates.values, [true], "Sending is shown while the answer waits for catch-up.")
+        XCTAssertTrue(answers.snapshot().isEmpty, "The answer waits for the live connection's catch-up.")
+        XCTAssertNotNil(try store.lookupIntent(reply, context: context), "The waiting answer stays saved.")
+
+        // The Server ends the catch-up; the waiting answer then goes out on the same connection.
+        relay.push("{\"v\":1,\"type\":\"conversation_resynced\",\"conversation_seq\":0}\n")
+        try await send.value
+        XCTAssertTrue(try isAcceptedIntent(reply, store: store, context: context))
+        XCTAssertEqual(sendingStates.values, [true, false])
+        XCTAssertEqual(answers.snapshot().count, 1)
+        let refreshed = await refresh.value
+        XCTAssertTrue(refreshed.relayConfirmed)
+        XCTAssertEqual(relay.connectionCount, liveConnections, "No second relay connection opened.")
+        await lifecycle.deactivate()
+    }
+
+    func testUnresolvedSubmissionIsResentOnTheLiveConnection() async throws {
+        let namespace = "Harklight.live-connection-unresolved-resend." + UUID().uuidString
+        let identity = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
+        defer {
+            SecItemDelete([kSecClass as String: kSecClassCertificate,
+                           kSecAttrLabel as String: identity.label] as CFDictionary)
+            SecItemDelete([kSecClass as String: kSecClassKey,
+                           kSecAttrApplicationTag as String: Data(namespace.utf8)] as CFDictionary)
+        }
+        let answers = ConversationFrameCollector()
+        let resent = expectation(description: "The saved answer is sent again")
+        let relay = try singleSessionRelay(expectedDevice: identity.deviceID, originPort: 443,
+                                           conversationCursor: 0, answers: answers,
+                                           answerReply: { count in
+            // The first response proves nothing about the outcome.
+            if count == 1 { return "{\"v\":1,\"type\":\"error\"}\n" }
+            if count == 2 { resent.fulfill() }
+            return "{\"v\":1,\"type\":\"ok\",\"seq\":\(count + 10)}\n"
+        })
+        defer { relay.close() }
+        let port = try await relay.start()
+        let context = ProfileContext(identity: ProfileIdentity(trustedRelayAuthority: ExactText("localhost"),
+            personID: ExactText("unresolved-resend-person"), deviceID: ExactText(identity.deviceID)),
+            transportMode: .relay)
+        let store = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        let lifecycle = NativeRelayLifecycle()
+        try await lifecycle.activate(store: store, context: context,
+            relayURL: XCTUnwrap(URL(string: "wss://localhost:\(port)/relay")),
+            clientIdentity: identity.value, trustedRootDER: relay.rootDER)
+        let first = await lifecycle.refreshResultFromTrustedRelay()
+        XCTAssertTrue(first.relayConfirmed, lifecycle.refreshFailureMessage(for: context) ?? "no failure message")
+        let liveConnections = relay.connectionCount
+
+        let domain = AttentionDomainPort(store: store)
+        let reply = try domain.submit(SubmitIntent(context: domain.context,
+            selector: liveRequestSelector("reply", domain: domain, context: context), intentID: UUID(),
+            inputs: [.compatibilityText(action: ExactText("reply"), text: ExactText("Resend me"))])).intentID
+        try await lifecycle.sendOriginalOperationForUserTap(reply, expected: context)
+        XCTAssertFalse(try isAcceptedIntent(reply, store: store, context: context))
+        XCTAssertNotNil(try store.lookupIntent(reply, context: context), "The unresolved answer stays saved.")
+
+        // The next delivery opportunity resends the same operation on the same live connection.
+        _ = await lifecycle.refreshResultFromTrustedRelay()
+        await fulfillment(of: [resent], timeout: 5)
+        let accepted = expectation(for: NSPredicate { _, _ in
+            Self.hasAcceptedDisposition(try? store.snapshot(context: context).intents[reply]?.disposition)
+        }, evaluatedWith: nil)
+        await fulfillment(of: [accepted], timeout: 5)
+        let sent = try answers.snapshot().map { try JSONValue.parse($0) }
+        XCTAssertEqual(sent.count, 2)
+        XCTAssertEqual(sent.first?.uniqueValue(named: "op_id"), sent.last?.uniqueValue(named: "op_id"),
+                       "The resend repeats the exact saved operation.")
+        XCTAssertEqual(relay.connectionCount, liveConnections, "The resend used the live connection.")
+        await lifecycle.deactivate()
+    }
+
+    func testOneReconnectAdmitsOnceWhenASubmissionAndARefreshBothSeeTheDrop() async throws {
+        let namespace = "Harklight.live-connection-single-admission." + UUID().uuidString
+        let identity = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
+        defer {
+            SecItemDelete([kSecClass as String: kSecClassCertificate,
+                           kSecAttrLabel as String: identity.label] as CFDictionary)
+            SecItemDelete([kSecClass as String: kSecClassKey,
+                           kSecAttrApplicationTag as String: Data(namespace.utf8)] as CFDictionary)
+        }
+        let answers = ConversationFrameCollector()
+        let relay = try singleSessionRelay(expectedDevice: identity.deviceID, originPort: 443,
+                                           conversationCursor: 0, answers: answers, countsAdmissions: true)
+        defer { relay.close() }
+        let port = try await relay.start()
+        let context = ProfileContext(identity: ProfileIdentity(trustedRelayAuthority: ExactText("localhost"),
+            personID: ExactText("single-admission-person"), deviceID: ExactText(identity.deviceID)),
+            transportMode: .relay)
+        let store = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        let diagnosticURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HarklightDiagnostics-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: diagnosticURL) }
+        let journal = NativeClientDiagnosticJournal(fileURL: diagnosticURL)
+        let lifecycle = NativeRelayLifecycle()
+        try await lifecycle.activate(store: store, context: context,
+            relayURL: XCTUnwrap(URL(string: "wss://localhost:\(port)/relay")),
+            clientIdentity: identity.value, trustedRootDER: relay.rootDER, diagnostics: journal)
+        let first = await lifecycle.refreshResultFromTrustedRelay()
+        XCTAssertTrue(first.relayConfirmed, lifecycle.refreshFailureMessage(for: context) ?? "no failure message")
+        for _ in 0..<50 { await Task.yield() }
+        let admissions = journal.events.filter { $0.phase == .relayAdmission && $0.transition == .completed }
+        XCTAssertEqual(admissions.count, 1,
+                       "One admission is journaled once, not once by the session and again by the lifecycle.")
+        XCTAssertEqual(journal.events.filter { $0.phase == .ordinaryReplay && $0.transition == .began }.count, 1,
+                       "One ordinary replay is journaled once.")
+        let connectionsBeforeDrop = relay.connectionCount
+        let admissionsBeforeDrop = Self.admissions(in: answers)
+
+        // The live connection ends; a tap and a refresh both meet the failure at once.
+        relay.dropConnections()
+        let domain = AttentionDomainPort(store: store)
+        let reply = try domain.submit(SubmitIntent(context: domain.context,
+            selector: liveRequestSelector("reply", domain: domain, context: context), intentID: UUID(),
+            inputs: [.compatibilityText(action: ExactText("reply"), text: ExactText("After the drop"))])).intentID
+        let send = Task { @MainActor in try await lifecycle.sendOriginalOperationForUserTap(reply, expected: context) }
+        let refresh = Task { @MainActor in await lifecycle.refreshResultFromTrustedRelay() }
+        let pushRefresh = Task { @MainActor in await lifecycle.refreshResultFromTrustedRelay(checkBlockedPush: true) }
+        try? await send.value
+        let refreshed = await refresh.value
+        _ = await pushRefresh.value
+        // This relay does not model a reconnected session's inbox resume, so
+        // refresh confirmation after reconnect is covered by
+        // testLifecycleReconnectsTwiceFromPersistedConversationPrefix; here the
+        // subject is how many sessions one reconnect admits.
+        _ = refreshed
+        let accepted = expectation(for: NSPredicate { _, _ in
+            Self.hasAcceptedDisposition(try? store.snapshot(context: context).intents[reply]?.disposition)
+        }, evaluatedWith: nil)
+        await fulfillment(of: [accepted], timeout: 5)
+        XCTAssertEqual(relay.connectionCount, connectionsBeforeDrop + 1, "One reconnect opens one connection.")
+        XCTAssertEqual(Self.admissions(in: answers), admissionsBeforeDrop + 1,
+                       "The reconnect admits exactly one relay session (one inbox_start).")
+        await lifecycle.deactivate()
+    }
+
+    func testEveryRelayErrorReplyIsRecordedWithReasonRequestTypeAndOperation() async throws {
+        let namespace = "Harklight.relay-error-reply-diagnostic." + UUID().uuidString
+        let identity = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
+        defer {
+            SecItemDelete([kSecClass as String: kSecClassCertificate,
+                           kSecAttrLabel as String: identity.label] as CFDictionary)
+            SecItemDelete([kSecClass as String: kSecClassKey,
+                           kSecAttrApplicationTag as String: Data(namespace.utf8)] as CFDictionary)
+        }
+        let relay = try LocalRelayWebSocket(expectedDevice: identity.deviceID) { text in
+            guard text.contains("\"type\":\"answer\"") else { return [] }
+            return [#"{"v":1,"type":"error","reason":"closed"}"# + "\n"]
+        }
+        defer { relay.close() }
+        let port = try await relay.start()
+        let context = ProfileContext(identity: ProfileIdentity(
+            trustedRelayAuthority: ExactText("localhost"), personID: ExactText("test-person"),
+            deviceID: ExactText(identity.deviceID)), transportMode: .relay)
+        let events = DiagnosticEventRecorder()
+        let session = try URLSessionInstallationSession(
+            profile: context, relayURL: XCTUnwrap(URL(string: "wss://localhost:\(port)/relay")),
+            clientIdentity: TrustedKeychainIdentity(identity.value), trustedRootDER: relay.rootDER,
+            onDiagnostic: { events.append($0) })
+        let operationID = UUID()
+        let frame = #"{"v":1,"type":"answer","op_id":"\#(operationID.uuidString.lowercased())","sender_id":"sender","request_id":"request","request_revision":1,"answer":null}"#
+        let result = try await session.sendOriginalOperation(Data((frame + "\n").utf8), operationID: operationID)
+        await session.close()
+        XCTAssertEqual(result, .refusedClosed(operationID: operationID))
+        let replies = events.values.filter { $0.phase == .relayErrorReply }
+        XCTAssertEqual(replies.count, 1, "The error reply is recorded once.")
+        XCTAssertEqual(replies.first?.causeCode, "server_closed")
+        XCTAssertEqual(replies.first?.relayRequestType, .answer)
+        XCTAssertEqual(replies.first?.operationID, operationID)
+    }
+
+    func testRelayErrorRepliesAreAttributedByRefOrToTheCurrentExchangeAcrossFocusReports() throws {
+        var attribution = RelayReplyAttribution()
+        func frame(_ text: String) -> Data { Data((text + "\n").utf8) }
+        let answerA = UUID(), answerB = UUID()
+
+        // An answer exchange is in flight when a focus report goes out beside it.
+        attribution.noteSent(frame(#"{"v":1,"type":"answer","op_id":"\#(answerA.uuidString.lowercased())","answer":null}"#),
+                             exchange: true)
+        attribution.noteSent(frame(#"{"v":1,"type":"focus_report","ref":"focus-1"}"#), exchange: false)
+        attribution.noteSent(frame(#"{"v":1,"type":"focus_report","ref":"focus-2"}"#), exchange: false)
+
+        // The answer's refusal carries no ref: it belongs to the gated answer, not the focus report.
+        XCTAssertEqual(attribution.observeReply(frame(#"{"v":1,"type":"error","reason":"closed"}"#)),
+                       .init(reason: "closed", request: .init(type: .answer, operationID: answerA)))
+        // The focus report's error echoes its ref.
+        XCTAssertEqual(attribution.observeReply(frame(#"{"v":1,"type":"error","ref":"focus-1","reason":"unknown_type"}"#)),
+                       .init(reason: "unknown_type", request: .init(type: .focusReport, operationID: nil)))
+
+        // A delayed focus error during a later answer exchange is not blamed on that answer.
+        attribution.noteSent(frame(#"{"v":1,"type":"answer","op_id":"\#(answerB.uuidString.lowercased())","answer":null}"#),
+                             exchange: true)
+        XCTAssertEqual(attribution.observeReply(frame(#"{"v":1,"type":"error","ref":"focus-2","reason":"forbidden"}"#)),
+                       .init(reason: "forbidden", request: .init(type: .focusReport, operationID: nil)))
+        XCTAssertEqual(attribution.observeReply(frame(#"{"v":1,"type":"error","reason":"not_found"}"#)),
+                       .init(reason: "not_found", request: .init(type: .answer, operationID: answerB)))
+
+        // A successful reply retires its ref; replay entries and successes are not error replies.
+        attribution.noteSent(frame(#"{"v":1,"type":"inbox_page","ref":"page-1"}"#), exchange: true)
+        XCTAssertNil(attribution.observeReply(frame(#"{"v":1,"type":"ok","ref":"page-1"}"#)))
+        XCTAssertEqual(attribution.observeReply(frame(#"{"v":1,"type":"error","ref":"page-1","reason":"closed"}"#)),
+                       .init(reason: "closed", request: nil), "A ref already answered matches no request.")
+        XCTAssertNil(attribution.observeReply(frame(#"{"v":1,"type":"delivery","seq":4}"#)))
+        XCTAssertFalse(RelayReplyAttribution.mayBeReply(#"{"v":1,"type":"conversation","conversation_seq":9}"#))
+        XCTAssertTrue(RelayReplyAttribution.mayBeReply(#"{"v":1,"type":"error","reason":"closed"}"#))
+    }
+
+    func testFocusReportRefusedAsUnknownTypeKeepsTheConnectionAndStopsFurtherReports() async throws {
+        let namespace = "Harklight.focus-report-unknown-type." + UUID().uuidString
+        let identity = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
+        defer {
+            SecItemDelete([kSecClass as String: kSecClassCertificate,
+                           kSecAttrLabel as String: identity.label] as CFDictionary)
+            SecItemDelete([kSecClass as String: kSecClassKey,
+                           kSecAttrApplicationTag as String: Data(namespace.utf8)] as CFDictionary)
+        }
+        let answers = ConversationFrameCollector()
+        let requests = ConversationFrameCollector()
+        // Like a maintenance-line Server: focus_report is an unknown type.
+        let relay = try singleSessionRelay(expectedDevice: identity.deviceID, originPort: 443,
+                                           conversationCursor: 0, answers: answers, requests: requests)
+        defer { relay.close() }
+        let port = try await relay.start()
+        let context = ProfileContext(identity: ProfileIdentity(trustedRelayAuthority: ExactText("localhost"),
+            personID: ExactText("focus-unknown-person"), deviceID: ExactText(identity.deviceID)),
+            transportMode: .relay)
+        let store = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        let lifecycle = NativeRelayLifecycle()
+        try await lifecycle.activate(store: store, context: context,
+            relayURL: XCTUnwrap(URL(string: "wss://localhost:\(port)/relay")),
+            clientIdentity: identity.value, trustedRootDER: relay.rootDER)
+        let first = await lifecycle.refreshResultFromTrustedRelay()
+        XCTAssertTrue(first.relayConfirmed, lifecycle.refreshFailureMessage(for: context) ?? "no failure message")
+        let liveConnections = relay.connectionCount
+        let focusSent = expectation(for: NSPredicate { _, _ in
+            requests.types.contains("focus_report")
+        }, evaluatedWith: nil)
+        await fulfillment(of: [focusSent], timeout: 5)
+
+        // A later focus change would normally report again; after the refusal it must not.
+        NativeFocusReporter.shared.settingsPresented(underlyingFocus: .inbox)
+        let after = await lifecycle.refreshResultFromTrustedRelay()
+        NativeFocusReporter.shared.settingsDismissed(fallback: .inbox)
+        XCTAssertTrue(after.relayConfirmed, "The refusal is not a connection failure.")
+        XCTAssertEqual(relay.connectionCount, liveConnections, "The connection survived the refusal, with no reconnect.")
+        // Nothing reaches the person: no refresh failure and no connection warning.
+        XCTAssertNil(lifecycle.refreshFailureMessage(for: context))
+        let presentation = try LivePresentationStore(store: store, context: context)
+        presentation.applyRefreshResult(after)
+        XCTAssertNil(presentation.connectionWarning, "A focus refusal shows no connection warning.")
+        XCTAssertEqual(requests.types.filter { $0 == "focus_report" }.count, 1,
+                       "No focus report follows the Server's unknown_type refusal.")
+        await lifecycle.deactivate()
+    }
+
+    func testARelayThatRefusedFocusReportsGetsNoneOnItsNextConnection() {
+        var refused = FocusReportReplyRouter(supportsFocusReports: false)
+        XCTAssertFalse(refused.supportsFocusReports)
+        XCTAssertFalse(refused.register(ref: "focus-1"), "No focus report is sent to a Server that refused them.")
+        var fresh = FocusReportReplyRouter()
+        XCTAssertTrue(fresh.register(ref: "focus-2"))
+        let refusal = Data(#"{"v":1,"type":"error","ref":"focus-2","reason":"unknown_type"}"#.utf8) + Data([0x0A])
+        XCTAssertEqual(fresh.route(refusal, using: FocusReportWire()), .unsupported,
+                       "unknown_type is a benign refusal, not a connection failure.")
+        XCTAssertFalse(fresh.register(ref: "focus-3"))
+    }
+
+    func testFileDownloadSessionOpensNoRelayConnection() async throws {
+        let namespace = "Harklight.download-no-relay-socket." + UUID().uuidString
+        let identity = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
+        defer {
+            SecItemDelete([kSecClass as String: kSecClassCertificate,
+                           kSecAttrLabel as String: identity.label] as CFDictionary)
+            SecItemDelete([kSecClass as String: kSecClassKey,
+                           kSecAttrApplicationTag as String: Data(namespace.utf8)] as CFDictionary)
+        }
+        let fileBytes = Data("Downloaded without a relay socket".utf8)
+        let fileHash = SHA256.hash(data: fileBytes).map { String(format: "%02x", $0) }.joined()
+        let origin = try LocalEnrollmentTLS(expectedDevice: identity.deviceID, replyBody: fileBytes,
+                                             responseFileHash: fileHash)
+        defer { origin.close() }
+        let originPort = try await origin.start()
+        let relay = try LocalRelayWebSocket(expectedDevice: identity.deviceID, fencesEarlierConnections: true) { _ in [] }
+        defer { relay.close() }
+        let relayPort = try await relay.start()
+        let context = ProfileContext(identity: ProfileIdentity(trustedRelayAuthority: ExactText("localhost"),
+            personID: ExactText("download-person"), deviceID: ExactText(identity.deviceID)), transportMode: .relay)
+        let destination = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: destination) }
+        let download = try URLSessionInstallationSession(profile: context,
+            relayURL: XCTUnwrap(URL(string: "wss://localhost:\(relayPort)/relay")),
+            clientIdentity: TrustedKeychainIdentity(identity.value), trustedRootDER: relay.rootDER,
+            opensRelaySocket: false)
+        let file = ConversationFile(id: ExactText("file"), name: ExactText("file.txt"),
+            byteCount: UInt64(fileBytes.count), sha256: ExactText(fileHash),
+            content: .uploaded(ExactText(UUID().uuidString)))
+        try await download.fetchConversationFile(file, to: destination,
+            originURL: XCTUnwrap(URL(string: "https://localhost:\(originPort)/origin/v1")))
+        await download.close()
+        XCTAssertEqual(try Data(contentsOf: destination), fileBytes)
+        XCTAssertEqual(relay.connectionCount, 0, "A download must not open a relay connection.")
     }
 
     func testLifecycleReconnectsTwiceFromPersistedConversationPrefix() async throws {
@@ -1505,6 +1939,10 @@ final class NativeGuidedTLSTests: XCTestCase {
                 // client must save its prefix on failure, without a cache-triggered reset.
                 return [ok + "}\n", turn] + (sequence == 3
                     ? [#"{"v":1,"type":"conversation_resynced","conversation_seq":3}"# + "\n"] : [])
+            case "conversation_ack":
+                // The Server's acknowledgement reply carries the accepted position.
+                let acknowledged = value.uniqueValue(named: "conversation_seq")?.integerValue ?? -1
+                return [ok + ",\"conversation_seq\":\(acknowledged)}\n"]
             default: return [ok + "}\n"]
             }
         }
@@ -1533,7 +1971,12 @@ final class NativeGuidedTLSTests: XCTestCase {
         let starts = try requests.snapshot().map { try JSONValue.parse($0) }.filter {
             $0.uniqueValue(named: "type")?.stringValue?.rawValue == "conversation_open"
         }.compactMap { $0.uniqueValue(named: "since")?.integerValue }
-        XCTAssertEqual(starts, [0, 1, 2], "Reconnect requests only each uncommitted suffix.")
+        // Each reconnect asks only for the uncommitted suffix. Once the
+        // acknowledged catch-up completes, any later catch-up starts at the
+        // committed position 3 and never asks for saved history again.
+        XCTAssertEqual(Array(starts.prefix(3)), [0, 1, 2], "Reconnect requests only each uncommitted suffix.")
+        XCTAssertTrue(starts.dropFirst(3).allSatisfy { $0 == 3 },
+                      "A catch-up after the committed prefix starts at that prefix: \(starts)")
         let loaded = try await FileServerStateCache(identity: context.identity, fileURL: cacheURL).load()
         let snapshot = try XCTUnwrap(loaded)
         XCTAssertEqual(snapshot.conversationCursor, 3)
@@ -1542,7 +1985,10 @@ final class NativeGuidedTLSTests: XCTestCase {
         let key = RequestKey(accountScope: context.identity.personID, senderID: ExactText("sender"),
                              messageID: ExactText("conversation"))
         let turns = try restarted.conversationSnapshot(context: context).threads[key]?.turns ?? []
-        XCTAssertEqual(turns.map(\.id), [ExactText("turn-1"), ExactText("turn-2"), ExactText("turn-3")])
+        // The inbox delivery carries its question revision (event "request"),
+        // which the thread keeps ahead of the replayed discussion turns.
+        XCTAssertEqual(turns.map(\.id), [ExactText("request"), ExactText("turn-1"), ExactText("turn-2"),
+                                          ExactText("turn-3")])
     }
 
     func testUploadEndpointDiscoveryDoesNotWaitForConversationHistoryOrAcknowledgeIt() async throws {
@@ -1935,7 +2381,7 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertNil(presentation.conversationUnavailableMessage, "A replacement connection clears the old refusal.")
     }
 
-    func testConnectionWarningNamesTheErrorAndClearsOnlyAfterMatchingConfirmation() throws {
+    func testConnectionWarningShowsPlainStatusAndClearsOnlyAfterMatchingConfirmation() throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
             personID: ExactText("person"), deviceID: ExactText("device"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
@@ -1948,7 +2394,9 @@ final class NativeGuidedTLSTests: XCTestCase {
                               userInfo: [NSLocalizedDescriptionKey: "approved server could not be reached"])
 
         presentation.applyRefreshResult(.failed(error: failure))
-        XCTAssertTrue(presentation.connectionWarning?.contains("approved server could not be reached") == true)
+        // The person sees plain status, not transport error text.
+        XCTAssertEqual(presentation.connectionWarning, "Waiting for the server. Your pending actions are saved.")
+        XCTAssertFalse(presentation.connectionWarning?.contains("approved server could not be reached") == true)
 
         presentation.applyRefreshResult(NativeRelayRefreshResult(relayConfirmed: true,
             pushRegistration: .confirmed, confirmedContext: otherContext,
@@ -4564,10 +5012,21 @@ private final class LocalRelayWebSocket: @unchecked Sendable {
     private let closeAfterReply: @Sendable (String) -> Bool
     // All connection ownership is serialized on queue, including close().
     private var connections: [NWConnection] = []
+    // Kept alive so a later connection can never reuse a freed one's identity
+    // and go uncounted.
+    private var sessions: [NWConnection] = []
+    private let fencesEarlierConnections: Bool
+    /// Relay sessions opened: connections that sent at least one message,
+    /// including ones since closed.
+    var connectionCount: Int { queue.sync { sessions.count } }
 
+    /// `fencesEarlierConnections` models the Server's one relay session per
+    /// device: when a new connection starts its session, every earlier one closes.
     init(expectedDevice: String,
+         fencesEarlierConnections: Bool = false,
          closeAfterReply: @escaping @Sendable (String) -> Bool = { _ in false },
          reply: @escaping @Sendable (String) -> [String]) throws {
+        self.fencesEarlierConnections = fencesEarlierConnections
         self.reply = reply
         self.closeAfterReply = closeAfterReply
         let (tls, root) = try LocalEnrollmentTLS.fixtureTLS(expectedDevice: expectedDevice, queue: queue)
@@ -4616,6 +5075,13 @@ private final class LocalRelayWebSocket: @unchecked Sendable {
             let metadata = context?.protocolMetadata(definition: NWProtocolWebSocket.definition)
                 as? NWProtocolWebSocket.Metadata
             if metadata?.opcode == .text, let data, let text = String(data: data, encoding: .utf8) {
+                if !sessions.contains(where: { $0 === connection }) {
+                    sessions.append(connection)
+                    if fencesEarlierConnections {
+                        connections.filter { $0 !== connection }.forEach { $0.cancel() }
+                        connections.removeAll { $0 !== connection }
+                    }
+                }
                 let frames = reply(text)
                 if closeAfterReply(text) {
                     sendThenClose(frames[...], on: connection)
@@ -4650,12 +5116,60 @@ private final class LocalRelayWebSocket: @unchecked Sendable {
             })
     }
 
+    /// Sends a frame the app did not ask for on every open connection, as the
+    /// Server does when it finishes a replay or delivers live news.
+    func push(_ frame: String) {
+        queue.sync {
+            for connection in connections {
+                let context = NWConnection.ContentContext(
+                    identifier: "relay-push", metadata: [NWProtocolWebSocket.Metadata(opcode: .text)])
+                connection.send(content: Data(frame.utf8), contentContext: context, isComplete: true,
+                                completion: .idempotent)
+            }
+        }
+    }
+
     func close() {
         queue.sync {
             listener.cancel()
             connections.forEach { $0.cancel() }
             connections.removeAll()
         }
+    }
+
+    /// Ends every open connection, as a network change or Server restart
+    /// would, while still accepting new ones.
+    func dropConnections() {
+        queue.sync {
+            connections.forEach { $0.cancel() }
+            connections.removeAll()
+        }
+    }
+}
+
+private final class DiagnosticEventRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var events: [NativeClientDiagnosticEvent] = []
+    var values: [NativeClientDiagnosticEvent] {
+        lock.lock(); defer { lock.unlock() }
+        return events
+    }
+
+    func append(_ event: NativeClientDiagnosticEvent) {
+        lock.lock(); events.append(event); lock.unlock()
+    }
+}
+
+private final class SendingStateRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var states: [Bool] = []
+    var values: [Bool] {
+        lock.lock(); defer { lock.unlock() }
+        return states
+    }
+
+    func append(_ sending: Bool) {
+        lock.lock(); states.append(sending); lock.unlock()
     }
 }
 
