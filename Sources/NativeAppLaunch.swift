@@ -57,6 +57,12 @@ final class NativeAppLaunch {
     private(set) var activeEnrollmentRecord: NativeEnrollmentRecord?
     private(set) var disconnectedAccount: NativeAccountDeparture?
     private(set) var disconnectedArchive: LivePresentationStore?
+#if DEBUG
+    /// A seeded failed-submission UI-test launch. It has no installation, so it
+    /// skips installation restore and relay refresh: no keychain, enrollment,
+    /// departure or connection is read or started.
+    @ObservationIgnored private var isSubmissionFailureSeed = false
+#endif
     private(set) var archivedAccountDepartures: [NativeAccountDeparture] = []
     private(set) var unconfirmedAccountDepartures: [NativeAccountDeparture] = []
     private(set) var disconnectRemovalMessages: [String: String] = [:]
@@ -105,7 +111,9 @@ final class NativeAppLaunch {
          },
          fetchInboxPageOperation: (@MainActor (LivePresentationStore) async -> Bool)? = nil) {
         #if DEBUG
-        let fixture = arguments.contains("--reset-attention-fixture") || arguments.contains("--attention-fixture")
+        let failureSeed = SubmissionFailureTestSeed.requestedKind(in: arguments)
+        let fixture = failureSeed != nil ||
+            arguments.contains("--reset-attention-fixture") || arguments.contains("--attention-fixture")
         #else
         let fixture = false
         #endif
@@ -134,7 +142,16 @@ final class NativeAppLaunch {
         if let initialState {
             state = initialState
         } else if fixture {
+            #if DEBUG
+            if let failureSeed, let seeded = try? SubmissionFailureTestSeed.makeStore(failureSeed) {
+                state = .live(seeded)
+                isSubmissionFailureSeed = true
+            } else {
+                state = .fixture(PrototypeStore.loadFromBundle())
+            }
+            #else
             state = .fixture(PrototypeStore.loadFromBundle())
+            #endif
         } else if let standaloneDeparture {
             state = .disconnected(nil)
         } else {
@@ -228,6 +245,9 @@ final class NativeAppLaunch {
         didRestore = true
         defer { didFinishRestoring = true }
         if case .fixture = state { return }
+#if DEBUG
+        if isSubmissionFailureSeed { return }
+#endif
         refreshArchivedAccounts()
         if let departure = try? guidedJoinStore.departure(),
            departure.replacement == nil {
@@ -1005,6 +1025,9 @@ final class NativeAppLaunch {
     }
 
     func refreshLive() async {
+#if DEBUG
+        if isSubmissionFailureSeed { return }
+#endif
         guard case let .live(presentation) = state, !presentation.isLocalExample else { return }
         presentation.beginRefresh()
         defer { presentation.endRefresh() }
