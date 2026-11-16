@@ -143,8 +143,13 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         XCTAssertEqual(live.request(for: key)?.lifecycleStatus, .answered)
         XCTAssertNil(live.request(for: key)?.receiptFacts,
                      "A completed account state does not expose the submitting device's receipt.")
-        XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty)
-        XCTAssertEqual(try store.snapshot(context: context).intents.count, 1)
+        let settled = try store.snapshot(context: context)
+        XCTAssertTrue(settled.outbox.isEmpty)
+        // The Server's answered terminal settles the operation, so the device
+        // keeps no unsent answer, and the stale callback recreates none.
+        XCTAssertTrue(settled.intents.isEmpty,
+                      "No unsent or duplicate answer remains after the answered terminal.")
+        XCTAssertNil(try store.lookupIntent(receipt.intentID, context: context))
     }
 
     func testNewDurableReceiptClearsAnObsoleteSubmissionError() async throws {
@@ -723,8 +728,21 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         expectedDraft.noCommentSelected = true
         XCTAssertTrue(queuedDraft == nil || queuedDraft == expectedDraft,
                       "Any retained draft contains only No comment, never the local Reply text.")
-        XCTAssertNil(try XCTUnwrap(live.request(for: key)).submittedAnswer,
-                     "The queued No comment operation does not create a server answer.")
+        // The queued operation is projected internally while it sends. It is
+        // No comment with no Reply text, and it is not the Server's confirmation.
+        let queued = try XCTUnwrap(live.request(for: key))
+        if let projected = queued.submittedAnswer {
+            XCTAssertTrue(projected.noCommentSelected)
+            XCTAssertTrue(projected.compatibility.textByActionID.isEmpty,
+                          "The pending projection carries no Reply text.")
+        }
+        XCTAssertEqual(queued.lifecycleStatus, .pending)
+        XCTAssertNil(queued.accountAnswerOutcome, "No Server terminal is recorded for the queued answer.")
+        XCTAssertNotEqual(queued.receiptFacts?.ownOutcome, .accepted)
+        XCTAssertEqual(live.submissionPhases[key]?.kind, .noComment)
+        XCTAssertEqual(live.submissionPhases[key]?.phase, .sending,
+                       "The tapped No comment control shows Sending, not a confirmed card.")
+        XCTAssertFalse(LiveRequestDetail(request: queued, store: live).isDurablyAccepted(.noComment))
         XCTAssertEqual(submitted.answerKind, .noComment)
     }
 
