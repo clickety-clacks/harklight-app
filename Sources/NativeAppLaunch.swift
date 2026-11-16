@@ -1969,6 +1969,7 @@ final class LivePresentationStore {
             try attentionStore.retainConversationText(nil, for: binding, context: profileContext)
             pendingConversationTextByBinding.removeValue(forKey: binding)
             try refreshFromDurableStore()
+            conversationError = nil
         } catch {
             conversationError = "Your unsent text could not be dismissed. It remains available in this chat."
             diagnose(.localStore, .draftSave, .failed, error: error, request: key, revision: revision)
