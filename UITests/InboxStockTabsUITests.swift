@@ -247,17 +247,19 @@ final class InboxStockTabsUITests: XCTestCase {
             let firstRow = app.descendants(matching: .any)[rowID]
             XCTAssertTrue(firstRow.waitForExistence(timeout: 5), app.debugDescription)
             XCTAssertTrue(firstRow.isHittable, app.debugDescription)
+            let warningButton = app.buttons["inbox-warning-button"]
+            XCTAssertFalse(warningButton.exists,
+                           "\(title) must start without a warning so an existing status cannot satisfy the refresh check.\n\(app.debugDescription)")
             let refreshStart = firstRow.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.1))
             refreshStart.press(forDuration: 0.05,
                                thenDragTo: refreshStart.withOffset(CGVector(dx: 0, dy: 310)),
                                withVelocity: .slow, thenHoldForDuration: 0.3)
 
-            let warningButton = app.buttons["inbox-warning-button"]
             XCTAssertTrue(warningButton.waitForExistence(timeout: 8), app.debugDescription)
             warningButton.tap()
             let warning = app.staticTexts["inbox-warning-message"]
             XCTAssertTrue(warning.waitForExistence(timeout: 5), app.debugDescription)
-            XCTAssertEqual(warning.label, "The approved server could not be reached.")
+            XCTAssertEqual(warning.label, "Waiting for the server. Your pending actions are saved.")
             app.terminate()
         }
     }
