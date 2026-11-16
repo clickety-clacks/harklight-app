@@ -1145,7 +1145,7 @@ private struct ConversationAvailabilityNotice: View {
                 Label("Messaging · Connection unconfirmed", systemImage: "exclamationmark.circle")
                     .foregroundStyle(.hkAmber)
             case .nothingListening:
-                Label("Messaging · Not listening", systemImage: "exclamationmark.circle.fill")
+                Label("Nothing's listening right now", systemImage: "exclamationmark.circle.fill")
                     .foregroundStyle(.hkAmber)
             case .noOneWillGetThis:
                 Label("Nobody can receive", systemImage: "xmark.circle.fill")
