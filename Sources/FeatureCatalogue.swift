@@ -93,8 +93,11 @@ struct FeatureFlagEvaluation: Equatable, Sendable {
              fallbackReason: .noSnapshot, hasPreviousSnapshot: false)
     }
 
-    var settingExplanation: String {
+    func settingExplanation(hasCurrentAccount: Bool) -> String {
         if freshness == .appDefaultsOnly {
+            if hasCurrentAccount {
+                return "Not connected yet. Connect this account to check the server’s setting. The app default is shown for now."
+            }
             return "App default only. A server’s setting and availability have not been checked here."
         }
         let origin: String = switch source {
@@ -142,6 +145,9 @@ struct FeatureCatalogueAvailability: Equatable {
             return Self(explanation: "Join through the normal invitation and approval flow to check this feature for an account.", route: nil)
         }
         guard setting.isEnabled else {
+            if setting.freshness == .appDefaultsOnly {
+                return Self(explanation: "Using the app default while this account is not connected. Connect to check the server’s setting and requirements.", route: nil)
+            }
             return Self(explanation: "Currently off. The feature’s requirements still apply if the server turns it on.", route: nil)
         }
         switch feature {

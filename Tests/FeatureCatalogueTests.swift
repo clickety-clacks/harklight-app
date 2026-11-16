@@ -40,6 +40,31 @@ final class FeatureCatalogueTests: XCTestCase {
         }
     }
 
+    func testEnrolledStoreWithoutFlagContextAsksToConnectInsteadOfJoinAgain() throws {
+        let ctx = context()
+        let repository = try ClientRepository(context: ctx, persistence: MemoryPendingActionPersistence())
+        let flags = RemoteFeatureFlags()
+        let store = try LivePresentationStore(store: repository, context: ctx, featureFlags: flags)
+        let catalogue = FeatureCatalogueView(store: store, flags: flags)
+        // Activation resets flags before transport is established. A failed
+        // connection must not make a cached enrolled account look unenrolled.
+        for feature in AppFeature.allCases {
+            let setting = flags.evaluation(for: feature, expected: ctx)
+            XCTAssertEqual(setting.freshness, .appDefaultsOnly)
+            let access = catalogue.access(for: setting)
+            XCTAssertTrue(access.hasCurrentAccount)
+            XCTAssertTrue(setting.settingExplanation(hasCurrentAccount: access.hasCurrentAccount)
+                .contains("Connect this account"))
+            let availability = FeatureCatalogueAvailability.evaluate(feature, setting: setting, access: access)
+            XCTAssertFalse(availability.explanation.contains("Join"))
+            XCTAssertNil(availability.route)
+        }
+        let welcome = FeatureCatalogueView(flags: flags)
+        XCTAssertFalse(welcome.access(for: .appDefault(for: .progressMessages)).hasCurrentAccount)
+        XCTAssertFalse(FeatureFlagEvaluation.appDefault(for: .progressMessages)
+            .settingExplanation(hasCurrentAccount: false).contains("this account"))
+    }
+
     func testCurrentAndRetainedSettingsHaveDifferentProvenanceWithoutChangingResolution() throws {
         let flags = RemoteFeatureFlags(), ctx = context(), first = UUID(), second = UUID()
         flags.connect(context: ctx, connectionID: first)

@@ -27,11 +27,10 @@ struct FeatureCatalogueView: View {
         return flags.evaluation(for: feature, expected: store.notificationContext)
     }
 
-    private func access(for setting: FeatureFlagEvaluation) -> FeatureCatalogueAccess {
+    func access(for setting: FeatureFlagEvaluation) -> FeatureCatalogueAccess {
         guard let store else { return FeatureCatalogueAccess() }
         return FeatureCatalogueAccess(
-            hasCurrentAccount: !store.isReadOnly && !store.isLocalExample &&
-                setting.freshness != .appDefaultsOnly,
+            hasCurrentAccount: !store.isReadOnly && !store.isLocalExample,
             isWritableAccount: store.canSendToCurrentServer && !store.isLocalExample,
             progressMessage: ProgressInboxProjection.rows(
                 store.inboxRows.map { InboxItem.request($0) }, search: "",
@@ -51,8 +50,9 @@ struct FeatureCatalogueView: View {
             }
             ForEach(AppFeature.allCases) { feature in
                 let setting = evaluation(feature)
+                let accountAccess = access(for: setting)
                 let availability = FeatureCatalogueAvailability.evaluate(
-                    feature, setting: setting, access: access(for: setting))
+                    feature, setting: setting, access: accountAccess)
                 Section {
                     Text(feature.description)
                         .accessibilityIdentifier("feature-\(feature.rawValue)-description")
@@ -62,7 +62,7 @@ struct FeatureCatalogueView: View {
                     LabeledContent(setting.freshness == .appDefaultsOnly ? "App default" : "Current setting",
                                    value: setting.isEnabled ? "On" : "Off")
                         .accessibilityIdentifier("feature-\(feature.rawValue)-setting")
-                    Text(setting.settingExplanation)
+                    Text(setting.settingExplanation(hasCurrentAccount: accountAccess.hasCurrentAccount))
                         .foregroundStyle(.hkSecondary)
                         .accessibilityIdentifier("feature-\(feature.rawValue)-provenance")
                     if setting.freshness != .appDefaultsOnly {
