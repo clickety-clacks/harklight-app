@@ -67,6 +67,18 @@ final class SubmissionStateUITests: XCTestCase {
         XCTAssertFalse(failed.textViews.matching(NSPredicate(format: "value CONTAINS %@", "Avenida")).firstMatch
             .exists, "The failed text is not in an editable field.")
         XCTAssertNoStatusText(failed)
+        // Bring the failed reply card into view before capturing it.
+        let replyCard = element("request-input-review-response-card", in: failed)
+        XCTAssertTrue(replyCard.waitForExistence(timeout: 5), failed.debugDescription)
+        let scroll = failed.scrollViews["message-card-scroll"]
+        for _ in 0..<8 where !(replyCard.isHittable && failed.buttons["request-reply-retry"].isHittable) {
+            scroll.swipeUp()
+        }
+        XCTAssertTrue(replyCard.isHittable, "The failed reply card is on screen.")
+        XCTAssertTrue(failed.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Avenida")).firstMatch
+            .isHittable, "The locked sent text is visible.")
+        XCTAssertTrue(failed.buttons["request-reply-retry"].isHittable, "Retry is visible.")
+        XCTAssertTrue(failed.buttons["request-reply-edit"].isHittable, "Edit is visible.")
         capture("07-reply-failed", failed)
     }
 
