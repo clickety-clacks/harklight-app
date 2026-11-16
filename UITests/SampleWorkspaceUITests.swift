@@ -81,6 +81,9 @@ final class SampleWorkspaceUITests: XCTestCase {
     }
 
     private func exerciseMessageDetectors(style: String) {
+        let originalAppearance = XCUIDevice.shared.appearance
+        defer { XCUIDevice.shared.appearance = originalAppearance }
+        XCUIDevice.shared.appearance = style == "Dark" ? .dark : .light
         let app = XCUIApplication()
         app.launchArguments = ["--reset-attention-fixture", "--harklight-samples",
                                "--harklight-data-detector-acceptance", "--harklight-ui-diagnostics"]
@@ -133,13 +136,22 @@ final class SampleWorkspaceUITests: XCTestCase {
 
         // Open the stock menus without placing a call, opening Maps, or saving
         // an event. Each must offer the platform action for the detected value.
-        for (value, action) in [("415", "Call"), ("Infinite Loop", "Maps"),
-                                ("November 4", "Calendar")] {
+        for (value, actionPattern) in [
+            ("415", "Call.*"),
+            ("Infinite Loop", ".*(Maps|Directions).*"),
+            ("November 4", "(Create Event|Add to Calendar|Show in Calendar|Open in Calendar).*")
+        ] {
             let link = app.links.matching(NSPredicate(format: "label CONTAINS %@", value)).firstMatch
             XCTAssertTrue(link.waitForExistence(timeout: 5), app.debugDescription)
             link.press(forDuration: 1)
-            let offeredAction = app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS[c] %@", action)).firstMatch
-            XCTAssertTrue(offeredAction.waitForExistence(timeout: 5), app.debugDescription)
+            // Match only actionable system controls. The sender label contains
+            // "Calendar", so a broad descendant-label match would prove nothing.
+            let predicate = NSPredicate(format: "label MATCHES[c] %@", actionPattern)
+            let menuAction = app.menuItems.matching(predicate).firstMatch
+            let buttonAction = app.buttons.matching(predicate).firstMatch
+            let offered = menuAction.waitForExistence(timeout: 3) ||
+                buttonAction.waitForExistence(timeout: 3)
+            XCTAssertTrue(offered, app.debugDescription)
             capture("message-detector-\(value)-\(style)", app)
             app.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.15)).tap()
         }
