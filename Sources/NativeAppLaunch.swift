@@ -194,6 +194,18 @@ final class NativeAppLaunch {
         guidedJoin.notificationChoice = { [weak self] enabled in
             await self?.chooseNotifications(enabled)
         }
+        guidedJoinStore.removePushBeforeDeparture = { [weak self] record in
+            guard let self else { return }
+            await NativeRelayLifecycle.shared.removePushBeforeDeparture(for: record, enrollment: self.enrollment)
+        }
+        guidedJoin.didKeepCurrentAccount = { [weak self] record in
+            guard NativeRelayLifecycle.shared.featureFlags.isEnabled(.serverMatchedPushRouting),
+                  let self, case let .live(presentation) = self.state,
+                  !presentation.isReadOnly, !presentation.isLocalExample,
+                  self.activeEnrollmentRecord?.sameNotificationProfile(as: record) == true else { return }
+            try self.enrollment.cancelPushDeparture(for: record)
+            await self.refreshLive()
+        }
         guidedJoin.didRemoveCurrentAccount = { [weak self] in
             guard let self else { return }
             self.activationGeneration = UUID()
@@ -266,6 +278,10 @@ final class NativeAppLaunch {
         disconnectMessage = nil
         do {
             try guidedJoin.prepareStandaloneRemoval(record)
+            try enrollment.preparePushRemoval(for: record)
+            // Keep the authenticated relay until push removal has had its send
+            // opportunity. An offline attempt remains durable for reconnect.
+            await guidedJoinStore.removePushBeforeDeparture?(record)
             refreshArchivedAccounts()
             let departure = try guidedJoinStore.departure() ??
                 NativeAccountDeparture(record: record, replacement: nil, removed: false)

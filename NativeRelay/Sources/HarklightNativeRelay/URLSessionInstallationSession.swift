@@ -50,7 +50,7 @@ public struct TrustedKeychainIdentity: @unchecked Sendable {
 /// CA are supplied by the native profile owner. No PEM/key bytes enter this API.
 /// URLSession presents the identity only to this exact `wss:/relay` endpoint.
 public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSession,
-    AuthenticatedInboxEventStreamSession, AuthenticatedConversationEventSession {
+    AuthenticatedInboxEventStreamSession, AuthenticatedConversationEventSession, AuthenticatedPushRemovalSession {
     public nonisolated let authenticatedIdentity: ProfileIdentity
     public nonisolated let relayEndpointHost: String
     public nonisolated let supportsPostCheckpointInboxEvents = true
@@ -58,10 +58,12 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
     private let urlSession: URLSession
     private let task: URLSessionWebSocketTask
     private let pingCoordinator: WebSocketPingCoordinator
+    public private(set) var serverID: String?
     private var isClosed = false
     private var replyAttribution = RelayReplyAttribution()
     private var connectionFailure: (any Error)?
     private let profileContext: ProfileContext
+    private let serverMatchedPushRoutingEnabled: @Sendable () async -> Bool
     private let onProgress: @Sendable (NativeRelayProgressEvent) -> Void
     private let onDiagnostic: NativeClientDiagnosticSink
     private let onFocusReportingReady: @Sendable () -> Void
@@ -98,6 +100,7 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
                 clientIdentity: TrustedKeychainIdentity,
                 trustedRootDER: Data,
                 attemptID: UUID? = nil,
+                serverMatchedPushRoutingEnabled: @escaping @Sendable () async -> Bool = { false },
                 onProgress: @escaping @Sendable (NativeRelayProgressEvent) -> Void = { _ in },
                 onFocusReportingReady: @escaping @Sendable () -> Void = {},
                 onFocusReportingUnsupported: @escaping @Sendable () -> Void = {},
@@ -132,6 +135,7 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
         authenticatedIdentity = profile.identity
         relayEndpointHost = host.lowercased()
         profileContext = profile
+        self.serverMatchedPushRoutingEnabled = serverMatchedPushRoutingEnabled
         self.onProgress = onProgress
         self.onFocusReportingReady = onFocusReportingReady
         self.onFocusReportingUnsupported = onFocusReportingUnsupported
@@ -263,6 +267,11 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
                 }
                 try await consume(frame)
                 if kind == "resynced" {
+                    if await serverMatchedPushRoutingEnabled() {
+                        serverID = try RelayServerIdentity.read(from: value)
+                    } else { serverID = nil }
+                }
+                if kind == "resynced" {
                     startPostCheckpointReader()
                     return
                 }
@@ -376,6 +385,11 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
                     continue
                 }
                 try await consume(frame)
+                if kind == "resynced" {
+                    if await serverMatchedPushRoutingEnabled() {
+                        serverID = try RelayServerIdentity.read(from: value)
+                    } else { serverID = nil }
+                }
                 if kind == end { return }
             }
         } catch InstallationTransportError.conversationsUnavailable {
@@ -734,6 +748,29 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
         }
     }
 
+    public func removePush(_ operation: PushRemovalOperation) async throws -> PushRemovalResult {
+        await socketExchangeGate.enter()
+        defer { socketExchangeGate.leave() }
+        guard await serverMatchedPushRoutingEnabled() else { return .deferred }
+        do {
+            try await send(operation.frame())
+            while true {
+                let value = try JSONValue.parse(try await receive())
+                switch value.uniqueValue(named: "type")?.stringValue?.rawValue {
+                case "delivery", "lifecycle", "conversation": continue
+                default: return try operation.result(value)
+                }
+            }
+        } catch InstallationTransportError.serverRejected {
+            // A correlated refusal completes this exchange. It does not make
+            // the authenticated connection unusable for inbox sync.
+            throw InstallationTransportError.serverRejected
+        } catch {
+            close()
+            throw error
+        }
+    }
+
     /// Recover legacy accepted registrations only on this authenticated session.
     public func currentPushBindingID(revision: UInt64) async throws -> String? {
         await socketExchangeGate.enter()
@@ -774,6 +811,9 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
                     throw InstallationTransportError.unexpectedServerFrame
                 }
             }
+        } catch InstallationTransportError.serverRejected {
+            if !(await serverMatchedPushRoutingEnabled()) { close() }
+            throw InstallationTransportError.serverRejected
         } catch {
             close()
             throw error

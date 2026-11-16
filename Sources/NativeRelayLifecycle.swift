@@ -1115,6 +1115,7 @@ final class NativeRelayLifecycle {
                                                               clientIdentity: TrustedKeychainIdentity(clientIdentity),
                                                               trustedRootDER: trustedRootDER,
                                                               attemptID: transportAttemptID,
+                                                              serverMatchedPushRoutingEnabled: pushRoutingEnabledHandler(),
                                                               onProgress: progressHandler(generation: generation,
                                                                                           transportAttemptID: transportAttemptID),
                                                               onFocusReportingReady: focusReportingReadyHandler(
@@ -1207,6 +1208,7 @@ final class NativeRelayLifecycle {
                                                               relayURL: relayURL,
                                                               clientIdentity: TrustedKeychainIdentity(current.identity),
                                                               trustedRootDER: current.rootDER,
+                                                              serverMatchedPushRoutingEnabled: pushRoutingEnabledHandler(),
                                                               onFocusReportingReady: focusReportingReadyHandler(
                                                                 generation: migrationGeneration,
                                                                 transportID: focusTransportID),
@@ -1261,6 +1263,21 @@ final class NativeRelayLifecycle {
         discussionTransports.removeAll()
         fileTransports.removeAll()
         for session in sessions { await session.close() }
+    }
+
+    func removePushBeforeDeparture(for record: NativeEnrollmentRecord,
+                                   enrollment: NativeEnrollmentStore) async {
+        guard featureFlags.isEnabled(.serverMatchedPushRouting) else { return }
+        guard let transport, let context, record.matchesNotificationIdentity(context.identity) else {
+            recordDiagnostic(.notifications, .pushRegistration, .failed, error: NativeRelayCoreError.inactive)
+            return
+        }
+        do {
+            try await enrollment.retryPendingPushRemoval(using: transport)
+        } catch {
+            recordDiagnostic(.notifications, .pushRegistration, .failed, error: error,
+                             attemptID: activeTransportAttemptID)
+        }
     }
 
     func deactivate() async {
@@ -1950,18 +1967,27 @@ final class NativeRelayLifecycle {
     /// enrollment or notification registration. It never forces send permission.
     func confirmInProcessSessionForTesting(store: ClientRepository, context: ProfileContext,
                                           session: any AuthenticatedInstallationSession,
-                                          serverStateCache: any ServerStateCaching) async throws -> NativeRelayRefreshResult {
+                                          serverStateCache: any ServerStateCaching,
+                                          pushRemovalSession: (any AuthenticatedPushRemovalSession)? = nil,
+                                          enrollmentStore: NativeEnrollmentStore = NativeEnrollmentStore()) async throws -> NativeRelayRefreshResult {
         await deactivate()
         let generation = UUID()
         let attemptID = UUID()
         refreshGeneration = generation
         activeTransportAttemptID = attemptID
         self.context = context
+        featureFlags.connect(context: context, connectionID: attemptID)
         let core = try NativeRelayCore(store: store, context: context, session: session,
                                        automaticallySendsPendingOperations: false,
-                                       attemptID: attemptID, serverStateCache: serverStateCache)
+                                       attemptID: attemptID, serverStateCache: serverStateCache,
+                                       onFeatureFlags: featureFlagsHandler(connectionID: attemptID))
         self.core = core
-        try await refreshConfirmedProjection(core: core, context: context, generation: generation)
+        if let pushRemovalSession {
+            try await refreshProjectionAfterPendingPushRemoval(core: core, context: context, generation: generation,
+                                                              pushSession: pushRemovalSession, enrollment: enrollmentStore)
+        } else {
+            try await refreshConfirmedProjection(core: core, context: context, generation: generation)
+        }
         try await resumeConfirmedDiscussions(core: core, context: context, generation: generation)
         return NativeRelayRefreshResult(relayConfirmed: true, pushRegistration: .notAttempted,
             confirmedContext: context, confirmedTransportAttemptID: attemptID)
@@ -1977,13 +2003,33 @@ final class NativeRelayLifecycle {
         }
     }
 
+    private func refreshProjectionAfterPendingPushRemoval(core: NativeRelayCore, context: ProfileContext,
+                                                           generation: UUID,
+                                                           pushSession: any AuthenticatedPushRemovalSession,
+                                                           enrollment: NativeEnrollmentStore) async throws {
+        try await refreshConfirmedProjection(core: core, context: context, generation: generation)
+        do {
+            try await enrollment.retryPendingPushRemoval(using: pushSession)
+        } catch {
+            // Notification setup cannot prevent the account from syncing. A
+            // refused removal stays durable for another connection.
+            recordDiagnostic(.notifications, .pushRegistration, .failed, error: error,
+                             attemptID: activeTransportAttemptID)
+        }
+        guard refreshGeneration == generation, self.context == context else {
+            throw NativeRelayCoreError.inactive
+        }
+    }
+
     private func refreshOnce(generation: UUID,
                              checkBlockedPush: Bool = false) async throws -> NativeRelayRefreshResult {
         guard refreshGeneration == generation else { throw NativeRelayCoreError.inactive }
         guard let core, let transport, let context else { throw NativeRelayCoreError.inactive }
         resumeSavedAnswers()
         resumeSavedDiscussions()
-        try await refreshConfirmedProjection(core: core, context: context, generation: generation)
+        try await refreshProjectionAfterPendingPushRemoval(core: core, context: context, generation: generation,
+                                                          pushSession: transport, enrollment: enrollment)
+        try enrollment.updateServerID(await transport.serverID, for: context.identity)
         if let configuration {
             let threads = try configuration.store.conversationSnapshot(context: context).threads
             for (request, thread) in threads where (thread.uploadCleanups ?? [:]).values.contains(where: {
@@ -2000,6 +2046,7 @@ final class NativeRelayLifecycle {
             self?.recordDiagnostic(.notifications, .pushRegistration, .failed,
                                    error: error, attemptID: self?.activeTransportAttemptID)
         }) {
+            if try enrollment.hasPushDeparture(for: context.identity) { return .notAttempted }
             let currentAddress = try DevelopmentPushRegistration.addressStore().load()
             if let currentAddress,
                let binding = try enrollment.pendingPushRegistration(address: currentAddress,
@@ -2135,6 +2182,7 @@ final class NativeRelayLifecycle {
                                                               clientIdentity: TrustedKeychainIdentity(configuration.identity),
                                                               trustedRootDER: configuration.rootDER,
                                                               attemptID: transportAttemptID,
+                                                              serverMatchedPushRoutingEnabled: pushRoutingEnabledHandler(),
                                                               onProgress: progressHandler(generation: generation,
                                                                                           transportAttemptID: transportAttemptID),
                                                               onFocusReportingReady: focusReportingReadyHandler(
@@ -2181,6 +2229,12 @@ final class NativeRelayLifecycle {
         focusTransportID = transportAttemptID
         featureFlags.connect(context: configuration.context, connectionID: transportAttemptID)
         installFocusReportHandler(for: nextTransport, transportID: transportAttemptID)
+    }
+
+    private func pushRoutingEnabledHandler() -> @Sendable () async -> Bool {
+        { [weak self] in
+            await self?.featureFlags.isEnabled(.serverMatchedPushRouting) ?? false
+        }
     }
 
     private func featureFlagsHandler(connectionID: UUID)

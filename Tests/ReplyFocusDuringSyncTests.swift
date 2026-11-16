@@ -231,11 +231,13 @@ final class ReplyCheckpointSession: AuthenticatedInboxPagingSession, @unchecked 
     let authenticatedIdentity: ProfileIdentity
     let key: RequestKey
     let payload: JSONValue
+    let featureFlagValues: JSONValue?
 
-    init(identity: ProfileIdentity, key: RequestKey, payload: JSONValue) {
+    init(identity: ProfileIdentity, key: RequestKey, payload: JSONValue, featureFlagValues: JSONValue? = nil) {
         authenticatedIdentity = identity
         self.key = key
         self.payload = payload
+        self.featureFlagValues = featureFlagValues
     }
 
     func inboxRequest(_ request: Data, ref: String) async throws -> Data {
@@ -266,7 +268,11 @@ final class ReplyCheckpointSession: AuthenticatedInboxPagingSession, @unchecked 
 
     func resync(_ request: Data, consume: @Sendable (Data) async throws -> Void) async throws {
         try await consume(Data(#"{"v":1,"type":"ok","ref":"native-sync"}"#.utf8))
-        try await consume(Data(#"{"v":1,"type":"resynced","seq":1}"#.utf8))
+        var end = [JSONMember("v", .number(JSONNumber(lexeme: "1"))),
+                   JSONMember("type", .string(ExactText("resynced"))),
+                   JSONMember("seq", .number(JSONNumber(lexeme: "1")))]
+        if let featureFlagValues { end.append(JSONMember("feature_flags", featureFlagValues)) }
+        try await consume(Data(JSONValue.object(end).canonicalJSON.utf8))
     }
 
     func acknowledge(_ request: Data) async throws {}
