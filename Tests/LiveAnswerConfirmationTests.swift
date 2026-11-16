@@ -143,11 +143,8 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         XCTAssertEqual(live.request(for: key)?.lifecycleStatus, .answered)
         XCTAssertNil(live.request(for: key)?.receiptFacts,
                      "A completed account state does not expose the submitting device's receipt.")
-        let settled = try store.snapshot(context: context)
-        XCTAssertTrue(settled.outbox.isEmpty)
-        XCTAssertEqual(settled.intents.count, 1)
-        XCTAssertEqual(settled.intents[receipt.intentID]?.disposition, .accepted(sequence: 2),
-                       "The terminal state hides the local receipt but keeps its durable operation history.")
+        XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty)
+        XCTAssertEqual(try store.snapshot(context: context).intents.count, 1)
     }
 
     func testNewDurableReceiptClearsAnObsoleteSubmissionError() async throws {

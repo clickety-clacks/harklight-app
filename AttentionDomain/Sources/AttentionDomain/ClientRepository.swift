@@ -4072,23 +4072,16 @@ public final class ClientRepository: @unchecked Sendable {
     }
 
     private func dropUnsentAnswer(for key: RequestKey, in next: inout ClientSessionState) {
-        let requestIntentIDs = Set(next.intents.compactMap { id, operation -> UUID? in
-            operation.requestKey == key ? id : nil
-        })
-        let unsentIDs = requestIntentIDs.filter { id in
-            guard let operation = next.intents[id] else { return false }
+        let ids = next.intents.compactMap { id, operation -> UUID? in
+            guard operation.requestKey == key else { return nil }
             switch operation.disposition {
-            case .pending, .lost, .failed, .unsupported: return true
-            case .accepted: return false
-            default: return false
+            case .pending, .lost, .accepted, .failed, .unsupported: return id
+            default: return nil
             }
         }
-        // A durably accepted operation is history, not an unsent answer. Keep
-        // its result for submission-state projection, while removing every
-        // request mapping and outbox entry so a server terminal cannot resend it.
-        for id in unsentIDs { next.intents.removeValue(forKey: id) }
+        for id in ids { next.intents.removeValue(forKey: id) }
         next.intentByRequest.removeValue(forKey: key)
-        next.outboxOrder.removeAll { requestIntentIDs.contains($0) }
+        next.outboxOrder.removeAll { ids.contains($0) }
         next.drafts.removeValue(forKey: key)
         if next.conversation?.threads[key]?.isRetracted != true {
             next.pendingConversations[key]?.answerDrafts = nil
