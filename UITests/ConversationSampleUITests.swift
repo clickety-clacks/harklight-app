@@ -833,9 +833,9 @@ final class ConversationSampleUITests: XCTestCase {
                       "These rows are synthetic display fixtures, not Server acceptance evidence.\n\(app.debugDescription)")
         XCTAssertTrue(app.staticTexts["Sending…"].exists, app.debugDescription)
         XCTAssertEqual(
-            app.descendants(matching: .any)["conversation-turn-two-ack-waiting"]
-                .descendants(matching: .staticText)
-                .matching(NSPredicate(format: "label == %@", "Sending…")).count,
+            app.staticTexts.matching(NSPredicate(
+                format: "identifier == %@ AND label == %@",
+                "conversation-turn-two-ack-waiting", "Sending…")).count,
             1,
             app.debugDescription)
         XCTAssertTrue(app.staticTexts.matching(
@@ -892,9 +892,9 @@ final class ConversationSampleUITests: XCTestCase {
         XCTAssertTrue(history.waitForExistence(timeout: 5), app.debugDescription)
         history.swipeUp()
         XCTAssertEqual(
-            app.descendants(matching: .any)["conversation-turn-two-ack-waiting"]
-                .descendants(matching: .staticText)
-                .matching(NSPredicate(format: "label == %@", "Sending…")).count,
+            app.staticTexts.matching(NSPredicate(
+                format: "identifier == %@ AND label == %@",
+                "conversation-turn-two-ack-waiting", "Sending…")).count,
             1,
             app.debugDescription)
         XCTAssertTrue(app.staticTexts.matching(
