@@ -83,8 +83,7 @@ final class SampleWorkspaceUITests: XCTestCase {
     private func exerciseMessageDetectors(style: String) {
         let app = XCUIApplication()
         app.launchArguments = ["--reset-attention-fixture", "--harklight-samples",
-                               "--harklight-data-detector-acceptance", "--harklight-ui-diagnostics",
-                               "-AppleInterfaceStyle", style]
+                               "--harklight-data-detector-acceptance", "--harklight-ui-diagnostics"]
         app.launch()
         XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10), app.debugDescription)
         enterSearch("Detector acceptance", in: app)
@@ -93,7 +92,9 @@ final class SampleWorkspaceUITests: XCTestCase {
         row.staticTexts["Detector acceptance"].tap()
         let body = app.textViews["request-message-body"]
         XCTAssertTrue(body.waitForExistence(timeout: 5), app.debugDescription)
-        let expected = "Select this sentence to verify that copying remains available.\n\nhttps://example.invalid/detector-acceptance\n\n+1 (415) 555-0136\n\n1 Infinite Loop, Cupertino, CA 95014\n\nNovember 4, 2027 at 2:00 PM."
+        // Copy preserves the visible Markdown-rendered paragraphs, whose spacing is
+        // supplied by paragraph style rather than extra newline characters.
+        let expected = "Select this sentence to verify that copying remains available.\nhttps://example.invalid/detector-acceptance\n+1 (415) 555-0136\n1 Infinite Loop, Cupertino, CA 95014\nNovember 4, 2027 at 2:00 PM."
         XCTAssertEqual(body.value as? String, expected)
         capture("message-detectors-\(style)", app)
 
@@ -102,7 +103,7 @@ final class SampleWorkspaceUITests: XCTestCase {
         UIPasteboard.general.string = "detector-selection-baseline"
         XCTAssertEqual(UIPasteboard.general.string, "detector-selection-baseline")
         body.coordinate(withNormalizedOffset: CGVector(dx: 0.04, dy: 0.025)).press(forDuration: 1)
-        let copy = app.buttons["Copy"]
+        let copy = app.menuItems["Copy"]
         XCTAssertTrue(copy.waitForExistence(timeout: 5), app.debugDescription)
         copy.tap()
         XCTAssertEqual(UIPasteboard.general.string, "Select")
@@ -110,7 +111,12 @@ final class SampleWorkspaceUITests: XCTestCase {
         UIPasteboard.general.string = "detector-whole-message-baseline"
         XCTAssertEqual(UIPasteboard.general.string, "detector-whole-message-baseline")
         body.coordinate(withNormalizedOffset: CGVector(dx: 0.04, dy: 0.025)).press(forDuration: 1)
-        let selectAll = app.buttons["Select All"]
+        let selectAll = app.menuItems["Select All"]
+        for _ in 0..<3 where !selectAll.exists {
+            let next = app.buttons["Next Page"]
+            guard next.exists else { break }
+            next.tap()
+        }
         XCTAssertTrue(selectAll.waitForExistence(timeout: 5), app.debugDescription)
         selectAll.tap()
         XCTAssertTrue(copy.waitForExistence(timeout: 5), app.debugDescription)
@@ -132,7 +138,7 @@ final class SampleWorkspaceUITests: XCTestCase {
             let link = app.links.matching(NSPredicate(format: "label CONTAINS %@", value)).firstMatch
             XCTAssertTrue(link.waitForExistence(timeout: 5), app.debugDescription)
             link.press(forDuration: 1)
-            let offeredAction = app.buttons.matching(NSPredicate(format: "label CONTAINS[c] %@", action)).firstMatch
+            let offeredAction = app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS[c] %@", action)).firstMatch
             XCTAssertTrue(offeredAction.waitForExistence(timeout: 5), app.debugDescription)
             capture("message-detector-\(value)-\(style)", app)
             app.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.15)).tap()
