@@ -441,9 +441,10 @@ private struct ReplyChoiceCard: View {
         let showsEditor = !isReadOnly && !failedHere && (isEditing || selected)
         let showsPane = showsEditor || !text.isEmpty
         let card = VStack(alignment: .leading, spacing: 0) {
+            // The card's own row below shows a failure once, with Edit and Retry.
             MessageChoiceLabel(title: title, detail: detail, selected: selected,
                                multiple: multiple, suggested: suggested,
-                               ownAnswer: ownAnswer, drawsSurface: false)
+                               ownAnswer: ownAnswer, drawsSurface: false, showsFailure: false)
             if showsEditor {
                 TextEditor(text: $text)
                     .harklightType(.messageBody)
@@ -1964,7 +1965,9 @@ struct LiveRequestDetail: View {
                                  answerNotDelivered: Bool = false) -> String? {
         if localState == .refusedClosed { return "This message was closed." }
         if localState == .refusedNotFound { return "This request is no longer available" }
-        if answerNotDelivered || localState == .notDelivered { return "Answer not delivered" }
+        // A plain failure has no status line: the control that sent it shows
+        // the circled mark and Retry.
+        if answerNotDelivered || localState == .notDelivered { return nil }
         if localState == .terminalUnconfirmed ||
             (ownOutcome == .unconfirmed && answeredFromThisDevice) {
             return "Submission unconfirmed · saved draft retained"
