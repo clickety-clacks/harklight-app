@@ -404,10 +404,10 @@ final class ConversationPresentationTests: XCTestCase {
     }
 
     func testComposerNoticeUsesOnlyActuallyReportedLatestAvailability() {
-        XCTAssertEqual(ConversationAvailabilityNoticePresentation.notice(for: nil), .none,
+        XCTAssertEqual(ConversationAvailabilityNoticePresentation.notice(for: nil), .unconfirmed,
                        "Missing legacy availability stays unknown.")
         XCTAssertEqual(ConversationAvailabilityNoticePresentation.notice(for:
-            ConversationAvailabilityObservation(state: .listening)), .none)
+            ConversationAvailabilityObservation(state: .listening)), .connected)
         XCTAssertEqual(ConversationAvailabilityNoticePresentation.notice(for:
             ConversationAvailabilityObservation(state: .notListening(lastDetachedAt: nil))),
             .nothingListening)
@@ -444,7 +444,7 @@ final class ConversationPresentationTests: XCTestCase {
         XCTAssertNil(availability.message(for: context))
     }
 
-    func testCachedRelayConversationRemainsEditableAndSendableBeforeCatchUp() async throws {
+    func testCachedRelayConversationKeepsDraftButCannotSendBeforeCatchUp() async throws {
         await NativeRelayLifecycle.shared.deactivate()
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
                                        personID: ExactText("cache-person"), deviceID: ExactText("cache-device"))
@@ -465,6 +465,9 @@ final class ConversationPresentationTests: XCTestCase {
         try serverStore.applyConversation(ConversationEvent(sequence: 2, binding: binding,
             fact: .turn(reply)), context: context)
 
+        try serverStore.applyConversation(ConversationEvent(sequence: 3, binding: binding,
+            fact: .availability(sessionHandle: ExactText("session"), .listening)), context: context)
+
         let serverSnapshot = ServerStateCacheSnapshot.make(identity: context.identity,
             from: try serverStore.snapshot(context: context),
             conversations: try serverStore.conversationSnapshot(context: context))
@@ -480,13 +483,252 @@ final class ConversationPresentationTests: XCTestCase {
         model.beginRefresh()
         defer { model.endRefresh() }
         XCTAssertTrue(model.canEditDiscussionDraft(for: key))
-        XCTAssertTrue(model.canSendDiscussion(for: key))
+        XCTAssertFalse(model.canSendDiscussion(for: key))
         XCTAssertTrue(model.updateConversation(for: key, revision: 1, text: "During catch-up"))
-        let operation = try cacheBackedStore.prepareDiscussion(binding, context: context)
+        model.sendDiscussion(for: key, revision: 1)
         let draft = try XCTUnwrap(cacheBackedStore.conversationSnapshot(context: context).threads[key]?.drafts[1])
         XCTAssertEqual(draft.text, ExactText("During catch-up"))
-        XCTAssertEqual(draft.operationID, operation)
-        XCTAssertEqual(draft.disposition, .submitting(operation))
+        XCTAssertNil(draft.operationID)
+        XCTAssertEqual(draft.disposition, .saved)
+    }
+
+    func testDiscussionSendUsesOnlyCurrentRequestListeningAndPreservesDraftOnLoss() async throws {
+        await NativeRelayLifecycle.shared.deactivate()
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+            personID: ExactText("person"), deviceID: ExactText("device"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let domain = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        let key = RequestKey(accountScope: identity.personID,
+            senderID: ExactText("sender"), messageID: ExactText("request"))
+        let sibling = RequestKey(accountScope: identity.personID,
+            senderID: key.senderID, messageID: ExactText("sibling"))
+        let binding = ConversationBinding(request: key, revision: 1)
+        let payload = try JSONValue.parse(Data(#"{"title":"Question"}"#.utf8))
+        try domain.apply(RelayEvent(sequence: 1,
+            body: .delivery(StoredRequest(key: key, originalPayload: payload), .message),
+            conversation: RelayConversationMetadata(revision: 1, sessionHandle: ExactText("handle"))),
+            context: context)
+        try domain.applyConversation(ConversationEvent(sequence: 1,
+            binding: ConversationBinding(request: sibling, revision: 1),
+            fact: .request(sessionHandle: ExactText("other-handle"), payload: payload)), context: context)
+        let model = try LivePresentationStore(store: domain, context: context)
+        let bytes = Data("Retained attachment".utf8)
+        let file = ConversationFile(id: ExactText("attachment"), name: ExactText("note.txt"),
+            byteCount: UInt64(bytes.count),
+            sha256: ExactText(SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()),
+            content: .inline(bytes))
+        XCTAssertTrue(model.updateConversation(for: key, revision: 1,
+            text: "Keep this draft", files: [file]))
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        addTeardownBlock {
+            await NativeRelayLifecycle.shared.deactivate()
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let result = try await NativeRelayLifecycle.shared.confirmInProcessSessionForTesting(
+            store: domain, context: context,
+            session: SendEligibilitySession(identity: identity, key: key, payload: payload),
+            serverStateCache: FileServerStateCache(identity: identity,
+                fileURL: directory.appendingPathComponent("server-cache.json")))
+        XCTAssertTrue(result.relayConfirmed)
+        try model.refreshFromDurableStore()
+        XCTAssertFalse(model.canSendDiscussion(for: key),
+                       "A confirmed connection without a listening report is insufficient.")
+
+        let states: [ConversationAvailability] = [
+            .listening, .notListening(lastDetachedAt: nil), .gone,
+            .unsupported(reason: ExactText("Unsupported")), .listening
+        ]
+        for (index, state) in states.enumerated() {
+            try domain.applyConversation(ConversationEvent(sequence: UInt64(index + 2), binding: binding,
+                fact: .availability(sessionHandle: ExactText("handle"), state)), context: context)
+            if case .notListening = state {
+                XCTAssertTrue(model.canSendDiscussion(for: key),
+                              "The presentation still holds the earlier listening report.")
+                var queued = false
+                model.sendDiscussion(for: key, revision: 1, onQueued: { queued = true })
+                XCTAssertFalse(queued)
+                XCTAssertNil(try domain.conversationSnapshot(context: context).threads[key]?.drafts[1]?.operationID,
+                             "A newer repository refusal must stop a new send before presentation adoption.")
+                XCTAssertNotNil(model.conversationError)
+            }
+            try model.refreshFromDurableStore()
+            XCTAssertEqual(model.canSendDiscussion(for: key), state == .listening)
+            XCTAssertFalse(model.canSendDiscussion(for: sibling),
+                           "A request cannot borrow another request's listening report.")
+            if state != .listening {
+                model.sendDiscussion(for: key, revision: 1)
+            }
+            let draft = model.conversationDraft(for: key, revision: 1)
+            XCTAssertEqual(draft.text, ExactText("Keep this draft"))
+            XCTAssertEqual(draft.files, [file])
+            XCTAssertNil(draft.operationID)
+        }
+
+        await NativeRelayLifecycle.shared.deactivate()
+        XCTAssertFalse(model.canSendDiscussion(for: key),
+                       "Losing the confirmed connection invalidates the retained listening report.")
+        XCTAssertEqual(model.conversationDraft(for: key, revision: 1).text, ExactText("Keep this draft"))
+
+        _ = try await NativeRelayLifecycle.shared.confirmInProcessSessionForTesting(
+            store: domain, context: context,
+            session: SendEligibilitySession(identity: identity, key: key, payload: payload),
+            serverStateCache: FileServerStateCache(identity: identity,
+                fileURL: directory.appendingPathComponent("server-cache.json")))
+        try model.refreshFromDurableStore()
+        XCTAssertTrue(model.canSendDiscussion(for: key))
+        try domain.applyConversation(ConversationEvent(sequence: 7, binding: binding,
+            fact: .terminal(turn: ExactText("answered"), author: .server, state: .answered)),
+            context: context)
+        XCTAssertTrue(model.canSendDiscussion(for: key), "The presentation has not adopted closure yet.")
+        var queuedAfterClosure = false
+        model.sendDiscussion(for: key, revision: 1, onQueued: { queuedAfterClosure = true })
+        XCTAssertFalse(queuedAfterClosure)
+        XCTAssertNil(try domain.conversationSnapshot(context: context).threads[key]?.drafts[1]?.operationID)
+        XCTAssertNotNil(model.conversationError)
+        try model.refreshFromDurableStore()
+        XCTAssertFalse(model.canEditDiscussionDraft(for: key))
+        XCTAssertFalse(model.canSendDiscussion(for: key))
+        XCTAssertFalse(model.updateConversation(for: key, revision: 1, text: "Cannot edit"))
+        XCTAssertEqual(model.conversationDraft(for: key, revision: 1).text, ExactText("Keep this draft"))
+
+    }
+
+    func testClosurePreservesUncertainDiscussionIdentityAndContent() throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+            personID: ExactText("person"), deviceID: ExactText("device"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let domain = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        let key = RequestKey(accountScope: identity.personID,
+            senderID: ExactText("sender"), messageID: ExactText("uncertain"))
+        let binding = ConversationBinding(request: key, revision: 1)
+        try domain.applyConversation(ConversationEvent(sequence: 1, binding: binding,
+            fact: .request(sessionHandle: ExactText("handle"), payload: .null)), context: context)
+        try domain.saveConversationDraft(ConversationDraft(binding: binding,
+            text: ExactText("Already submitted")), context: context)
+        let operation = try domain.prepareDiscussion(binding, context: context)
+        try domain.markDiscussionOutcome(binding, operation: operation, rejection: nil, context: context)
+        let before = try XCTUnwrap(domain.conversationSnapshot(context: context).threads[key]?.drafts[1])
+        try domain.applyConversation(ConversationEvent(sequence: 2, binding: binding,
+            fact: .terminal(turn: ExactText("answer"), author: .server, state: .answered)),
+            context: context)
+        let model = try LivePresentationStore(store: domain, context: context)
+        XCTAssertFalse(model.canEditDiscussionDraft(for: key))
+        XCTAssertFalse(model.canSendDiscussion(for: key))
+        XCTAssertEqual(model.conversationDraft(for: key, revision: 1), before,
+                       "Closure cannot reclassify an earlier uncertain send or replace its operation.")
+    }
+
+    func testClosedRepositoryRejectsEditsBeforePresentationAdoption() throws {
+        for terminal in [TerminalState.answered, .noComment] {
+            let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                personID: ExactText("person"), deviceID: ExactText("device"))
+            let context = ProfileContext(identity: identity, transportMode: .relay)
+            let domain = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+            let key = RequestKey(accountScope: identity.personID,
+                senderID: ExactText("sender"), messageID: ExactText("request"))
+            let binding = ConversationBinding(request: key, revision: 1)
+            try domain.applyConversation(ConversationEvent(sequence: 1, binding: binding,
+                fact: .request(sessionHandle: ExactText("handle"), payload: .null)), context: context)
+            try domain.saveConversationDraft(ConversationDraft(binding: binding,
+                text: ExactText("Original submitted text")), context: context)
+            let operation = try domain.prepareDiscussion(binding, context: context)
+            try domain.markDiscussionOutcome(binding, operation: operation,
+                rejection: ExactText("storage_unavailable"), context: context)
+            let before = try XCTUnwrap(domain.conversationSnapshot(context: context).threads[key]?.drafts[1])
+            let directEdit = try LivePresentationStore(store: domain, context: context)
+            let rejectedEdit = try LivePresentationStore(store: domain, context: context)
+            try domain.applyConversation(ConversationEvent(sequence: 2, binding: binding,
+                fact: .terminal(turn: ExactText("answer"), author: .server, state: terminal)),
+                context: context)
+
+            XCTAssertTrue(directEdit.canEditDiscussionDraft(for: key))
+            XCTAssertTrue(rejectedEdit.canEditDiscussionDraft(for: key))
+            rejectedEdit.editRejectedDiscussion(for: key, revision: 1)
+            XCTAssertEqual(try domain.conversationSnapshot(context: context).threads[key]?.drafts[1], before)
+            XCTAssertNotNil(rejectedEdit.conversationError)
+            XCTAssertFalse(directEdit.updateConversation(for: key, revision: 1, text: "Stale edit"))
+            XCTAssertEqual(try domain.conversationSnapshot(context: context).threads[key]?.drafts[1], before,
+                           "Neither a stale editor nor Edit can clear the saved operation on a closed request.")
+            XCTAssertNotNil(directEdit.conversationError)
+        }
+    }
+
+    func testComposerStagedTextSurvivesClosureBeforePendingSave() throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+            personID: ExactText("person"), deviceID: ExactText("device"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let persistence = MemoryPendingActionPersistence()
+        let domain = try ClientRepository(context: context, persistence: persistence)
+        let key = RequestKey(accountScope: identity.personID,
+            senderID: ExactText("sender"), messageID: ExactText("request"))
+        let binding = ConversationBinding(request: key, revision: 1)
+        try domain.applyConversation(ConversationEvent(sequence: 1, binding: binding,
+            fact: .request(sessionHandle: ExactText("handle"), payload: .null)), context: context)
+        try domain.saveConversationDraft(ConversationDraft(binding: binding,
+            text: ExactText("Before typing")), context: context)
+        let model = try LivePresentationStore(store: domain, context: context)
+        let editor = ConversationComposerTextSession()
+        editor.stagedBinding = binding
+        editor.savedText = "Before typing"
+        editor.stagedText = "Before typing plus the unsaved editing burst"
+
+        try domain.applyConversation(ConversationEvent(sequence: 2, binding: binding,
+            fact: .terminal(turn: ExactText("answer"), author: .server, state: .answered)),
+            context: context)
+        try model.refreshFromDurableStore()
+        // This is the same persistence path used when removal cancels the
+        // composer's pending save and onDisappear flushes the staged session.
+        XCTAssertFalse(editor.persist(in: model))
+        XCTAssertEqual(model.unsavedConversationText(for: binding), editor.stagedText)
+        XCTAssertEqual(editor.savedText, "Before typing")
+        XCTAssertEqual(try domain.conversationSnapshot(context: context).threads[key]?.drafts[1]?.text,
+                       ExactText("Before typing"))
+        XCTAssertNotNil(model.conversationError)
+        XCTAssertFalse(model.canEditDiscussionDraft(for: key))
+        XCTAssertFalse(model.canSendDiscussion(for: key))
+        XCTAssertEqual(model.retainedConversationText(for: key)[1], ExactText(editor.stagedText))
+
+        // Later Server projection writes must not erase locally retained text.
+        try domain.applyConversation(ConversationEvent(sequence: 3, binding: binding,
+            fact: .availability(sessionHandle: ExactText("handle"), .notListening(lastDetachedAt: nil))),
+            context: context)
+        let sibling = RequestKey(accountScope: identity.personID,
+            senderID: key.senderID, messageID: ExactText("sibling"))
+        let siblingBinding = ConversationBinding(request: sibling, revision: 1)
+        try domain.applyConversation(ConversationEvent(sequence: 4, binding: siblingBinding,
+            fact: .request(sessionHandle: ExactText("handle"), payload: .null)), context: context)
+        try domain.applyConversation(ConversationEvent(sequence: 5, binding: siblingBinding,
+            fact: .terminal(turn: ExactText("sibling-answer"), author: .server, state: .noComment)),
+            context: context)
+        try domain.retainConversationText(ExactText("Sibling unsent text"), for: siblingBinding, context: context)
+        let cache = ServerStateCacheSnapshot.make(identity: identity,
+            from: try domain.serverCacheSnapshot(context: context),
+            conversations: try domain.conversationSnapshot(context: context))
+        let restored = try ClientRepository(context: context, persistence: persistence)
+        try restored.restoreCachedServerState(try cache.attentionDomainState(for: identity), context: context)
+        let reopened = try LivePresentationStore(store: restored, context: context)
+        XCTAssertEqual(reopened.retainedConversationText(for: key), [1: ExactText(editor.stagedText)],
+                       "The closed-history recovery surface restores the exact request/revision after relaunch.")
+        XCTAssertEqual(reopened.conversationDraft(for: key, revision: 1).text, ExactText("Before typing"))
+        XCTAssertFalse(reopened.canEditDiscussionDraft(for: key))
+        XCTAssertFalse(reopened.canSendDiscussion(for: key))
+        let priorClipboard = UIPasteboard.general.string
+        defer { UIPasteboard.general.string = priorClipboard }
+        reopened.copyRetainedConversationText(for: key, revision: 1)
+        XCTAssertEqual(UIPasteboard.general.string, editor.stagedText)
+        XCTAssertTrue(reopened.retainedConversationText(for: key).isEmpty)
+        XCTAssertEqual(reopened.retainedConversationText(for: sibling), [1: ExactText("Sibling unsent text")])
+
+        let afterCopy = try ClientRepository(context: context, persistence: persistence)
+        try afterCopy.restoreCachedServerState(try cache.attentionDomainState(for: identity), context: context)
+        let afterCopyModel = try LivePresentationStore(store: afterCopy, context: context)
+        XCTAssertTrue(afterCopyModel.retainedConversationText(for: key).isEmpty,
+                      "Copy dismisses only that request/revision durably.")
+        XCTAssertEqual(afterCopyModel.retainedConversationText(for: sibling), [1: ExactText("Sibling unsent text")])
+        afterCopyModel.dismissRetainedConversationText(for: sibling, revision: 1)
+        let afterDismiss = try ClientRepository(context: context, persistence: persistence)
+        XCTAssertTrue(try afterDismiss.retainedConversationText(for: sibling, context: context).isEmpty,
+                      "Explicit Dismiss persists without sending or editing the saved draft.")
     }
 
     func testConversationPanelSeparatesNoChatFromLoadingAndUnavailableStates() {
@@ -514,43 +756,47 @@ final class ConversationPresentationTests: XCTestCase {
             isRefreshing: false, hasConnectionWarning: false, canCheckAvailability: true), .historyPending)
     }
 
-    func testCachedClosedChatKeepsDraftEditableWithoutAuthorizingSend() throws {
-        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
-            personID: ExactText("person"), deviceID: ExactText("device"))
-        let context = ProfileContext(identity: identity, transportMode: .relay)
-        let key = RequestKey(accountScope: identity.personID,
-            senderID: ExactText("sender"), messageID: ExactText("closed-cache"))
-        let binding = ConversationBinding(request: key, revision: 1)
-        let payload = try JSONValue.parse(Data(#"{"title":"Question","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"yes","label":"Yes","kind":"value","value":{"ok":true}}]}}"#.utf8))
-        let serverStore = try ClientRepository(context: context,
-            persistence: MemoryPendingActionPersistence())
-        _ = try serverStore.apply(RelayEvent(sequence: 1,
-            body: .delivery(StoredRequest(key: key, originalPayload: payload), .message),
-            conversation: RelayConversationMetadata(revision: 1, sessionHandle: ExactText("session"))),
-            context: context)
-        try serverStore.applyConversation(ConversationEvent(sequence: 1, binding: binding,
-            fact: .request(sessionHandle: ExactText("session"), payload: payload)), context: context)
-        try serverStore.applyConversation(ConversationEvent(sequence: 2, binding: binding,
-            fact: .terminal(turn: ExactText("expired"), author: .server, state: .expired)),
-            context: context)
+    func testCachedClosedChatRetainsDraftWithoutEditingOrSending() throws {
+        for terminal in [TerminalState.answered, .noComment, .expired] {
+            let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                personID: ExactText("person"), deviceID: ExactText("device"))
+            let context = ProfileContext(identity: identity, transportMode: .relay)
+            let key = RequestKey(accountScope: identity.personID,
+                senderID: ExactText("sender"), messageID: ExactText("closed-cache"))
+            let binding = ConversationBinding(request: key, revision: 1)
+            let payload = try JSONValue.parse(Data(#"{"title":"Question","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"yes","label":"Yes","kind":"value","value":{"ok":true}}]}}"#.utf8))
+            let serverStore = try ClientRepository(context: context,
+                persistence: MemoryPendingActionPersistence())
+            _ = try serverStore.apply(RelayEvent(sequence: 1,
+                body: .delivery(StoredRequest(key: key, originalPayload: payload), .message),
+                conversation: RelayConversationMetadata(revision: 1, sessionHandle: ExactText("session"))),
+                context: context)
+            try serverStore.applyConversation(ConversationEvent(sequence: 1, binding: binding,
+                fact: .request(sessionHandle: ExactText("session"), payload: payload)), context: context)
+            try serverStore.saveConversationDraft(ConversationDraft(binding: binding,
+                text: ExactText("Retained before closure")), context: context)
+            try serverStore.applyConversation(ConversationEvent(sequence: 2, binding: binding,
+                fact: .terminal(turn: ExactText("expired"), author: .server, state: terminal)),
+                context: context)
 
-        let snapshot = ServerStateCacheSnapshot.make(identity: context.identity,
-            from: try serverStore.snapshot(context: context),
-            conversations: try serverStore.conversationSnapshot(context: context))
-        let cacheBackedStore = try ClientRepository(context: context,
-            persistence: MemoryPendingActionPersistence())
+            let snapshot = ServerStateCacheSnapshot.make(identity: context.identity,
+                from: try serverStore.snapshot(context: context),
+                conversations: try serverStore.conversationSnapshot(context: context))
+            let cacheBackedStore = try ClientRepository(context: context,
+                persistence: MemoryPendingActionPersistence())
 
-        try cacheBackedStore.restoreCachedServerState(
-            try snapshot.attentionDomainState(for: context.identity), context: context)
-        let model = try LivePresentationStore(store: cacheBackedStore, context: context)
+            try cacheBackedStore.restoreCachedServerState(
+                try snapshot.attentionDomainState(for: context.identity), context: context)
+            let model = try LivePresentationStore(store: cacheBackedStore, context: context)
 
-        XCTAssertFalse(try XCTUnwrap(model.conversation(for: key)).allowsDiscussion)
-        XCTAssertTrue(model.canEditDiscussionDraft(for: key))
-        XCTAssertFalse(model.canSendDiscussion(for: key))
-        XCTAssertTrue(model.updateConversation(for: key, revision: 1, text: "Saved while syncing"))
-        XCTAssertEqual(model.conversationDraft(for: key, revision: 1).text,
-                       ExactText("Saved while syncing"))
-        XCTAssertFalse(model.canSendDiscussion(for: key))
+            XCTAssertEqual(try XCTUnwrap(model.conversation(for: key)).terminal, terminal)
+            XCTAssertFalse(model.canEditDiscussionDraft(for: key))
+            XCTAssertFalse(model.canSendDiscussion(for: key))
+            XCTAssertFalse(model.updateConversation(for: key, revision: 1, text: "Cannot edit closed history"))
+            XCTAssertEqual(model.conversationDraft(for: key, revision: 1).text,
+                           ExactText("Retained before closure"))
+            XCTAssertFalse(model.canSendDiscussion(for: key))
+        }
     }
 
 
@@ -1180,4 +1426,35 @@ private final class FailOncePendingActionPersistence: PendingActionPersistence, 
         }
         try backing.commit(data, identity: identity)
     }
+}
+
+
+// Uses the ordinary inbox and conversation checkpoint path to establish a
+// current authenticated projection; it never supplies a profile-wide listener.
+private final class SendEligibilitySession: AuthenticatedInboxPagingSession,
+    AuthenticatedConversationSession, @unchecked Sendable {
+    let authenticatedIdentity: ProfileIdentity
+    private let inbox: ReplyCheckpointSession
+
+    init(identity: ProfileIdentity, key: RequestKey, payload: JSONValue) {
+        authenticatedIdentity = identity
+        inbox = ReplyCheckpointSession(identity: identity, key: key, payload: payload)
+    }
+
+    func inboxRequest(_ request: Data, ref: String) async throws -> Data {
+        try await inbox.inboxRequest(request, ref: ref)
+    }
+    func resync(_ request: Data, consume: @Sendable (Data) async throws -> Void) async throws {
+        try await inbox.resync(request, consume: consume)
+    }
+    func acknowledge(_ request: Data) async throws {}
+    func sendOriginalOperation(_ frame: Data, operationID: UUID) async throws -> OriginalOperationResult {
+        .unresolved
+    }
+    func openConversation(_ request: Data, consume: @Sendable (Data) async throws -> Void) async throws {
+        let since = try JSONValue.parse(request).uniqueValue(named: "since")?.integerValue ?? 0
+        try await consume(Data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#.utf8))
+        try await consume(Data("{\"v\":1,\"type\":\"conversation_resynced\",\"conversation_seq\":\(since)}".utf8))
+    }
+    func acknowledgeConversation(_ request: Data) async throws {}
 }
