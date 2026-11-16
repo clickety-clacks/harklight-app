@@ -280,10 +280,10 @@ final class LiveAnswerConfirmationTests: XCTestCase {
         XCTAssertFalse(live.request(for: key)?.noCommentUnavailable ?? true,
                        "A newly queued attempt replaces the prior unsupported result in the current status.")
         let pendingRetryRow = try XCTUnwrap(live.inboxRows.first { $0.key == key })
-        XCTAssertTrue(pendingRetryRow.hasDeliveryWarning,
-                      "The known delivery failure remains visible until the retry is accepted.")
-        XCTAssertFalse(pendingRetryRow.belongsToReplied,
-                       "The known delivery failure keeps the row in Inbox until the retry is accepted.")
+        XCTAssertFalse(pendingRetryRow.hasDeliveryWarning,
+                       "Retry replaces the old failure warning with the pending saved response.")
+        XCTAssertTrue(pendingRetryRow.belongsToReplied,
+                      "The pending retry appears in Replied until the Server confirms it.")
     }
 
     func testAcceptedNoCommentIsFinalAndCannotBeResubmitted() async throws {
