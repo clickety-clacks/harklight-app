@@ -682,13 +682,16 @@ final class NativeGuidedTLSTests: XCTestCase {
                 relayURL: XCTUnwrap(URL(string: "wss://localhost:\(port)/relay")),
                 clientIdentity: installation.value, trustedRootDER: relay.rootDER)
             configurePushRoutingFlag(true, context: context)
+            let observerFlags = RemoteFeatureFlags()
+            configurePushRoutingFlag(true, context: context, flags: observerFlags)
+            let observer = NativeEnrollmentStore(service: namespace, featureFlags: observerFlags)
             var removalObserved = false
             // At /device/remove the pending push operation must already be
             // acknowledged on the relay, for both departure entry points.
             transport.onRemove = {
-                XCTAssertTrue(try enrollment.hasPushDeparture(for: context.identity))
+                XCTAssertTrue(try observer.hasPushDeparture(for: context.identity))
                 let probe = PushRemovalProbeSession(identity: context.identity, results: [nil])
-                try await enrollment.retryPendingPushRemoval(using: probe)
+                try await observer.retryPendingPushRemoval(using: probe)
                 let remaining = await probe.sent
                 XCTAssertTrue(remaining.isEmpty, "Push removal must be confirmed before device removal.")
                 removalObserved = true
@@ -698,13 +701,14 @@ final class NativeGuidedTLSTests: XCTestCase {
                 let root = "-----BEGIN CERTIFICATE-----\n" +
                     relay.rootDER.base64EncodedString(options: [.lineLength64Characters, .endLineWithLineFeed]) +
                     "-----END CERTIFICATE-----\n"
-                let invitation = NativeJoinInvitation(v: 1, personID: "replacement", serverName: "Other server",
+                let invitation = NativeJoinInvitation(v: 1, personID: "replacement", serverName: "other.example",
                     enrollmentURL: URL(string: "https://other.example:18444/enroll")!,
                     relayURL: URL(string: "wss://other.example:18443/relay")!, caPEM: root,
                     caSHA256: NativeEndpointMigrationPolicy.rootSHA256(relay.rootDER),
                     inviteToken: String(repeating: "d", count: 64),
                     expiresAt: Int64(Date().timeIntervalSince1970 * 1000) + 60_000,
                     personName: "Replacement", inviterName: "Owner")
+                try invitation.validate()
                 let fragment = try JSONEncoder().encode(invitation).base64EncodedString()
                     .replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")
                     .replacingOccurrences(of: "=", with: "")
@@ -758,7 +762,7 @@ final class NativeGuidedTLSTests: XCTestCase {
             _ = try await session.removePush(PushRemovalOperation(revision: 1))
             XCTFail("The fixture refuses push removal.")
         } catch InstallationTransportError.serverRejected {}
-        let response = try await session.inboxRequest(Data(#"{"v":1,"type":"inbox_status","ref":"probe"}"#.utf8),
+        let response = try await session.inboxRequest(Data((#"{"v":1,"type":"inbox_status","ref":"probe"}"# + "\n").utf8),
                                                      ref: "probe")
         XCTAssertEqual(try JSONValue.parse(response).uniqueValue(named: "type")?.stringValue?.rawValue, "ok")
         await session.close()
