@@ -1,4 +1,5 @@
 import AttentionDomain
+import HarklightNativeRelay
 import XCTest
 @testable import Harklight
 
