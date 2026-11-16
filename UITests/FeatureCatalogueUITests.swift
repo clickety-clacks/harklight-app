@@ -33,7 +33,11 @@ final class FeatureCatalogueUITests: XCTestCase {
             for _ in 0..<12 where !title.isHittable { app.swipeUp() }
             XCTAssertTrue(title.exists, app.debugDescription)
             let description = app.staticTexts["feature-\(name)-description"].firstMatch
-            XCTAssertTrue(description.exists)
+            // A Form header can enter the accessibility tree before its next
+            // row, especially at accessibility text sizes. Reveal the actual
+            // description as well, rather than assuming the header reveals it.
+            for _ in 0..<12 where !description.isHittable { app.swipeUp() }
+            XCTAssertTrue(description.isHittable, app.debugDescription)
             XCTAssertFalse(app.buttons["feature-\(name)-open"].exists)
         }
     }
