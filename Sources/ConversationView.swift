@@ -145,11 +145,11 @@ struct ConversationPanel: View {
                     Label(thread.isRetracted ? store.retractionLabel(key) : "Request \(terminal.rawValue)", systemImage: "checkmark.circle")
                         .font(.caption).padding(8)
                 }
+                if let error = store.conversationError {
+                    Text(error).font(.caption).foregroundStyle(.hkSecondary).padding(.horizontal)
+                }
                 if thread.terminal == nil && thread.allowsDiscussion {
                     ConversationUploadCleanupStatus(store: store, key: key, revision: revision)
-                    if let error = store.conversationError {
-                        Text(error).font(.caption).foregroundStyle(.hkSecondary).padding(.horizontal)
-                    }
                     if let message = store.conversationUnavailableMessage {
                         Text(message)
                             .font(.callout)
@@ -664,7 +664,7 @@ enum ConversationSubmittedText {
 
 @MainActor
 @Observable
-private final class ConversationComposerTextSession {
+final class ConversationComposerTextSession {
     // Keystroke updates stay in the editor/send leaves instead of invalidating
     // the composer that also builds attachment and control content.
     var stagedText = ""
@@ -672,6 +672,16 @@ private final class ConversationComposerTextSession {
     var savedText = ""
     var stagedBinding: ConversationBinding?
     @ObservationIgnored var textSaveTask: Task<Void, Never>?
+
+    @discardableResult
+    func persist(in store: LivePresentationStore) -> Bool {
+        guard let binding = stagedBinding else { return false }
+        guard stagedText != savedText else { return true }
+        guard store.updateConversation(for: binding.request, revision: binding.revision,
+                                       text: stagedText) else { return false }
+        savedText = stagedText
+        return true
+    }
 }
 
 @MainActor
@@ -865,6 +875,10 @@ private struct ConversationComposer: View {
         }
         .onChange(of: draft.disposition) { _, _ in
             textSession.textSaveTask?.cancel()
+            guard thread?.terminal == nil else {
+                _ = persistStagedText()
+                return
+            }
             textSession.stagedText = ConversationSubmittedText.composerText(for: draft)
             textSession.savedText = textSession.stagedText
         }
@@ -902,12 +916,7 @@ private struct ConversationComposer: View {
 
     @discardableResult
     private func persistStagedText() -> Bool {
-        guard let binding = textSession.stagedBinding else { return false }
-        guard textSession.stagedText != textSession.savedText else { return true }
-        guard store.updateConversation(for: binding.request, revision: binding.revision,
-                                       text: textSession.stagedText) else { return false }
-        textSession.savedText = textSession.stagedText
-        return true
+        textSession.persist(in: store)
     }
 
     private func sendStagedText() {
