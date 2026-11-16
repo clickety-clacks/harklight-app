@@ -39,6 +39,10 @@ final class SubmissionStateUITests: XCTestCase {
         XCTAssertTrue(element("request-choice-retry", in: app).waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["Cover B"].isEnabled, "Other choices can be picked again.")
         XCTAssertNoStatusText(app)
+        // The failure shows once: one circled mark and one Retry, in the picked choice.
+        let message = app.scrollViews["message-card-scroll"]
+        XCTAssertEqual(count("request-choice-retry", in: app), 1, "Exactly one Retry.")
+        XCTAssertEqual(failureMarks(in: message), 1, "Exactly one circled mark.")
         capture("04-choice-failed", app)
     }
 
@@ -79,6 +83,11 @@ final class SubmissionStateUITests: XCTestCase {
             .isHittable, "The locked sent text is visible.")
         XCTAssertTrue(failed.buttons["request-reply-retry"].isHittable, "Retry is visible.")
         XCTAssertTrue(failed.buttons["request-reply-edit"].isHittable, "Edit is visible.")
+        // The failure shows once, in the card's row with Edit: one circled mark and
+        // one Retry, and no second Retry in the card's title row.
+        XCTAssertEqual(count("request-reply-retry", in: failed), 1, "Exactly one Retry control.")
+        XCTAssertEqual(count("request-choice-retry", in: failed), 0, "No Retry in the card's title row.")
+        XCTAssertEqual(failureMarks(in: replyCard), 1, "Exactly one circled mark on the card.")
         capture("07-reply-failed", failed)
     }
 
@@ -165,9 +174,18 @@ final class SubmissionStateUITests: XCTestCase {
         return app
     }
 
+    private func count(_ identifier: String, in app: XCUIApplication) -> Int {
+        app.descendants(matching: .any).matching(identifier: identifier).count
+    }
+
+    /// Circled failure marks ("Did not send") inside one part of the screen.
+    private func failureMarks(in scope: XCUIElement) -> Int {
+        scope.descendants(matching: .any).matching(NSPredicate(format: "label == %@", "Did not send")).count
+    }
+
     /// A failed send shows only its mark and Retry, with no status words.
     private func XCTAssertNoStatusText(_ app: XCUIApplication, file: StaticString = #filePath, line: UInt = #line) {
-        for word in ["Not sent", "Pending", "Answered"] {
+        for word in ["Not sent", "Pending", "Answered", "Answer not delivered"] {
             XCTAssertFalse(app.staticTexts[word].exists, "No \(word) label.", file: file, line: line)
         }
     }
