@@ -238,6 +238,12 @@
           "detail": "If the server's record of what this device has received no longer matches the device's own record, Harklight now reloads the chat history from the server and keeps connecting, and answers the server has already settled stop showing as pending. This fix is pending formal testing."
         },
         {
+          "id": "quiet-on-servers-without-screen-reports",
+          "symbol": "antenna.radiowaves.left.and.right",
+          "title": "Stays connected quietly on older servers",
+          "detail": "Harklight tells newer servers which screen you are on. When a server does not support that, Harklight now stops asking after the first time and stays connected, with nothing shown and no effect on your messages or answers. The diagnostics also record each reconnect once, not twice. This fix is pending formal testing."
+        },
+        {
           "id": "answers-keep-the-connection",
           "symbol": "bolt.horizontal",
           "title": "Answers no longer drop the connection",
