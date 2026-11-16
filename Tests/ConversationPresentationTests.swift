@@ -765,8 +765,8 @@ final class ConversationPresentationTests: XCTestCase {
                 senderID: ExactText("sender"), messageID: ExactText("closed-cache"))
             let binding = ConversationBinding(request: key, revision: 1)
             let payload = try JSONValue.parse(Data(#"{"title":"Question","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"yes","label":"Yes","kind":"value","value":{"ok":true}}]}}"#.utf8))
-            let serverStore = try ClientRepository(context: context,
-                persistence: MemoryPendingActionPersistence())
+            let persistence = MemoryPendingActionPersistence()
+            let serverStore = try ClientRepository(context: context, persistence: persistence)
             _ = try serverStore.apply(RelayEvent(sequence: 1,
                 body: .delivery(StoredRequest(key: key, originalPayload: payload), .message),
                 conversation: RelayConversationMetadata(revision: 1, sessionHandle: ExactText("session"))),
@@ -782,8 +782,7 @@ final class ConversationPresentationTests: XCTestCase {
             let snapshot = ServerStateCacheSnapshot.make(identity: context.identity,
                 from: try serverStore.snapshot(context: context),
                 conversations: try serverStore.conversationSnapshot(context: context))
-            let cacheBackedStore = try ClientRepository(context: context,
-                persistence: MemoryPendingActionPersistence())
+            let cacheBackedStore = try ClientRepository(context: context, persistence: persistence)
 
             try cacheBackedStore.restoreCachedServerState(
                 try snapshot.attentionDomainState(for: context.identity), context: context)
