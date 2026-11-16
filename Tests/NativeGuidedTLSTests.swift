@@ -1851,6 +1851,72 @@ final class NativeGuidedTLSTests: XCTestCase {
         await lifecycle.deactivate()
     }
 
+    func testFocusRefusalCarriesAcrossAReconnectAndResetsOnRelaunchAndAccountSwitch() async throws {
+        let namespace = "Harklight.focus-suppression-activation." + UUID().uuidString
+        let identity = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
+        defer {
+            SecItemDelete([kSecClass as String: kSecClassCertificate,
+                           kSecAttrLabel as String: identity.label] as CFDictionary)
+            SecItemDelete([kSecClass as String: kSecClassKey,
+                           kSecAttrApplicationTag as String: Data(namespace.utf8)] as CFDictionary)
+        }
+        let answers = ConversationFrameCollector()
+        let requests = ConversationFrameCollector()
+        // A maintenance-line Server: focus_report is an unknown type.
+        let relay = try singleSessionRelay(expectedDevice: identity.deviceID, originPort: 443,
+                                           conversationCursor: 0, answers: answers, requests: requests)
+        defer { relay.close() }
+        let port = try await relay.start()
+        let relayURL = try XCTUnwrap(URL(string: "wss://localhost:\(port)/relay"))
+        func account(_ person: String) -> ProfileContext {
+            ProfileContext(identity: ProfileIdentity(trustedRelayAuthority: ExactText("localhost"),
+                personID: ExactText(person), deviceID: ExactText(identity.deviceID)), transportMode: .relay)
+        }
+        func focusReports() -> Int { requests.types.filter { $0 == "focus_report" }.count }
+        func settle() async { for _ in 0..<50 { await Task.yield() } }
+
+        let first = account("focus-suppression-person")
+        let lifecycle = NativeRelayLifecycle()
+        try await lifecycle.activate(store: ClientRepository(context: first, persistence: MemoryPendingActionPersistence()),
+                                     context: first, relayURL: relayURL,
+                                     clientIdentity: identity.value, trustedRootDER: relay.rootDER)
+        _ = await lifecycle.refreshResultFromTrustedRelay()
+        let refused = expectation(for: NSPredicate { _, _ in focusReports() == 1 }, evaluatedWith: nil)
+        await fulfillment(of: [refused], timeout: 5)
+        await settle()
+        let before = await lifecycle.liveConnectionFocusState
+        XCTAssertEqual(before.sendsFocusReports, false, "The refused connection sends no more focus reports.")
+
+        // Reconnect within the same activation: the new connection starts with focus reports off.
+        relay.dropConnections()
+        _ = await lifecycle.refreshResultFromTrustedRelay()
+        let reconnected = await lifecycle.liveConnectionFocusState
+        XCTAssertNotEqual(reconnected.attemptID, before.attemptID, "The refresh replaced the dropped connection.")
+        XCTAssertEqual(reconnected.sendsFocusReports, false,
+                       "The refusal carries across a reconnect within one activation.")
+        XCTAssertEqual(focusReports(), 1, "No focus report was sent on the reconnected connection.")
+
+        // Account switch: a new activation asks again.
+        let second = account("focus-suppression-other-person")
+        try await lifecycle.activate(store: ClientRepository(context: second, persistence: MemoryPendingActionPersistence()),
+                                     context: second, relayURL: relayURL,
+                                     clientIdentity: identity.value, trustedRootDER: relay.rootDER)
+        let switched = await lifecycle.liveConnectionFocusState
+        XCTAssertEqual(switched.sendsFocusReports, true, "An account switch resets focus suppression.")
+        await lifecycle.deactivate()
+
+        // Relaunch: a fresh lifecycle for the same account asks again.
+        let relaunched = NativeRelayLifecycle()
+        try await relaunched.activate(store: ClientRepository(context: first, persistence: MemoryPendingActionPersistence()),
+                                      context: first, relayURL: relayURL,
+                                      clientIdentity: identity.value, trustedRootDER: relay.rootDER)
+        let fresh = await relaunched.liveConnectionFocusState
+        XCTAssertEqual(fresh.sendsFocusReports, true, "A relaunch resets focus suppression.")
+        await relaunched.deactivate()
+        // An endpoint change resets it the same way (NativeRelayLifecycle.migrateEndpoint); that path
+        // runs only between the two approved production hosts, so it is covered by source, not here.
+    }
+
     func testARelayThatRefusedFocusReportsGetsNoneOnItsNextConnection() {
         var refused = FocusReportReplyRouter(supportsFocusReports: false)
         XCTAssertFalse(refused.supportsFocusReports)

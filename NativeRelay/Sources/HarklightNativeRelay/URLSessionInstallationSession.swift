@@ -314,6 +314,9 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
     /// A connection-health check is a WebSocket control frame, not an application
     /// exchange. It must remain usable while replay or an ACK owns that gate.
     /// Only URLSession's reported failure closes the connection; no timer races it.
+    /// Whether this connection may still send focus reports.
+    var sendsFocusReports: Bool { focusReportReplyRouter.supportsFocusReports }
+
     public func checkConnection() async throws {
         if let connectionFailure { throw connectionFailure }
         guard !isClosed else { throw CancellationError() }

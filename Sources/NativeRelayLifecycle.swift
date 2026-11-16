@@ -940,6 +940,12 @@ final class NativeRelayLifecycle {
     /// Set when this activation's Server refused a focus report as an unknown
     /// type. Cleared by a new activation or endpoint.
     private var focusReportsUnsupported = false
+
+    /// The live connection's attempt and whether it may send focus reports,
+    /// for tests that follow focus suppression across reconnects.
+    var liveConnectionFocusState: (attemptID: UUID?, sendsFocusReports: Bool?) {
+        get async { (activeTransportAttemptID, await transport?.sendsFocusReports) }
+    }
     private var foregroundDiagnosticContext: ProfileContext?
     private var foregroundDiagnosticOperationsAtStart: [UUID: NativeForegroundOperationDiagnostic] = [:]
     private var foregroundDiagnosticIntentIDs: [UUID: UUID] = [:]
