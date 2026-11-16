@@ -2201,10 +2201,9 @@ final class NativeRelayLifecycle {
                     // happened. A second record here, made only once the main
                     // actor ran this task, read as a second admission.
                     break
-                case .nativeSyncReplayRequested:
-                    self.recordDiagnostic(.relay, .ordinaryReplay, .began, attemptID: transportAttemptID)
-                case .nativeSyncResynced:
-                    self.recordDiagnostic(.relay, .ordinaryReplay, .completed, attemptID: transportAttemptID)
+                case .nativeSyncReplayRequested, .nativeSyncResynced:
+                    // The core journals the replay's start and end itself.
+                    break
                 case .nativeSyncAcknowledged:
                     // The core emits the correlated acknowledgement diagnostic
                     // at this same boundary. Keep progress without a second
