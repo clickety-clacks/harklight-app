@@ -10,7 +10,13 @@ enum FocusReportReplyRoute: Equatable {
 /// The reader consumes a reply only when its ref belongs to a sent report.
 struct FocusReportReplyRouter {
     private var refs = Set<String>()
-    private(set) var supportsFocusReports = true
+    private(set) var supportsFocusReports: Bool
+
+    /// `supportsFocusReports` is false when this Server already refused focus
+    /// reports on an earlier connection, so this connection sends none.
+    init(supportsFocusReports: Bool = true) {
+        self.supportsFocusReports = supportsFocusReports
+    }
 
     mutating func register(ref: String) -> Bool {
         guard supportsFocusReports else { return false }

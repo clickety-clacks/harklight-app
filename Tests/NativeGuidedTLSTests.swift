@@ -1684,12 +1684,20 @@ final class NativeGuidedTLSTests: XCTestCase {
             personID: ExactText("single-admission-person"), deviceID: ExactText(identity.deviceID)),
             transportMode: .relay)
         let store = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        let diagnosticURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HarklightDiagnostics-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: diagnosticURL) }
+        let journal = NativeClientDiagnosticJournal(fileURL: diagnosticURL)
         let lifecycle = NativeRelayLifecycle()
         try await lifecycle.activate(store: store, context: context,
             relayURL: XCTUnwrap(URL(string: "wss://localhost:\(port)/relay")),
-            clientIdentity: identity.value, trustedRootDER: relay.rootDER)
+            clientIdentity: identity.value, trustedRootDER: relay.rootDER, diagnostics: journal)
         let first = await lifecycle.refreshResultFromTrustedRelay()
         XCTAssertTrue(first.relayConfirmed, lifecycle.refreshFailureMessage(for: context) ?? "no failure message")
+        for _ in 0..<50 { await Task.yield() }
+        let admissions = journal.events.filter { $0.phase == .relayAdmission && $0.transition == .completed }
+        XCTAssertEqual(admissions.count, 1,
+                       "One admission is journaled once, not once by the session and again by the lifecycle.")
         let connectionsBeforeDrop = relay.connectionCount
         let admissionsBeforeDrop = Self.admissions(in: answers)
 
@@ -1789,6 +1797,18 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertNil(attribution.observeReply(frame(#"{"v":1,"type":"delivery","seq":4}"#)))
         XCTAssertFalse(RelayReplyAttribution.mayBeReply(#"{"v":1,"type":"conversation","conversation_seq":9}"#))
         XCTAssertTrue(RelayReplyAttribution.mayBeReply(#"{"v":1,"type":"error","reason":"closed"}"#))
+    }
+
+    func testARelayThatRefusedFocusReportsGetsNoneOnItsNextConnection() {
+        var refused = FocusReportReplyRouter(supportsFocusReports: false)
+        XCTAssertFalse(refused.supportsFocusReports)
+        XCTAssertFalse(refused.register(ref: "focus-1"), "No focus report is sent to a Server that refused them.")
+        var fresh = FocusReportReplyRouter()
+        XCTAssertTrue(fresh.register(ref: "focus-2"))
+        let refusal = Data(#"{"v":1,"type":"error","ref":"focus-2","reason":"unknown_type"}"#.utf8) + Data([0x0A])
+        XCTAssertEqual(fresh.route(refusal, using: FocusReportWire()), .unsupported,
+                       "unknown_type is a benign refusal, not a connection failure.")
+        XCTAssertFalse(fresh.register(ref: "focus-3"))
     }
 
     func testFileDownloadSessionOpensNoRelayConnection() async throws {

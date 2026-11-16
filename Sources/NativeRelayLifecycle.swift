@@ -937,6 +937,9 @@ final class NativeRelayLifecycle {
     private var focusTransportID: UUID?
     private let foregroundProgress = ForegroundConnectProgressTracker()
     private var diagnosticJournal: NativeClientDiagnosticJournal?
+    /// Set when this activation's Server refused a focus report as an unknown
+    /// type. Cleared by a new activation or endpoint.
+    private var focusReportsUnsupported = false
     private var foregroundDiagnosticContext: ProfileContext?
     private var foregroundDiagnosticOperationsAtStart: [UUID: NativeForegroundOperationDiagnostic] = [:]
     private var foregroundDiagnosticIntentIDs: [UUID: UUID] = [:]
@@ -1058,6 +1061,10 @@ final class NativeRelayLifecycle {
                 guard let self,
                       self.refreshGeneration == generation,
                       self.focusTransportID == transportID else { return }
+                // No Server advertises focus reports; one that refuses them
+                // will refuse again, so later connections of this activation
+                // do not send them.
+                self.focusReportsUnsupported = true
                 NativeFocusReporter.shared.relaySessionDoesNotSupportFocus(transportID)
             }
         }
@@ -1095,6 +1102,7 @@ final class NativeRelayLifecycle {
                   serverStateCache: (any ServerStateCaching)? = nil) async throws {
         let generation = UUID()
         let transportAttemptID = UUID()
+        focusReportsUnsupported = false
         self.diagnosticJournal = diagnostics
         recordDiagnostic(.connection, .approvedConnection, .began,
                          attemptID: transportAttemptID, transportAttemptID: transportAttemptID)
@@ -1116,7 +1124,8 @@ final class NativeRelayLifecycle {
                                                               onViewShow: viewShowHandler(
                                                                 generation: generation,
                                                                 transportID: transportAttemptID),
-                                                              onDiagnostic: diagnosticSink())
+                                                              onDiagnostic: diagnosticSink(),
+                                                              focusReportsSupported: !focusReportsUnsupported)
         } catch {
             recordDiagnostic(.connection, .approvedConnection,
                              NativeDiagnosticCauseCode.failureTransition(for: error), error: error,
@@ -1202,7 +1211,8 @@ final class NativeRelayLifecycle {
                                                                 transportID: focusTransportID),
                                                               onViewShow: viewShowHandler(
                                                                 generation: migrationGeneration,
-                                                                transportID: focusTransportID))
+                                                                transportID: focusTransportID),
+                                                              focusReportsSupported: true)
         var nextCore: NativeRelayCore?
         do {
             nextCore = try NativeRelayCore(store: current.store, context: current.context,
@@ -1227,6 +1237,7 @@ final class NativeRelayLifecycle {
             configuration = (current.store, current.context, relayURL, current.identity,
                              current.rootDER, current.serverStateCache)
             observeNetworkPath(generation: migrationGeneration)
+            focusReportsUnsupported = false
             nextCore = nil
             await priorCore.deactivate()
             await priorTransport.close()
@@ -2129,7 +2140,8 @@ final class NativeRelayLifecycle {
                                                               onViewShow: viewShowHandler(
                                                                 generation: generation,
                                                                 transportID: transportAttemptID),
-                                                              onDiagnostic: diagnosticSink())
+                                                              onDiagnostic: diagnosticSink(),
+                                                              focusReportsSupported: !focusReportsUnsupported)
         } catch {
             recordDiagnostic(.connection, .approvedConnection,
                              NativeDiagnosticCauseCode.failureTransition(for: error), error: error,
@@ -2185,7 +2197,10 @@ final class NativeRelayLifecycle {
                 case .webSocketOpened:
                     self.recordDiagnostic(.connection, .webSocketOpen, .completed, attemptID: transportAttemptID)
                 case .relayAdmitted:
-                    self.recordDiagnostic(.connection, .relayAdmission, .completed, attemptID: transportAttemptID)
+                    // The session journals this admission itself, timed when it
+                    // happened. A second record here, made only once the main
+                    // actor ran this task, read as a second admission.
+                    break
                 case .nativeSyncReplayRequested:
                     self.recordDiagnostic(.relay, .ordinaryReplay, .began, attemptID: transportAttemptID)
                 case .nativeSyncResynced:
