@@ -384,7 +384,180 @@ final class NativeGuidedTLSTests: XCTestCase {
         return record
     }
 
+    @discardableResult
+    private func configurePushRoutingFlag(_ enabled: Bool, context: ProfileContext? = nil,
+                                          flags: RemoteFeatureFlags? = nil) -> RemoteFeatureFlags {
+        let flags = flags ?? NativeRelayLifecycle.shared.featureFlags
+        let record = notificationRecord()
+        let context = context ?? ProfileContext(identity: ProfileIdentity(
+            trustedRelayAuthority: ExactText(record.profileAuthority),
+            personID: ExactText(record.personID!), deviceID: ExactText(record.deviceID)), transportMode: .relay)
+        let id = UUID()
+        flags.connect(context: context, connectionID: id)
+        flags.replace(RemoteFeatureFlagSnapshot(field: .object([
+            JSONMember("server_matched_push_routing", .bool(enabled))
+        ])), connectionID: id)
+        return flags
+    }
+
+    func testDisabledPushRoutingPreservesLegacyAndAvoidsDepartureKeychainReads() throws {
+        let service = "Harklight.push-default-off." + UUID().uuidString
+        defer { deleteEnrollmentRecord(service: service) }
+        let flags = RemoteFeatureFlags()
+        XCTAssertFalse(flags.isEnabled(.serverMatchedPushRouting))
+        let record = notificationRecord()
+        try saveEnrollmentRecord(record, service: service)
+        let identity = try XCTUnwrap(NativeNotificationProfile(record)).identity
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        let key = "push-departure-" + SHA256.hash(data: try encoder.encode(identity))
+            .map { String(format: "%02x", $0) }.joined()
+        let corrupted = Data("malformed departure cache".utf8)
+        let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service, kSecAttrAccount as String: key,
+            kSecValueData as String: corrupted,
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly]
+        XCTAssertEqual(SecItemAdd(query as CFDictionary, nil), errSecSuccess)
+        let store = NativeEnrollmentStore(service: service, featureFlags: flags)
+        // A new state read here would throw, proving that OFF uses the old path.
+        XCTAssertNil(try store.pendingPushRegistration(address: record.pushBinding!.address, for: record.deviceID))
+        XCTAssertFalse(try store.hasPushDeparture(for: identity))
+        try store.updateServerID(String(repeating: "a", count: 32), for: identity)
+        try store.preparePushRemoval(for: record)
+        try store.cancelPushDeparture(for: record)
+        try store.finishPushDeparture(for: record)
+        XCTAssertEqual(try store.load(), record, "OFF makes no new identity or removal-cache writes.")
+        let status = PushBindingStatus(revision: record.pushBinding!.revision, state: "blocked_configuration",
+            bindingID: notificationBindingID, profile: .production)
+        XCTAssertNotNil(try store.pendingBlockedConfigurationRegistration(address: record.pushBinding!.address,
+            for: record.deviceID, status: status, profile: .production),
+            "OFF must not consult corrupt departure state before legacy re-registration.")
+        let value = try notificationPayload().canonicalJSON
+            .replacingOccurrences(of: #""type":"sync""#, with: #""type":"sync","server":"malformed""#)
+        let payload = try JSONValue.parse(Data(value.utf8))
+        let locator = try XCTUnwrap(NativeNotificationLocator(payload))
+        XCTAssertNotNil(locator.profile(in: [record]), "OFF ignores even malformed optional server origin.")
+        configurePushRoutingFlag(true, flags: flags)
+        XCTAssertThrowsError(try store.hasPushDeparture(for: identity),
+                             "The same malformed state is observable when the feature is ON.")
+    }
+
+    func testFlagOffDefersExistingPendingRemovalAndOnResumes() async throws {
+        let service = "Harklight.push-flag-toggle." + UUID().uuidString
+        defer { deleteEnrollmentRecord(service: service) }
+        let flags = RemoteFeatureFlags()
+        configurePushRoutingFlag(true, flags: flags)
+        let record = notificationRecord()
+        try saveEnrollmentRecord(record, service: service)
+        let store = NativeEnrollmentStore(service: service, featureFlags: flags)
+        let identity = try XCTUnwrap(NativeNotificationProfile(record)).identity
+        try store.preparePushRemoval(for: record)
+        let failed = PushRemovalProbeSession(identity: identity, results: [nil])
+        do { try await store.retryPendingPushRemoval(using: failed) } catch {}
+        configurePushRoutingFlag(false, flags: flags)
+        let off = PushRemovalProbeSession(identity: identity, results: [.removed])
+        try await store.retryPendingPushRemoval(using: off)
+        let offSends = await off.sent
+        XCTAssertTrue(offSends.isEmpty)
+        XCTAssertFalse(try store.hasPushDeparture(for: identity))
+        XCTAssertNotNil(try store.pendingPushRegistration(address: String(repeating: "b", count: 64),
+                                                          for: record.deviceID),
+                        "OFF restores the normal token-update path despite pending ON-era removal.")
+        configurePushRoutingFlag(true, flags: flags)
+        let resumed = PushRemovalProbeSession(identity: identity, results: [.removed])
+        try await store.retryPendingPushRemoval(using: resumed)
+        let original = await failed.sent
+        let retried = await resumed.sent
+        XCTAssertEqual(original, retried, "OFF defers, rather than loses or replaces, the pending operation.")
+    }
+
+    func testCurrentSyncOffPreventsPriorOnRemovalDrain() async throws {
+        configurePushRoutingFlag(true)
+        defer { NativeRelayLifecycle.shared.featureFlags.reset() }
+        let namespace = "Harklight.current-sync-push-off." + UUID().uuidString
+        defer { deleteEnrollmentRecord(service: namespace) }
+        let record = notificationRecord()
+        try saveEnrollmentRecord(record, service: namespace)
+        let enrollment = NativeEnrollmentStore(service: namespace)
+        try enrollment.preparePushRemoval(for: record)
+        let context = ProfileContext(identity: try XCTUnwrap(NativeNotificationProfile(record)).identity,
+                                     transportMode: .relay)
+        let domain = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        let key = try XCTUnwrap(NativeNotificationLocator(notificationPayload())).request
+        let payload = try JSONValue.parse(Data(#"{"title":"Still synchronizes"}"#.utf8))
+        let removal = PushRemovalProbeSession(identity: context.identity, results: [.removed])
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let result = try await NativeRelayLifecycle.shared.confirmInProcessSessionForTesting(
+            store: domain, context: context,
+            session: ReplyCheckpointSession(identity: context.identity, key: key, payload: payload,
+                featureFlagValues: .object([JSONMember("server_matched_push_routing", .bool(false))])),
+            serverStateCache: FileServerStateCache(identity: context.identity,
+                                                  fileURL: directory.appendingPathComponent("cache.json")),
+            pushRemovalSession: removal, enrollmentStore: enrollment)
+        XCTAssertTrue(result.relayConfirmed)
+        let offSends = await removal.sent
+        XCTAssertTrue(offSends.isEmpty, "The current OFF sync snapshot must precede reconnect drain.")
+        configurePushRoutingFlag(true, context: context)
+        try await enrollment.retryPendingPushRemoval(using: removal)
+        let resumed = await removal.sent
+        XCTAssertEqual(resumed.count, 1, "OFF must retain the pending operation.")
+        await NativeRelayLifecycle.shared.deactivate()
+    }
+
+    func testResyncedSnapshotControlsServerReaderAndRemoval() async throws {
+        for enabled in [false, true] {
+            let namespace = "Harklight.sync-push-flag." + UUID().uuidString
+            let installation = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
+            defer {
+                SecItemDelete([kSecClass as String: kSecClassCertificate,
+                               kSecAttrLabel as String: installation.label] as CFDictionary)
+                SecItemDelete([kSecClass as String: kSecClassKey,
+                               kSecAttrApplicationTag as String: Data(namespace.utf8)] as CFDictionary)
+            }
+            let server = enabled ? String(repeating: "a", count: 32) : "malformed"
+            let relay = try LocalRelayWebSocket(expectedDevice: installation.deviceID) { text in
+                let value = try? JSONValue.parse(Data(text.utf8))
+                XCTAssertEqual(value?.uniqueValue(named: "type")?.stringValue?.rawValue, "resync")
+                return [
+                    #"{"v":1,"type":"ok","ref":"native-sync"}"#,
+                    "{\"v\":1,\"type\":\"resynced\",\"seq\":0,\"server\":\"" + server +
+                    "\",\"feature_flags\":{\"server_matched_push_routing\":" + (enabled ? "true" : "false") + "}}"
+                ]
+            }
+            defer { relay.close() }
+            let port = try await relay.start()
+            let context = ProfileContext(identity: ProfileIdentity(trustedRelayAuthority: ExactText("localhost"),
+                personID: ExactText("test-person"), deviceID: ExactText(installation.deviceID)), transportMode: .relay)
+            let flags = RemoteFeatureFlags()
+            configurePushRoutingFlag(!enabled, context: context, flags: flags)
+            let id = UUID()
+            flags.connect(context: context, connectionID: id)
+            let session = try URLSessionInstallationSession(profile: context,
+                relayURL: XCTUnwrap(URL(string: "wss://localhost:\(port)/relay")),
+                clientIdentity: TrustedKeychainIdentity(installation.value), trustedRootDER: relay.rootDER,
+                serverMatchedPushRoutingEnabled: { await flags.isEnabled(.serverMatchedPushRouting) })
+            try await session.resync(RelayWire(profile: context).resync(since: 0)) { bytes in
+                let frame = try JSONValue.parse(bytes)
+                if frame.uniqueValue(named: "type")?.stringValue?.rawValue == "resynced" {
+                    await flags.replace(RemoteFeatureFlagSnapshot(field: frame.uniqueValue(named: "feature_flags")),
+                                        connectionID: id)
+                }
+            }
+            let learned = await session.serverID
+            XCTAssertEqual(learned, enabled ? server : nil,
+                           "Use the just-accepted snapshot; malformed server is ignored while OFF.")
+            configurePushRoutingFlag(false, context: context, flags: flags)
+            let removal = try await session.removePush(PushRemovalOperation(revision: 1))
+            XCTAssertEqual(removal, .deferred, "A current OFF accessor must prevent the actual wire send.")
+            await session.close()
+        }
+    }
+
     func testPushServerIdentityParsingAndCurrentAccountRouting() throws {
+        configurePushRoutingFlag(true)
+        defer { NativeRelayLifecycle.shared.featureFlags.reset() }
+
         let current = String(repeating: "a", count: 32)
         let other = String(repeating: "b", count: 32)
         func payload(server: String?) throws -> JSONValue {
@@ -400,9 +573,9 @@ final class NativeGuidedTLSTests: XCTestCase {
         }
         var record = notificationRecord()
         record.serverID = current
-        let matching = try XCTUnwrap(NativeNotificationLocator(payload(server: current)))
+        let matching = try XCTUnwrap(NativeNotificationLocator(payload(server: current), serverMatchedRouting: true))
         XCTAssertEqual(matching.serverID, current)
-        XCTAssertNotNil(matching.profile(in: [record]))
+        XCTAssertNotNil(matching.profile(in: [record], serverMatchedRouting: true))
         let context = ProfileContext(identity: try XCTUnwrap(NativeNotificationProfile(record)).identity,
                                      transportMode: .relay)
         let domain = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
@@ -422,19 +595,30 @@ final class NativeGuidedTLSTests: XCTestCase {
         router.receive(try payload(server: other), opened: true)
         XCTAssertNil(router.resolve(records: [record], context: context, requests: requests, synchronized: true))
         XCTAssertNil(router.intent?.locator, "A left-server tap falls back to the inbox.")
-        let legacy = try XCTUnwrap(NativeNotificationLocator(payload(server: nil)))
+        router.receive(try payload(server: other), opened: true)
+        configurePushRoutingFlag(false, context: context)
+        XCTAssertEqual(router.resolve(records: [record], context: context, requests: requests, synchronized: true),
+                       matching.request, "OFF restores legacy routing even for a pending ON-era tap.")
+        router.receive(try payload(server: other), opened: true)
+        configurePushRoutingFlag(true, context: context)
+        XCTAssertNil(router.resolve(records: [record], context: context, requests: requests, synchronized: true),
+                     "Enabling the feature must re-check the origin of a pending OFF-era tap.")
+        let legacy = try XCTUnwrap(NativeNotificationLocator(payload(server: nil), serverMatchedRouting: true))
         XCTAssertNil(legacy.serverID)
-        XCTAssertNotNil(legacy.profile(in: [record]))
-        let unknown = try XCTUnwrap(NativeNotificationLocator(payload(server: other)))
+        XCTAssertNotNil(legacy.profile(in: [record], serverMatchedRouting: true))
+        let unknown = try XCTUnwrap(NativeNotificationLocator(payload(server: other), serverMatchedRouting: true))
         XCTAssertEqual(unknown.serverID, other)
-        XCTAssertNil(unknown.profile(in: [record]), "A server we have left falls back to inbox.")
+        XCTAssertNil(unknown.profile(in: [record], serverMatchedRouting: true), "A server we have left falls back to inbox.")
         record.serverID = nil
-        XCTAssertNil(matching.profile(in: [record]), "An explicit origin must match a known current server.")
-        XCTAssertNotNil(legacy.profile(in: [record]), "A missing push origin keeps active-account resolution.")
-        XCTAssertNil(NativeNotificationLocator(try payload(server: "invalid")))
+        XCTAssertNil(matching.profile(in: [record], serverMatchedRouting: true), "An explicit origin must match a known current server.")
+        XCTAssertNotNil(legacy.profile(in: [record], serverMatchedRouting: true), "A missing push origin keeps active-account resolution.")
+        XCTAssertNil(NativeNotificationLocator(try payload(server: "invalid"), serverMatchedRouting: true))
     }
 
     func testAuthenticatedServerIdentityCacheAndArchiveRoundTrip() throws {
+        configurePushRoutingFlag(true)
+        defer { NativeRelayLifecycle.shared.featureFlags.reset() }
+
         let service = "Harklight.server-identity." + UUID().uuidString
         defer { deleteEnrollmentRecord(service: service) }
         let record = notificationRecord()
@@ -497,6 +681,7 @@ final class NativeGuidedTLSTests: XCTestCase {
             try await lifecycle.activate(store: domain, context: context,
                 relayURL: XCTUnwrap(URL(string: "wss://localhost:\(port)/relay")),
                 clientIdentity: installation.value, trustedRootDER: relay.rootDER)
+            configurePushRoutingFlag(true, context: context)
             var removalObserved = false
             // At /device/remove the pending push operation must already be
             // acknowledged on the relay, for both departure entry points.
@@ -568,7 +753,7 @@ final class NativeGuidedTLSTests: XCTestCase {
             personID: ExactText("test-person"), deviceID: ExactText(installation.deviceID)), transportMode: .relay)
         let session = try URLSessionInstallationSession(profile: context,
             relayURL: XCTUnwrap(URL(string: "wss://localhost:\(port)/relay")),
-            clientIdentity: TrustedKeychainIdentity(installation.value), trustedRootDER: relay.rootDER)
+            clientIdentity: TrustedKeychainIdentity(installation.value), trustedRootDER: relay.rootDER, serverMatchedPushRoutingEnabled: { true })
         do {
             _ = try await session.removePush(PushRemovalOperation(revision: 1))
             XCTFail("The fixture refuses push removal.")
@@ -580,6 +765,9 @@ final class NativeGuidedTLSTests: XCTestCase {
     }
 
     func testKeptAccountCancelsUnacknowledgedPushRemovalAndRestoresRegistration() async throws {
+        configurePushRoutingFlag(true)
+        defer { NativeRelayLifecycle.shared.featureFlags.reset() }
+
         let service = "Harklight.cancel-push-departure." + UUID().uuidString
         defer { deleteEnrollmentRecord(service: service) }
         let record = notificationRecord()
@@ -603,6 +791,9 @@ final class NativeGuidedTLSTests: XCTestCase {
     }
 
     func testPendingPushRemovalFailureDoesNotBlockRefreshProjection() async throws {
+        configurePushRoutingFlag(true)
+        defer { NativeRelayLifecycle.shared.featureFlags.reset() }
+
         let namespace = "Harklight.nonfatal-push-drain." + UUID().uuidString
         defer { deleteEnrollmentRecord(service: namespace) }
         let record = notificationRecord()
@@ -619,7 +810,8 @@ final class NativeGuidedTLSTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: directory) }
         let result = try await NativeRelayLifecycle.shared.confirmInProcessSessionForTesting(
             store: domain, context: context,
-            session: ReplyCheckpointSession(identity: context.identity, key: key, payload: payload),
+            session: ReplyCheckpointSession(identity: context.identity, key: key, payload: payload,
+                                            featureFlagValues: .object([JSONMember("server_matched_push_routing", .bool(true))])),
             serverStateCache: FileServerStateCache(identity: context.identity,
                                                   fileURL: directory.appendingPathComponent("cache.json")),
             pushRemovalSession: refused, enrollmentStore: enrollment)
@@ -661,7 +853,7 @@ final class NativeGuidedTLSTests: XCTestCase {
             personID: ExactText("test-person"), deviceID: ExactText(installation.deviceID)), transportMode: .relay)
         let session = try URLSessionInstallationSession(profile: context,
             relayURL: XCTUnwrap(URL(string: "wss://localhost:\(port)/relay")),
-            clientIdentity: TrustedKeychainIdentity(installation.value), trustedRootDER: relay.rootDER)
+            clientIdentity: TrustedKeychainIdentity(installation.value), trustedRootDER: relay.rootDER, serverMatchedPushRoutingEnabled: { true })
         let first = try await session.removePush(operation)
         let duplicate = try await session.removePush(operation)
         XCTAssertEqual(first, .removed)
@@ -676,6 +868,9 @@ final class NativeGuidedTLSTests: XCTestCase {
     }
 
     func testPendingPushRemovalSurvivesOfflineDepartureAndRetriesSameOperationOnReconnect() async throws {
+        configurePushRoutingFlag(true)
+        defer { NativeRelayLifecycle.shared.featureFlags.reset() }
+
         let service = "Harklight.pending-push-remove." + UUID().uuidString
         defer { deleteEnrollmentRecord(service: service) }
         let record = notificationRecord()
@@ -711,6 +906,9 @@ final class NativeGuidedTLSTests: XCTestCase {
     }
 
     func testDisabledPushRemovalCompletesAndStaleRemovalReloadsRevision() async throws {
+        configurePushRoutingFlag(true)
+        defer { NativeRelayLifecycle.shared.featureFlags.reset() }
+
         let service = "Harklight.push-remove-revisions." + UUID().uuidString
         defer { deleteEnrollmentRecord(service: service) }
         let record = notificationRecord()

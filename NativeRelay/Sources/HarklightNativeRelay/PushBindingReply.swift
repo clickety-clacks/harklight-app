@@ -138,7 +138,7 @@ public struct PushRemovalOperation: Codable, Equatable, Sendable {
     }
 }
 
-public enum PushRemovalResult: Sendable, Equatable { case removed, disabled, stale }
+public enum PushRemovalResult: Sendable, Equatable { case removed, disabled, stale, deferred }
 
 public protocol AuthenticatedPushRemovalSession: Sendable {
     var authenticatedIdentity: ProfileIdentity { get }

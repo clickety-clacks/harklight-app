@@ -199,7 +199,8 @@ final class NativeAppLaunch {
             await NativeRelayLifecycle.shared.removePushBeforeDeparture(for: record, enrollment: self.enrollment)
         }
         guidedJoin.didKeepCurrentAccount = { [weak self] record in
-            guard let self, case let .live(presentation) = self.state,
+            guard NativeRelayLifecycle.shared.featureFlags.isEnabled(.serverMatchedPushRouting),
+                  let self, case let .live(presentation) = self.state,
                   !presentation.isReadOnly, !presentation.isLocalExample,
                   self.activeEnrollmentRecord?.sameNotificationProfile(as: record) == true else { return }
             try self.enrollment.cancelPushDeparture(for: record)

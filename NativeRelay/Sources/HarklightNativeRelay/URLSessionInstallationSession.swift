@@ -63,6 +63,7 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
     private var replyAttribution = RelayReplyAttribution()
     private var connectionFailure: (any Error)?
     private let profileContext: ProfileContext
+    private let serverMatchedPushRoutingEnabled: @Sendable () async -> Bool
     private let onProgress: @Sendable (NativeRelayProgressEvent) -> Void
     private let onDiagnostic: NativeClientDiagnosticSink
     private let onFocusReportingReady: @Sendable () -> Void
@@ -99,6 +100,7 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
                 clientIdentity: TrustedKeychainIdentity,
                 trustedRootDER: Data,
                 attemptID: UUID? = nil,
+                serverMatchedPushRoutingEnabled: @escaping @Sendable () async -> Bool = { false },
                 onProgress: @escaping @Sendable (NativeRelayProgressEvent) -> Void = { _ in },
                 onFocusReportingReady: @escaping @Sendable () -> Void = {},
                 onFocusReportingUnsupported: @escaping @Sendable () -> Void = {},
@@ -133,6 +135,7 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
         authenticatedIdentity = profile.identity
         relayEndpointHost = host.lowercased()
         profileContext = profile
+        self.serverMatchedPushRoutingEnabled = serverMatchedPushRoutingEnabled
         self.onProgress = onProgress
         self.onFocusReportingReady = onFocusReportingReady
         self.onFocusReportingUnsupported = onFocusReportingUnsupported
@@ -262,10 +265,12 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
                 guard kind == "delivery" || kind == "lifecycle" || kind == "resynced" else {
                     throw InstallationTransportError.unexpectedServerFrame
                 }
-                if kind == "resynced" {
-                    serverID = try RelayServerIdentity.read(from: value)
-                }
                 try await consume(frame)
+                if kind == "resynced" {
+                    if await serverMatchedPushRoutingEnabled() {
+                        serverID = try RelayServerIdentity.read(from: value)
+                    } else { serverID = nil }
+                }
                 if kind == "resynced" {
                     startPostCheckpointReader()
                     return
@@ -379,10 +384,12 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
                 } else if (event == "conversation" && ordinary) || (event == "delivery" && conversation) {
                     continue
                 }
-                if kind == "resynced" {
-                    serverID = try RelayServerIdentity.read(from: value)
-                }
                 try await consume(frame)
+                if kind == "resynced" {
+                    if await serverMatchedPushRoutingEnabled() {
+                        serverID = try RelayServerIdentity.read(from: value)
+                    } else { serverID = nil }
+                }
                 if kind == end { return }
             }
         } catch InstallationTransportError.conversationsUnavailable {
@@ -744,6 +751,7 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
     public func removePush(_ operation: PushRemovalOperation) async throws -> PushRemovalResult {
         await socketExchangeGate.enter()
         defer { socketExchangeGate.leave() }
+        guard await serverMatchedPushRoutingEnabled() else { return .deferred }
         do {
             try await send(operation.frame())
             while true {
@@ -804,6 +812,7 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
                 }
             }
         } catch InstallationTransportError.serverRejected {
+            if !(await serverMatchedPushRoutingEnabled()) { close() }
             throw InstallationTransportError.serverRejected
         } catch {
             close()
