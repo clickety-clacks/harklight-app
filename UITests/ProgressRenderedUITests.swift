@@ -39,7 +39,7 @@ final class ProgressRenderedUITests: XCTestCase {
         let newMore = app.buttons["new-message-area-more"]
         reveal(newMore, in: app)
         newMore.tap()
-        reveal(newHeader, in: app)
+        reveal(newHeader, in: app, towardTop: true)
         XCTAssertEqual(newHeader.label, "New · 7 of 7")
         for _ in 0..<12 where !progressHeader.isHittable {
             app.collectionViews.firstMatch.swipeDown()
@@ -48,9 +48,11 @@ final class ProgressRenderedUITests: XCTestCase {
         app.terminate()
     }
 
-    private func reveal(_ element: XCUIElement, in app: XCUIApplication) {
+    private func reveal(_ element: XCUIElement, in app: XCUIApplication,
+                        towardTop: Bool = false) {
         for _ in 0..<12 where !element.isHittable {
-            app.collectionViews.firstMatch.swipeUp()
+            let list = app.collectionViews.firstMatch
+            if towardTop { list.swipeDown() } else { list.swipeUp() }
         }
         XCTAssertTrue(element.exists, app.debugDescription)
     }
