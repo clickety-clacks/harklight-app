@@ -11,7 +11,7 @@ Read [HARKLIGHT_GUIDANCE.md](HARKLIGHT_GUIDANCE.md) before adding, changing, or 
 - Where hosted CI is queued and not running, an exact-head local build plus focused tests through `Scripts/verify.sh` stands in for it. A job that runs and fails on something new blocks the merge.
 - Rebase or merge `main` into your branch often, so it never drifts far from `main`.
 - Delete the branch when it merges.
-- Don't create release, candidate, integration or notes branches. A release is a tag on a `main` commit, and its release notes land on `main` like any other change.
+- Don't create release, candidate, integration or notes branches. A release is a tag on a `main` commit, and its release notes land on `main` like any other change. The one sanctioned exception is `public-testflight`, described below.
 - If `main` breaks, fixing it comes before any other work. Revert first when that's the fastest way back to green.
 
 ## Builds and releases
@@ -19,6 +19,14 @@ Read [HARKLIGHT_GUIDANCE.md](HARKLIGHT_GUIDANCE.md) before adding, changing, or 
 - Every merge to `main` triggers an Xcode Cloud build that goes to internal TestFlight automatically. There is nothing to start and nothing to approve. Agents never start Xcode Cloud workflows by hand.
 - Internal TestFlight builds, made automatically on every merge to `main`, follow the owner's ship-to-me rule and are not a release. A release for this app means App Store or public/external TestFlight distribution. It is a separate step outside the automatic build path and needs its own existing authority; this document grants none. Every change in a release must have a clean independent review before that release is tagged.
 - If a shipped build is bad, ship a fix or revert from `main` as the next build. Don't hand-patch a build.
+
+### The `public-testflight` branch
+
+`public-testflight` is a deployment pointer only. It triggers the Xcode Cloud "Public testflight" (external) workflow.
+
+- Only ever fast-forward it to an existing `main` commit that has passed the clean independent-review audit. It never gets commits of its own or development work.
+- Moving it starts an external build, so every change in that commit must have a clean independent review first.
+- Switching that workflow to a tag trigger is a pending Xcode Cloud configuration change. It needs the owner's or the executive's authority; do not make it yourself.
 
 ## Large features behind a feature flag
 
