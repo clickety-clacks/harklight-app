@@ -36,6 +36,11 @@ final class AdaptiveDuoNavigationUITests: XCTestCase {
 
         let row = app.descendants(matching: .any)["request-row-facilities-01"]
         XCTAssertTrue(row.waitForExistence(timeout: 10), app.debugDescription)
+        let presentation = splitPresentation(in: app)
+        XCTAssertTrue(presentation.waitForExistence(timeout: 5), app.debugDescription)
+        let before = presentation.value as? String ?? ""
+        XCTAssertTrue(["presentation=compact", "presentation=overlay", "presentation=sideBySide"].contains(before),
+                      "Establish the actual list presentation before selection: \(before)")
         attachScreenshot("portrait-master-before-selection")
         row.tap()
 
@@ -46,14 +51,14 @@ final class AdaptiveDuoNavigationUITests: XCTestCase {
         XCTAssertTrue(heading.label.contains("Facilities desk"), heading.debugDescription)
         let diagnostic = app.descendants(matching: .any)["inbox-ui-diagnostics"].firstMatch
         XCTAssertTrue(diagnostic.waitForExistence(timeout: 5), app.debugDescription)
-        if diagnostic.label.contains("sizeClass=regular") {
+        if before == "presentation=sideBySide" {
             XCTAssertTrue(row.isHittable,
-                          "A regular-width split view keeps the Inbox row beside its detail. \(diagnostic.label)")
+                          "A side-by-side split view keeps the Inbox row beside its detail. \(diagnostic.label)")
             assertSideBySide(listRow: row, detailHeading: heading, in: app)
             attachScreenshot("portrait-side-by-side-detail-after-selection")
         } else {
             XCTAssertFalse(row.isHittable,
-                           "A compact-width portrait selection closes the master overlay. \(diagnostic.label)")
+                           "Selection dismisses an overlaid or compact list. \(diagnostic.label)")
             attachScreenshot("portrait-detail-after-selection")
             let back = workspaceBackButton(in: app)
             XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
@@ -65,29 +70,65 @@ final class AdaptiveDuoNavigationUITests: XCTestCase {
         attachHierarchy("portrait-selection-hierarchy", app: app)
     }
 
-    func testSelectingAnotherMessageFromPortraitOverlayUpdatesDetailAndDismissesIt() {
+    func testSelectingAnotherMessageFromPortraitOverlayUpdatesDetailAndDismissesIt() throws {
+        try assertReopenedListDismissesAfterSelection(presentation: "overlay")
+    }
+
+    func testSelectingAnotherMessageFromCompactListUpdatesDetailAndDismissesIt() throws {
+        try assertReopenedListDismissesAfterSelection(presentation: "compact")
+    }
+
+    private func assertReopenedListDismissesAfterSelection(presentation expected: String) throws {
         XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()
         app.launchArguments = ["--reset-attention-fixture", "--harklight-samples",
                                "--harklight-ui-diagnostics"]
+        if expected == "overlay" { app.launchArguments.append("--harklight-test-overlay") }
         app.launch()
+        let initialSidebar = app.buttons["Show Sidebar"]
+        if initialSidebar.waitForExistence(timeout: 3) && initialSidebar.isHittable {
+            initialSidebar.tap()
+        }
 
         let facilities = app.descendants(matching: .any)["request-row-facilities-01"]
         let review = app.descendants(matching: .any)["request-row-review-01"]
         XCTAssertTrue(facilities.waitForExistence(timeout: 10), app.debugDescription)
         XCTAssertTrue(review.waitForExistence(timeout: 5), app.debugDescription)
+        let probe = splitPresentation(in: app)
+        XCTAssertTrue(probe.waitForExistence(timeout: 5), app.debugDescription)
+        let initial = probe.value as? String ?? ""
+        if expected == "overlay", initial == "presentation=compact" {
+            throw XCTSkip("A collapsed phone cannot present a regular-width overlay; the compact test covers it.")
+        }
+        if expected == "compact", initial != "presentation=compact" {
+            throw XCTSkip("This case requires a collapsed phone; the iPad cases cover expanded presentations.")
+        }
+        XCTAssertEqual(initial, "presentation=\(expected)",
+                       "Establish the native presentation before the first selection too.")
         facilities.tap()
 
         let card = app.scrollViews["message-card-scroll"]
         XCTAssertTrue(card.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(card.staticTexts["Facilities desk"].waitForExistence(timeout: 5),
                       app.debugDescription)
+        let sidebar = app.buttons["Show Sidebar"]
         let back = workspaceBackButton(in: app)
-        XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
-        back.tap()
+        if !review.isHittable {
+            if sidebar.exists && sidebar.isHittable {
+                sidebar.tap()
+            } else {
+                XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
+                back.tap()
+            }
+        }
         XCTAssertTrue(review.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(review.isHittable, app.debugDescription)
-        attachScreenshot("portrait-overlay-before-second-selection")
+        let presentation = splitPresentation(in: app)
+        XCTAssertTrue(presentation.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertEqual(presentation.value as? String, "presentation=\(expected)",
+                       "This case must exercise the real \(expected) presentation before selection.")
+        attachScreenshot("\(expected)-before-second-selection")
+        attachHierarchy("\(expected)-before-second-selection-hierarchy", app: app)
 
         review.tap()
 
@@ -118,6 +159,10 @@ final class AdaptiveDuoNavigationUITests: XCTestCase {
         let review = app.descendants(matching: .any)["request-row-review-01"]
         XCTAssertTrue(facilities.waitForExistence(timeout: 10), app.debugDescription)
         XCTAssertTrue(review.waitForExistence(timeout: 5), app.debugDescription)
+        let presentation = splitPresentation(in: app)
+        XCTAssertTrue(presentation.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertEqual(presentation.value as? String, "presentation=sideBySide",
+                       "Establish adjacent columns before selection, not just regular width.")
         attachScreenshot("landscape-list-and-empty-detail-before-selection")
         facilities.tap()
 
@@ -144,9 +189,9 @@ final class AdaptiveDuoNavigationUITests: XCTestCase {
     }
 
     func testPortraitSelectionKeepsListAndDetailVisible() {
-        // On a large iPad, NavigationSplitView keeps both columns visible in
-        // portrait. Compare the actual row and detail heading; the hosting
-        // scroll and collection views report pane-local accessibility frames.
+        // Run on an iPad that actually tiles both columns in portrait.
+        // Size class alone cannot establish that presentation. Compare the row
+        // and heading too; scroll views report pane-local accessibility frames.
         XCUIDevice.shared.orientation = .landscapeLeft
         let app = XCUIApplication()
         app.launchArguments = ["--reset-attention-fixture", "--harklight-ui-diagnostics"]
@@ -181,6 +226,10 @@ final class AdaptiveDuoNavigationUITests: XCTestCase {
         XCTAssertTrue(review.isHittable,
                       "The Inbox row remains available beside the detail. \(app.debugDescription)")
         XCTAssertTrue(heading.label.contains("Facilities desk"), heading.debugDescription)
+        let presentation = splitPresentation(in: app)
+        XCTAssertTrue(presentation.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertEqual(presentation.value as? String, "presentation=sideBySide",
+                       "This case requires actual side-by-side portrait columns.")
         assertSideBySide(listRow: facilities, detailHeading: heading, in: app)
         attachScreenshot("portrait-list-and-detail-before-selection")
 
@@ -265,6 +314,10 @@ final class AdaptiveDuoNavigationUITests: XCTestCase {
             XCTAssertTrue(row.waitForExistence(timeout: 5),
                           "The confirmed Seen row appears in Replied.")
         }
+    }
+
+    private func splitPresentation(in app: XCUIApplication) -> XCUIElement {
+        app.descendants(matching: .any)["inbox-split-presentation"].firstMatch
     }
 
     private func attachScreenshot(_ name: String) {
