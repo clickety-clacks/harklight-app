@@ -566,13 +566,13 @@ enum SampleCatalog {
         sender: "Calendar assistant",
         initials: "CA",
         title: "Detector acceptance",
-        body: "Select this sentence to verify that copying remains available.\n\nhttps://example.invalid/detector-acceptance\n\nNovember 4, 2027 at 2:00 PM.",
+        body: "Select this sentence to verify that copying remains available.\n\nhttps://example.invalid/detector-acceptance\n\n+1 (415) 555-0136\n\n1 Infinite Loop, Cupertino, CA 95014\n\nNovember 4, 2027 at 2:00 PM.",
         options: [],
         deadline: nil,
         missed: false,
         revised: false,
         chatUnread: false,
-        hasChat: false,
+        hasChat: true,
         fixtureCreatedAtMilliseconds: 1_790_000_000_000)
 
     private static let markdownAcceptanceMessage = SampleMessage(

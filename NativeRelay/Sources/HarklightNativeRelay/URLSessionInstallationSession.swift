@@ -69,7 +69,7 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
     private let onFocusReportingUnsupported: @Sendable () -> Void
     private let onViewShow: @Sendable (Data) -> Void
     private let focusReportWire = FocusReportWire()
-    private var focusReportReplyRouter = FocusReportReplyRouter()
+    private var focusReportReplyRouter: FocusReportReplyRouter
     private let attemptID: UUID?
     private var postCheckpointReader: Task<Void, Never>?
     private var postCheckpointReaderOwnsSocket = false
@@ -139,6 +139,7 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
         self.onViewShow = onViewShow
         self.attemptID = attemptID
         self.onDiagnostic = onDiagnostic
+        focusReportReplyRouter = FocusReportReplyRouter()
         let pingCoordinator = WebSocketPingCoordinator()
         self.pingCoordinator = pingCoordinator
         let delegate = DeviceTLSDelegate(host: host, identity: clientIdentity.value, root: root,
@@ -316,6 +317,9 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
     /// A connection-health check is a WebSocket control frame, not an application
     /// exchange. It must remain usable while replay or an ACK owns that gate.
     /// Only URLSession's reported failure closes the connection; no timer races it.
+    /// Whether this connection may still send focus reports.
+    public var sendsFocusReports: Bool { focusReportReplyRouter.supportsFocusReports }
+
     public func checkConnection() async throws {
         if let connectionFailure { throw connectionFailure }
         guard !isClosed else { throw CancellationError() }

@@ -80,6 +80,11 @@ enum InboxItem: Identifiable {
         return false
     }
 
+    var hasProgressMarker: Bool {
+        if case let .request(row) = self { return row.hasProgressMarker || row.progress != nil }
+        return false
+    }
+
     var resolvedMessageType: HarklightMessageType {
         switch self {
         case let .request(row): row.resolvedMessageType

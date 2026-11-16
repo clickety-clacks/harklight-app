@@ -1761,11 +1761,13 @@ final class NativeGuidedTLSTests: XCTestCase {
                                     conversationStarted: XCTestExpectation? = nil,
                                     holdsConversationCatchUp: Bool = false,
                                     countsAdmissions: Bool = false,
+                                    requests: ConversationFrameCollector? = nil,
                                     answerReply: @escaping @Sendable (Int) -> String = { count in
                                         "{\"v\":1,\"type\":\"ok\",\"seq\":\(count + 10)}\n"
                                     }) throws -> LocalRelayWebSocket {
         let rows = ["seen", "reply", "silent"]
         return try LocalRelayWebSocket(expectedDevice: expectedDevice, fencesEarlierConnections: true) { text in
+            requests?.append(Data(text.utf8))
             guard let value = try? JSONValue.parse(Data(text.utf8)),
                   let kind = value.uniqueValue(named: "type")?.stringValue?.rawValue else { return [] }
             if kind == "answer" || kind == "answer_no_comment" {
@@ -2037,12 +2039,22 @@ final class NativeGuidedTLSTests: XCTestCase {
             personID: ExactText("single-admission-person"), deviceID: ExactText(identity.deviceID)),
             transportMode: .relay)
         let store = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        let diagnosticURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HarklightDiagnostics-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: diagnosticURL) }
+        let journal = NativeClientDiagnosticJournal(fileURL: diagnosticURL)
         let lifecycle = NativeRelayLifecycle()
         try await lifecycle.activate(store: store, context: context,
             relayURL: XCTUnwrap(URL(string: "wss://localhost:\(port)/relay")),
-            clientIdentity: identity.value, trustedRootDER: relay.rootDER)
+            clientIdentity: identity.value, trustedRootDER: relay.rootDER, diagnostics: journal)
         let first = await lifecycle.refreshResultFromTrustedRelay()
         XCTAssertTrue(first.relayConfirmed, lifecycle.refreshFailureMessage(for: context) ?? "no failure message")
+        for _ in 0..<50 { await Task.yield() }
+        let admissions = journal.events.filter { $0.phase == .relayAdmission && $0.transition == .completed }
+        XCTAssertEqual(admissions.count, 1,
+                       "One admission is journaled once, not once by the session and again by the lifecycle.")
+        XCTAssertEqual(journal.events.filter { $0.phase == .ordinaryReplay && $0.transition == .began }.count, 1,
+                       "One ordinary replay is journaled once.")
         let connectionsBeforeDrop = relay.connectionCount
         let admissionsBeforeDrop = Self.admissions(in: answers)
 
@@ -2142,6 +2154,132 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertNil(attribution.observeReply(frame(#"{"v":1,"type":"delivery","seq":4}"#)))
         XCTAssertFalse(RelayReplyAttribution.mayBeReply(#"{"v":1,"type":"conversation","conversation_seq":9}"#))
         XCTAssertTrue(RelayReplyAttribution.mayBeReply(#"{"v":1,"type":"error","reason":"closed"}"#))
+    }
+
+    func testFocusReportRefusedAsUnknownTypeKeepsTheConnectionAndStopsFurtherReports() async throws {
+        let namespace = "Harklight.focus-report-unknown-type." + UUID().uuidString
+        let identity = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
+        defer {
+            SecItemDelete([kSecClass as String: kSecClassCertificate,
+                           kSecAttrLabel as String: identity.label] as CFDictionary)
+            SecItemDelete([kSecClass as String: kSecClassKey,
+                           kSecAttrApplicationTag as String: Data(namespace.utf8)] as CFDictionary)
+        }
+        let answers = ConversationFrameCollector()
+        let requests = ConversationFrameCollector()
+        // Like a maintenance-line Server: focus_report is an unknown type.
+        let relay = try singleSessionRelay(expectedDevice: identity.deviceID, originPort: 443,
+                                           conversationCursor: 0, answers: answers, requests: requests)
+        defer { relay.close() }
+        let port = try await relay.start()
+        let context = ProfileContext(identity: ProfileIdentity(trustedRelayAuthority: ExactText("localhost"),
+            personID: ExactText("focus-unknown-person"), deviceID: ExactText(identity.deviceID)),
+            transportMode: .relay)
+        let store = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        let lifecycle = NativeRelayLifecycle()
+        try await lifecycle.activate(store: store, context: context,
+            relayURL: XCTUnwrap(URL(string: "wss://localhost:\(port)/relay")),
+            clientIdentity: identity.value, trustedRootDER: relay.rootDER)
+        let first = await lifecycle.refreshResultFromTrustedRelay()
+        XCTAssertTrue(first.relayConfirmed, lifecycle.refreshFailureMessage(for: context) ?? "no failure message")
+        let liveConnections = relay.connectionCount
+        let focusSent = expectation(for: NSPredicate { _, _ in
+            requests.types.contains("focus_report")
+        }, evaluatedWith: nil)
+        await fulfillment(of: [focusSent], timeout: 5)
+
+        // A later focus change would normally report again; after the refusal it must not.
+        NativeFocusReporter.shared.settingsPresented(underlyingFocus: .inbox)
+        let after = await lifecycle.refreshResultFromTrustedRelay()
+        NativeFocusReporter.shared.settingsDismissed(fallback: .inbox)
+        XCTAssertTrue(after.relayConfirmed, "The refusal is not a connection failure.")
+        XCTAssertEqual(relay.connectionCount, liveConnections, "The connection survived the refusal, with no reconnect.")
+        // Nothing reaches the person: no refresh failure and no connection warning.
+        XCTAssertNil(lifecycle.refreshFailureMessage(for: context))
+        let presentation = try LivePresentationStore(store: store, context: context)
+        presentation.applyRefreshResult(after)
+        XCTAssertNil(presentation.connectionWarning, "A focus refusal shows no connection warning.")
+        XCTAssertEqual(requests.types.filter { $0 == "focus_report" }.count, 1,
+                       "No focus report follows the Server's unknown_type refusal.")
+        await lifecycle.deactivate()
+    }
+
+    func testEachNewRelaySessionSendsTheCurrentFocusAgainAndARepeatRefusalStaysQuiet() async throws {
+        let namespace = "Harklight.focus-per-connection." + UUID().uuidString
+        let identity = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
+        defer {
+            SecItemDelete([kSecClass as String: kSecClassCertificate,
+                           kSecAttrLabel as String: identity.label] as CFDictionary)
+            SecItemDelete([kSecClass as String: kSecClassKey,
+                           kSecAttrApplicationTag as String: Data(namespace.utf8)] as CFDictionary)
+        }
+        let answers = ConversationFrameCollector()
+        let requests = ConversationFrameCollector()
+        // A maintenance-line Server: focus_report is an unknown type.
+        let relay = try singleSessionRelay(expectedDevice: identity.deviceID, originPort: 443,
+                                           conversationCursor: 0, answers: answers, requests: requests)
+        defer { relay.close() }
+        let port = try await relay.start()
+        let relayURL = try XCTUnwrap(URL(string: "wss://localhost:\(port)/relay"))
+        let context = ProfileContext(identity: ProfileIdentity(trustedRelayAuthority: ExactText("localhost"),
+            personID: ExactText("focus-per-connection-person"), deviceID: ExactText(identity.deviceID)),
+            transportMode: .relay)
+        func focusReports() -> Int { requests.types.filter { $0 == "focus_report" }.count }
+        func waitForFocusReports(_ count: Int) async {
+            let sent = expectation(for: NSPredicate { _, _ in
+                requests.types.filter { $0 == "focus_report" }.count >= count
+            }, evaluatedWith: nil)
+            await fulfillment(of: [sent], timeout: 5)
+        }
+
+        let lifecycle = NativeRelayLifecycle()
+        try await lifecycle.activate(store: ClientRepository(context: context, persistence: MemoryPendingActionPersistence()),
+                                     context: context, relayURL: relayURL,
+                                     clientIdentity: identity.value, trustedRootDER: relay.rootDER)
+        _ = await lifecycle.refreshResultFromTrustedRelay()
+        await waitForFocusReports(1)
+        let refusedState = await lifecycle.liveConnectionFocusState
+        XCTAssertEqual(refusedState.sendsFocusReports, false, "The refused connection stops focus reports.")
+
+        // A reconnect is a new relay session: once ready it sends the current focus
+        // again, and this Server's refusal then ends reports on that session too.
+        relay.dropConnections()
+        _ = await lifecycle.refreshResultFromTrustedRelay()
+        await waitForFocusReports(2)
+        let reconnected = await lifecycle.liveConnectionFocusState
+        XCTAssertNotEqual(reconnected.attemptID, refusedState.attemptID, "The reconnect is a new session.")
+        XCTAssertEqual(focusReports(), 2, "The reconnected session sent the current focus once.")
+
+        // A new session on the same endpoint that becomes ready sends the current focus again,
+        // and when that Server refuses again it stays quiet: no reconnect and no warning.
+        try await lifecycle.activate(store: ClientRepository(context: context, persistence: MemoryPendingActionPersistence()),
+                                     context: context, relayURL: relayURL,
+                                     clientIdentity: identity.value, trustedRootDER: relay.rootDER)
+        let ready = await lifecycle.refreshResultFromTrustedRelay()
+        XCTAssertTrue(ready.relayConfirmed, lifecycle.refreshFailureMessage(for: context) ?? "no failure message")
+        await waitForFocusReports(3)
+        let sessionsAfterRefusal = relay.connectionCount
+        let after = await lifecycle.refreshResultFromTrustedRelay()
+        XCTAssertTrue(after.relayConfirmed, "The repeat refusal is not a connection failure.")
+        XCTAssertEqual(relay.connectionCount, sessionsAfterRefusal, "No reconnect follows the repeat refusal.")
+        XCTAssertNil(lifecycle.refreshFailureMessage(for: context))
+        let presentation = try LivePresentationStore(
+            store: ClientRepository(context: context, persistence: MemoryPendingActionPersistence()), context: context)
+        presentation.applyRefreshResult(after)
+        XCTAssertNil(presentation.connectionWarning, "A repeat refusal shows no connection warning.")
+        XCTAssertEqual(focusReports(), 3, "Exactly one focus report per session (first, reconnect, re-activation), none after each refusal.")
+        await lifecycle.deactivate()
+    }
+
+    func testAFocusRefusalEndsReportsOnlyOnThatConnection() {
+        var refused = FocusReportReplyRouter()
+        XCTAssertTrue(refused.register(ref: "focus-1"))
+        let refusal = Data(#"{"v":1,"type":"error","ref":"focus-1","reason":"unknown_type"}"#.utf8) + Data([0x0A])
+        XCTAssertEqual(refused.route(refusal, using: FocusReportWire()), .unsupported,
+                       "unknown_type is a benign refusal, not a connection failure.")
+        XCTAssertFalse(refused.register(ref: "focus-2"), "No further focus report on the refused connection.")
+        var nextConnection = FocusReportReplyRouter()
+        XCTAssertTrue(nextConnection.register(ref: "focus-3"), "A new connection starts able to send focus.")
     }
 
     func testFileDownloadSessionOpensNoRelayConnection() async throws {
@@ -5295,7 +5433,9 @@ private final class LocalRelayWebSocket: @unchecked Sendable {
     private let closeAfterReply: @Sendable (String) -> Bool
     // All connection ownership is serialized on queue, including close().
     private var connections: [NWConnection] = []
-    private var sessions = Set<ObjectIdentifier>()
+    // Kept alive so a later connection can never reuse a freed one's identity
+    // and go uncounted.
+    private var sessions: [NWConnection] = []
     private let fencesEarlierConnections: Bool
     /// Relay sessions opened: connections that sent at least one message,
     /// including ones since closed.
@@ -5356,9 +5496,12 @@ private final class LocalRelayWebSocket: @unchecked Sendable {
             let metadata = context?.protocolMetadata(definition: NWProtocolWebSocket.definition)
                 as? NWProtocolWebSocket.Metadata
             if metadata?.opcode == .text, let data, let text = String(data: data, encoding: .utf8) {
-                if sessions.insert(ObjectIdentifier(connection)).inserted, fencesEarlierConnections {
-                    connections.filter { $0 !== connection }.forEach { $0.cancel() }
-                    connections.removeAll { $0 !== connection }
+                if !sessions.contains(where: { $0 === connection }) {
+                    sessions.append(connection)
+                    if fencesEarlierConnections {
+                        connections.filter { $0 !== connection }.forEach { $0.cancel() }
+                        connections.removeAll { $0 !== connection }
+                    }
                 }
                 let frames = reply(text)
                 if closeAfterReply(text) {

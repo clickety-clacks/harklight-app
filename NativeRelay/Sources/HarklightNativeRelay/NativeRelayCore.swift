@@ -179,6 +179,7 @@ public actor NativeRelayCore {
     private let inboxWire: InboxPagingWire
     private let onProgress: @Sendable (NativeRelayProgressEvent) -> Void
     private let onDiagnostic: NativeClientDiagnosticSink
+    private let onFeatureFlags: @Sendable (RemoteFeatureFlagSnapshot) async -> Void
     private let attemptID: UUID?
     private var active = true
     private var busy = false
@@ -485,7 +486,8 @@ public actor NativeRelayCore {
                 attemptID: UUID? = nil,
                 serverStateCache: (any ServerStateCaching)? = nil,
                 onProgress: @escaping @Sendable (NativeRelayProgressEvent) -> Void = { _ in },
-                onDiagnostic: @escaping NativeClientDiagnosticSink = { _ in }) throws {
+                onDiagnostic: @escaping NativeClientDiagnosticSink = { _ in },
+                onFeatureFlags: @escaping @Sendable (RemoteFeatureFlagSnapshot) async -> Void = { _ in }) throws {
         guard context.transportMode == .relay else { throw NativeRelayCoreError.fixtureProfile }
         guard session.authenticatedIdentity == context.identity else {
             throw NativeRelayCoreError.wrongInstallation
@@ -499,6 +501,7 @@ public actor NativeRelayCore {
         self.onProgress = onProgress
         self.attemptID = attemptID
         self.onDiagnostic = onDiagnostic
+        self.onFeatureFlags = onFeatureFlags
         self.wire = try RelayWire(profile: context)
         self.inboxWire = try InboxPagingWire(profile: context)
     }
@@ -1628,6 +1631,8 @@ public actor NativeRelayCore {
             try store.finishReplay(at: high, context: context)
             replay.high = high
             activeInboxReplay = replay
+            await onFeatureFlags(try wire.decodeFeatureFlags(frame))
+            try validate()
             return
         }
         switch try wire.decodeUpdate(frame) {

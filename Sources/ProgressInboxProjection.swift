@@ -3,7 +3,9 @@ import Foundation
 
 @MainActor
 enum ProgressInboxProjection {
-    static func rows(_ items: [InboxItem], search: String) -> [InboxRequestRow] {
+    static func rows(_ items: [InboxItem], search: String,
+                     enabled: Bool = true) -> [InboxRequestRow] {
+        guard enabled else { return [] }
         let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
         return items.compactMap { item -> InboxRequestRow? in
             guard case let .request(row) = item, row.progress != nil,

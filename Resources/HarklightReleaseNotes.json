@@ -238,6 +238,12 @@
           "detail": "If the server's record of what this device has received no longer matches the device's own record, Harklight now reloads the chat history from the server and keeps connecting, and answers the server has already settled stop showing as pending. This fix is pending formal testing."
         },
         {
+          "id": "quiet-on-servers-without-screen-reports",
+          "symbol": "antenna.radiowaves.left.and.right",
+          "title": "Stays connected quietly on servers without focus support",
+          "detail": "Harklight tells newer servers which screen you are on. When a server does not support this, Harklight stops asking on that connection and stays connected, with nothing shown and no effect on your messages or answers. It asks again on each new connection, so a server that gains support gets it. The diagnostics no longer duplicate entries when reconnecting. This change is pending formal testing."
+        },
+        {
           "id": "answers-keep-the-connection",
           "symbol": "bolt.horizontal",
           "title": "Answers no longer drop the connection",
@@ -254,6 +260,12 @@
           "symbol": "chart.bar.fill",
           "title": "Follow work in Progress",
           "detail": "Progress updates appear above New with stage-colored bars. Open one for its stage legend and notes. Progress stays out of the Inbox badge, including completed work. This change is pending formal testing and requires server support."
+        },
+        {
+          "id": "message-detail-select-all",
+          "symbol": "doc.on.doc",
+          "title": "Copy a whole message",
+          "detail": "The message text menu offers Select All so you can copy the whole message as well as a selected passage. This fix is pending formal testing."
         }
       ]
     }
