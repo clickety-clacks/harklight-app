@@ -671,7 +671,6 @@ public actor NativeRelayCore {
             failedStep = .validateRelayState
             try validate()
             onProgress(.postAckDrainFinished(.completed))
-            _ = await drainPendingMessageOpens(using: pagingSession)
             let levelsState = try? store.snapshot(context: context).priorityLevels
             if levelsState?.pendingSave != nil {
                 priorityLevelsSaveRequested = true

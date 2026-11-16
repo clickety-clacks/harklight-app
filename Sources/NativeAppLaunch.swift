@@ -1349,7 +1349,7 @@ final class LivePresentationStore {
     private(set) var priorityLevelsState = PriorityLevelsStoreState.empty
     private(set) var priorityLevelsLocalError: LocalizedStringResource?
     private(set) var priorityLevelsRelayConfirmed = false
-    @ObservationIgnored private var pendingConversationTextByBinding: [ConversationBinding: String] = [:]
+    private var pendingConversationTextByBinding: [ConversationBinding: String] = [:]
     private(set) var conversationError: String?
     @ObservationIgnored private let conversationAvailability: NativeConversationAvailability
     var conversationAvailabilityState: NativeConversationAvailability.State {
