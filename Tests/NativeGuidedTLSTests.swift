@@ -1840,7 +1840,12 @@ final class NativeGuidedTLSTests: XCTestCase {
         let after = await lifecycle.refreshResultFromTrustedRelay()
         NativeFocusReporter.shared.settingsDismissed(fallback: .inbox)
         XCTAssertTrue(after.relayConfirmed, "The refusal is not a connection failure.")
-        XCTAssertEqual(relay.connectionCount, liveConnections, "The connection survived the refusal.")
+        XCTAssertEqual(relay.connectionCount, liveConnections, "The connection survived the refusal, with no reconnect.")
+        // Nothing reaches the person: no refresh failure and no connection warning.
+        XCTAssertNil(lifecycle.refreshFailureMessage(for: context))
+        let presentation = try LivePresentationStore(store: store, context: context)
+        presentation.applyRefreshResult(after)
+        XCTAssertNil(presentation.connectionWarning, "A focus refusal shows no connection warning.")
         XCTAssertEqual(requests.types.filter { $0 == "focus_report" }.count, 1,
                        "No focus report follows the Server's unknown_type refusal.")
         await lifecycle.deactivate()
