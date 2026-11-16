@@ -41,7 +41,9 @@ final class SubmissionStateUITests: XCTestCase {
         XCTAssertNoStatusText(app)
         // The failure shows once: one circled mark and one Retry, in the picked choice.
         let message = app.scrollViews["message-card-scroll"]
-        XCTAssertEqual(count("request-choice-retry", in: app), 1, "Exactly one Retry.")
+        // The Retry text sits inside the choice button, which carries the same
+        // identifier; count the text element so one visible Retry counts once.
+        XCTAssertEqual(app.staticTexts.matching(identifier: "request-choice-retry").count, 1, "Exactly one Retry.")
         XCTAssertEqual(failureMarks(in: message), 1, "Exactly one circled mark.")
         capture("04-choice-failed", app)
     }
