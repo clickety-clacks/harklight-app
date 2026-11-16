@@ -148,6 +148,9 @@ struct ConversationPanel: View {
                 if let error = store.conversationError {
                     Text(error).font(.caption).foregroundStyle(.hkSecondary).padding(.horizontal)
                 }
+                if thread.terminal != nil || !thread.allowsDiscussion {
+                    ConversationRetainedTextRecovery(store: store, key: key)
+                }
                 if thread.terminal == nil && thread.allowsDiscussion {
                     ConversationUploadCleanupStatus(store: store, key: key, revision: revision)
                     if let message = store.conversationUnavailableMessage {
@@ -508,6 +511,35 @@ private struct ConversationHistoryContent: View, Equatable {
             store.newMessageAreaStore?.open(key)
             if let request = store.request(for: key) {
                 store.reportMessageContentOpened(request)
+            }
+        }
+    }
+}
+
+@MainActor
+private struct ConversationRetainedTextRecovery: View {
+    let store: LivePresentationStore
+    let key: RequestKey
+
+    var body: some View {
+        let retained = store.retainedConversationText(for: key)
+        ForEach(retained.keys.sorted(), id: \.self) { revision in
+            if let text = retained[revision] {
+                VStack(alignment: .leading, spacing: 8) {
+                    Label("Unsent text · Revision \(revision)", systemImage: "doc.text")
+                        .font(.caption).foregroundStyle(.hkSecondary)
+                    Text(text.rawValue)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)
+                    HStack {
+                        Button("Copy") { store.copyRetainedConversationText(for: key, revision: revision) }
+                            .accessibilityIdentifier("conversation-retained-copy-\(revision)")
+                        Button("Dismiss") { store.dismissRetainedConversationText(for: key, revision: revision) }
+                            .accessibilityIdentifier("conversation-retained-dismiss-\(revision)")
+                    }
+                }
+                .padding()
+                .accessibilityIdentifier("conversation-retained-text-\(revision)")
             }
         }
     }

@@ -657,7 +657,8 @@ final class ConversationPresentationTests: XCTestCase {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
             personID: ExactText("person"), deviceID: ExactText("device"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
-        let domain = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        let persistence = MemoryPendingActionPersistence()
+        let domain = try ClientRepository(context: context, persistence: persistence)
         let key = RequestKey(accountScope: identity.personID,
             senderID: ExactText("sender"), messageID: ExactText("request"))
         let binding = ConversationBinding(request: key, revision: 1)
@@ -685,6 +686,49 @@ final class ConversationPresentationTests: XCTestCase {
         XCTAssertNotNil(model.conversationError)
         XCTAssertFalse(model.canEditDiscussionDraft(for: key))
         XCTAssertFalse(model.canSendDiscussion(for: key))
+        XCTAssertEqual(model.retainedConversationText(for: key)[1], ExactText(editor.stagedText))
+
+        // Later Server projection writes must not erase locally retained text.
+        try domain.applyConversation(ConversationEvent(sequence: 3, binding: binding,
+            fact: .availability(sessionHandle: ExactText("handle"), .notListening(lastDetachedAt: nil))),
+            context: context)
+        let sibling = RequestKey(accountScope: identity.personID,
+            senderID: key.senderID, messageID: ExactText("sibling"))
+        let siblingBinding = ConversationBinding(request: sibling, revision: 1)
+        try domain.applyConversation(ConversationEvent(sequence: 4, binding: siblingBinding,
+            fact: .request(sessionHandle: ExactText("handle"), payload: .null)), context: context)
+        try domain.applyConversation(ConversationEvent(sequence: 5, binding: siblingBinding,
+            fact: .terminal(turn: ExactText("sibling-answer"), author: .server, state: .noComment)),
+            context: context)
+        try domain.retainConversationText(ExactText("Sibling unsent text"), for: siblingBinding, context: context)
+        let cache = ServerStateCacheSnapshot.make(identity: identity,
+            from: try domain.serverCacheSnapshot(context: context),
+            conversations: try domain.conversationSnapshot(context: context))
+        let restored = try ClientRepository(context: context, persistence: persistence)
+        try restored.restoreCachedServerState(try cache.attentionDomainState(for: identity), context: context)
+        let reopened = try LivePresentationStore(store: restored, context: context)
+        XCTAssertEqual(reopened.retainedConversationText(for: key), [1: ExactText(editor.stagedText)],
+                       "The closed-history recovery surface restores the exact request/revision after relaunch.")
+        XCTAssertEqual(reopened.conversationDraft(for: key, revision: 1).text, ExactText("Before typing"))
+        XCTAssertFalse(reopened.canEditDiscussionDraft(for: key))
+        XCTAssertFalse(reopened.canSendDiscussion(for: key))
+        let priorClipboard = UIPasteboard.general.string
+        defer { UIPasteboard.general.string = priorClipboard }
+        reopened.copyRetainedConversationText(for: key, revision: 1)
+        XCTAssertEqual(UIPasteboard.general.string, editor.stagedText)
+        XCTAssertTrue(reopened.retainedConversationText(for: key).isEmpty)
+        XCTAssertEqual(reopened.retainedConversationText(for: sibling), [1: ExactText("Sibling unsent text")])
+
+        let afterCopy = try ClientRepository(context: context, persistence: persistence)
+        try afterCopy.restoreCachedServerState(try cache.attentionDomainState(for: identity), context: context)
+        let afterCopyModel = try LivePresentationStore(store: afterCopy, context: context)
+        XCTAssertTrue(afterCopyModel.retainedConversationText(for: key).isEmpty,
+                      "Copy dismisses only that request/revision durably.")
+        XCTAssertEqual(afterCopyModel.retainedConversationText(for: sibling), [1: ExactText("Sibling unsent text")])
+        afterCopyModel.dismissRetainedConversationText(for: sibling, revision: 1)
+        let afterDismiss = try ClientRepository(context: context, persistence: persistence)
+        XCTAssertTrue(try afterDismiss.retainedConversationText(for: sibling, context: context).isEmpty,
+                      "Explicit Dismiss persists without sending or editing the saved draft.")
     }
 
     func testConversationPanelSeparatesNoChatFromLoadingAndUnavailableStates() {
