@@ -234,7 +234,15 @@ final class InboxStockTabsUITests: XCTestCase {
                 let back = workspaceBackButton(in: app)
                 XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
                 back.tap()
-                leaveWorkspaceSearch(in: app)
+                if UIDevice.current.userInterfaceIdiom == .phone {
+                    // Close the system Search tab before selecting Replied.
+                    let closeSearch = app.buttons["Close"]
+                    XCTAssertTrue(closeSearch.waitForExistence(timeout: 5), app.debugDescription)
+                    XCTAssertTrue(closeSearch.isHittable, app.debugDescription)
+                    closeSearch.tap()
+                } else {
+                    leaveWorkspaceSearch(in: app)
+                }
             }
 
             let tab = workspaceTab(title, in: app)
