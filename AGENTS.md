@@ -26,7 +26,7 @@ Read [HARKLIGHT_GUIDANCE.md](HARKLIGHT_GUIDANCE.md) before adding, changing, or 
 
 - Only ever fast-forward it to an existing `main` commit that has passed the clean independent-review audit. It never gets commits of its own or development work.
 - Moving it starts an external build, so every change in that commit must have a clean independent review first.
-- The branch trigger is the settled design: the workflow stays triggered by this branch. Don't change the Xcode Cloud workflow configuration.
+- The branch trigger is the intended mechanism and the settled design: the workflow stays triggered by this branch. This guidance grants no release or Xcode Cloud configuration authority; don't change the workflow configuration.
 
 ## Large features behind a feature flag
 
