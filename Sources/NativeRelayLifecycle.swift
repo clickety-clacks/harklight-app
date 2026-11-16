@@ -937,16 +937,6 @@ final class NativeRelayLifecycle {
     private var focusTransportID: UUID?
     private let foregroundProgress = ForegroundConnectProgressTracker()
     private var diagnosticJournal: NativeClientDiagnosticJournal?
-    /// The relay and account whose Server refused a focus report as an unknown
-    /// type. That Server will refuse again, so no connection to it for that
-    /// account sends focus reports, including after a retry re-activates it.
-    /// A relaunch clears it; a different relay or account does not match it.
-    private var focusRefusal: (relayURL: URL, account: ProfileIdentity)?
-
-    private func sendsFocusReports(to relayURL: URL, for account: ProfileIdentity) -> Bool {
-        guard let focusRefusal else { return true }
-        return !(focusRefusal.relayURL == relayURL && focusRefusal.account == account)
-    }
 
     /// The live connection's attempt and whether it may send focus reports,
     /// for tests that follow focus suppression across reconnects.
@@ -1074,11 +1064,9 @@ final class NativeRelayLifecycle {
                 guard let self,
                       self.refreshGeneration == generation,
                       self.focusTransportID == transportID else { return }
-                // No Server advertises focus reports; one that refuses them
-                // will refuse again, so later connections to it do not send them.
-                if let configuration = self.configuration {
-                    self.focusRefusal = (configuration.relayURL, configuration.context.identity)
-                }
+                // The refusal ends focus reports on this connection only. Each
+                // new relay session sends the current focus again, so a Server
+                // that gains support (or a supported session) gets it.
                 NativeFocusReporter.shared.relaySessionDoesNotSupportFocus(transportID)
             }
         }
@@ -1137,8 +1125,7 @@ final class NativeRelayLifecycle {
                                                               onViewShow: viewShowHandler(
                                                                 generation: generation,
                                                                 transportID: transportAttemptID),
-                                                              onDiagnostic: diagnosticSink(),
-                                                              focusReportsSupported: sendsFocusReports(to: relayURL, for: context.identity))
+                                                              onDiagnostic: diagnosticSink())
         } catch {
             recordDiagnostic(.connection, .approvedConnection,
                              NativeDiagnosticCauseCode.failureTransition(for: error), error: error,
@@ -1224,8 +1211,7 @@ final class NativeRelayLifecycle {
                                                                 transportID: focusTransportID),
                                                               onViewShow: viewShowHandler(
                                                                 generation: migrationGeneration,
-                                                                transportID: focusTransportID),
-                                                              focusReportsSupported: sendsFocusReports(to: relayURL, for: current.context.identity))
+                                                                transportID: focusTransportID))
         var nextCore: NativeRelayCore?
         do {
             nextCore = try NativeRelayCore(store: current.store, context: current.context,
@@ -2152,8 +2138,7 @@ final class NativeRelayLifecycle {
                                                               onViewShow: viewShowHandler(
                                                                 generation: generation,
                                                                 transportID: transportAttemptID),
-                                                              onDiagnostic: diagnosticSink(),
-                                                              focusReportsSupported: sendsFocusReports(to: configuration.relayURL, for: configuration.context.identity))
+                                                              onDiagnostic: diagnosticSink())
         } catch {
             recordDiagnostic(.connection, .approvedConnection,
                              NativeDiagnosticCauseCode.failureTransition(for: error), error: error,

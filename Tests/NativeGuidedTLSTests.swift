@@ -1851,8 +1851,8 @@ final class NativeGuidedTLSTests: XCTestCase {
         await lifecycle.deactivate()
     }
 
-    func testFocusRefusalIsKeptForTheSameRelayAndAccountAcrossReconnectAndReactivation() async throws {
-        let namespace = "Harklight.focus-suppression-activation." + UUID().uuidString
+    func testEachNewRelaySessionSendsTheCurrentFocusAgainAndARepeatRefusalStaysQuiet() async throws {
+        let namespace = "Harklight.focus-per-connection." + UUID().uuidString
         let identity = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
         defer {
             SecItemDelete([kSecClass as String: kSecClassCertificate,
@@ -1868,93 +1868,65 @@ final class NativeGuidedTLSTests: XCTestCase {
         defer { relay.close() }
         let port = try await relay.start()
         let relayURL = try XCTUnwrap(URL(string: "wss://localhost:\(port)/relay"))
-        func account(_ person: String) -> ProfileContext {
-            ProfileContext(identity: ProfileIdentity(trustedRelayAuthority: ExactText("localhost"),
-                personID: ExactText(person), deviceID: ExactText(identity.deviceID)), transportMode: .relay)
-        }
+        let context = ProfileContext(identity: ProfileIdentity(trustedRelayAuthority: ExactText("localhost"),
+            personID: ExactText("focus-per-connection-person"), deviceID: ExactText(identity.deviceID)),
+            transportMode: .relay)
         func focusReports() -> Int { requests.types.filter { $0 == "focus_report" }.count }
-        func settle() async { for _ in 0..<50 { await Task.yield() } }
+        func waitForFocusReports(_ count: Int) async {
+            let sent = expectation(for: NSPredicate { _, _ in
+                requests.types.filter { $0 == "focus_report" }.count >= count
+            }, evaluatedWith: nil)
+            await fulfillment(of: [sent], timeout: 5)
+        }
 
-        let first = account("focus-suppression-person")
-        let firstStore = try ClientRepository(context: first, persistence: MemoryPendingActionPersistence())
         let lifecycle = NativeRelayLifecycle()
-        try await lifecycle.activate(store: firstStore,
-                                     context: first, relayURL: relayURL,
+        try await lifecycle.activate(store: ClientRepository(context: context, persistence: MemoryPendingActionPersistence()),
+                                     context: context, relayURL: relayURL,
                                      clientIdentity: identity.value, trustedRootDER: relay.rootDER)
         _ = await lifecycle.refreshResultFromTrustedRelay()
-        let refused = expectation(for: NSPredicate { _, _ in
-            requests.types.filter { $0 == "focus_report" }.count == 1
-        }, evaluatedWith: nil)
-        await fulfillment(of: [refused], timeout: 5)
-        await settle()
-        let before = await lifecycle.liveConnectionFocusState
-        XCTAssertEqual(before.sendsFocusReports, false, "The refused connection sends no more focus reports.")
+        await waitForFocusReports(1)
+        let refusedState = await lifecycle.liveConnectionFocusState
+        XCTAssertEqual(refusedState.sendsFocusReports, false, "The refused connection stops focus reports.")
 
-        // Reconnect within the same activation: the new connection starts with focus reports off.
+        // A reconnect is a new relay session: once ready it sends the current focus
+        // again, and this Server's refusal then ends reports on that session too.
         relay.dropConnections()
         _ = await lifecycle.refreshResultFromTrustedRelay()
+        await waitForFocusReports(2)
         let reconnected = await lifecycle.liveConnectionFocusState
-        XCTAssertNotEqual(reconnected.attemptID, before.attemptID, "The refresh replaced the dropped connection.")
-        XCTAssertEqual(reconnected.sendsFocusReports, false,
-                       "The refusal carries across a reconnect within one activation.")
-        XCTAssertEqual(focusReports(), 1, "No focus report was sent on the reconnected connection.")
+        XCTAssertNotEqual(reconnected.attemptID, refusedState.attemptID, "The reconnect is a new session.")
+        XCTAssertEqual(focusReports(), 2, "The reconnected session sent the current focus once.")
 
-        // The retry route (retryForegroundConnection, then retryApprovedConnection,
-        // connectApproved, NativeAppLaunch.activate) re-activates the same
-        // account on the same relay; the refusal still holds.
-        try await lifecycle.activate(store: firstStore, context: first, relayURL: relayURL,
+        // A new session on the same endpoint that becomes ready sends the current focus again,
+        // and when that Server refuses again it stays quiet: no reconnect and no warning.
+        try await lifecycle.activate(store: ClientRepository(context: context, persistence: MemoryPendingActionPersistence()),
+                                     context: context, relayURL: relayURL,
                                      clientIdentity: identity.value, trustedRootDER: relay.rootDER)
-        let reactivated = await lifecycle.liveConnectionFocusState
-        XCTAssertNotEqual(reactivated.attemptID, reconnected.attemptID, "Re-activation opened a new connection.")
-        XCTAssertEqual(reactivated.sendsFocusReports, false,
-                       "Re-activating the same account and relay keeps the refusal.")
-        _ = await lifecycle.refreshResultFromTrustedRelay()
-        await settle()
-        XCTAssertEqual(focusReports(), 1, "No focus report after re-activation on the same relay.")
-
-        // A different relay asks again.
-        let otherRelay = try singleSessionRelay(expectedDevice: identity.deviceID, originPort: 443,
-                                                conversationCursor: 0, answers: ConversationFrameCollector())
-        defer { otherRelay.close() }
-        let otherPort = try await otherRelay.start()
-        try await lifecycle.activate(store: firstStore, context: first,
-                                     relayURL: XCTUnwrap(URL(string: "wss://localhost:\(otherPort)/relay")),
-                                     clientIdentity: identity.value, trustedRootDER: otherRelay.rootDER)
-        let otherRelayState = await lifecycle.liveConnectionFocusState
-        XCTAssertEqual(otherRelayState.sendsFocusReports, true, "A different relay is asked again.")
-
-        // Account switch: a different account asks again.
-        let second = account("focus-suppression-other-person")
-        try await lifecycle.activate(store: ClientRepository(context: second, persistence: MemoryPendingActionPersistence()),
-                                     context: second, relayURL: relayURL,
-                                     clientIdentity: identity.value, trustedRootDER: relay.rootDER)
-        let switched = await lifecycle.liveConnectionFocusState
-        XCTAssertEqual(switched.sendsFocusReports, true, "An account switch resets focus suppression.")
+        let ready = await lifecycle.refreshResultFromTrustedRelay()
+        XCTAssertTrue(ready.relayConfirmed, lifecycle.refreshFailureMessage(for: context) ?? "no failure message")
+        await waitForFocusReports(3)
+        let sessionsAfterRefusal = relay.connectionCount
+        let after = await lifecycle.refreshResultFromTrustedRelay()
+        XCTAssertTrue(after.relayConfirmed, "The repeat refusal is not a connection failure.")
+        XCTAssertEqual(relay.connectionCount, sessionsAfterRefusal, "No reconnect follows the repeat refusal.")
+        XCTAssertNil(lifecycle.refreshFailureMessage(for: context))
+        let presentation = try LivePresentationStore(
+            store: ClientRepository(context: context, persistence: MemoryPendingActionPersistence()), context: context)
+        presentation.applyRefreshResult(after)
+        XCTAssertNil(presentation.connectionWarning, "A repeat refusal shows no connection warning.")
+        XCTAssertEqual(focusReports(), 3, "Exactly one focus report per session (first, reconnect, re-activation), none after each refusal.")
         await lifecycle.deactivate()
-
-        // Relaunch: a fresh lifecycle for the same account asks again.
-        let relaunched = NativeRelayLifecycle()
-        try await relaunched.activate(store: ClientRepository(context: first, persistence: MemoryPendingActionPersistence()),
-                                      context: first, relayURL: relayURL,
-                                      clientIdentity: identity.value, trustedRootDER: relay.rootDER)
-        let fresh = await relaunched.liveConnectionFocusState
-        XCTAssertEqual(fresh.sendsFocusReports, true, "A relaunch resets focus suppression.")
-        await relaunched.deactivate()
-        // An endpoint migration uses the same per-relay check with its new URL
-        // (NativeRelayLifecycle.migrateEndpoint); it runs only between the two
-        // approved production hosts, so the different-relay case above stands in for it.
     }
 
-    func testARelayThatRefusedFocusReportsGetsNoneOnItsNextConnection() {
-        var refused = FocusReportReplyRouter(supportsFocusReports: false)
-        XCTAssertFalse(refused.supportsFocusReports)
-        XCTAssertFalse(refused.register(ref: "focus-1"), "No focus report is sent to a Server that refused them.")
-        var fresh = FocusReportReplyRouter()
-        XCTAssertTrue(fresh.register(ref: "focus-2"))
-        let refusal = Data(#"{"v":1,"type":"error","ref":"focus-2","reason":"unknown_type"}"#.utf8) + Data([0x0A])
-        XCTAssertEqual(fresh.route(refusal, using: FocusReportWire()), .unsupported,
+    func testAFocusRefusalEndsReportsOnlyOnThatConnection() {
+        var refused = FocusReportReplyRouter()
+        XCTAssertTrue(refused.register(ref: "focus-1"))
+        let refusal = Data(#"{"v":1,"type":"error","ref":"focus-1","reason":"unknown_type"}"#.utf8) + Data([0x0A])
+        XCTAssertEqual(refused.route(refusal, using: FocusReportWire()), .unsupported,
                        "unknown_type is a benign refusal, not a connection failure.")
-        XCTAssertFalse(fresh.register(ref: "focus-3"))
+        XCTAssertFalse(refused.register(ref: "focus-2"), "No further focus report on the refused connection.")
+        var nextConnection = FocusReportReplyRouter()
+        XCTAssertTrue(nextConnection.register(ref: "focus-3"), "A new connection starts able to send focus.")
     }
 
     func testFileDownloadSessionOpensNoRelayConnection() async throws {
