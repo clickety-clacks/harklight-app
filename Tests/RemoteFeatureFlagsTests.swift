@@ -150,9 +150,10 @@ final class RemoteFeatureFlagsTests: XCTestCase {
     func testReconnectKeepsCacheUntilSnapshotThenReplacesRatherThanMerges() throws {
         let flags = RemoteFeatureFlags()
         let first = UUID(), second = UUID()
-        flags.connect(context: context(), connectionID: first)
+        let ctx = context()
+        flags.connect(context: ctx, connectionID: first)
         flags.replace(try snapshot(#"{"test_off":true,"test_on":false}"#), connectionID: first)
-        flags.connect(context: context(), connectionID: second)
+        flags.connect(context: ctx, connectionID: second)
         XCTAssertTrue(flags.isEnabled(off))
         flags.replace(try snapshot(#"{"test_on":true}"#), connectionID: second)
         flags.replace(try snapshot(#"{"test_off":true,"test_on":false}"#), connectionID: first)
