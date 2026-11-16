@@ -1994,6 +1994,23 @@ final class NativeGuidedTLSTests: XCTestCase {
                 checkpointRequested?.fulfill()
                 if holdsCheckpointAcknowledgement { return [] }
                 return [ok + checkpoint + ",\"checkpoint_accepted\":true}\n"]
+            case "inbox_reconcile":
+                // As the Server: an operation this relay has not accepted was
+                // not committed at the snapshot, so the client keeps it queued.
+                guard let batchID = value.uniqueValue(named: "batch_id")?.stringValue?.rawValue,
+                      let operations = value.uniqueValue(named: "operations")?.arrayValues else { return [] }
+                let accepted = Set(answers.snapshot().compactMap {
+                    (try? JSONValue.parse($0))?.uniqueValue(named: "op_id")?.stringValue?.rawValue
+                })
+                let operationIDs = operations.compactMap { $0.uniqueValue(named: "op_id")?.stringValue?.rawValue }
+                guard operationIDs.count == operations.count, accepted.isDisjoint(with: operationIDs) else {
+                    // This relay models only operations it never accepted.
+                    return ["{\"v\":1,\"type\":\"error\",\"ref\":\"\(ref)\",\"reason\":\"invalid_request\"}\n"]
+                }
+                let results = operationIDs.map {
+                    "{\"op_id\":\"\($0)\",\"status\":\"not_committed_at_snapshot\"}"
+                }.joined(separator: ",")
+                return [ok + checkpoint + ",\"batch_id\":\"\(batchID)\",\"results\":[\(results)]}\n"]
             case "inbox_attach":
                 return [ok + checkpoint + ",\"checkpoint_accepted\":true,\"replay_started\":true}\n",
                         "{\"v\":1,\"type\":\"resynced\",\"seq\":\(rows.count)}\n"]
@@ -2010,7 +2027,7 @@ final class NativeGuidedTLSTests: XCTestCase {
                 return [ok + ",\"seq\":\(answers.snapshot().count + 10),\"event_id\":\"chat-turn\"}\n"]
             default:
                 // Optional features this relay does not model (inbox view,
-                // reconciliation, push status) are unsupported here.
+                // push status) are unsupported here.
                 return ["{\"v\":1,\"type\":\"error\",\"ref\":\"\(ref)\",\"reason\":\"unknown_type\"}\n"]
             }
         }
@@ -5337,7 +5354,14 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertEqual(try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate().deviceID,
                        installation.deviceID, "The approved device identity remains available after cancellation.")
         XCTAssertEqual(try store.snapshot(context: context).cursor, 1)
-        XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty)
+        // The answer was never sent on the stalled connection, so it stays
+        // queued as pending: neither lost nor accepted.
+        XCTAssertEqual(try store.snapshot(context: context).outbox.map(\.intentID), [queuedReceipt.intentID],
+                       "The never-sent answer stays queued for the next connection.")
+        let keptOperation = try XCTUnwrap(store.lookupIntent(queuedReceipt.intentID, context: context))
+        XCTAssertEqual(keptOperation.disposition, .pending, "A never-sent answer is not recorded as lost or accepted.")
+        XCTAssertEqual(keptOperation.wireFrame, originalOperation.wireFrame, "The exact saved bytes stay queued.")
+        XCTAssertTrue(try store.acceptedOperationsAwaitingTerminalReplay(context: context).isEmpty)
         XCTAssertEqual(try store.conversationSnapshot(context: context).threads[requestKey]?.drafts[1]?.text,
                        ExactText("Keep this draft"))
         XCTAssertFalse(diagnosticJournal.events.contains { $0.causeCode == "foreground_deadline" },
