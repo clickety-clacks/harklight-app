@@ -336,7 +336,12 @@ final class ConversationPresentationTests: XCTestCase {
         let unacknowledged = ConversationTurnFacts(acceptedAtMilliseconds: 40_000)
         XCTAssertEqual(status(unacknowledged, availability: listening, now: 159_999), .sending)
         XCTAssertEqual(status(unacknowledged, availability: listening, now: 160_000), .sending)
+        XCTAssertEqual(status(unacknowledged, availability: listening, now: 9_000_000), .sending,
+                       "An unreported ACK1 stays Sending; elapsed time does not synthesize a stall.")
         XCTAssertEqual(status(unacknowledged, availability: notListening, now: 40_001), .noListenerPickedThisUp)
+        XCTAssertEqual(status(unacknowledged, availability: notListening, now: 9_000_000),
+                       .noListenerPickedThisUp,
+                       "The first-stage caption comes from the latest Server availability, not age.")
 
         var waiting = unacknowledged
         waiting.deliveryAck1 = .listenerReceived(atMilliseconds: 40_000, ack2Expected: true,
@@ -344,6 +349,8 @@ final class ConversationPresentationTests: XCTestCase {
         XCTAssertEqual(status(waiting, availability: notListening, now: 159_999), .sending)
         XCTAssertEqual(status(waiting, availability: notListening, now: 160_000), .sending,
                        "An ACK1-to-ACK2 wait stays quiet, even if availability is now not-listening.")
+        XCTAssertEqual(status(waiting, availability: notListening, now: 9_000_000), .sending,
+                       "A supported listener remains Sending until the Server reports ACK2.")
         XCTAssertEqual(status(waiting, availability: gone, now: 160_000), .noOneWillGetThis)
 
         var incapable = waiting
@@ -355,14 +362,14 @@ final class ConversationPresentationTests: XCTestCase {
         var handed = unacknowledged
         handed.deliveryAck2 = .handed(atMilliseconds: 50_000, rerouted: false,
             acknowledgerSystem: ExactText("Tightbeam"), acknowledgerAgent: ExactText("Release"))
-        XCTAssertEqual(status(handed, availability: gone, now: 60_000), .deliveredAck,
+        XCTAssertEqual(status(handed, availability: gone, now: 9_000_000), .deliveredAck,
                        "rerouted is authoritative; the Client never compares agent names.")
         handed.deliveryAck2 = .handed(atMilliseconds: 50_000, rerouted: true,
             acknowledgerSystem: ExactText("Tightbeam"), acknowledgerAgent: ExactText("Release"))
-        XCTAssertEqual(status(handed, availability: gone, now: 60_000), .deliveredTo("Release"))
+        XCTAssertEqual(status(handed, availability: gone, now: 9_000_000), .deliveredTo("Release"))
         handed.deliveryAck2 = .handed(atMilliseconds: 50_000, rerouted: true,
             acknowledgerSystem: ExactText("Tightbeam"), acknowledgerAgent: nil)
-        XCTAssertEqual(status(handed, availability: listening, now: 60_000), .deliveredAck,
+        XCTAssertEqual(status(handed, availability: listening, now: 9_000_000), .deliveredAck,
                        "A rerouted ACK without an agent name keeps the plain Delivered caption.")
 
         var notHanded = unacknowledged
@@ -371,6 +378,9 @@ final class ConversationPresentationTests: XCTestCase {
             acknowledgerSystem: ExactText("Harklight Agent"), acknowledgerAgent: nil)
         XCTAssertEqual(status(notHanded, availability: listening, now: 60_000),
                        .notDelivered("Receiving system could not hand off the message."))
+        XCTAssertEqual(status(notHanded, availability: listening, now: 9_000_000),
+                       .notDelivered("Receiving system could not hand off the message."),
+                       "A reported negative ACK2 reason remains the source of the failure caption.")
         XCTAssertEqual(status(notHanded, availability: gone, now: 60_000), .noOneWillGetThis)
         notHanded.delivered = true
         XCTAssertEqual(status(notHanded, availability: gone, now: 60_000), .deliveredAck,
