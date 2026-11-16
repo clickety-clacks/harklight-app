@@ -937,9 +937,16 @@ final class NativeRelayLifecycle {
     private var focusTransportID: UUID?
     private let foregroundProgress = ForegroundConnectProgressTracker()
     private var diagnosticJournal: NativeClientDiagnosticJournal?
-    /// Set when this activation's Server refused a focus report as an unknown
-    /// type. Cleared by a new activation or endpoint.
-    private var focusReportsUnsupported = false
+    /// The relay and account whose Server refused a focus report as an unknown
+    /// type. That Server will refuse again, so no connection to it for that
+    /// account sends focus reports, including after a retry re-activates it.
+    /// A relaunch clears it; a different relay or account does not match it.
+    private var focusRefusal: (relayURL: URL, account: ProfileIdentity)?
+
+    private func sendsFocusReports(to relayURL: URL, for account: ProfileIdentity) -> Bool {
+        guard let focusRefusal else { return true }
+        return !(focusRefusal.relayURL == relayURL && focusRefusal.account == account)
+    }
 
     /// The live connection's attempt and whether it may send focus reports,
     /// for tests that follow focus suppression across reconnects.
@@ -1068,9 +1075,10 @@ final class NativeRelayLifecycle {
                       self.refreshGeneration == generation,
                       self.focusTransportID == transportID else { return }
                 // No Server advertises focus reports; one that refuses them
-                // will refuse again, so later connections of this activation
-                // do not send them.
-                self.focusReportsUnsupported = true
+                // will refuse again, so later connections to it do not send them.
+                if let configuration = self.configuration {
+                    self.focusRefusal = (configuration.relayURL, configuration.context.identity)
+                }
                 NativeFocusReporter.shared.relaySessionDoesNotSupportFocus(transportID)
             }
         }
@@ -1108,7 +1116,6 @@ final class NativeRelayLifecycle {
                   serverStateCache: (any ServerStateCaching)? = nil) async throws {
         let generation = UUID()
         let transportAttemptID = UUID()
-        focusReportsUnsupported = false
         self.diagnosticJournal = diagnostics
         recordDiagnostic(.connection, .approvedConnection, .began,
                          attemptID: transportAttemptID, transportAttemptID: transportAttemptID)
@@ -1131,7 +1138,7 @@ final class NativeRelayLifecycle {
                                                                 generation: generation,
                                                                 transportID: transportAttemptID),
                                                               onDiagnostic: diagnosticSink(),
-                                                              focusReportsSupported: !focusReportsUnsupported)
+                                                              focusReportsSupported: sendsFocusReports(to: relayURL, for: context.identity))
         } catch {
             recordDiagnostic(.connection, .approvedConnection,
                              NativeDiagnosticCauseCode.failureTransition(for: error), error: error,
@@ -1218,7 +1225,7 @@ final class NativeRelayLifecycle {
                                                               onViewShow: viewShowHandler(
                                                                 generation: migrationGeneration,
                                                                 transportID: focusTransportID),
-                                                              focusReportsSupported: true)
+                                                              focusReportsSupported: sendsFocusReports(to: relayURL, for: current.context.identity))
         var nextCore: NativeRelayCore?
         do {
             nextCore = try NativeRelayCore(store: current.store, context: current.context,
@@ -1243,7 +1250,6 @@ final class NativeRelayLifecycle {
             configuration = (current.store, current.context, relayURL, current.identity,
                              current.rootDER, current.serverStateCache)
             observeNetworkPath(generation: migrationGeneration)
-            focusReportsUnsupported = false
             nextCore = nil
             await priorCore.deactivate()
             await priorTransport.close()
@@ -2147,7 +2153,7 @@ final class NativeRelayLifecycle {
                                                                 generation: generation,
                                                                 transportID: transportAttemptID),
                                                               onDiagnostic: diagnosticSink(),
-                                                              focusReportsSupported: !focusReportsUnsupported)
+                                                              focusReportsSupported: sendsFocusReports(to: configuration.relayURL, for: configuration.context.identity))
         } catch {
             recordDiagnostic(.connection, .approvedConnection,
                              NativeDiagnosticCauseCode.failureTransition(for: error), error: error,
