@@ -1888,12 +1888,14 @@ final class NativeGuidedTLSTests: XCTestCase {
         let refusedState = await lifecycle.liveConnectionFocusState
         XCTAssertEqual(refusedState.sendsFocusReports, false, "The refused connection stops focus reports.")
 
-        // A reconnect is a new relay session: it starts with focus reports on again.
+        // A reconnect is a new relay session: once ready it sends the current focus
+        // again, and this Server's refusal then ends reports on that session too.
         relay.dropConnections()
         _ = await lifecycle.refreshResultFromTrustedRelay()
+        await waitForFocusReports(2)
         let reconnected = await lifecycle.liveConnectionFocusState
-        XCTAssertNotEqual(reconnected.attemptID, refusedState.attemptID)
-        XCTAssertEqual(reconnected.sendsFocusReports, true, "A new relay session may send focus again.")
+        XCTAssertNotEqual(reconnected.attemptID, refusedState.attemptID, "The reconnect is a new session.")
+        XCTAssertEqual(focusReports(), 2, "The reconnected session sent the current focus once.")
 
         // A new session on the same endpoint that becomes ready sends the current focus again,
         // and when that Server refuses again it stays quiet: no reconnect and no warning.
@@ -1902,7 +1904,7 @@ final class NativeGuidedTLSTests: XCTestCase {
                                      clientIdentity: identity.value, trustedRootDER: relay.rootDER)
         let ready = await lifecycle.refreshResultFromTrustedRelay()
         XCTAssertTrue(ready.relayConfirmed, lifecycle.refreshFailureMessage(for: context) ?? "no failure message")
-        await waitForFocusReports(2)
+        await waitForFocusReports(3)
         let sessionsAfterRefusal = relay.connectionCount
         let after = await lifecycle.refreshResultFromTrustedRelay()
         XCTAssertTrue(after.relayConfirmed, "The repeat refusal is not a connection failure.")
@@ -1912,7 +1914,7 @@ final class NativeGuidedTLSTests: XCTestCase {
             store: ClientRepository(context: context, persistence: MemoryPendingActionPersistence()), context: context)
         presentation.applyRefreshResult(after)
         XCTAssertNil(presentation.connectionWarning, "A repeat refusal shows no connection warning.")
-        XCTAssertEqual(focusReports(), 2, "Exactly one focus report per new session, none after each refusal.")
+        XCTAssertEqual(focusReports(), 3, "Exactly one focus report per session (first, reconnect, re-activation), none after each refusal.")
         await lifecycle.deactivate()
     }
 
