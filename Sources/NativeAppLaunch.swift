@@ -1296,6 +1296,18 @@ private struct PreparedLivePresentationUpdate: Sendable {
     let shouldClearActionError: Bool
 }
 
+#if DEBUG
+/// Allows local examples to present only availability explicitly seeded by the
+/// fixture. This is synthetic UI input, never evidence of a Server snapshot.
+struct SyntheticFixtureAvailabilityInput: Sendable {
+    enum Report: Equatable, Sendable {
+        case notListening
+    }
+
+    let reportsByRequest: [RequestKey: Report]
+}
+#endif
+
 @MainActor
 @Observable
 final class LivePresentationStore {
@@ -1434,6 +1446,9 @@ final class LivePresentationStore {
     private let permitsDelivery: Bool
     @ObservationIgnored private let conversationFiles: ConversationFileStorage?
     @ObservationIgnored private let profileContext: ProfileContext
+#if DEBUG
+    @ObservationIgnored private var syntheticFixtureAvailability: SyntheticFixtureAvailabilityInput?
+#endif
     var notificationContext: ProfileContext { profileContext }
     // Delivery permission is independent of connection and catch-up status.
     // The durable intent queue accepts actions while transport is unavailable.
@@ -1471,6 +1486,13 @@ final class LivePresentationStore {
 
     private func discussionAvailability(in thread: ConversationThread) -> ConversationAvailabilityObservation? {
         guard let observation = thread.latestReportedAvailabilityObservation else { return nil }
+#if DEBUG
+        if profileContext.transportMode == .fixture,
+           !permitsDelivery,
+           syntheticFixtureAvailability?.reportsByRequest[thread.request] == .notListening {
+            if case .notListening = observation.state { return observation }
+        }
+#endif
         switch observation.state {
         case .gone, .unsupported:
             return observation
@@ -1537,6 +1559,19 @@ final class LivePresentationStore {
         try self.init(store: store, context: context, permitsDelivery: false, isReadOnly: false,
                       diagnostics: nil, newMessageAreaDefaults: newMessageAreaDefaults)
     }
+
+#if DEBUG
+    /// Presents a fixture-seeded not-listening report without manufacturing
+    /// relay confirmation or enabling delivery.
+    convenience init(localFixtureStore store: ClientRepository, context: ProfileContext,
+                     syntheticAvailability: SyntheticFixtureAvailabilityInput,
+                     newMessageAreaDefaults: UserDefaults? = nil) throws {
+        guard context.transportMode == .fixture else { throw AttentionStoreError.fixtureOnlyOperation }
+        try self.init(localFixtureStore: store, context: context,
+                      newMessageAreaDefaults: newMessageAreaDefaults)
+        self.syntheticFixtureAvailability = syntheticAvailability
+    }
+#endif
 
     convenience init(disconnectedStore store: ClientRepository, context: ProfileContext,
                      newMessageAreaDefaults: UserDefaults? = nil) throws {
