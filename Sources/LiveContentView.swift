@@ -849,6 +849,8 @@ struct LiveInboxSettings: View {
     let archiveDeparture: NativeAccountDeparture?
     let connectionStatus: String?
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.openCatalogueMessage) private var openCatalogueMessage
+    @State private var showsFeatures = false
     @State private var confirmingDisconnect = false
     @State private var confirmingEndpointMigration = false
 
@@ -882,7 +884,16 @@ struct LiveInboxSettings: View {
 
     var body: some View {
         NavigationStack {
+            ScrollViewReader { proxy in
             Form {
+                Section {
+                    Button {
+                        showsFeatures = true
+                    } label: {
+                        Label("Features", systemImage: "list.bullet.rectangle")
+                    }
+                    .accessibilityIdentifier("settings-features")
+                }
                 if let connectionStatus {
                     HarklightFormSection("Connection status") {
                         Text(connectionStatus).foregroundStyle(.hkSecondary)
@@ -1025,6 +1036,7 @@ struct LiveInboxSettings: View {
                 if NativeRelayLifecycle.shared.featureFlags.isEnabled(.priorityLevelEditing),
                    !store.isReadOnly && !store.isLocalExample {
                     PriorityLevelsSettingsSection(store: store)
+                        .id("priority-levels-settings")
                 }
                 if let launch,
                    launch.diagnostics.hasEvents || launch.foregroundConnectDiagnostic != nil {
@@ -1041,6 +1053,18 @@ struct LiveInboxSettings: View {
             .toolbar { ToolbarItem(placement: .confirmationAction) {
                 HarklightDoneButton { dismiss() }
             } }
+            .navigationDestination(isPresented: $showsFeatures) {
+                FeatureCatalogueView(store: store) { route in
+                    switch route {
+                    case let .progressMessage(key):
+                        openCatalogueMessage?(key)
+                    case .priorityLevels:
+                        showsFeatures = false
+                        proxy.scrollTo("priority-levels-settings", anchor: .top)
+                    }
+                }
+            }
+            }
         }
         .harklightSheetSurface()
     }
