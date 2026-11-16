@@ -3105,12 +3105,13 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertFalse(row.belongsToReplied)
         XCTAssertTrue(row.hasFailedResponse)
         XCTAssertNil(row.localStatus, "The failed-response indicator must not duplicate the content-area warning.")
-        XCTAssertEqual(LiveRequestDetail.answerStatusText(
+        XCTAssertNil(LiveRequestDetail.answerStatusText(
             lifecycleStatus: request.lifecycleStatus,
             ownOutcome: request.receiptFacts?.ownOutcome,
             answeredFromThisDevice: false,
             localState: request.intentReceipt?.localState,
-            answerNotDelivered: request.answerNotDelivered), "Answer not delivered")
+            answerNotDelivered: request.answerNotDelivered),
+            "A plain failure has no status line; the control that sent it shows the mark and Retry.")
     }
 
     func testUnavailableChatMessageIsLocalToConversationAndDoesNotHideConnectionWarning() throws {

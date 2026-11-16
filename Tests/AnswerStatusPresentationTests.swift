@@ -15,6 +15,21 @@ final class AnswerStatusPresentationTests: XCTestCase {
             ownOutcome: .refused, answerNotDelivered: false))
     }
 
+    func testPlainFailureHasNoStatusLineButRefusalsKeepTheirReason() {
+        XCTAssertNil(LiveRequestDetail.answerStatusText(lifecycleStatus: .open, ownOutcome: nil,
+            answeredFromThisDevice: false, answerNotDelivered: true),
+            "A failed send shows the circled mark and Retry in its control, not \"Answer not delivered\".")
+        XCTAssertNil(LiveRequestDetail.answerStatusText(lifecycleStatus: .open, ownOutcome: .unconfirmed,
+            answeredFromThisDevice: true, localState: .notDelivered))
+        XCTAssertEqual(LiveRequestDetail.answerStatusText(lifecycleStatus: .open, ownOutcome: .refused,
+            answeredFromThisDevice: true, localState: .refusedClosed), "This message was closed.")
+        XCTAssertEqual(LiveRequestDetail.answerStatusText(lifecycleStatus: .open, ownOutcome: .refused,
+            answeredFromThisDevice: true, localState: .refusedNotFound), "This request is no longer available")
+        XCTAssertEqual(LiveRequestDetail.answerStatusText(lifecycleStatus: .pending, ownOutcome: .unconfirmed,
+            answeredFromThisDevice: true, localState: .terminalUnconfirmed),
+            "Submission unconfirmed · saved draft retained")
+    }
+
     func testPendingUnconfirmedSendIsNeverAnswered() {
         XCTAssertFalse(LiveRequestDetail.answerStatusIsComplete(
             lifecycleStatus: .pending, ownOutcome: .unconfirmed, answerNotDelivered: false))
