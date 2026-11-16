@@ -600,6 +600,15 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
                              operationID: operationID, receipt: .terminal)
                     return .refusedClosed(operationID: operationID)
                 }
+                if reason == "checkpoint_pending" {
+                    // The Server's catch-up gate refuses operations until this
+                    // connection's inbox checkpoint is accepted, before applying
+                    // them. That is not a definitive refusal of the answer.
+                    diagnose(.answer, .originalOperationDelivery, .retrying,
+                             causeCode: NativeDiagnosticCauseCode.serverReason(reason),
+                             operationID: operationID, receipt: .pendingUnconfirmed)
+                    return .awaitingCheckpoint(operationID: operationID)
+                }
                 if reason == nil {
                     // A missing reason does not prove a definitive refusal.
                     diagnose(.answer, .originalOperationDelivery, .unresolved,

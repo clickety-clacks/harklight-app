@@ -1962,6 +1962,8 @@ final class NativeGuidedTLSTests: XCTestCase {
                                     conversationCursor: Int, answers: ConversationFrameCollector,
                                     conversationStarted: XCTestExpectation? = nil,
                                     holdsConversationCatchUp: Bool = false,
+                                    checkpointRequested: XCTestExpectation? = nil,
+                                    holdsCheckpointAcknowledgement: Bool = false,
                                     countsAdmissions: Bool = false,
                                     requests: ConversationFrameCollector? = nil,
                                     answerReply: @escaping @Sendable (Int) -> String = { count in
@@ -1989,7 +1991,26 @@ final class NativeGuidedTLSTests: XCTestCase {
                 }.joined(separator: ",")
                 return [ok + checkpoint + ",\"items\":[\(items)],\"next_cursor\":null,\"receipt_cursor\":null}\n"]
             case "inbox_checkpoint_ack":
+                checkpointRequested?.fulfill()
+                if holdsCheckpointAcknowledgement { return [] }
                 return [ok + checkpoint + ",\"checkpoint_accepted\":true}\n"]
+            case "inbox_reconcile":
+                // As the Server: an operation this relay has not accepted was
+                // not committed at the snapshot, so the client keeps it queued.
+                guard let batchID = value.uniqueValue(named: "batch_id")?.stringValue?.rawValue,
+                      let operations = value.uniqueValue(named: "operations")?.arrayValues else { return [] }
+                let accepted = Set(answers.snapshot().compactMap {
+                    (try? JSONValue.parse($0))?.uniqueValue(named: "op_id")?.stringValue?.rawValue
+                })
+                let operationIDs = operations.compactMap { $0.uniqueValue(named: "op_id")?.stringValue?.rawValue }
+                guard operationIDs.count == operations.count, accepted.isDisjoint(with: operationIDs) else {
+                    // This relay models only operations it never accepted.
+                    return ["{\"v\":1,\"type\":\"error\",\"ref\":\"\(ref)\",\"reason\":\"invalid_request\"}\n"]
+                }
+                let results = operationIDs.map {
+                    "{\"op_id\":\"\($0)\",\"status\":\"not_committed_at_snapshot\"}"
+                }.joined(separator: ",")
+                return [ok + checkpoint + ",\"batch_id\":\"\(batchID)\",\"results\":[\(results)]}\n"]
             case "inbox_attach":
                 return [ok + checkpoint + ",\"checkpoint_accepted\":true,\"replay_started\":true}\n",
                         "{\"v\":1,\"type\":\"resynced\",\"seq\":\(rows.count)}\n"]
@@ -2006,7 +2027,7 @@ final class NativeGuidedTLSTests: XCTestCase {
                 return [ok + ",\"seq\":\(answers.snapshot().count + 10),\"event_id\":\"chat-turn\"}\n"]
             default:
                 // Optional features this relay does not model (inbox view,
-                // reconciliation, push status) are unsupported here.
+                // push status) are unsupported here.
                 return ["{\"v\":1,\"type\":\"error\",\"ref\":\"\(ref)\",\"reason\":\"unknown_type\"}\n"]
             }
         }
@@ -2167,6 +2188,80 @@ final class NativeGuidedTLSTests: XCTestCase {
         await lifecycle.deactivate()
     }
 
+    func testAnswerTappedBeforeTheCheckpointIsAcceptedWaitsForItWhileShownPending() async throws {
+        let namespace = "Harklight.live-connection-checkpoint-ordering." + UUID().uuidString
+        let identity = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
+        defer {
+            SecItemDelete([kSecClass as String: kSecClassCertificate,
+                           kSecAttrLabel as String: identity.label] as CFDictionary)
+            SecItemDelete([kSecClass as String: kSecClassKey,
+                           kSecAttrApplicationTag as String: Data(namespace.utf8)] as CFDictionary)
+        }
+        let answers = ConversationFrameCollector()
+        let requests = ConversationFrameCollector()
+        let checkpointRequested = expectation(description: "The checkpoint acknowledgement is pending at the Server")
+        let relay = try singleSessionRelay(expectedDevice: identity.deviceID, originPort: 443,
+                                           conversationCursor: 0, answers: answers,
+                                           checkpointRequested: checkpointRequested,
+                                           holdsCheckpointAcknowledgement: true, requests: requests)
+        defer { relay.close() }
+        let port = try await relay.start()
+        let context = ProfileContext(identity: ProfileIdentity(trustedRelayAuthority: ExactText("localhost"),
+            personID: ExactText("checkpoint-ordering-person"), deviceID: ExactText(identity.deviceID)),
+            transportMode: .relay)
+        let store = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        let lifecycle = NativeRelayLifecycle()
+        try await lifecycle.activate(store: store, context: context,
+            relayURL: XCTUnwrap(URL(string: "wss://localhost:\(port)/relay")),
+            clientIdentity: identity.value, trustedRootDER: relay.rootDER)
+        let refresh = Task { @MainActor in await lifecycle.refreshResultFromTrustedRelay() }
+        await fulfillment(of: [checkpointRequested], timeout: 5)
+        let liveConnections = relay.connectionCount
+
+        let domain = AttentionDomainPort(store: store)
+        let reply = try domain.submit(SubmitIntent(context: domain.context,
+            selector: liveRequestSelector("reply", domain: domain, context: context), intentID: UUID(),
+            inputs: [.compatibilityText(action: ExactText("reply"), text: ExactText("Before the checkpoint"))])).intentID
+        let saved = try XCTUnwrap(store.lookupIntent(reply, context: context))
+        let sendingStates = SendingStateRecorder()
+        let sendStarted = expectation(description: "The tap shows Sending at once")
+        sendStarted.assertForOverFulfill = false
+        let send = Task { @MainActor in
+            try await lifecycle.sendOriginalOperationForUserTap(reply, expected: context,
+                onSendCallStateChange: { sending in
+                    sendingStates.append(sending)
+                    if sending { sendStarted.fulfill() }
+                })
+        }
+        await fulfillment(of: [sendStarted], timeout: 5)
+        XCTAssertTrue(answers.snapshot().isEmpty, "Nothing goes out before the checkpoint is accepted.")
+        XCTAssertEqual(try store.snapshot(context: context).outbox.map(\.intentID), [reply],
+                       "The answer is queued and shown pending meanwhile.")
+
+        // The Server accepts this connection's checkpoint; the answer then goes out once on it.
+        let acknowledgement = try XCTUnwrap(requests.snapshot().compactMap { try? JSONValue.parse($0) }
+            .last { $0.uniqueValue(named: "type")?.stringValue?.rawValue == "inbox_checkpoint_ack" })
+        let ref = try XCTUnwrap(acknowledgement.uniqueValue(named: "ref")?.stringValue?.rawValue)
+        relay.push("{\"v\":1,\"type\":\"ok\",\"ref\":\"\(ref)\",\"paging_version\":1,\"snapshot_id\":\"single-session\",\"high_water\":3,\"checkpoint_accepted\":true}\n")
+        try await send.value
+        let refreshed = await refresh.value
+        XCTAssertTrue(refreshed.relayConfirmed, lifecycle.refreshFailureMessage(for: context) ?? "no failure message")
+        let accepted = expectation(for: NSPredicate { _, _ in
+            Self.hasAcceptedDisposition(try? store.snapshot(context: context).intents[reply]?.disposition)
+        }, evaluatedWith: nil)
+        await fulfillment(of: [accepted], timeout: 5)
+        let types = requests.types
+        let acknowledged = try XCTUnwrap(types.firstIndex(of: "inbox_checkpoint_ack"))
+        let answered = try XCTUnwrap(types.firstIndex(of: "answer"))
+        XCTAssertLessThan(acknowledged, answered, "The answer follows the checkpoint acknowledgement.")
+        XCTAssertEqual(answers.snapshot().count, 1, "The waiting answer is sent exactly once.")
+        let sentAnswer = try JSONValue.parse(XCTUnwrap(answers.snapshot().first))
+        XCTAssertEqual(sentAnswer.uniqueValue(named: "op_id")?.stringValue?.rawValue,
+                       saved.operationID.uuidString.lowercased(), "The saved operation is sent, not a new one.")
+        XCTAssertEqual(relay.connectionCount, liveConnections, "No second relay connection opened.")
+        await lifecycle.deactivate()
+    }
+
     func testUnresolvedSubmissionIsResentOnTheLiveConnection() async throws {
         let namespace = "Harklight.live-connection-unresolved-resend." + UUID().uuidString
         let identity = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
@@ -2320,6 +2415,42 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertEqual(replies.first?.causeCode, "server_closed")
         XCTAssertEqual(replies.first?.relayRequestType, .answer)
         XCTAssertEqual(replies.first?.operationID, operationID)
+    }
+
+    func testOnlyACheckpointPendingRefusalLeavesAnAnswerAwaitingTheCheckpoint() async throws {
+        let namespace = "Harklight.answer-checkpoint-pending." + UUID().uuidString
+        let identity = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
+        defer {
+            SecItemDelete([kSecClass as String: kSecClassCertificate,
+                           kSecAttrLabel as String: identity.label] as CFDictionary)
+            SecItemDelete([kSecClass as String: kSecClassKey,
+                           kSecAttrApplicationTag as String: Data(namespace.utf8)] as CFDictionary)
+        }
+        let context = ProfileContext(identity: ProfileIdentity(
+            trustedRelayAuthority: ExactText("localhost"), personID: ExactText("test-person"),
+            deviceID: ExactText(identity.deviceID)), transportMode: .relay)
+        // The Server's catch-up gate is temporary; every other refusal keeps
+        // its existing definitive classification.
+        for reason in ["checkpoint_pending", "snapshot_unavailable", "operation_conflict"] {
+            let relay = try LocalRelayWebSocket(expectedDevice: identity.deviceID) { text in
+                guard text.contains("\"type\":\"answer\"") else { return [] }
+                return ["{\"v\":1,\"type\":\"error\",\"reason\":\"\(reason)\"}\n"]
+            }
+            defer { relay.close() }
+            let port = try await relay.start()
+            let session = try URLSessionInstallationSession(
+                profile: context, relayURL: XCTUnwrap(URL(string: "wss://localhost:\(port)/relay")),
+                clientIdentity: TrustedKeychainIdentity(identity.value), trustedRootDER: relay.rootDER)
+            let operationID = UUID()
+            let frame = #"{"v":1,"type":"answer","op_id":"\#(operationID.uuidString.lowercased())","sender_id":"sender","request_id":"request","request_revision":1,"answer":null}"#
+            let result = try await session.sendOriginalOperation(Data((frame + "\n").utf8), operationID: operationID)
+            await session.close()
+            if reason == "checkpoint_pending" {
+                XCTAssertEqual(result, .awaitingCheckpoint(operationID: operationID))
+            } else {
+                XCTAssertEqual(result, .failed(operationID: operationID), reason)
+            }
+        }
     }
 
     func testRelayErrorRepliesAreAttributedByRefOrToTheCurrentExchangeAcrossFocusReports() throws {
@@ -5223,7 +5354,14 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertEqual(try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate().deviceID,
                        installation.deviceID, "The approved device identity remains available after cancellation.")
         XCTAssertEqual(try store.snapshot(context: context).cursor, 1)
-        XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty)
+        // The answer was never sent on the stalled connection, so it stays
+        // queued as pending: neither lost nor accepted.
+        XCTAssertEqual(try store.snapshot(context: context).outbox.map(\.intentID), [queuedReceipt.intentID],
+                       "The never-sent answer stays queued for the next connection.")
+        let keptOperation = try XCTUnwrap(store.lookupIntent(queuedReceipt.intentID, context: context))
+        XCTAssertEqual(keptOperation.disposition, .pending, "A never-sent answer is not recorded as lost or accepted.")
+        XCTAssertEqual(keptOperation.wireFrame, originalOperation.wireFrame, "The exact saved bytes stay queued.")
+        XCTAssertTrue(try store.acceptedOperationsAwaitingTerminalReplay(context: context).isEmpty)
         XCTAssertEqual(try store.conversationSnapshot(context: context).threads[requestKey]?.drafts[1]?.text,
                        ExactText("Keep this draft"))
         XCTAssertFalse(diagnosticJournal.events.contains { $0.causeCode == "foreground_deadline" },
