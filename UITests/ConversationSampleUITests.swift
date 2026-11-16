@@ -832,7 +832,9 @@ final class ConversationSampleUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Local example · status is simulated; nothing was sent."].exists,
                       "These rows are synthetic display fixtures, not Server acceptance evidence.\n\(app.debugDescription)")
         XCTAssertTrue(app.staticTexts["Sending…"].exists, app.debugDescription)
-        XCTAssertTrue(app.staticTexts["Waiting for Calendar assistant"].exists, app.debugDescription)
+        XCTAssertGreaterThanOrEqual(app.staticTexts.matching(
+            NSPredicate(format: "label == %@", "Sending…")).count, 2,
+            "Both ACK1-only entries remain Sending until ACK2; elapsed time does not advance their captions.")
         XCTAssertTrue(app.staticTexts.matching(
             NSPredicate(format: "label CONTAINS %@", "Delivered to Release orchestrator")).firstMatch.exists,
             app.debugDescription)
@@ -886,7 +888,9 @@ final class ConversationSampleUITests: XCTestCase {
         let history = app.scrollViews["conversation-history-scroll"]
         XCTAssertTrue(history.waitForExistence(timeout: 5), app.debugDescription)
         history.swipeUp()
-        XCTAssertTrue(app.staticTexts["Waiting for Calendar assistant"].exists, app.debugDescription)
+        XCTAssertGreaterThanOrEqual(app.staticTexts.matching(
+            NSPredicate(format: "label == %@", "Sending…")).count, 2,
+            "Both ACK1-only entries remain Sending until ACK2; elapsed time does not advance their captions.")
         XCTAssertTrue(app.staticTexts.matching(
             NSPredicate(format: "label CONTAINS %@", "Delivered to Release orchestrator")).firstMatch.exists,
             app.debugDescription)
