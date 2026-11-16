@@ -1,18 +1,17 @@
 import UIKit
 import UserNotifications
 
-/// The icon badge counts the Inbox rows that still need attention: the same
-/// rows the Inbox tab lists, judged by the same membership rule, so acting on
-/// a message moves the badge exactly when it moves the list. A retracted
-/// message stays listed with its Retracted marker but no longer needs an
-/// answer, so it does not count. Zero clears the badge.
+/// Counts ordinary Inbox messages that still need attention. Server-marked
+/// Progress messages never count, including when shown as ordinary rows with
+/// the Progress flag off, matching the Server's APNs badge. Retracted messages
+/// remain visible but do not count. Zero clears the badge.
 @MainActor
 enum InboxBadge {
     static func count(requests: [InboxRequestRow], samples: SampleLibrary,
                       showsLocalExamples: Bool) -> Int {
         let items = showsLocalExamples ? samples.inboxItems(appendingTo: requests)
             : requests.map(InboxItem.request)
-        return items.filter { !$0.isProgress && !$0.belongsToReplied && !$0.isRetracted }.count
+        return items.filter { !$0.hasProgressMarker && !$0.belongsToReplied && !$0.isRetracted }.count
     }
 }
 

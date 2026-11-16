@@ -179,6 +179,7 @@ public actor NativeRelayCore {
     private let inboxWire: InboxPagingWire
     private let onProgress: @Sendable (NativeRelayProgressEvent) -> Void
     private let onDiagnostic: NativeClientDiagnosticSink
+    private let onFeatureFlags: @Sendable (RemoteFeatureFlagSnapshot) async -> Void
     private let attemptID: UUID?
     private var active = true
     private var busy = false
@@ -197,6 +198,14 @@ public actor NativeRelayCore {
     private var latestInboxViewNotice: ExactText?
     private var messageOpenUnsupportedForConnection = false
     private var pendingMessageOpenDrainRequested = false
+    private var priorityLevelsUnavailableForConnection = false
+    private var priorityLevelsSaveRequested = false
+    private var priorityLevelsDrainRequested = false
+    private var priorityLevelsRefreshRequested = false
+    private var priorityLevelsReadForConnection = false
+    private let onPriorityLevelsChanged: @Sendable () -> Void
+    private let onPriorityLevelsConnectionLost: @Sendable () -> Void
+    private let onPriorityLevelsFeatureEnabled: @Sendable () async -> Bool
     private var postCheckpointAcknowledgementGateOpen = false
     private var postCheckpointAcknowledgedCursor: UInt64?
     private var pendingPostCheckpointAcknowledgement: UInt64?
@@ -485,7 +494,11 @@ public actor NativeRelayCore {
                 attemptID: UUID? = nil,
                 serverStateCache: (any ServerStateCaching)? = nil,
                 onProgress: @escaping @Sendable (NativeRelayProgressEvent) -> Void = { _ in },
-                onDiagnostic: @escaping NativeClientDiagnosticSink = { _ in }) throws {
+                onPriorityLevelsChanged: @escaping @Sendable () -> Void = {},
+                onPriorityLevelsConnectionLost: @escaping @Sendable () -> Void = {},
+                onPriorityLevelsFeatureEnabled: @escaping @Sendable () async -> Bool = { false },
+                onDiagnostic: @escaping NativeClientDiagnosticSink = { _ in },
+                onFeatureFlags: @escaping @Sendable (RemoteFeatureFlagSnapshot) async -> Void = { _ in }) throws {
         guard context.transportMode == .relay else { throw NativeRelayCoreError.fixtureProfile }
         guard session.authenticatedIdentity == context.identity else {
             throw NativeRelayCoreError.wrongInstallation
@@ -497,8 +510,12 @@ public actor NativeRelayCore {
         self.automaticallySendsPendingOperations = automaticallySendsPendingOperations
         self.serverStateCache = serverStateCache ?? FileServerStateCache(identity: context.identity)
         self.onProgress = onProgress
+        self.onPriorityLevelsChanged = onPriorityLevelsChanged
+        self.onPriorityLevelsConnectionLost = onPriorityLevelsConnectionLost
+        self.onPriorityLevelsFeatureEnabled = onPriorityLevelsFeatureEnabled
         self.attemptID = attemptID
         self.onDiagnostic = onDiagnostic
+        self.onFeatureFlags = onFeatureFlags
         self.wire = try RelayWire(profile: context)
         self.inboxWire = try InboxPagingWire(profile: context)
     }
@@ -654,6 +671,15 @@ public actor NativeRelayCore {
             failedStep = .validateRelayState
             try validate()
             onProgress(.postAckDrainFinished(.completed))
+            let levelsState = try? store.snapshot(context: context).priorityLevels
+            if levelsState?.pendingSave != nil {
+                priorityLevelsSaveRequested = true
+                priorityLevelsDrainRequested = true
+            }
+            if levelsState?.editorWasOpened == true && !priorityLevelsReadForConnection {
+                priorityLevelsRefreshRequested = true
+                priorityLevelsDrainRequested = true
+            }
             return max(high, durableCursor)
         } catch {
             let errorCode = NativeDiagnosticCauseCode.forPostAckError(error)
@@ -1314,7 +1340,18 @@ public actor NativeRelayCore {
     ) async {
         do {
             while !Task.isCancelled {
-                let frame = try await eventStream.nextPostCheckpointInboxEvent()
+                let frame: Data
+                do {
+                    frame = try await eventStream.nextPostCheckpointInboxEvent()
+                } catch {
+                    guard !Task.isCancelled else { return }
+                    markPriorityLevelsConnectionLost()
+                    throw error
+                }
+                if PriorityLevelsWire.isChangedHint(frame) {
+                    await refreshPriorityLevels()
+                    continue
+                }
                 let update = try wire.decodeUpdate(frame)
                 if case let .viewChanged(revision) = update {
                     scheduleInboxViewRefresh(using: eventStream, noticedRevision: revision)
@@ -1628,6 +1665,8 @@ public actor NativeRelayCore {
             try store.finishReplay(at: high, context: context)
             replay.high = high
             activeInboxReplay = replay
+            await onFeatureFlags(try wire.decodeFeatureFlags(frame))
+            try validate()
             return
         }
         switch try wire.decodeUpdate(frame) {
@@ -2254,6 +2293,34 @@ public actor NativeRelayCore {
         refreshWaiters.remove(at: index).continuation.resume(throwing: CancellationError())
     }
 
+    /// Reads or saves the account table only over this enrolled connection.
+    /// Requests made during another relay exchange are coalesced and drained
+    /// after that exchange releases the core.
+    public func refreshPriorityLevels() async {
+        guard await onPriorityLevelsFeatureEnabled() else { return }
+        priorityLevelsRefreshRequested = true
+        guard !priorityLevelsUnavailableForConnection else { return }
+        guard !busy else {
+            priorityLevelsDrainRequested = true
+            return
+        }
+        await drainPriorityLevels()
+    }
+
+    public func sendPendingPriorityLevelsSave() async {
+        guard await onPriorityLevelsFeatureEnabled() else { return }
+        guard !priorityLevelsUnavailableForConnection else { return }
+        priorityLevelsSaveRequested = true
+        guard !busy else {
+            // A save can be created while an editor-open GET is in flight.
+            // Drain it immediately after that exchange instead of leaving it
+            // pending until another foreground or reconnect event.
+            priorityLevelsDrainRequested = true
+            return
+        }
+        await drainPriorityLevels()
+    }
+
     private func releaseBusy() {
         if active, !refreshWaiters.isEmpty {
             // Transfer ownership before resuming the caller so another live
@@ -2273,6 +2340,10 @@ public actor NativeRelayCore {
         if pendingMessageOpenDrainRequested {
             pendingMessageOpenDrainRequested = false
             Task { _ = await sendPendingMessageOpens() }
+        }
+        if priorityLevelsDrainRequested {
+            priorityLevelsDrainRequested = false
+            Task { await drainPriorityLevels() }
         }
         if !pendingInboxPageWaiters.isEmpty {
             let waiters = pendingInboxPageWaiters
@@ -2600,6 +2671,121 @@ public actor NativeRelayCore {
             }
         }
         return retired
+    }
+
+    private func drainPriorityLevels() async {
+        guard await onPriorityLevelsFeatureEnabled() else {
+            priorityLevelsSaveRequested = false
+            priorityLevelsRefreshRequested = false
+            priorityLevelsDrainRequested = false
+            return
+        }
+        guard !priorityLevelsUnavailableForConnection,
+              let pagingSession = session as? any AuthenticatedInboxPagingSession else { return }
+        guard !busy else {
+            priorityLevelsDrainRequested = true
+            return
+        }
+        busy = true
+        priorityLevelsDrainRequested = false
+        defer {
+            onPriorityLevelsChanged()
+            releaseBusy()
+        }
+        do {
+            try validate()
+            let initialState = try store.snapshot(context: context).priorityLevels
+            let shouldSendSave = priorityLevelsSaveRequested
+            priorityLevelsSaveRequested = false
+            if shouldSendSave, let pendingSave = initialState.pendingSave {
+                let response: Data
+                do {
+                    response = try await pagingSession.inboxRequest(
+                        PriorityLevelsWire().setRequest(for: pendingSave),
+                        ref: PriorityLevelsWire.requestRef)
+                } catch {
+                    markPriorityLevelsConnectionLost()
+                    try? store.recordPriorityLevelsFailure("unconfirmed", context: context)
+                    return
+                }
+                switch PriorityLevelsWire().decodeSetResult(response, for: pendingSave) {
+                case let .confirmed(levels):
+                    guard try store.confirmPriorityLevelsSave(pendingSave.operationID,
+                                                              levels: levels,
+                                                              context: context) else {
+                        try store.recordPriorityLevelsFailure("unconfirmed", context: context)
+                        return
+                    }
+                    try? await saveServerStateCache()
+                    priorityLevelsRefreshRequested = true
+                case let .permanentlyRejected(reason):
+                    _ = try store.rejectPriorityLevelsSave(pendingSave.operationID,
+                                                           reason: reason,
+                                                           context: context)
+                    if reason == "forbidden" {
+                        priorityLevelsUnavailableForConnection = true
+                        priorityLevelsReadForConnection = true
+                        return
+                    }
+                    if initialState.editorWasOpened { priorityLevelsRefreshRequested = true }
+                case .unsupported:
+                    priorityLevelsUnavailableForConnection = true
+                    priorityLevelsReadForConnection = true
+                    try store.recordPriorityLevelsFailure("unknown_type", context: context)
+                    return
+                case .unresolved:
+                    try store.recordPriorityLevelsFailure("unconfirmed", context: context)
+                    return
+                }
+            }
+
+            while priorityLevelsRefreshRequested && !priorityLevelsUnavailableForConnection {
+                priorityLevelsRefreshRequested = false
+                if !priorityLevelsSaveRequested { priorityLevelsDrainRequested = false }
+                priorityLevelsReadForConnection = true
+                let response: Data
+                do {
+                    response = try await pagingSession.inboxRequest(
+                        PriorityLevelsWire().getRequest(), ref: PriorityLevelsWire.requestRef)
+                } catch {
+                    markPriorityLevelsConnectionLost()
+                    try? store.recordPriorityLevelsFailure("unconfirmed", context: context)
+                    return
+                }
+                switch PriorityLevelsWire().decodeGetResult(response) {
+                case let .confirmed(levels):
+                    try store.recordPriorityLevelsRead(levels, context: context)
+                    try? await saveServerStateCache()
+                case let .permanentlyRejected(reason):
+                    try store.recordPriorityLevelsFailure(reason, context: context)
+                    if reason == "forbidden" {
+                        priorityLevelsUnavailableForConnection = true
+                    }
+                    return
+                case .unsupported:
+                    priorityLevelsUnavailableForConnection = true
+                    try store.recordPriorityLevelsFailure("unknown_type", context: context)
+                    return
+                case .unresolved:
+                    try store.recordPriorityLevelsFailure("unconfirmed", context: context)
+                    return
+                }
+            }
+            // A read requested during this drain is consumed by the loop above.
+            // Preserve a queued drain only when it represents a save that was
+            // requested while the current relay request was in flight.
+            if !priorityLevelsRefreshRequested && !priorityLevelsSaveRequested {
+                priorityLevelsDrainRequested = false
+            }
+        } catch {
+            try? store.recordPriorityLevelsFailure("unconfirmed", context: context)
+        }
+    }
+
+    private func markPriorityLevelsConnectionLost() {
+        priorityLevelsUnavailableForConnection = true
+        priorityLevelsReadForConnection = true
+        onPriorityLevelsConnectionLost()
     }
 
     private func diagnose(_ area: NativeDiagnosticArea,

@@ -266,6 +266,7 @@ public final class ClientRepository: @unchecked Sendable {
                 operations: queue.operations, cancelled: queue.cancelledOperations)
             state.drafts = queue.answerDrafts
             state.pendingMessageOpens = queue.messageOpens
+            state.priorityLevels = queue.priorityLevelsDraft?.restoredState
             state.pendingConversations = queue.conversations
             state.pendingReadPositions = queue.readPositions
             if state.intentByRequest != queue.activeOperations {
@@ -284,6 +285,7 @@ public final class ClientRepository: @unchecked Sendable {
                 operations: state.intents, cancelled: state.fencedIntents)
             state.drafts = salvaged.answerDrafts.values
             state.pendingMessageOpens = salvaged.messageOpens?.values
+            state.priorityLevels = salvaged.priorityLevelsDraft?.restoredState
             state.pendingConversations = salvaged.conversations.values.mapValues(\.actions)
             state.pendingReadPositions = salvaged.readPositions.values
             let unattributed = state.intents.count - state.intentByRequest.count
@@ -353,6 +355,9 @@ public final class ClientRepository: @unchecked Sendable {
         next.inboxView = cached.inboxView
         next.pendingRelayOverlays = cached.pendingRelayOverlays
         next.inboxReferences = cached.inboxReferences
+        var priorityLevels = next.priorityLevels ?? .empty
+        priorityLevels.confirmedLevels = cached.priorityLevels
+        next.priorityLevels = priorityLevels
 
         var conversation = ConversationState()
         conversation.cursor = cached.conversationCursor
@@ -391,6 +396,10 @@ public final class ClientRepository: @unchecked Sendable {
         // Chat drafts, uploads and read positions live in their own queues
         // (pendingConversations, pendingReadPositions), not in this projection.
         next.server = ServerProjectionCache()
+        if var priorityLevels = next.priorityLevels {
+            priorityLevels.confirmedLevels = nil
+            next.priorityLevels = priorityLevels
+        }
         next.replayPublishedIntents = nil
         var unsent: [UUID: Submission] = [:]
         for id in state.intentByRequest.values {
@@ -990,6 +999,178 @@ public final class ClientRepository: @unchecked Sendable {
             published.removeValue(forKey: intentID)
             next.replayPublishedIntents = published
         }
+        try commit(next)
+    }
+
+    public func markPriorityLevelsEditorOpened(context suppliedContext: ProfileContext) throws {
+        writerLock.lock()
+        defer { writerLock.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard suppliedContext.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
+        var levels = state.priorityLevels ?? .empty
+        guard !levels.editorWasOpened else { return }
+        levels.editorWasOpened = true
+        var next = state
+        next.priorityLevels = levels
+        try commit(next)
+    }
+
+    public func savePriorityLevelsDraft(_ rows: [PriorityLevelDraftRow],
+                                        context suppliedContext: ProfileContext) throws {
+        writerLock.lock()
+        defer { writerLock.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard suppliedContext.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
+        guard Set(rows.map(\.id)).count == rows.count, rows.allSatisfy({ isUUIDv4($0.id) }) else {
+            throw AttentionStoreError.invalidDraft
+        }
+        var levels = state.priorityLevels ?? .empty
+        levels.draftRows = rows
+        levels.draftRevision &+= 1
+        if levels.pendingSave == nil,
+           levels.failureReason != "unknown_type",
+           levels.failureReason != "forbidden" {
+            levels.failureReason = nil
+        }
+        var next = state
+        next.priorityLevels = levels
+        try commit(next)
+    }
+
+    public func beginPriorityLevelsSave(_ table: [PriorityLevel],
+                                        context suppliedContext: ProfileContext) throws -> PendingPriorityLevelsSave {
+        writerLock.lock()
+        defer { writerLock.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard suppliedContext.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
+        let rows = table.map(PriorityLevelDraftRow.init(level:))
+        guard !table.isEmpty, PriorityLevelsTableValidation.levels(from: rows) == table else {
+            throw AttentionStoreError.invalidDraft
+        }
+        var levels = state.priorityLevels ?? .empty
+        guard levels.pendingSave == nil else { throw AttentionStoreError.invalidSubmission }
+        let operation = PendingPriorityLevelsSave(levels: table, sourceDraftRevision: levels.draftRevision)
+        levels.pendingSave = operation
+        levels.failureReason = nil
+        var next = state
+        next.priorityLevels = levels
+        try commit(next)
+        return operation
+    }
+
+    @discardableResult
+    public func confirmPriorityLevelsSave(_ operationID: UUID,
+                                          levels appliedLevels: [PriorityLevel],
+                                          context suppliedContext: ProfileContext) throws -> Bool {
+        writerLock.lock()
+        defer { writerLock.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard suppliedContext.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
+        var levels = state.priorityLevels ?? .empty
+        guard let operation = levels.pendingSave, operation.operationID == operationID,
+              operation.levels == appliedLevels else { return false }
+        levels.confirmedLevels = appliedLevels
+        levels.pendingSave = nil
+        if levels.draftRevision == operation.sourceDraftRevision {
+            levels.draftRows = appliedLevels.map(PriorityLevelDraftRow.init(level:))
+            levels.draftRevision &+= 1
+        }
+        levels.failureReason = nil
+        var next = state
+        next.priorityLevels = levels
+        try commit(next)
+        return true
+    }
+
+    @discardableResult
+    public func rejectPriorityLevelsSave(_ operationID: UUID,
+                                         reason: String,
+                                         context suppliedContext: ProfileContext) throws -> Bool {
+        writerLock.lock()
+        defer { writerLock.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard suppliedContext.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
+        var levels = state.priorityLevels ?? .empty
+        guard levels.pendingSave?.operationID == operationID else { return false }
+        levels.pendingSave = nil
+        levels.failureReason = reason
+        var next = state
+        next.priorityLevels = levels
+        try commit(next)
+        return true
+    }
+
+    public func recordPriorityLevelsRead(_ table: [PriorityLevel],
+                                        context suppliedContext: ProfileContext) throws {
+        writerLock.lock()
+        defer { writerLock.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard suppliedContext.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
+        let rows = table.map(PriorityLevelDraftRow.init(level:))
+        guard table.isEmpty || PriorityLevelsTableValidation.levels(from: rows) == table else {
+            throw AttentionStoreError.invalidProjection
+        }
+        var levels = state.priorityLevels ?? .empty
+        let draftMatchesLastConfirmed: Bool
+        if let draftRows = levels.draftRows {
+            if draftRows.isEmpty {
+                draftMatchesLastConfirmed = levels.confirmedLevels == []
+            } else if let confirmedLevels = levels.confirmedLevels {
+                draftMatchesLastConfirmed = PriorityLevelsTableValidation.levels(from: draftRows) == confirmedLevels
+            } else {
+                draftMatchesLastConfirmed = false
+            }
+        } else {
+            draftMatchesLastConfirmed = true
+        }
+        levels.confirmedLevels = table
+        let draftMatchesRead: Bool
+        if let draftRows = levels.draftRows {
+            if table.isEmpty {
+                draftMatchesRead = draftRows.isEmpty
+            } else {
+                draftMatchesRead = PriorityLevelsTableValidation.levels(from: draftRows) == table
+            }
+        } else {
+            draftMatchesRead = false
+        }
+        if levels.pendingSave == nil && draftMatchesLastConfirmed && !draftMatchesRead {
+            levels.draftRows = table.map(PriorityLevelDraftRow.init(level:))
+        }
+        if levels.pendingSave == nil,
+           (levels.failureReason == "unknown_type" || levels.failureReason == "unconfirmed" ||
+            levels.failureReason == "forbidden") {
+            levels.failureReason = nil
+        }
+        var next = state
+        next.priorityLevels = levels
+        try commit(next)
+    }
+
+    public func recordPriorityLevelsFailure(_ reason: String,
+                                            context suppliedContext: ProfileContext) throws {
+        writerLock.lock()
+        defer { writerLock.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard suppliedContext.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
+        var levels = state.priorityLevels ?? .empty
+        levels.failureReason = reason
+        var next = state
+        next.priorityLevels = levels
         try commit(next)
     }
 
@@ -2899,7 +3080,8 @@ public final class ClientRepository: @unchecked Sendable {
                                       inboxCurrentKeys: inboxCurrentKeys,
                                       pendingRelayOverlays: state.pendingRelayOverlays ?? [:],
                                       inboxReferences: state.inboxReferences ?? [:],
-                                      pendingMessageOpens: state.pendingMessageOpens ?? [])
+                                      pendingMessageOpens: state.pendingMessageOpens ?? [],
+                                      priorityLevels: state.priorityLevels ?? .empty)
     }
 
     /// Returns only the contiguous relay cursor after validating the profile.
@@ -2932,6 +3114,41 @@ public final class ClientRepository: @unchecked Sendable {
         return acceptedAwaitingTerminalReplay.values.sorted {
             $0.operationID.uuidString < $1.operationID.uuidString
         }
+    }
+
+    /// Local text awaiting explicit recovery, separate from a frozen submission
+    /// and from Server-owned history. Nil dismisses only this revision's text.
+    public func retainConversationText(_ text: ExactText?, for binding: ConversationBinding,
+                                       context suppliedContext: ProfileContext) throws {
+        writerLock.lock()
+        defer { writerLock.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        try validate(binding.request, in: context.identity)
+        var next = state
+        if let text {
+            guard let thread = next.conversation?.threads[binding.request],
+                  thread.revisions[binding.revision] != nil else { throw ConversationError.missingRequest }
+            if next.pendingConversations[binding.request] == nil {
+                next.pendingConversations[binding.request] = PendingConversationActions(thread: thread)
+            }
+            var retained = next.pendingConversations[binding.request]?.retainedUnsentText ?? [:]
+            retained[binding.revision] = text
+            next.pendingConversations[binding.request]?.retainedUnsentText = retained
+        } else {
+            next.pendingConversations[binding.request]?.retainedUnsentText?.removeValue(forKey: binding.revision)
+        }
+        try commit(next)
+    }
+
+    public func retainedConversationText(for request: RequestKey,
+                                         context suppliedContext: ProfileContext) throws -> [UInt64: ExactText] {
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        try validate(request, in: context.identity)
+        return state.pendingConversations[request]?.retainedUnsentText ?? [:]
     }
 
     public func conversationSnapshot(context suppliedContext: ProfileContext) throws -> ConversationSnapshot {
@@ -4357,6 +4574,7 @@ private struct ClientSessionState {
     var outboxOrder: [UUID] = []
     var replayPublishedIntents: [UUID: Submission]?
     var pendingMessageOpens: [PendingMessageOpen]?
+    var priorityLevels: PriorityLevelsStoreState?
     var pendingConversations: [RequestKey: PendingConversationActions] = [:]
     var pendingReadPositions: [RequestKey: PendingConversationReadPosition] = [:]
     var requests: [RequestKey: StoredRequest] {
@@ -4481,7 +4699,9 @@ private struct ClientSessionState {
                         }
                     }
                 }
+                let retainedText = pendingConversations[key]?.retainedUnsentText
                 pendingConversations[key] = PendingConversationActions(thread: thread)
+                pendingConversations[key]?.retainedUnsentText = retainedText
                 thread.drafts = [:]
                 thread.answerDrafts = nil
                 thread.uploadGroups = nil
@@ -4625,7 +4845,7 @@ private struct SalvagedConversationActions: Decodable {
     let actions: PendingConversationActions
     let dropped: Int
 
-    private enum CodingKeys: String, CodingKey { case drafts, answerDrafts, uploadGroups, uploadCleanups }
+    private enum CodingKeys: String, CodingKey { case drafts, answerDrafts, uploadGroups, uploadCleanups, retainedUnsentText }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -4643,8 +4863,10 @@ private struct SalvagedConversationActions: Decodable {
         let answerDrafts: [UInt64: RequestDraft]? = section(.answerDrafts)
         let uploadGroups: [UUID: ConversationUploadGroup]? = section(.uploadGroups)
         let uploadCleanups: [UUID: ConversationUploadCleanup]? = section(.uploadCleanups)
-        actions = PendingConversationActions(drafts: drafts ?? [:], answerDrafts: answerDrafts,
-                                             uploadGroups: uploadGroups, uploadCleanups: uploadCleanups)
+        var recovered = PendingConversationActions(drafts: drafts ?? [:], answerDrafts: answerDrafts,
+                                                   uploadGroups: uploadGroups, uploadCleanups: uploadCleanups)
+        recovered.retainedUnsentText = section(.retainedUnsentText)
+        actions = recovered
         self.dropped = dropped
     }
 }
@@ -4678,6 +4900,7 @@ private struct SalvagedPendingActions: Decodable {
     let messageOpens: SalvagedArray<PendingMessageOpen>?
     let conversations: SalvagedDictionary<RequestKey, SalvagedConversationActions>
     let readPositions: SalvagedDictionary<RequestKey, PendingConversationReadPosition>
+    let priorityLevelsDraft: PersistedPriorityLevelsDraft?
     let lostSections: [String]
 
     var droppedEntries: Int {
@@ -4688,7 +4911,7 @@ private struct SalvagedPendingActions: Decodable {
 
     private enum CodingKeys: String, CodingKey {
         case version, profileIdentity, operations, activeOperations, cancelledOperations,
-             answerDrafts, messageOpens, conversations, readPositions
+             answerDrafts, messageOpens, conversations, readPositions, priorityLevelsDraft
     }
 
     init(from decoder: Decoder) throws {
@@ -4709,7 +4932,33 @@ private struct SalvagedPendingActions: Decodable {
         messageOpens = container.contains(.messageOpens) ? section(.messageOpens, SalvagedArray()) : nil
         conversations = section(.conversations, SalvagedDictionary())
         readPositions = section(.readPositions, SalvagedDictionary())
+        priorityLevelsDraft = container.contains(.priorityLevelsDraft)
+            ? section(.priorityLevelsDraft, Optional<PersistedPriorityLevelsDraft>.none) : nil
         lostSections = lost
+    }
+}
+
+/// Only local priority-level draft/save intent belongs in the pending-action queue.
+/// The server-confirmed table is restored separately from ServerStateCache.
+private struct PersistedPriorityLevelsDraft: Codable {
+    let draftRows: [PriorityLevelDraftRow]?
+    let draftRevision: UInt64
+    let pendingSave: PendingPriorityLevelsSave?
+    let editorWasOpened: Bool
+    let failureReason: String?
+
+    init(_ state: PriorityLevelsStoreState) {
+        draftRows = state.draftRows
+        draftRevision = state.draftRevision
+        pendingSave = state.pendingSave
+        editorWasOpened = state.editorWasOpened
+        failureReason = state.failureReason
+    }
+
+    var restoredState: PriorityLevelsStoreState {
+        PriorityLevelsStoreState(draftRows: draftRows, draftRevision: draftRevision,
+                                 pendingSave: pendingSave, editorWasOpened: editorWasOpened,
+                                 failureReason: failureReason)
     }
 }
 
@@ -4728,6 +4977,7 @@ private struct PersistedPendingActions: Codable {
     let messageOpens: [PendingMessageOpen]?
     let conversations: [RequestKey: PendingConversationActions]
     let readPositions: [RequestKey: PendingConversationReadPosition]
+    let priorityLevelsDraft: PersistedPriorityLevelsDraft?
 
     init(state: ClientSessionState) {
         version = 1
@@ -4747,12 +4997,14 @@ private struct PersistedPendingActions: Codable {
         messageOpens = state.pendingMessageOpens
         conversations = state.pendingConversations
         readPositions = state.pendingReadPositions
+        priorityLevelsDraft = state.priorityLevels.map(PersistedPriorityLevelsDraft.init)
     }
 }
 
 /// User-authored work awaiting transport. No request content, server revisions,
 /// accepted turns, terminal state or read cursor is stored with this queue.
 private struct PendingConversationActions: Codable {
+    var retainedUnsentText: [UInt64: ExactText]?
     var drafts: [UInt64: ConversationDraft]
     var answerDrafts: [UInt64: RequestDraft]?
     var uploadGroups: [UUID: ConversationUploadGroup]?

@@ -55,6 +55,40 @@ public enum NativeDiagnosticPhase: String, Codable, Sendable {
     case noReplyOperationApply
     case noReplyLifecycleApply
     case noReplyRouting
+    /// An error reply the Server sent on a relay connection.
+    case relayErrorReply
+}
+
+/// The wire type of the request a relay error reply answered. Only known
+/// client request types are named; anything else is `other`.
+public enum NativeDiagnosticRelayRequestType: String, Codable, Sendable {
+    case answer
+    case answerNoComment = "answer_no_comment"
+    case discussion
+    case ack
+    case resync
+    case inboxStart = "inbox_start"
+    case inboxPage = "inbox_page"
+    case inboxReconcile = "inbox_reconcile"
+    case inboxReceipts = "inbox_receipts"
+    case inboxCheckpointAck = "inbox_checkpoint_ack"
+    case inboxAttach = "inbox_attach"
+    case conversationOpen = "conversation_open"
+    case conversationAck = "conversation_ack"
+    case conversationReadPosition = "conversation_read_position"
+    case messageOpen = "message_open"
+    case pushRegister = "push_register"
+    case pushRemove = "push_remove"
+    case pushStatus = "push_status"
+    case focusReport = "focus_report"
+    case levelsGet = "levels_get"
+    case levelsSet = "levels_set"
+    case viewRequest = "view_request"
+    case other
+
+    public init(wireType: String?) {
+        self = wireType.flatMap(Self.init(rawValue:)).flatMap { $0 == .other ? nil : $0 } ?? .other
+    }
 }
 
 public enum NativeDiagnosticTransition: String, Codable, Sendable {
@@ -193,6 +227,8 @@ public struct NativeClientDiagnosticEvent: Codable, Equatable, Identifiable, Sen
     public let receiptState: NativeDiagnosticReceiptState?
     /// Counts and section names for a local-state recovery; never content.
     public let localRecovery: NativeDiagnosticLocalRecovery?
+    /// For a relay error reply, the type of request it answered.
+    public let relayRequestType: NativeDiagnosticRelayRequestType?
 
     private enum CodingKeys: String, CodingKey {
         case id, occurredAtMilliseconds, area, phase, transition, causeCode, terminalReason
@@ -200,7 +236,7 @@ public struct NativeClientDiagnosticEvent: Codable, Equatable, Identifiable, Sen
         case noReplyResponseClass, operationIDSource, terminalSequence, lifecycleSequence, noReplyRoute
         case conversationSequence, conversationValidationRejection
         case attemptID, transportAttemptID, operationID, requestTag, requestRevision, receiptState
-        case localRecovery
+        case localRecovery, relayRequestType
     }
 
     public init(area: NativeDiagnosticArea,
@@ -226,6 +262,7 @@ public struct NativeClientDiagnosticEvent: Codable, Equatable, Identifiable, Sen
                 requestRevision: UInt64? = nil,
                 receiptState: NativeDiagnosticReceiptState? = nil,
                 localRecovery: NativeDiagnosticLocalRecovery? = nil,
+                relayRequestType: NativeDiagnosticRelayRequestType? = nil,
                 id: UUID = UUID(),
                 occurredAtMilliseconds: Int64 = Int64(Date().timeIntervalSince1970 * 1_000)) {
         self.id = id
@@ -253,6 +290,7 @@ public struct NativeClientDiagnosticEvent: Codable, Equatable, Identifiable, Sen
         self.requestRevision = requestRevision
         self.receiptState = receiptState
         self.localRecovery = localRecovery
+        self.relayRequestType = relayRequestType
     }
 
     public init(from decoder: Decoder) throws {
@@ -284,6 +322,7 @@ public struct NativeClientDiagnosticEvent: Codable, Equatable, Identifiable, Sen
         requestRevision = try values.decodeIfPresent(UInt64.self, forKey: .requestRevision)
         receiptState = try values.decodeIfPresent(NativeDiagnosticReceiptState.self, forKey: .receiptState)
         localRecovery = try values.decodeIfPresent(NativeDiagnosticLocalRecovery.self, forKey: .localRecovery)
+        relayRequestType = try values.decodeIfPresent(NativeDiagnosticRelayRequestType.self, forKey: .relayRequestType)
     }
 
     private static func requestTag(for request: RequestKey) -> String {
@@ -393,7 +432,12 @@ public enum NativeDiagnosticCauseCode {
         "invalid_request", "invalid_cursor", "invalid_field", "unknown_type",
         "unauthorized", "forbidden", "not_found", "operation_conflict",
         "unsupported_version", "request_closed", "revision_mismatch", "upload_discarded",
-        "op_id_mismatch", "conflict", "expired", "used", "too_large"
+        "op_id_mismatch", "conflict", "expired", "used", "too_large",
+        // Further Server-generated refusal codes; codes only, never message text.
+        "closed", "retracted", "stale_revision", "unknown_message", "storage_unavailable",
+        "sync_mode_conflict", "checkpoint_pending", "snapshot_unavailable", "invalid_snapshot",
+        "conversation_open_required", "resync_required", "not_supported", "view_unavailable",
+        "bad_frame", "fenced"
     ]
 
     /// Accepts only codes produced by this client. Sanitizing arbitrary text

@@ -63,16 +63,22 @@ final class InboxSubmissionProgressTests: XCTestCase {
         XCTAssertEqual(thread.drafts[1]?.text, ExactText("Keep this"))
     }
 
-    func testAnswerSpinnerClearsOnServerConfirmationWithoutWaitingForAgentReply() {
+    func testAnswerSpinnerLastsThroughADropAndClearsAtAcceptanceWithoutWaitingForAgentReply() {
         let thread = makeThread()
         XCTAssertEqual(project(thread, submissions: [submission(.pending)])[key],
                        .init(state: .awaiting, since: sentAt))
-        XCTAssertNil(project(thread, submissions: [submission(.accepted(sequence: 2))])[key])
+        XCTAssertEqual(project(thread, submissions: [submission(.lost)])[key],
+                       .init(state: .awaiting, since: sentAt),
+                       "A dropped connection leaves the same operation recovering, so it still spins.")
+        XCTAssertNil(project(thread, submissions: [submission(.accepted(sequence: 2))])[key],
+                     "Durable acceptance is the server's confirmation.")
+        let answered = [key: RemoteRequestState(state: .answered)]
+        XCTAssertNil(project(thread, submissions: [submission(.lost)], remote: answered)[key])
     }
 
     func testFailedAnswersShowNotSentButRefusalsShowTheMessageState() {
-        // Retry cases: a failed, unsupported or lost (outcome unknown) send.
-        for disposition in [IntentDisposition.failed, .unsupported, .lost] {
+        // Retry cases: the store gave up on the send.
+        for disposition in [IntentDisposition.failed, .unsupported, .repairRequired] {
             let progress = project(makeThread(), submissions: [submission(disposition)])[key]
             XCTAssertEqual(progress?.state, .notSent, "\(disposition)")
             XCTAssertNil(progress?.detail, "Retry is the indicator; a plain failure has no reason line.")
@@ -161,10 +167,11 @@ final class InboxSubmissionProgressTests: XCTestCase {
             requestRevision: 1, submittedAt: sentAt)
     }
 
-    private func project(_ thread: ConversationThread, submissions: [Submission] = []) -> [RequestKey: InboxSubmissionProgress] {
+    private func project(_ thread: ConversationThread, submissions: [Submission] = [],
+                         remote: [RequestKey: RemoteRequestState] = [:]) -> [RequestKey: InboxSubmissionProgress] {
         let snapshot = AttentionStoreSnapshot(requests: [key: StoredRequest(key: key, originalPayload: .null)],
             drafts: [:], intents: Dictionary(uniqueKeysWithValues: submissions.map { ($0.intentID, $0) }),
-            outbox: [], remoteStates: [:], fixtureSessions: [:], revision: 1, cursor: 0,
+            outbox: [], remoteStates: remote, fixtureSessions: [:], revision: 1, cursor: 0,
             replayBarrier: nil, repairIssues: [])
         return InboxSubmissionProgress.project(snapshot: snapshot, threads: [key: thread])
     }

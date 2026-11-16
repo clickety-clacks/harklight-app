@@ -1,6 +1,7 @@
 import AttentionDomain
 import Foundation
 import Observation
+import HarklightNativeRelay
 
 struct NativeNotificationBinding: Codable, Equatable {
     let bindingID: ExactText
@@ -37,13 +38,15 @@ extension NativeEnrollmentRecord {
 }
 
 struct NativeNotificationLocator: Codable, Equatable {
+    let serverID: String?
+    let hasInvalidServerID: Bool?
     let bindingID: ExactText
     let deviceID: ExactText
     let request: RequestKey
     let acceptanceSequence: UInt64
     let target: String?
 
-    init?(_ payload: JSONValue) {
+    init?(_ payload: JSONValue, serverMatchedRouting: Bool = false) {
         guard let attention = payload.uniqueValue(named: "attention"),
               attention.uniqueValue(named: "v")?.integerValue == 1,
               attention.uniqueValue(named: "type")?.stringValue?.rawValue == "sync",
@@ -57,6 +60,14 @@ struct NativeNotificationLocator: Codable, Equatable {
               let message = locator.uniqueValue(named: "message_id")?.stringValue, !message.rawValue.isEmpty,
               case let .number(number)? = locator.uniqueValue(named: "acceptance_seq"),
               let sequence = UInt64(number.lexeme), sequence > 0 else { return nil }
+        do {
+            serverID = try RelayServerIdentity.read(from: attention)
+            hasInvalidServerID = false
+        } catch {
+            if serverMatchedRouting { return nil }
+            serverID = nil
+            hasInvalidServerID = true
+        }
         bindingID = binding
         deviceID = device
         request = RequestKey(accountScope: person, senderID: sender, messageID: message)
@@ -64,9 +75,13 @@ struct NativeNotificationLocator: Codable, Equatable {
         target = locator.uniqueValue(named: "target")?.stringValue?.rawValue
     }
 
-    func profile(in records: [NativeEnrollmentRecord]) -> NativeNotificationProfile? {
+    func profile(in records: [NativeEnrollmentRecord], serverMatchedRouting: Bool = false) -> NativeNotificationProfile? {
+        if serverMatchedRouting, hasInvalidServerID == true { return nil }
         let matches = records.filter { record in
-            (record.notificationBindings ?? []).contains { $0.bindingID == bindingID }
+            // A push from a server we have left must not open a message in a
+            // different account. Missing identity preserves legacy resolution.
+            if serverMatchedRouting, let serverID, serverID != record.serverID { return false }
+            return (record.notificationBindings ?? []).contains { $0.bindingID == bindingID }
         }
         guard matches.count == 1, let record = matches.first,
               NativeAuthorityBinding.samePerson(record.personID, request.accountScope.rawValue),
@@ -150,12 +165,14 @@ final class NativeNotificationRouter {
     private(set) var intent: NativeNotificationIntent?
     private(set) var foregroundChatIndicator: NativeForegroundChatIndicator?
     @ObservationIgnored private let defaults: UserDefaults
+    @ObservationIgnored private let featureFlags: RemoteFeatureFlags
     @ObservationIgnored private let key = "harklight.notification.navigation"
     @ObservationIgnored private var liveGeneration: UUID?
     @ObservationIgnored private var visibleConversationKey: RequestKey?
 
-    init(defaults: UserDefaults = .standard) {
+    init(defaults: UserDefaults = .standard, featureFlags: RemoteFeatureFlags? = nil) {
         self.defaults = defaults
+        self.featureFlags = featureFlags ?? NativeRelayLifecycle.shared.featureFlags
         // Discard navigation saved by earlier versions. The system delivers a
         // current launch tap through didReceive; it does not need disk replay.
         defaults.removeObject(forKey: key)
@@ -165,7 +182,7 @@ final class NativeNotificationRouter {
         guard opened else { return }
         NativePushedViewCoordinator.shared.recordOwnOpen()
         let serial = UInt64(defaults.string(forKey: key + ".serial") ?? "0") ?? 0
-        intent = NativeNotificationIntent(serial: serial &+ 1, locator: NativeNotificationLocator(payload))
+        intent = NativeNotificationIntent(serial: serial &+ 1, locator: NativeNotificationLocator(payload, serverMatchedRouting: featureFlags.isEnabled(.serverMatchedPushRouting)))
         foregroundChatIndicator = nil
         liveGeneration = nil
         defaults.set(String(serial &+ 1), forKey: key + ".serial")
@@ -177,7 +194,7 @@ final class NativeNotificationRouter {
     @discardableResult
     func receiveForegroundNotification(_ payload: JSONValue, title: String,
                                        body: String) -> Bool {
-        guard let locator = NativeNotificationLocator(payload), locator.target == "chat" else {
+        guard let locator = NativeNotificationLocator(payload, serverMatchedRouting: featureFlags.isEnabled(.serverMatchedPushRouting)), locator.target == "chat" else {
             return false
         }
         guard visibleConversationKey != locator.request else {
@@ -209,7 +226,7 @@ final class NativeNotificationRouter {
     func resolve(records: [NativeEnrollmentRecord], context: ProfileContext,
                  requests: [PresentedRequest], synchronized: Bool) -> RequestKey? {
         guard var pending = intent, let locator = pending.locator else { return nil }
-        guard let profile = locator.profile(in: records), profile.identity == context.identity,
+        guard let profile = locator.profile(in: records, serverMatchedRouting: featureFlags.isEnabled(.serverMatchedPushRouting)), profile.identity == context.identity,
               pending.profile == nil || pending.profile == profile,
               liveGeneration == nil || liveGeneration == context.generation else {
             fallback()

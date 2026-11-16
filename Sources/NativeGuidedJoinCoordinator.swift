@@ -30,6 +30,7 @@ final class NativeGuidedJoinCoordinator {
     @ObservationIgnored var connectApproved: ((NativeEnrollmentRecord) async throws -> Bool)?
     @ObservationIgnored var notificationChoice: ((Bool) async -> Void)?
     @ObservationIgnored var didRemoveCurrentAccount: (() async -> Void)?
+    @ObservationIgnored var didKeepCurrentAccount: ((NativeEnrollmentRecord) async throws -> Void)?
     @ObservationIgnored var departureRecordsDidChange: (() -> Void)?
 
     init(store: NativeGuidedJoinStore = NativeGuidedJoinStore(),
@@ -337,7 +338,13 @@ final class NativeGuidedJoinCoordinator {
     @discardableResult
     func retryAutomaticallyIfNeeded() async -> Bool {
         guard shouldAutomaticallyRetry() else { return false }
-        await retry()
+        // An approved account still finishing has no join attempt left to
+        // refresh; retrying means reconnecting that exact approved record.
+        if screen == .approvedFinishing, currentAccount?.isApproved == true {
+            await retryApprovedConnection()
+        } else {
+            await retry()
+        }
         return true
     }
 
@@ -578,10 +585,19 @@ final class NativeGuidedJoinCoordinator {
             attempt = nil
             screen = .confirmation
         } catch {
+            let removalError = error
+            do {
+                try await didKeepCurrentAccount?(old)
+            } catch {
+                diagnostics?.record(area: .notifications, phase: .pushRegistration, transition: .failed,
+                                    error: error, attemptID: removalAttemptID)
+                message = "The account was kept, but notifications could not be restored. Try again."
+                return
+            }
             departureRecordsDidChange?()
             diagnostics?.record(area: .enrollment, phase: .accountRemoval,
-                                transition: NativeDiagnosticCauseCode.failureTransition(for: error),
-                                error: error, attemptID: removalAttemptID)
+                                transition: NativeDiagnosticCauseCode.failureTransition(for: removalError),
+                                error: removalError, attemptID: removalAttemptID)
             if generation == epoch {
                 message = "Removal could not be confirmed with the current server. This account has been kept. Try again when it is reachable."
                 screen = .replacementConfirmation

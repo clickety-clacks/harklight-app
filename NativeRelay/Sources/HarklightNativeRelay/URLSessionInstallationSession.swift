@@ -50,7 +50,7 @@ public struct TrustedKeychainIdentity: @unchecked Sendable {
 /// CA are supplied by the native profile owner. No PEM/key bytes enter this API.
 /// URLSession presents the identity only to this exact `wss:/relay` endpoint.
 public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSession,
-    AuthenticatedInboxEventStreamSession, AuthenticatedConversationEventSession {
+    AuthenticatedInboxEventStreamSession, AuthenticatedConversationEventSession, AuthenticatedPushRemovalSession {
     public nonisolated let authenticatedIdentity: ProfileIdentity
     public nonisolated let relayEndpointHost: String
     public nonisolated let supportsPostCheckpointInboxEvents = true
@@ -58,16 +58,19 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
     private let urlSession: URLSession
     private let task: URLSessionWebSocketTask
     private let pingCoordinator: WebSocketPingCoordinator
+    public private(set) var serverID: String?
     private var isClosed = false
+    private var replyAttribution = RelayReplyAttribution()
     private var connectionFailure: (any Error)?
     private let profileContext: ProfileContext
+    private let serverMatchedPushRoutingEnabled: @Sendable () async -> Bool
     private let onProgress: @Sendable (NativeRelayProgressEvent) -> Void
     private let onDiagnostic: NativeClientDiagnosticSink
     private let onFocusReportingReady: @Sendable () -> Void
     private let onFocusReportingUnsupported: @Sendable () -> Void
     private let onViewShow: @Sendable (Data) -> Void
     private let focusReportWire = FocusReportWire()
-    private var focusReportReplyRouter = FocusReportReplyRouter()
+    private var focusReportReplyRouter: FocusReportReplyRouter
     private let attemptID: UUID?
     private var postCheckpointReader: Task<Void, Never>?
     private var postCheckpointReaderOwnsSocket = false
@@ -97,11 +100,13 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
                 clientIdentity: TrustedKeychainIdentity,
                 trustedRootDER: Data,
                 attemptID: UUID? = nil,
+                serverMatchedPushRoutingEnabled: @escaping @Sendable () async -> Bool = { false },
                 onProgress: @escaping @Sendable (NativeRelayProgressEvent) -> Void = { _ in },
                 onFocusReportingReady: @escaping @Sendable () -> Void = {},
                 onFocusReportingUnsupported: @escaping @Sendable () -> Void = {},
                 onViewShow: @escaping @Sendable (Data) -> Void = { _ in },
-                onDiagnostic: @escaping NativeClientDiagnosticSink = { _ in }) throws {
+                onDiagnostic: @escaping NativeClientDiagnosticSink = { _ in },
+                opensRelaySocket: Bool = true) throws {
         guard profile.transportMode == .relay,
               relayURL.scheme == "wss",
               relayURL.path == "/relay",
@@ -130,12 +135,14 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
         authenticatedIdentity = profile.identity
         relayEndpointHost = host.lowercased()
         profileContext = profile
+        self.serverMatchedPushRoutingEnabled = serverMatchedPushRoutingEnabled
         self.onProgress = onProgress
         self.onFocusReportingReady = onFocusReportingReady
         self.onFocusReportingUnsupported = onFocusReportingUnsupported
         self.onViewShow = onViewShow
         self.attemptID = attemptID
         self.onDiagnostic = onDiagnostic
+        focusReportReplyRouter = FocusReportReplyRouter()
         let pingCoordinator = WebSocketPingCoordinator()
         self.pingCoordinator = pingCoordinator
         let delegate = DeviceTLSDelegate(host: host, identity: clientIdentity.value, root: root,
@@ -150,7 +157,10 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
         let session = URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
         urlSession = session
         task = session.webSocketTask(with: relayURL, protocols: ["attention-relay/1"])
-        task.resume()
+        // The Server keeps one relay session per device and closes the others
+        // when a new one opens. An HTTPS-only session (file download) must
+        // therefore never open a relay WebSocket of its own.
+        if opensRelaySocket { task.resume() }
     }
 
     public func resync(_ request: Data, consume: @Sendable (Data) async throws -> Void) async throws {
@@ -198,7 +208,7 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
         guard let frame = try? focusReportWire.request(for: report, ref: ref) else { return }
         guard focusReportReplyRouter.register(ref: ref) else { return }
         do {
-            try await send(frame)
+            try await send(frame, exchange: false)
         } catch {
             focusReportReplyRouter.remove(ref: ref)
         }
@@ -257,6 +267,11 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
                 }
                 try await consume(frame)
                 if kind == "resynced" {
+                    if await serverMatchedPushRoutingEnabled() {
+                        serverID = try RelayServerIdentity.read(from: value)
+                    } else { serverID = nil }
+                }
+                if kind == "resynced" {
                     startPostCheckpointReader()
                     return
                 }
@@ -307,6 +322,9 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
     /// A connection-health check is a WebSocket control frame, not an application
     /// exchange. It must remain usable while replay or an ACK owns that gate.
     /// Only URLSession's reported failure closes the connection; no timer races it.
+    /// Whether this connection may still send focus reports.
+    public var sendsFocusReports: Bool { focusReportReplyRouter.supportsFocusReports }
+
     public func checkConnection() async throws {
         if let connectionFailure { throw connectionFailure }
         guard !isClosed else { throw CancellationError() }
@@ -367,6 +385,11 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
                     continue
                 }
                 try await consume(frame)
+                if kind == "resynced" {
+                    if await serverMatchedPushRoutingEnabled() {
+                        serverID = try RelayServerIdentity.read(from: value)
+                    } else { serverID = nil }
+                }
                 if kind == end { return }
             }
         } catch InstallationTransportError.conversationsUnavailable {
@@ -450,7 +473,7 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
             diagnose(.answer, .originalOperationDelivery,
                      NativeDiagnosticCauseCode.unresolvedTransition(for: error), error: error,
                      operationID: operationID, receipt: .unknown)
-            close()
+            retire(after: error)
             return .unresolved
         }
         if isNoCommentOperation {
@@ -483,7 +506,7 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
                 diagnose(.answer, .originalOperationDelivery,
                          NativeDiagnosticCauseCode.unresolvedTransition(for: error), error: error,
                          operationID: operationID, receipt: .unknown)
-                close()
+                retire(after: error)
                 return .unresolved
             }
             let responseType = value.uniqueValue(named: "type")?.stringValue?.rawValue
@@ -659,7 +682,7 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
             diagnose(.conversation, .discussionSubmission,
                      NativeDiagnosticCauseCode.unresolvedTransition(for: error), error: error,
                      operationID: operationID, receipt: .unknown)
-            close()
+            retire(after: error)
             return .unresolved
         }
     }
@@ -725,6 +748,29 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
         }
     }
 
+    public func removePush(_ operation: PushRemovalOperation) async throws -> PushRemovalResult {
+        await socketExchangeGate.enter()
+        defer { socketExchangeGate.leave() }
+        guard await serverMatchedPushRoutingEnabled() else { return .deferred }
+        do {
+            try await send(operation.frame())
+            while true {
+                let value = try JSONValue.parse(try await receive())
+                switch value.uniqueValue(named: "type")?.stringValue?.rawValue {
+                case "delivery", "lifecycle", "conversation": continue
+                default: return try operation.result(value)
+                }
+            }
+        } catch InstallationTransportError.serverRejected {
+            // A correlated refusal completes this exchange. It does not make
+            // the authenticated connection unusable for inbox sync.
+            throw InstallationTransportError.serverRejected
+        } catch {
+            close()
+            throw error
+        }
+    }
+
     /// Recover legacy accepted registrations only on this authenticated session.
     public func currentPushBindingID(revision: UInt64) async throws -> String? {
         await socketExchangeGate.enter()
@@ -765,10 +811,21 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
                     throw InstallationTransportError.unexpectedServerFrame
                 }
             }
+        } catch InstallationTransportError.serverRejected {
+            if !(await serverMatchedPushRoutingEnabled()) { close() }
+            throw InstallationTransportError.serverRejected
         } catch {
             close()
             throw error
         }
+    }
+
+    /// Closes a connection that failed under a submission, keeping the actual
+    /// failure so the live connection's other users see it (and reconnect on
+    /// a real interruption) instead of a bare cancellation.
+    private func retire(after error: Error) {
+        if !isClosed, connectionFailure == nil { connectionFailure = error }
+        close()
     }
 
     public func close() {
@@ -779,6 +836,7 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
         postCheckpointReader = nil
         postCheckpointReaderOwnsSocket = false
         focusReportReplyRouter.reset()
+        replyAttribution.reset()
         failPostCheckpointReader(connectionFailure ?? InstallationTransportError.unexpectedServerFrame)
         task.cancel(with: .normalClosure, reason: nil)
         urlSession.invalidateAndCancel()
@@ -894,12 +952,25 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
         }
     }
 
-    private func send(_ frame: Data) async throws {
+    /// `exchange` is false only for frames sent outside the exchange gate.
+    private func send(_ frame: Data, exchange: Bool = true) async throws {
         if let connectionFailure { throw connectionFailure }
         guard let text = String(data: frame, encoding: .utf8), text.hasSuffix("\n") else {
             throw InstallationTransportError.unexpectedServerFrame
         }
+        replyAttribution.noteSent(frame, exchange: exchange)
         try await task.send(.string(text))
+    }
+
+    /// Every error reply is recorded with its Server reason code, the type of
+    /// the request it answered and that request's operation ID.
+    private func recordErrorReply(_ text: String) {
+        guard RelayReplyAttribution.mayBeReply(text),
+              let reply = replyAttribution.observeReply(Data(text.utf8)) else { return }
+        onDiagnostic(NativeClientDiagnosticEvent(area: .relay, phase: .relayErrorReply, transition: .rejected,
+            causeCode: NativeDiagnosticCauseCode.serverReason(reply.reason),
+            attemptID: attemptID, transportAttemptID: attemptID,
+            operationID: reply.request?.operationID, relayRequestType: reply.request?.type ?? .other))
     }
 
     private func receive() async throws -> Data {
@@ -921,7 +992,9 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
     private func receiveTaskFrame() async throws -> Data {
         do {
             switch try await task.receive() {
-            case let .string(text): return Data(text.utf8)
+            case let .string(text):
+                recordErrorReply(text)
+                return Data(text.utf8)
             case .data: throw InstallationTransportError.unexpectedServerFrame
             @unknown default: throw InstallationTransportError.unexpectedServerFrame
             }
@@ -976,7 +1049,7 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
                     }
                     guard conversationReplayReading else { continue }
                 }
-                if kind == "delivery" || kind == "lifecycle" || kind == "view_changed" {
+                if kind == "delivery" || kind == "lifecycle" || kind == "view_changed" || kind == "levels_changed" {
                     try await enqueuePostCheckpointInboxEvent(frame)
                 } else if !responseWaiters.isEmpty {
                     responseWaiters.removeFirst().resume(returning: frame)

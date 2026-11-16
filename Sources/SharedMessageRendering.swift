@@ -404,8 +404,20 @@ struct SystemDetectedMessageBody: UIViewRepresentable {
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
+    /// UIKit omits Select All for an already selected word in read-only text.
+    /// Keep the standard selection and Copy implementations, but make whole
+    /// message selection available alongside copying a selected passage.
+    final class MessageTextView: UITextView {
+        override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
+            if action == #selector(selectAll(_:)) {
+                return hasText && selectedRange.length < (text as NSString).length
+            }
+            return super.canPerformAction(action, withSender: sender)
+        }
+    }
+
     func makeUIView(context: Context) -> UITextView {
-        let textView = UITextView()
+        let textView = MessageTextView()
         textView.isEditable = false
         textView.isSelectable = true
         textView.dataDetectorTypes = .all

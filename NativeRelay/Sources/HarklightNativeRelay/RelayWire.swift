@@ -18,6 +18,37 @@ public enum RelayWireUpdate: Equatable, Sendable {
     case ignoredUnsequenced
 }
 
+/// Server values are a replaceable cache. Missing entries always use the
+/// caller's built-in default; invalid entries do not discard valid siblings.
+public struct RemoteFeatureFlagSnapshot: Equatable, Sendable {
+    public let values: [String: Bool]
+    public let hasMalformedValues: Bool
+
+    public init(field: JSONValue?) {
+        guard let field, field != .null else {
+            values = [:]
+            hasMalformedValues = false
+            return
+        }
+        guard case let .object(members) = field else {
+            values = [:]
+            hasMalformedValues = true
+            return
+        }
+        var decoded: [String: Bool] = [:]
+        var malformed = false
+        for member in members {
+            if case let .bool(value) = member.value {
+                decoded[member.key.rawValue] = value
+            } else {
+                malformed = true
+            }
+        }
+        values = decoded
+        hasMalformedValues = malformed
+    }
+}
+
 /// Decode the server's authenticated projection without re-encoding sender JSON.
 /// The trusted profile, never a wire field, supplies the person/account scope.
 public struct RelayWire: Sendable {
@@ -127,6 +158,13 @@ public struct RelayWire: Sendable {
         return try sequence(value)
     }
 
+    /// Call only for an accepted ordinary replay marker.
+    public func decodeFeatureFlags(_ bytes: Data) throws -> RemoteFeatureFlagSnapshot {
+        let value = try parseFrame(bytes)
+        guard try text(value, "type") == "resynced" else { throw RelayWireError.invalidFrame }
+        return RemoteFeatureFlagSnapshot(field: value.uniqueValue(named: "feature_flags"))
+    }
+
     /// Returns a definite answer refusal only when the v1 error includes the
     /// server's matching retracted terminal snapshot.
     public func decodeAnswerRefusal(_ bytes: Data, operationID: UUID) throws -> OriginalOperationResult? {
@@ -217,5 +255,19 @@ public struct RelayWire: Sendable {
             // from applying. Unknown values fall back to generic Answered.
             return nil
         }
+    }
+}
+
+/// Shared reader for the stable server identity exposed by authenticated sync
+/// and notification payloads. Older servers omit it.
+public enum RelayServerIdentity {
+    public static func read(from value: JSONValue) throws -> String? {
+        guard let field = value.uniqueValue(named: "server") else { return nil }
+        guard let server = field.stringValue?.rawValue,
+              server.utf8.count == 32,
+              server.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) else {
+            throw RelayWireError.invalidFrame
+        }
+        return server
     }
 }
