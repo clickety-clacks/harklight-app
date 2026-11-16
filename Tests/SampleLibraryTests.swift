@@ -218,4 +218,58 @@ final class SampleLibraryTests: XCTestCase {
         XCTAssertNil(library.neighbor(of: first.id, direction: 1))
         XCTAssertEqual(library.neighbor(of: first.id, direction: -1)?.id, library.messages.dropLast().last?.id)
     }
+
+#if DEBUG
+    func testSyntheticFixtureAvailabilityIsOptInAndNeverEnablesDelivery() throws {
+        let fixture = try SampleFixtureDomain()
+        try fixture.populate()
+        let message = try XCTUnwrap(SampleCatalog.messages.first { $0.id == "sample-information-2" })
+        let key = fixture.key(for: message)
+
+        XCTAssertEqual(fixture.viewModel.discussionAvailability(for: key)?.state,
+                       .notListening(lastDetachedAt: nil))
+        XCTAssertFalse(fixture.viewModel.canSendToCurrentServer)
+        XCTAssertFalse(fixture.viewModel.canCheckConversationAvailability)
+        XCTAssertFalse(NativeRelayLifecycle.shared.hasConfirmedServerSnapshot(for: fixture.context),
+                       "Synthetic fixture presentation is not relay confirmation.")
+        XCTAssertThrowsError(try fixture.viewModel.submit(key),
+                             "A synthetic availability report cannot enable an answer intent.")
+        XCTAssertTrue(try fixture.domain.snapshot(context: fixture.context).intents.isEmpty)
+
+        let withoutSyntheticInput = try LivePresentationStore(
+            localFixtureStore: fixture.domain, context: fixture.context)
+        XCTAssertNil(withoutSyntheticInput.discussionAvailability(for: key),
+                     "Without explicit fixture input, a local report remains unconfirmed.")
+        XCTAssertFalse(withoutSyntheticInput.canSendToCurrentServer)
+    }
+
+    func testSyntheticFixtureAvailabilityCannotOverrideRelayConfirmation() throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+            personID: ExactText("relay-\(UUID().uuidString)"), deviceID: ExactText("device-\(UUID().uuidString)"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let repository = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        let key = RequestKey(accountScope: identity.personID, senderID: ExactText("sender"),
+                             messageID: ExactText("message"))
+        let binding = ConversationBinding(request: key, revision: 1)
+        let payload = try JSONValue.parse(Data(#"{"title":"Chat"}"#.utf8))
+        _ = try repository.apply(RelayEvent(sequence: 1,
+            body: .delivery(StoredRequest(key: key, originalPayload: payload), .message),
+            conversation: RelayConversationMetadata(revision: 1, sessionHandle: ExactText("session"))),
+            context: context)
+        try repository.applyConversation(ConversationEvent(sequence: 1, binding: binding,
+            fact: .request(sessionHandle: ExactText("session"), payload: payload)), context: context)
+        try repository.applyConversation(ConversationEvent(sequence: 2, binding: binding,
+            fact: .availability(sessionHandle: ExactText("session"),
+                                .notListening(lastDetachedAt: nil))), context: context)
+
+        let livePresentation = try LivePresentationStore(store: repository, context: context)
+        XCTAssertNil(livePresentation.discussionAvailability(for: key),
+                     "A relay report remains hidden until its exact context has a confirmed snapshot.")
+        XCTAssertThrowsError(try LivePresentationStore(localFixtureStore: repository, context: context,
+            syntheticAvailability: SyntheticFixtureAvailabilityInput(
+                reportsByRequest: [key: .notListening])))
+        XCTAssertNil(livePresentation.discussionAvailability(for: key),
+                     "The fixture-only input cannot override relay confirmation.")
+    }
+#endif
 }

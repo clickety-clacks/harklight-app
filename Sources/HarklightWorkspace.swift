@@ -1529,6 +1529,10 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         }
         .sheet(isPresented: $settings) {
             settingsContent()
+                .environment(\.openCatalogueMessage, { key in
+                    settings = false
+                    navigate(to: .request(key))
+                })
                 .foregroundChatNotificationLayer(testRouter: testNotificationRouter,
                                                  testOpen: testOpenForegroundChatIndicator)
         }

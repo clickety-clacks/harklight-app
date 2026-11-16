@@ -295,7 +295,7 @@ final class SampleWorkspaceUITests: XCTestCase {
         selectMessageTab("Replied", in: app)
         XCTAssertTrue(original.exists, app.debugDescription)
         XCTAssertTrue(original.label.contains("Pending"),
-                      "The submitted ordinary answer remains pending after relaunch and local example actions.")
+                      "The submitted ordinary answer remains pending after relaunch and local example actions. Row label: \(original.label)")
         original.tap()
         XCTAssertTrue(app.scrollViews["message-card-scroll"].waitForExistence(timeout: 5))
         // The persisted submission still shows its send state in place: the

@@ -13,11 +13,41 @@ final class SampleFixtureDomain {
     init() throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("fixture-only:harklight-examples"),
             personID: ExactText("local-examples"), deviceID: ExactText("local-example-device"))
-        context = ProfileContext(identity: identity, transportMode: .fixture)
-        domain = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
-        viewModel = try LivePresentationStore(localFixtureStore: domain, context: context,
-                                              newMessageAreaDefaults: Self.replyItemAreaTestDefaults())
+        let fixtureContext = ProfileContext(identity: identity, transportMode: .fixture)
+        context = fixtureContext
+        let fixtureDomain = try ClientRepository(context: fixtureContext,
+            persistence: MemoryPendingActionPersistence())
+        domain = fixtureDomain
+#if DEBUG
+        viewModel = try LivePresentationStore(localFixtureStore: fixtureDomain, context: fixtureContext,
+            syntheticAvailability: Self.syntheticAvailabilityInput(for: fixtureContext),
+            newMessageAreaDefaults: Self.replyItemAreaTestDefaults())
+#else
+        viewModel = try LivePresentationStore(localFixtureStore: fixtureDomain, context: fixtureContext,
+            newMessageAreaDefaults: Self.replyItemAreaTestDefaults())
+#endif
     }
+
+#if DEBUG
+    private static func syntheticAvailabilityInput(
+        for context: ProfileContext
+    ) -> SyntheticFixtureAvailabilityInput {
+        let arguments = ProcessInfo.processInfo.arguments
+        let twoAckExampleEnabled = arguments.contains("--harklight-test-chat-status-two-ack")
+        let requests = SampleCatalog.messages.compactMap { message -> RequestKey? in
+            guard message.hasChat else { return nil }
+            let reportsNotListening = message.id.hasSuffix("-2") ||
+                (twoAckExampleEnabled && ["sample-information-0", "sample-markdown-acceptance"].contains(message.id))
+            guard reportsNotListening else { return nil }
+            return RequestKey(accountScope: context.identity.personID,
+                senderID: ExactText(message.sender), messageID: ExactText(message.id))
+        }
+        let reportsByRequest = Dictionary(uniqueKeysWithValues: requests.map {
+            ($0, SyntheticFixtureAvailabilityInput.Report.notListening)
+        })
+        return SyntheticFixtureAvailabilityInput(reportsByRequest: reportsByRequest)
+    }
+#endif
 
     /// The reply-item UI test runs the ordinary new-message-area stores
     /// against a scratch defaults suite; other launches keep them absent.
