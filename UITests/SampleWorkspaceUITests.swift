@@ -174,9 +174,9 @@ final class SampleWorkspaceUITests: XCTestCase {
         // Open the stock menus without placing a call, opening Maps, or saving
         // an event. Each must offer the platform action for the detected value.
         for (value, actionPattern) in [
+            ("November 4", "(Create Event|Add to Calendar|Show in Calendar|Open in Calendar).*"),
             ("415", "Call.*"),
-            ("Infinite Loop", ".*(Maps|Directions).*"),
-            ("November 4", "(Create Event|Add to Calendar|Show in Calendar|Open in Calendar).*")
+            ("Infinite Loop", ".*(Maps|Directions).*")
         ] {
             let link = app.links.matching(NSPredicate(format: "label CONTAINS %@", value)).firstMatch
             XCTAssertTrue(link.waitForExistence(timeout: 5), app.debugDescription)
@@ -190,7 +190,12 @@ final class SampleWorkspaceUITests: XCTestCase {
                 buttonAction.waitForExistence(timeout: 3)
             XCTAssertTrue(offered, app.debugDescription)
             capture("message-detector-\(value)-\(style)", app)
-            app.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.15)).tap()
+            // A tap outside a tall detector preview can hit its map instead
+            // of dismissing it. Leaving the app closes the system preview
+            // without invoking an action; return to the same message next.
+            XCUIDevice.shared.press(.home)
+            app.activate()
+            XCTAssertTrue(body.waitForExistence(timeout: 5), app.debugDescription)
         }
         app.terminate()
     }
