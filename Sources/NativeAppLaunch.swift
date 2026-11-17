@@ -2786,6 +2786,13 @@ final class LivePresentationStore {
         requestsByKey[key]
     }
 
+    /// Relation labels use only messages already held by this profile, including
+    /// superseded messages omitted from the lists. Navigation keeps the full key.
+    func relatedMessageLabel(for key: RequestKey, fallback: String) -> String {
+        let title = request(for: key)?.title?.rawValue
+        return title.flatMap { $0.isEmpty ? nil : $0 } ?? fallback
+    }
+
     func historicalRequest(for key: RequestKey, revision: UInt64) -> PresentedRequest? {
         guard conversationThreads[key]?.revisionNumbers.contains(revision) == true else { return nil }
         return try? inspectedRequest(key, revision: revision)

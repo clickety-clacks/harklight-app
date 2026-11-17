@@ -1257,6 +1257,7 @@ private struct PriorityLevelDraftEditorRow: View {
 @MainActor
 private struct ReplacedByMessagesSection: View {
     let replacementKeys: [RequestKey]
+    let messageLabel: (RequestKey, String) -> String
     let secondaryTextColor: Color
 
     private var orderedReplacementKeys: [RequestKey] {
@@ -1276,7 +1277,7 @@ private struct ReplacedByMessagesSection: View {
                     .foregroundStyle(secondaryTextColor)
                 ForEach(orderedReplacementKeys, id: \.self) { replacementKey in
                     NavigationLink(value: RelatedMessageTarget.replacement(replacementKey)) {
-                        Text(replacementKey.messageID.rawValue)
+                        Text(messageLabel(replacementKey, String(localized: "Replacement message")))
                             .font(.subheadline)
                             .textSelection(.enabled)
                     }
@@ -1320,6 +1321,7 @@ private struct RequestDetailMetadata: View {
     let stake: String?
     let key: RequestKey
     let supersedesMessageIDs: [ExactText]
+    let messageLabel: (RequestKey, String) -> String
     let secondaryTextColor: Color
 
     var body: some View {
@@ -1367,7 +1369,7 @@ private struct RequestDetailMetadata: View {
                         let targetKey = RequestKey(accountScope: key.accountScope,
                             senderID: key.senderID, messageID: messageID)
                         NavigationLink(value: RelatedMessageTarget.supersedes(targetKey)) {
-                            Text(messageID.rawValue)
+                            Text(messageLabel(targetKey, String(localized: "Earlier message")))
                                 .font(.subheadline)
                                 .textSelection(.enabled)
                         }
@@ -2230,10 +2232,12 @@ struct LiveRequestDetail: View {
                     messageType: request.messageType, messageKind: request.messageKind,
                     deadline: byWhenDate, stake: request.stakeText?.rawValue,
                     key: request.key, supersedesMessageIDs: request.supersedesMessageIDs,
+                    messageLabel: store.relatedMessageLabel,
                     secondaryTextColor: detailColors.secondary)
                 if !request.supersededByMessageKeys.isEmpty {
                     ReplacedByMessagesSection(
                         replacementKeys: request.supersededByMessageKeys,
+                        messageLabel: store.relatedMessageLabel,
                         secondaryTextColor: detailColors.secondary)
                 }
                 if let localExample {
