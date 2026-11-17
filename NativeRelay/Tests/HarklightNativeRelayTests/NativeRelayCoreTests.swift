@@ -502,7 +502,8 @@ final class NativeRelayCoreTests: XCTestCase {
             XCTAssertEqual(retained.disposition, dropped ? .lost : .failed)
             XCTAssertEqual(retained.wireFrame, original.wireFrame)
             XCTAssertEqual(session.sent.first?.0, original.wireFrame)
-            XCTAssertEqual(try port.inspect(context: port.context, request: key).requests.first?.lifecycleStatus, .open)
+            XCTAssertEqual(try port.inspect(context: port.context, request: key).requests.first?.lifecycleStatus,
+                           dropped ? .pending : .open)
             if dropped {
                 XCTAssertThrowsError(try store.releaseFailedOperationForEdit(receipt.intentID, context: context))
             }
