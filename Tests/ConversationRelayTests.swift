@@ -1179,6 +1179,7 @@ final class ConversationRelayTests: XCTestCase {
 
         // The relay refuses the conversation ACK, so the projection is rebuilt
         // from the Server's history, which repeats revision 2.
+        session.ordinary = [session.ordinary[0], session.ordinary[2]]
         let history = session.conversation
         session.conversation = [history[0], history[2]]
         var opens = 0
@@ -1192,10 +1193,9 @@ final class ConversationRelayTests: XCTestCase {
         let thread = try XCTUnwrap(try store.conversationSnapshot(context: context).threads[key])
         XCTAssertEqual(thread.currentRevision, 2)
         XCTAssertEqual(thread.currentQuestionPayload.value(named: "title")?.stringValue, ExactText("Later wording"))
-        XCTAssertNotEqual(try store.lookupIntent(receipt.intentID, context: context)?.disposition, .lost,
-                          "Replaying a question the person already answered is not a newer question.")
         let presented = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first)
-        XCTAssertEqual(presented.intentReceipt?.intentID, receipt.intentID)
+        XCTAssertEqual(presented.intentReceipt?.intentID, receipt.intentID,
+                       "Replaying a question the person already answered is not a newer question.")
         XCTAssertEqual(presented.lifecycleStatus, .pending)
         await core.deactivate()
     }

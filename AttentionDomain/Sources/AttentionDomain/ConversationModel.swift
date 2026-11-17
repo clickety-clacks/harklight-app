@@ -614,7 +614,7 @@ public struct ConversationThread: Equatable, Codable, Sendable {
     /// restores them; turns the ordinary feed added do not, and are kept.
     /// Question revisions already delivered are kept: the replay repeats them,
     /// and restarting at revision 1 would make each replayed revision look like
-    /// a newer question, resetting the answer and marking a queued answer lost.
+    /// a newer question to the store, which resets the person's unsent answer.
     func ordinaryFeedSeed(terminal: TerminalState?) -> ConversationThread {
         var seed = ConversationThread(request: request, sessionHandle: sessionHandle,
                                       revision: currentRevision, payload: currentQuestionPayload)
