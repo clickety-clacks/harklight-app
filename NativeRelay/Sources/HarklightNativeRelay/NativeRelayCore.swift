@@ -104,6 +104,10 @@ public enum OriginalOperationResult: Equatable, Sendable {
     case failed(operationID: UUID)
     case refusedClosed(operationID: UUID)
     case refusedNotFound(operationID: UUID)
+    /// The Server has not accepted this connection's inbox checkpoint yet, so
+    /// it refused the operation before applying it. The operation stays queued
+    /// with its bytes and operation ID; it is neither delivered nor failed.
+    case awaitingCheckpoint(operationID: UUID)
     case unresolved
 }
 
@@ -187,6 +191,10 @@ public actor NativeRelayCore {
     private var postAckFailureDetails: NativePostAckFailureDetails?
     private var activeInboxReplay: ReplayProgress?
     private var inboxBootstrapped = false
+    /// True once the Server accepted this connection's inbox checkpoint. Until
+    /// then its catch-up gate refuses every operation sent on the connection.
+    private var connectionCheckpointAccepted = false
+    private var connectionCheckpointWaiters: [CheckedContinuation<Void, Error>] = []
     private var activeInboxStartupID: String?
     private var postCheckpointInboxConsumerTask: Task<Void, Never>?
     private var postCheckpointInboxFailure: (any Error)?
@@ -547,6 +555,35 @@ public actor NativeRelayCore {
         pendingLiveConversationReplay = false
         conversationReadPositionSupportForSession = false
         resumePostCheckpointWaiters(throwing: NativeRelayCoreError.inactive)
+        let checkpointWaiters = connectionCheckpointWaiters
+        connectionCheckpointWaiters.removeAll()
+        checkpointWaiters.forEach { $0.resume(throwing: NativeRelayCoreError.inactive) }
+    }
+
+    private func markConnectionCheckpointAccepted() {
+        guard !connectionCheckpointAccepted else { return }
+        connectionCheckpointAccepted = true
+        let waiters = connectionCheckpointWaiters
+        connectionCheckpointWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+    }
+
+    /// The Server gates operations only on a connection running inbox-paging
+    /// catch-up, and this core runs that catch-up on its own session.
+    private func sendsOnOwnCatchUpConnection(_ operationSession: any AuthenticatedInstallationSession) -> Bool {
+        session is any AuthenticatedInboxPagingSession &&
+            (operationSession as AnyObject) === (session as AnyObject)
+    }
+
+    /// Waits, without polling, until this connection's inbox checkpoint is
+    /// accepted. A deactivated core (closed or replaced connection) throws.
+    private func waitForConnectionCheckpoint() async throws {
+        try validate()
+        guard !connectionCheckpointAccepted else { return }
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            connectionCheckpointWaiters.append(continuation)
+        }
+        try validate()
     }
 
     /// Returns details for the most recent failed post-ACK drain without
@@ -615,7 +652,11 @@ public actor NativeRelayCore {
             let attempted: Int
             do {
                 failedStep = .drainPendingOperations
-                attempted = automaticallySendsPendingOperations ? try await drainPending() : 0
+                // Every path into this drain accepted this connection's
+                // checkpoint, unless the Server has since refused an operation
+                // as awaiting it; then the queue waits for the next connection.
+                attempted = automaticallySendsPendingOperations && connectionCheckpointAccepted
+                    ? try await drainPending() : 0
             } catch {
                 // A later operation may fail after an earlier operation was
                 // accepted. Record that the accepted operation's terminal replay
@@ -762,6 +803,7 @@ public actor NativeRelayCore {
                     try await recoverInboxCheckpoint(candidate, using: transport)
                     if isCurrentStartup, let checkpoint = try store.snapshot(context: context).inboxCheckpoint,
                        checkpoint.checkpointAccepted, let high = checkpoint.highWater {
+                        markConnectionCheckpointAccepted()
                         return try await replayInboxAndAcknowledge(
                             since: high,
                             trackingAcceptedOperations: accepted,
@@ -840,6 +882,7 @@ public actor NativeRelayCore {
         }
         let high = try store.acceptInboxCheckpoint(snapshotID: snapshotID, highWater: highWater,
                                                    context: context)
+        markConnectionCheckpointAccepted()
         return try await replayInboxAndAcknowledge(since: high,
             trackingAcceptedOperations: accepted, using: transport)
     }
@@ -2239,6 +2282,19 @@ public actor NativeRelayCore {
         defer { sendingIntentIDs.remove(intentID) }
         try validate()
         _ = try store.queueOriginalOperationForUserTap(intentID, context: context)
+        if let operationSession, sendsOnOwnCatchUpConnection(operationSession), !connectionCheckpointAccepted {
+            // The answer is already queued and shown as pending. Only its
+            // emission on this live connection waits for the connection's
+            // accepted checkpoint. Nothing is sent meanwhile, so a closed
+            // connection leaves it queued rather than unresolved.
+            if let onSendCallStateChange { await onSendCallStateChange(true) }
+            do {
+                try await waitForConnectionCheckpoint()
+            } catch {
+                if let onSendCallStateChange { await onSendCallStateChange(false) }
+                throw error
+            }
+        }
         do {
             _ = try await drainPending(onlyIntentID: intentID, using: operationSession,
                                       onSendCallStateChange: onSendCallStateChange)
@@ -2370,6 +2426,13 @@ public actor NativeRelayCore {
         var attempted = 0
         for submission in pending {
             try validate()
+            // A tap or resumed send owns an intent it has claimed; the queue
+            // drain neither repeats it nor races it.
+            let claimed = onlyIntentID == nil
+            if claimed {
+                guard sendingIntentIDs.insert(submission.intentID).inserted else { continue }
+            }
+            defer { if claimed { sendingIntentIDs.remove(submission.intentID) } }
             if submission.isNoComment {
                 diagnose(.answer, .noReplyOriginalOperation, .began,
                          operationIDSource: .localSubmission,
@@ -2567,6 +2630,26 @@ public actor NativeRelayCore {
                          causeCode: "answer_not_delivered", operationID: operationID,
                          request: submission.requestKey, revision: submission.requestRevision,
                          receipt: .terminal)
+            case let .awaitingCheckpoint(operationID):
+                guard operationID == submission.operationID else {
+                    diagnose(.answer, .originalOperationDelivery, .unresolved,
+                             error: NativeRelayCoreError.mismatchedOperationResult,
+                             operationID: submission.operationID, request: submission.requestKey,
+                             revision: submission.requestRevision, receipt: .unknown)
+                    diagnoseNoReplyApplyFailure(NativeRelayCoreError.mismatchedOperationResult,
+                                                for: submission)
+                    throw NativeRelayCoreError.mismatchedOperationResult
+                }
+                // Not applied by the Server: the queued operation stays pending
+                // with its bytes and operation ID for the post-checkpoint drain.
+                // This connection's checkpoint is not accepted after all, so no
+                // later send on it goes out until a new one is accepted.
+                connectionCheckpointAccepted = false
+                diagnose(.answer, .originalOperationDelivery, .retrying,
+                         causeCode: NativeDiagnosticCauseCode.serverReason("checkpoint_pending"),
+                         operationID: operationID,
+                         request: submission.requestKey, revision: submission.requestRevision,
+                         receipt: .pendingUnconfirmed)
             case .unresolved:
                 do {
                     do {
@@ -2601,6 +2684,10 @@ public actor NativeRelayCore {
                     applied = .rejected
                     receipt = .pendingUnconfirmed
                     terminalSequence = nil
+                case .awaitingCheckpoint:
+                    applied = .retrying
+                    receipt = .pendingUnconfirmed
+                    terminalSequence = nil
                 case .unresolved:
                     applied = .unresolved
                     receipt = .unknown
@@ -2612,6 +2699,9 @@ public actor NativeRelayCore {
                          operationID: submission.operationID, request: submission.requestKey,
                          revision: submission.requestRevision, receipt: receipt)
             }
+            // The gate refuses every operation on this connection until its
+            // checkpoint is accepted; sending the rest now would only repeat it.
+            if case .awaitingCheckpoint = result { break }
         }
         return attempted
     }

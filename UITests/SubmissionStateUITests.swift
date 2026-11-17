@@ -33,15 +33,18 @@ final class SubmissionStateUITests: XCTestCase {
     }
 
     func testFailedChoiceShowsRetryInThePickedChoice() {
-        let app = launch(reset: true)
-        openMessage(app)
-        app.buttons["Cover A"].tap()
-        send(app)
-        relaunch(app, phase: "answer:failed")
+        // A real definitively failed answer (Cover A), seeded through the store.
+        let app = launchSeeded("--harklight-test-relay-failed-choice")
         openSentMessage(app)
         XCTAssertTrue(element("request-choice-retry", in: app).waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["Cover B"].isEnabled, "Other choices can be picked again.")
-        XCTAssertFalse(app.staticTexts["Not sent"].exists)
+        XCTAssertNoStatusText(app)
+        // The failure shows once: one circled mark and one Retry, in the picked choice.
+        let message = app.scrollViews["message-card-scroll"]
+        // The Retry text sits inside the choice button, which carries the same
+        // identifier; count the text element so one visible Retry counts once.
+        XCTAssertEqual(app.staticTexts.matching(identifier: "request-choice-retry").count, 1, "Exactly one Retry.")
+        XCTAssertEqual(failureMarks(in: message), 1, "Exactly one circled mark.")
         capture("04-choice-failed", app)
     }
 
@@ -59,13 +62,35 @@ final class SubmissionStateUITests: XCTestCase {
         XCTAssertEqual(app.buttons["request-finish"].label, "Sending")
         capture("06-reply-sending", app)
 
-        relaunch(app, phase: "answer:failed")
-        openSentMessage(app)
-        XCTAssertTrue(app.buttons["request-reply-retry"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.buttons["request-reply-edit"].exists)
-        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Avenida")).firstMatch
+        // A real definitively failed written reply, seeded through the store.
+        app.terminate()
+        let failed = launchSeeded("--harklight-test-relay-failed-reply")
+        openSentMessage(failed)
+        XCTAssertTrue(failed.buttons["request-reply-retry"].waitForExistence(timeout: 5))
+        XCTAssertTrue(failed.buttons["request-reply-edit"].exists)
+        XCTAssertTrue(failed.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Avenida")).firstMatch
             .exists, "The failed text shows locked until Edit.")
-        capture("07-reply-failed", app)
+        XCTAssertFalse(failed.textViews.matching(NSPredicate(format: "value CONTAINS %@", "Avenida")).firstMatch
+            .exists, "The failed text is not in an editable field.")
+        XCTAssertNoStatusText(failed)
+        // Bring the failed reply card into view before capturing it.
+        let replyCard = element("request-input-review-response-card", in: failed)
+        XCTAssertTrue(replyCard.waitForExistence(timeout: 5), failed.debugDescription)
+        let scroll = failed.scrollViews["message-card-scroll"]
+        for _ in 0..<8 where !(replyCard.isHittable && failed.buttons["request-reply-retry"].isHittable) {
+            scroll.swipeUp()
+        }
+        XCTAssertTrue(replyCard.isHittable, "The failed reply card is on screen.")
+        XCTAssertTrue(failed.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Avenida")).firstMatch
+            .isHittable, "The locked sent text is visible.")
+        XCTAssertTrue(failed.buttons["request-reply-retry"].isHittable, "Retry is visible.")
+        XCTAssertTrue(failed.buttons["request-reply-edit"].isHittable, "Edit is visible.")
+        // The failure shows once, in the card's row with Edit: one circled mark and
+        // one Retry, and no second Retry in the card's title row.
+        XCTAssertEqual(count("request-reply-retry", in: failed), 1, "Exactly one Retry control.")
+        XCTAssertEqual(count("request-choice-retry", in: failed), 0, "No Retry in the card's title row.")
+        XCTAssertEqual(failureMarks(in: replyCard), 1, "Exactly one circled mark on the card.")
+        capture("07-reply-failed", failed)
     }
 
     func testNoCommentSpinsWhileSendingAndOffersRetryWhenItFails() {
@@ -138,6 +163,33 @@ final class SubmissionStateUITests: XCTestCase {
         app.launch()
         XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 20), app.debugDescription)
         return app
+    }
+
+    /// Launches with a debug seed that records a real failed answer for this
+    /// message in an in-memory store; nothing connects anywhere.
+    private func launchSeeded(_ argument: String) -> XCUIApplication {
+        XCUIDevice.shared.orientation = isPad ? .landscapeLeft : .portrait
+        let app = XCUIApplication()
+        app.launchArguments = [argument]
+        app.launch()
+        XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 20), app.debugDescription)
+        return app
+    }
+
+    private func count(_ identifier: String, in app: XCUIApplication) -> Int {
+        app.descendants(matching: .any).matching(identifier: identifier).count
+    }
+
+    /// Circled failure marks ("Did not send") inside one part of the screen.
+    private func failureMarks(in scope: XCUIElement) -> Int {
+        scope.descendants(matching: .any).matching(NSPredicate(format: "label == %@", "Did not send")).count
+    }
+
+    /// A failed send shows only its mark and Retry, with no status words.
+    private func XCTAssertNoStatusText(_ app: XCUIApplication, file: StaticString = #filePath, line: UInt = #line) {
+        for word in ["Not sent", "Pending", "Answered", "Answer not delivered"] {
+            XCTAssertFalse(app.staticTexts[word].exists, "No \(word) label.", file: file, line: line)
+        }
     }
 
     private func relaunch(_ app: XCUIApplication, phase: String) {

@@ -152,6 +152,9 @@ struct MessageChoiceLabel: View {
     var drawsSurface = true
     /// Which submission this choice sends, for its in-place send state.
     var submissionKind: SubmissionControlPhase.Kind = .answer
+    /// Off where the surrounding control shows the failure itself, as the
+    /// written-reply card does with its locked text, Edit and Retry.
+    var showsFailure = true
 
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.harklightMessageType) private var messageType
@@ -166,7 +169,7 @@ struct MessageChoiceLabel: View {
     /// The picked choice carries the send state: a spinner while sending, an
     /// error mark and Retry when it did not go through.
     private var isSendingHere: Bool { selected && submission.isSending(submissionKind) }
-    private var isFailedHere: Bool { selected && submission.isFailed(submissionKind) }
+    private var isFailedHere: Bool { showsFailure && selected && submission.isFailed(submissionKind) }
 
     @ViewBuilder
     private var mark: some View {
