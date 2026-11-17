@@ -5333,6 +5333,8 @@ final class NativeGuidedTLSTests: XCTestCase {
         }
         let requestReceived = await eventually { server.receivedRequest }
         XCTAssertTrue(requestReceived, "The fixture holds an actual WebSocket request open.")
+        let firstProgressDelivered = await eventually { !operationSnapshots.isEmpty }
+        XCTAssertTrue(firstProgressDelivered, "The first progress update is delivered before cancellation.")
         XCTAssertFalse(finished, "An unfinished connection remains active until an actual lifecycle event.")
         await lifecycle.deactivate()
         let result = await connection.value
