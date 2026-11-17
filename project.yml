@@ -13,15 +13,12 @@ targets:
     type: application
     platform: iOS
     dependencies:
-      - target: HarklightNotificationContent
-        embed: true
       - package: AttentionDomain
         product: AttentionDomain
       - package: HarklightNativeRelay
         product: HarklightNativeRelay
     sources:
       - path: Sources
-      - path: Shared
       - path: Resources
         buildPhase: resources
       - path: Design/tokens.json
@@ -42,28 +39,6 @@ targets:
         SWIFT_VERSION: "6.0"
         TARGETED_DEVICE_FAMILY: "1,2"
         CODE_SIGNING_ALLOWED: YES
-  HarklightNotificationContent:
-    type: app-extension
-    platform: iOS
-    sources:
-      - path: NotificationContentExtension
-        excludes:
-          - Info.plist
-      - path: Shared
-    settings:
-      base:
-        PRODUCT_BUNDLE_IDENTIFIER: co.clicketyclacks.Harklight.NotificationContent
-        MARKETING_VERSION: 0.1.0
-        CURRENT_PROJECT_VERSION: 1
-        DEVELOPMENT_TEAM: Z7R59J7QV8
-        CODE_SIGN_STYLE: Automatic
-        GENERATE_INFOPLIST_FILE: YES
-        INFOPLIST_FILE: NotificationContentExtension/Info.plist
-        IPHONEOS_DEPLOYMENT_TARGET: "27.0"
-        SWIFT_VERSION: "6.0"
-        TARGETED_DEVICE_FAMILY: "1,2"
-        APPLICATION_EXTENSION_API_ONLY: YES
-        SKIP_INSTALL: YES
   HarklightConversationUITestHost:
     type: application
     platform: iOS
@@ -76,7 +51,6 @@ targets:
       - path: Sources
         excludes:
           - HarklightApp.swift
-      - path: Shared
       - path: UITestHost
       - path: Resources
         buildPhase: resources
