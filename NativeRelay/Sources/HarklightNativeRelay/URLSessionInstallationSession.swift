@@ -92,6 +92,7 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
     private var conversationReplaySpaceWaiters: [CheckedContinuation<Void, any Error>] = []
     private var liveConversationWaiters: [CheckedContinuation<LiveConversationSignal, any Error>] = []
     private let socketExchangeGate = RelaySocketExchangeGate()
+    private var operationRefusal = RelayOperationRefusal()
     /// Tests read this to check that a replay's catch-up stays bounded.
     var queuedResponseFrameCount: Int { responseFrames.count }
 
@@ -459,9 +460,11 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
             isNoCommentOperation = false
         }
         await socketExchangeGate.enter()
-        defer { socketExchangeGate.leave() }
+        operationRefusal.begin(operationID)
+        defer { operationRefusal.end(); socketExchangeGate.leave() }
         do { try await send(frame) }
         catch {
+            if takeReceivedBadFrame(for: operationID) { return .failed(operationID: operationID) }
             if isNoCommentOperation {
                 diagnoseNoReply(.noReplyResponseReceive, .unresolved, .noResponse,
                                 operationID: operationID)
@@ -485,6 +488,7 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
                 value = try JSONValue.parse(frame)
             }
             catch {
+                if takeReceivedBadFrame(for: operationID) { return .failed(operationID: operationID) }
                 if isNoCommentOperation {
                     if let frameReceivedAt {
                         diagnoseNoReply(.noReplyResponseReceive, .completed, .frameReceived,
@@ -504,6 +508,11 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
                          operationID: operationID, receipt: .unknown)
                 retire(after: error)
                 return .unresolved
+            }
+            if RelayOperationRefusal.isUncorrelatedBadFrame(frame) {
+                let refused = takeReceivedBadFrame(for: operationID)
+                if !refused { retire(after: InstallationTransportError.serverRejected) }
+                return refused ? .failed(operationID: operationID) : .unresolved
             }
             let responseType = value.uniqueValue(named: "type")?.stringValue?.rawValue
             if responseType == "delivery" || responseType == "lifecycle" || responseType == "conversation" {
@@ -652,7 +661,8 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
     /// A send response is not a replay ACK and cannot advance either cursor.
     public func sendDiscussion(_ frame: Data, operationID: UUID) async -> DiscussionOperationResult {
         await socketExchangeGate.enter()
-        defer { socketExchangeGate.leave() }
+        operationRefusal.begin(operationID)
+        defer { operationRefusal.end(); socketExchangeGate.leave() }
         do {
             let outgoing = try JSONValue.parse(frame)
             guard outgoing.uniqueValue(named: "type") == .string(ExactText("discussion")),
@@ -668,6 +678,11 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
                 let incoming = try await receive()
                 let kind = try JSONValue.parse(incoming).uniqueValue(named: "type")?.stringValue?.rawValue
                 if kind == "delivery" || kind == "lifecycle" || kind == "conversation" { continue }
+                if RelayOperationRefusal.isUncorrelatedBadFrame(incoming) {
+                    let refused = takeReceivedBadFrame(for: operationID)
+                    if !refused { retire(after: InstallationTransportError.serverRejected) }
+                    return refused ? .rejected(reason: ExactText("bad_frame")) : .unresolved
+                }
                 let result = try wire.decodeDiscussionResult(incoming)
                 switch result {
                 case .accepted:
@@ -684,6 +699,7 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
                 return result
             }
         } catch {
+            if takeReceivedBadFrame(for: operationID) { return .rejected(reason: ExactText("bad_frame")) }
             diagnose(.conversation, .discussionSubmission,
                      NativeDiagnosticCauseCode.unresolvedTransition(for: error), error: error,
                      operationID: operationID, receipt: .unknown)
@@ -972,10 +988,19 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
     private func recordErrorReply(_ text: String) {
         guard RelayReplyAttribution.mayBeReply(text),
               let reply = replyAttribution.observeReply(Data(text.utf8)) else { return }
+        operationRefusal.observe(Data(text.utf8), hasOtherPendingRequests: focusReportReplyRouter.hasPendingReplies)
         onDiagnostic(NativeClientDiagnosticEvent(area: .relay, phase: .relayErrorReply, transition: .rejected,
             causeCode: NativeDiagnosticCauseCode.serverReason(reply.reason),
             attemptID: attemptID, transportAttemptID: attemptID,
             operationID: reply.request?.operationID, relayRequestType: reply.request?.type ?? .other))
+    }
+
+    private func takeReceivedBadFrame(for operationID: UUID) -> Bool {
+        guard operationRefusal.take(for: operationID) else { return false }
+        // A refused frame may be followed by TLS EOF. Retire this connection,
+        // but return the refusal already received instead of losing its evidence.
+        retire(after: InstallationTransportError.serverRejected)
+        return true
     }
 
     private func receive() async throws -> Data {

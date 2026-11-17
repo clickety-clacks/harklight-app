@@ -5300,6 +5300,28 @@ final class NativeGuidedTLSTests: XCTestCase {
             "An established inbox retry must keep automatic reconnection")
     }
 
+    func testBadFrameEvidenceRequiresTheSoleActiveOperationAndNoOtherPendingRequest() {
+        let frame = Data(#"{"v":1,"type":"error","reason":"bad_frame"}"#.utf8)
+        let operation = UUID()
+        var evidence = RelayOperationRefusal()
+        evidence.observe(frame, hasOtherPendingRequests: false)
+        evidence.begin(operation)
+        XCTAssertFalse(evidence.take(for: operation))
+        evidence.observe(frame, hasOtherPendingRequests: true)
+        XCTAssertFalse(evidence.take(for: operation), "A pending focus reply makes the error ambiguous")
+        evidence.observe(Data(#"{"v":1,"type":"error","ref":"other","reason":"bad_frame"}"#.utf8),
+                         hasOtherPendingRequests: false)
+        XCTAssertFalse(evidence.take(for: operation))
+        evidence.observe(frame, hasOtherPendingRequests: false)
+        XCTAssertFalse(evidence.take(for: UUID()))
+        XCTAssertTrue(evidence.take(for: operation), "Already received refusal survives until classification")
+        XCTAssertFalse(evidence.take(for: operation), "Evidence is consumed exactly once")
+        evidence.observe(frame, hasOtherPendingRequests: false)
+        evidence.end()
+        evidence.begin(UUID())
+        XCTAssertFalse(evidence.take(for: operation), "Evidence never transfers to another operation")
+    }
+
     func testLegacyOversizedSendWireObservation() async throws {
         for (sendsRefusal, isDiscussion, mebibytes) in [
             (true, false, 5), (false, false, 5), (true, true, 5), (false, true, 5),
@@ -5334,11 +5356,11 @@ final class NativeGuidedTLSTests: XCTestCase {
             if isDiscussion {
                 let outcome = await session.sendDiscussion(frame, operationID: operation)
                 result = String(describing: outcome)
-                if !sendsRefusal { XCTAssertEqual(outcome, .unresolved) }
+                XCTAssertEqual(outcome, sendsRefusal ? .rejected(reason: ExactText("bad_frame")) : .unresolved)
             } else {
                 let outcome = try await session.sendOriginalOperation(frame, operationID: operation)
                 result = String(describing: outcome)
-                if !sendsRefusal { XCTAssertEqual(outcome, .unresolved) }
+                XCTAssertEqual(outcome, sendsRefusal ? .failed(operationID: operation) : .unresolved)
             }
             await session.close()
             let refusalEvents = events.events.filter { $0.phase == .relayErrorReply && $0.causeCode == "server_bad_frame" }

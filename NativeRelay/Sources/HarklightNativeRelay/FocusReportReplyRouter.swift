@@ -10,6 +10,7 @@ enum FocusReportReplyRoute: Equatable {
 /// The reader consumes a reply only when its ref belongs to a sent report.
 struct FocusReportReplyRouter {
     private var refs = Set<String>()
+    var hasPendingReplies: Bool { !refs.isEmpty }
     /// Per connection: a refusal ends focus reports on this connection only.
     private(set) var supportsFocusReports = true
 
