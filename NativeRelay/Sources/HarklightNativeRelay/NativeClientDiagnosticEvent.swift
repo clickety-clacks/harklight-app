@@ -528,7 +528,6 @@ public enum NativeDiagnosticCauseCode {
             case .invalidDraft: return "store_invalid_draft"
             case .invalidSubmission: return "store_invalid_submission"
             case .unsupportedInterface: return "store_unsupported_interface"
-            case .answerTooLarge: return "store_answer_too_large"
             case .requestClosed: return "store_request_closed"
             case .competingIntent: return "store_competing_intent"
             case .intentConflict: return "store_intent_conflict"

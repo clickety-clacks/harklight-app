@@ -13,7 +13,7 @@ struct SubmissionControlPhase: Equatable, Sendable {
     enum RefusalReason: Equatable, Sendable { case changed, closed, retracted }
 
     enum Phase: Equatable, Sendable {
-        /// Saved, in flight, or recovering after a dropped connection: the
+        /// Saved or in flight: the
         /// server has not durably accepted it yet.
         case sending
         /// The server durably accepted it. A later refusal from the message's
@@ -79,15 +79,15 @@ struct SubmissionControlPhase: Equatable, Sendable {
                 } else {
                     .confirmed
                 }
-            // A dropped connection leaves the outcome unknown and the store
-            // still recovering the same operation, so it is still sending.
+            // A dropped connection leaves the outcome unknown. Show failure
+            // with Retry of the same operation; editing could duplicate an answer.
             // A newer open version of the message retires an earlier answer
             // as lost too; that one is history, and the message changed.
             case .lost:
                 if Self.isRetiredByNewerVersion(submission, in: snapshot) {
                     .refused(.changed)
                 } else {
-                    closedOnServer ? .refused(.closed) : .sending
+                    closedOnServer ? .refused(.closed) : .failed(retryable: true, editable: false)
                 }
             case .failed, .unsupported: .failed(retryable: !closedOnServer, editable: !closedOnServer)
             case .repairRequired: .failed(retryable: false, editable: false)
