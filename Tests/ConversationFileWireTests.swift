@@ -58,7 +58,8 @@ final class ConversationFileWireTests: XCTestCase {
             sha256: ExactText(String(repeating: "a", count: 64)), content: .localFile(ExactText("retained-large")))
         let uploaded = ConversationFile(id: large.id, name: large.name, byteCount: large.byteCount,
             sha256: large.sha256, content: .uploaded(ExactText(UUID().uuidString.lowercased())))
-        try store.saveConversationDraft(ConversationDraft(binding: binding, text: ExactText("Explain exactly\nthis"), files: [inline, large]), context: context)
+        let text = ExactText(String(repeating: "x", count: 2 * 1024 * 1024 + 1))
+        try store.saveConversationDraft(ConversationDraft(binding: binding, text: text, files: [inline, large]), context: context)
         let operation = try store.prepareDiscussion(binding, context: context)
         let frozen = try XCTUnwrap(store.conversationSnapshot(context: context).threads[binding.request]?.drafts[1])
         let wire = try ConversationWire(profile: context), limits = ConversationFileLimits(inlineDecodedBytes: 262_144, uploadCap: nil)
@@ -80,7 +81,7 @@ final class ConversationFileWireTests: XCTestCase {
         let retained = try XCTUnwrap(restored.conversationSnapshot(context: context).threads[binding.request]?.drafts[1])
         XCTAssertEqual(try wire.discussion(retained, operationID: operation, preparedFiles: [inline, uploaded], limits: limits), originalFrame)
         let parsed = try JSONValue.parse(originalFrame)
-        XCTAssertEqual(parsed.uniqueValue(named: "text"), .string(ExactText("Explain exactly\nthis")))
+        XCTAssertEqual(parsed.uniqueValue(named: "text"), .string(text))
         XCTAssertEqual(parsed.uniqueValue(named: "files")?.arrayValues?.last?.uniqueValue(named: "upload_id"),
                        .string({ if case let .uploaded(id) = uploaded.content { return id }; return ExactText("") }()))
         XCTAssertThrowsError(try wire.discussion(retained, operationID: UUID(), preparedFiles: [inline, uploaded], limits: limits))

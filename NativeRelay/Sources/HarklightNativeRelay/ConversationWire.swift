@@ -104,7 +104,6 @@ public struct ConversationWire: Sendable {
             JSONMember("text", .string(draft.text)), JSONMember("files", .array(encoded))
         ])
         let bytes = Data((frame.jsonString + "\n").utf8)
-        guard bytes.count <= 2 * 1024 * 1024 else { throw RelayWireError.invalidFrame }
         return bytes
     }
     public func conversationReadPosition(_ pending: PendingConversationReadPosition) throws -> Data {
