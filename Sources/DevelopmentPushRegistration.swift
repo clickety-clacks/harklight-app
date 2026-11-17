@@ -15,8 +15,6 @@ final class DevelopmentPushRegistration: NSObject, UIApplicationDelegate, UNUser
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
         UNUserNotificationCenter.current().delegate = self
-        UNUserNotificationCenter.current().setNotificationCategories(
-            ExpandedNotificationPresentation.categories())
         return true
     }
 

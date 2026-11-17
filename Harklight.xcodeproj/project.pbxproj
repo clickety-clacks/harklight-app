@@ -37,7 +37,6 @@
 		241106BE1CF58DD3731FBDB9 /* NativeFocusSelection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 165E851D0BCFD2B21FD91893 /* NativeFocusSelection.swift */; };
 		253FF6D928101B02B4093646 /* PrototypeStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = AEC8516B5AF186CD58914057 /* PrototypeStore.swift */; };
 		25687C2E7B8A6FCEA937DE63 /* ConversationJoinTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3DFF574DDDAA420FDCF79D76 /* ConversationJoinTests.swift */; };
-		269A439428DB7A7E092513B0 /* ExpandedNotificationPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 18B48382E90E297F8F5A311F /* ExpandedNotificationPresentation.swift */; };
 		27BF57CECC9F7EA25BA3A606 /* DetailChatButtonUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 13CD46E1416E0F7FD24B20D0 /* DetailChatButtonUITests.swift */; };
 		2B49E00075AB3899F518B1B1 /* HarklightNativeRelay in Frameworks */ = {isa = PBXBuildFile; productRef = 48453C5BED656765F891BB5E /* HarklightNativeRelay */; };
 		2B9EAF5E923B2C17ED08834B /* HarklightDesignTokenTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 243B726F46E033478D1B2661 /* HarklightDesignTokenTests.swift */; };
@@ -77,12 +76,9 @@
 		4A2AC6D82151B98D67038AAB /* HarklightBuildProvenance.plist in Resources */ = {isa = PBXBuildFile; fileRef = 1E47211C3CC07D39F1EF3FBF /* HarklightBuildProvenance.plist */; };
 		4B06047B37C597023BA94175 /* NativeGuidedJoin.swift in Sources */ = {isa = PBXBuildFile; fileRef = DFAD8343BC6B04735955C91E /* NativeGuidedJoin.swift */; };
 		4C2FECF89B2A209A3D6527B4 /* attention-client-m2-fixtures.json in Resources */ = {isa = PBXBuildFile; fileRef = EDE096CBD69169053E255190 /* attention-client-m2-fixtures.json */; };
-		4C647190ACB6F974F74787BD /* ExpandedNotificationPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 18B48382E90E297F8F5A311F /* ExpandedNotificationPresentation.swift */; };
-		4CCFD8177811C54946493D42 /* NotificationView.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 33615F4E297C31BE3E1A444D /* NotificationView.storyboard */; };
 		4FDE0BB79BFA2964B9F4172B /* attention-client-ui1-conformance-v3.json in Resources */ = {isa = PBXBuildFile; fileRef = DEEE7C53134517618EB95752 /* attention-client-ui1-conformance-v3.json */; };
 		503FA126271540CD387F443B /* Fraunces.ttf in Resources */ = {isa = PBXBuildFile; fileRef = C2888EA332B9E4E7005B334E /* Fraunces.ttf */; };
 		505D1C27D07F96272A35E644 /* UnboundedNativeWireParsingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B67BEE5202414CF6D3DC2B86 /* UnboundedNativeWireParsingTests.swift */; };
-		506CE785F28492DDF46CF62B /* expanded-notification-batch-v1.json in Resources */ = {isa = PBXBuildFile; fileRef = 6CE24FCD4EAA6BB3EA679780 /* expanded-notification-batch-v1.json */; };
 		525175974667045FCDFCE81D /* ProgressMessageViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A4B9F502B70A2699C31923E /* ProgressMessageViews.swift */; };
 		53754083DF8313BEFA327034 /* RetractionPresentationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 82A636EA3A9AD62ED6E2B6D3 /* RetractionPresentationTests.swift */; };
 		54976060574B865FBF118C4A /* NativeEnrollment.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2BC5F8F8783FB9F06698C460 /* NativeEnrollment.swift */; };
@@ -122,7 +118,6 @@
 		79574C97164DB6F37A22FEB4 /* OperationRecoveryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F7E418881B8F6E863D558004 /* OperationRecoveryTests.swift */; };
 		79E4029884C3F62C0C154BF8 /* FeatureCatalogueTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 85136126D64EA5FEB103F0CA /* FeatureCatalogueTests.swift */; };
 		7A8F2884CCC02F2DBE4330A7 /* RemoteFeatureFlags.swift in Sources */ = {isa = PBXBuildFile; fileRef = 44560C8F04DB1E1AB71A61BD /* RemoteFeatureFlags.swift */; };
-		7B880B84E4A90F98BDF84333 /* ExpandedNotificationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D9D8D3485BD6B63544A75B8A /* ExpandedNotificationView.swift */; };
 		7BDFD2B2D70BD71596D8B6C5 /* ConversationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F68B30BAF95249EB48C166A9 /* ConversationView.swift */; };
 		7BEE9B268CA2DB39BF40F53E /* HarklightSurfaces.swift in Sources */ = {isa = PBXBuildFile; fileRef = B01832C54C511620F90E4A7C /* HarklightSurfaces.swift */; };
 		7DE0B5AF61B956E2CCDEF752 /* SeenActionPresentationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 58F8B0F885499EBA7A9C9539 /* SeenActionPresentationTests.swift */; };
@@ -130,7 +125,6 @@
 		83CA8F46BBF1402E385ADBB3 /* FeatureCatalogue.swift in Sources */ = {isa = PBXBuildFile; fileRef = CD7B2937E79897906C6A6E24 /* FeatureCatalogue.swift */; };
 		843E3AFB1BD02FEC405438C0 /* MessageMetadataPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2289126C589FCD4A3067908 /* MessageMetadataPresentation.swift */; };
 		843E951CCCB042B7C0C72B99 /* RemoteFeatureFlagsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1B381AC8AA6BF08A0056DEA /* RemoteFeatureFlagsTests.swift */; };
-		862D77AC4302B42128AA1510 /* expanded-notification-chat-v1.json in Resources */ = {isa = PBXBuildFile; fileRef = 08BB3F6422A53A081C5CCC13 /* expanded-notification-chat-v1.json */; };
 		8666F9D7728D06FDF6239EF2 /* NativeFocusReporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 22007CF1FAC9CED79D1B37D4 /* NativeFocusReporter.swift */; };
 		876C7F4DBE6214DAB099A845 /* FeatureCatalogueView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9081B631301F809D82F13C29 /* FeatureCatalogueView.swift */; };
 		88078E1A9F4E2CE54A07A2AF /* free-active.json in Resources */ = {isa = PBXBuildFile; fileRef = 63B7EA4C4972E87CAC642768 /* free-active.json */; };
@@ -150,7 +144,6 @@
 		9D262F1A9341068BB8EFA25E /* NativeAppLaunch.swift in Sources */ = {isa = PBXBuildFile; fileRef = 53F269E32BC52CEA4E14CCE7 /* NativeAppLaunch.swift */; };
 		9D89298BEE42012D75B28E08 /* ConversationReturnTextView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 339E15F97694A217F778CAC0 /* ConversationReturnTextView.swift */; };
 		9EBAF1B70940FCCDCC38F0C7 /* ReleaseNotes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 051A64DEB3D98D201BE5075B /* ReleaseNotes.swift */; };
-		9F952368D89E6E28EF294215 /* HarklightNotificationContent.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 6D8A846EAAE360CA552705EE /* HarklightNotificationContent.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		9FD4A84FC8F6E688261AFDAD /* NativeFocusReporterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 368833A02633BE557A3E69BA /* NativeFocusReporterTests.swift */; };
 		A22F0A38C5F61DA2314976D5 /* IsolatedRelayActionUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BADD0A60F54087330C56EDF6 /* IsolatedRelayActionUITests.swift */; };
 		A27D48651D89DAC048631C30 /* AttentionTierClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5D08AC0D6D784E9C72FE43E /* AttentionTierClientTests.swift */; };
@@ -178,7 +171,6 @@
 		B94344DC233B547EA2B73930 /* Fraunces.ttf in Resources */ = {isa = PBXBuildFile; fileRef = C2888EA332B9E4E7005B334E /* Fraunces.ttf */; };
 		B9995D6AF5723C4A6CACD4F1 /* SubmissionControlPhase.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26659F87A4A24076B17759F6 /* SubmissionControlPhase.swift */; };
 		BA42DE1B4F75C5E8FCC8CAC7 /* FailedResponseDialogCopyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 14C0B89440054ED77BE771AB /* FailedResponseDialogCopyTests.swift */; };
-		BB61F588D143CFD80DD07A06 /* ExpandedNotificationPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 18B48382E90E297F8F5A311F /* ExpandedNotificationPresentation.swift */; };
 		BD89225524ACF7B897FF8F6A /* WorkspaceTabQuery.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8EC7E7FF78F30F051661B0A6 /* WorkspaceTabQuery.swift */; };
 		BDF6EF67E0F241C9F8ADA4E6 /* NativeFocusPushCoordinatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 936D87DC8DB35DDCAE5B7109 /* NativeFocusPushCoordinatorTests.swift */; };
 		BE2476A95E1FA06B77F4E980 /* TwoDeviceEnrollmentCompletionUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D4A892EAE021864A5505220E /* TwoDeviceEnrollmentCompletionUITests.swift */; };
@@ -215,7 +207,6 @@
 		D808A5E3E151B0B4715C5433 /* NativeFocusVisibleTurnTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 65D8FC410BF13DD17F2C9AF2 /* NativeFocusVisibleTurnTests.swift */; };
 		D8840150B21F7F2C78C055A7 /* tokens.json in Resources */ = {isa = PBXBuildFile; fileRef = B190A2CC6123E6B2601A49C6 /* tokens.json */; };
 		D89ADA837732358999CB5EC8 /* HarklightTypography.swift in Sources */ = {isa = PBXBuildFile; fileRef = F9337B557BF496432842C126 /* HarklightTypography.swift */; };
-		D9C1344A9BE1CA46D8086D09 /* ExpandedNotificationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D9D8D3485BD6B63544A75B8A /* ExpandedNotificationView.swift */; };
 		DAB1A0139AEDBCA1F0273F31 /* NativePushedViewCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 818A134ACD7A558BF2905280 /* NativePushedViewCoordinator.swift */; };
 		DB822091AB67AE8A8CDBFFA0 /* NewMessageAreaTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7BC1BB72451B5EBD6C9DD4B9 /* NewMessageAreaTests.swift */; };
 		E1293E76ADFDF807073C55CE /* InboxBadgeCountTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A535B54D8F4374D0170AD5B4 /* InboxBadgeCountTests.swift */; };
@@ -224,7 +215,6 @@
 		E6E61329D4F209CB396C8F5B /* SeenDeviceContractCompositionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F4CAD332B8A4AF8BC83C695E /* SeenDeviceContractCompositionTests.swift */; };
 		E6F19DA009C46D52AB01EE7B /* NativeFocusSelection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 165E851D0BCFD2B21FD91893 /* NativeFocusSelection.swift */; };
 		EB268D8018E0E94991604D07 /* InstalledRelayDecoderFixture.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1B2803FE632975943E92BCAF /* InstalledRelayDecoderFixture.swift */; };
-		EBD0A0585CB1A080439465A5 /* ExpandedNotificationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D6268EEA211DB7950F45F85B /* ExpandedNotificationTests.swift */; };
 		ED4B87547E11FFDE7818EFBE /* MessageMarkdownTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7E1E85DB1B3213306E670445 /* MessageMarkdownTests.swift */; };
 		EE3096EA3E5BE32F11F847AC /* attention-client-m2-r1-compat.json in Resources */ = {isa = PBXBuildFile; fileRef = D88FC828D6959E4441371AB5 /* attention-client-m2-r1-compat.json */; };
 		EF4AF8DCF9C103D74CCB589E /* SupersedesPresentationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C23053D4C65BA3F6B2A010FF /* SupersedesPresentationTests.swift */; };
@@ -245,11 +235,9 @@
 		FAAEC6DD7ADD88708C8B5C30 /* InboxMessageSurface.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7B98DB32B39F5FB6D0FADF4F /* InboxMessageSurface.swift */; };
 		FC1C60DA08989C469053AE8F /* AttentionDomain in Frameworks */ = {isa = PBXBuildFile; productRef = 8045345F214DAA29775F7EB0 /* AttentionDomain */; };
 		FC59D2E238B12E619897AF1C /* NativeGuidedJoin.swift in Sources */ = {isa = PBXBuildFile; fileRef = DFAD8343BC6B04735955C91E /* NativeGuidedJoin.swift */; };
-		FC9598E2C2CBEF06ECEB7F3F /* NotificationViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B579FDB5FFB3BE4A9DB0AA0F /* NotificationViewController.swift */; };
 		FD60725972D79FDF0DB82F5E /* DevelopmentPushRegistration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 407E539F1063EFB0E135C9A1 /* DevelopmentPushRegistration.swift */; };
 		FDB33E7EADEDFFCDE651C930 /* InboxViewLiveProgressTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F41EE0AA99B238B7CF17B8A7 /* InboxViewLiveProgressTests.swift */; };
 		FE9A2435E3DEEA8115BA04B5 /* NativeClientDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = F54DF1642676FFC2DDD59474 /* NativeClientDiagnostics.swift */; };
-		FEC6A1FB08FECBFC323193D4 /* ExpandedNotificationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D9D8D3485BD6B63544A75B8A /* ExpandedNotificationView.swift */; };
 		FEE0EA389A07D71F0372DFA3 /* MessageMetadataPresentationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FDAAC52B9B8BD99B169F9A37 /* MessageMetadataPresentationTests.swift */; };
 /* End PBXBuildFile section */
 
@@ -268,13 +256,6 @@
 			remoteGlobalIDString = 759D83DCB9456A16ABDFA1B3;
 			remoteInfo = HarklightConversationUITestHost;
 		};
-		D8BC4BB768B381D0C540761B /* PBXContainerItemProxy */ = {
-			isa = PBXContainerItemProxy;
-			containerPortal = 65E0F54CAE33A9EC4FF405E2 /* Project object */;
-			proxyType = 1;
-			remoteGlobalIDString = 70FC8BAEF8250E4D64FA18A7;
-			remoteInfo = HarklightNotificationContent;
-		};
 		FAC27E8E91B10CCEED0C79F5 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = 65E0F54CAE33A9EC4FF405E2 /* Project object */;
@@ -284,20 +265,6 @@
 		};
 /* End PBXContainerItemProxy section */
 
-/* Begin PBXCopyFilesBuildPhase section */
-		CEA1DCEB893201B065B4FB86 /* Embed Foundation Extensions */ = {
-			isa = PBXCopyFilesBuildPhase;
-			buildActionMask = 2147483647;
-			dstPath = "";
-			dstSubfolderSpec = 13;
-			files = (
-				9F952368D89E6E28EF294215 /* HarklightNotificationContent.appex in Embed Foundation Extensions */,
-			);
-			name = "Embed Foundation Extensions";
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-/* End PBXCopyFilesBuildPhase section */
-
 /* Begin PBXFileReference section */
 		01C0F88FA7049CEF0D8C0CC5 /* SampleFixtureDomain.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SampleFixtureDomain.swift; sourceTree = "<group>"; };
 		01CB210035380D4BC90B8748 /* ProgressRenderedUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProgressRenderedUITests.swift; sourceTree = "<group>"; };
@@ -305,7 +272,6 @@
 		04AA77629FA531D8EEC90BC8 /* FreeRenderedHost.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FreeRenderedHost.swift; sourceTree = "<group>"; };
 		051A64DEB3D98D201BE5075B /* ReleaseNotes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReleaseNotes.swift; sourceTree = "<group>"; };
 		085FB20037A923362FCABAC4 /* InboxLaunchSelectionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InboxLaunchSelectionTests.swift; sourceTree = "<group>"; };
-		08BB3F6422A53A081C5CCC13 /* expanded-notification-chat-v1.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "expanded-notification-chat-v1.json"; sourceTree = "<group>"; };
 		09DB4C20F00F7F2F62E90594 /* HarklightConversationUITestHost.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = HarklightConversationUITestHost.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		0B3098163AF51E0B83C1C947 /* NativeFocusScrollSampling.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeFocusScrollSampling.swift; sourceTree = "<group>"; };
 		0EBB9C23159B0ED5ABBDCEEC /* free-reactivated.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "free-reactivated.json"; sourceTree = "<group>"; };
@@ -317,7 +283,6 @@
 		13CD46E1416E0F7FD24B20D0 /* DetailChatButtonUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DetailChatButtonUITests.swift; sourceTree = "<group>"; };
 		14C0B89440054ED77BE771AB /* FailedResponseDialogCopyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FailedResponseDialogCopyTests.swift; sourceTree = "<group>"; };
 		165E851D0BCFD2B21FD91893 /* NativeFocusSelection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeFocusSelection.swift; sourceTree = "<group>"; };
-		18B48382E90E297F8F5A311F /* ExpandedNotificationPresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExpandedNotificationPresentation.swift; sourceTree = "<group>"; };
 		1B2803FE632975943E92BCAF /* InstalledRelayDecoderFixture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InstalledRelayDecoderFixture.swift; sourceTree = "<group>"; };
 		1BBAD47406ECE39BB808B8AE /* RealRelayActionEligibilityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RealRelayActionEligibilityTests.swift; sourceTree = "<group>"; };
 		1E47211C3CC07D39F1EF3FBF /* HarklightBuildProvenance.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = HarklightBuildProvenance.plist; sourceTree = "<group>"; };
@@ -341,7 +306,6 @@
 		31790F646FEF94ED413BE1EC /* ForegroundChatNotificationIndicator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ForegroundChatNotificationIndicator.swift; sourceTree = "<group>"; };
 		321798AEF657AEBF709D6F76 /* SampleMedia.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SampleMedia.swift; sourceTree = "<group>"; };
 		33243085490C2711E409837A /* NativeJoinInvitationValidationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeJoinInvitationValidationTests.swift; sourceTree = "<group>"; };
-		33615F4E297C31BE3E1A444D /* NotificationView.storyboard */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; path = NotificationView.storyboard; sourceTree = "<group>"; };
 		339E15F97694A217F778CAC0 /* ConversationReturnTextView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationReturnTextView.swift; sourceTree = "<group>"; };
 		368833A02633BE557A3E69BA /* NativeFocusReporterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeFocusReporterTests.swift; sourceTree = "<group>"; };
 		396AEC07109CDA54130ED482 /* AnswerStatusPresentationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnswerStatusPresentationTests.swift; sourceTree = "<group>"; };
@@ -378,8 +342,6 @@
 		660455D7785DC5CED7A04E45 /* SampleCardScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SampleCardScreen.swift; sourceTree = "<group>"; };
 		69EEC3F07C72D78B3516529C /* NativeNotificationPermissionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeNotificationPermissionTests.swift; sourceTree = "<group>"; };
 		6A1BCFA69E2D128C79C15DCF /* HarklightDesignTokens.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HarklightDesignTokens.swift; sourceTree = "<group>"; };
-		6CE24FCD4EAA6BB3EA679780 /* expanded-notification-batch-v1.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "expanded-notification-batch-v1.json"; sourceTree = "<group>"; };
-		6D8A846EAAE360CA552705EE /* HarklightNotificationContent.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = HarklightNotificationContent.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		70CB8B5332A9351FEA4DE078 /* ConversationPresentationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationPresentationTests.swift; sourceTree = "<group>"; };
 		70CEBEA7ECF5BA4A0E2F9284 /* ReplyItemArea.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReplyItemArea.swift; sourceTree = "<group>"; };
 		7439D887DF795765C58615C0 /* Fraunces-OFL.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "Fraunces-OFL.txt"; sourceTree = "<group>"; };
@@ -422,7 +384,6 @@
 		B2289126C589FCD4A3067908 /* MessageMetadataPresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageMetadataPresentation.swift; sourceTree = "<group>"; };
 		B3AD83C5473F6DFB7981B536 /* SenderRevisionPresentationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SenderRevisionPresentationTests.swift; sourceTree = "<group>"; };
 		B3F0434BA70BF47D003E427C /* HarklightUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = HarklightUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
-		B579FDB5FFB3BE4A9DB0AA0F /* NotificationViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationViewController.swift; sourceTree = "<group>"; };
 		B5E0EA6A63411F8F0E070F3E /* MessageBodyUpdateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageBodyUpdateTests.swift; sourceTree = "<group>"; };
 		B67BEE5202414CF6D3DC2B86 /* UnboundedNativeWireParsingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UnboundedNativeWireParsingTests.swift; sourceTree = "<group>"; };
 		B72BA617D53D9A15FC5D2F58 /* SampleLibraryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SampleLibraryTests.swift; sourceTree = "<group>"; };
@@ -440,13 +401,11 @@
 		D2FEF6E138B9762AA2BE4AE1 /* NativeClientDiagnosticsVersionUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeClientDiagnosticsVersionUITests.swift; sourceTree = "<group>"; };
 		D3B9732F966E6F1372B2C35C /* SampleMessages.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SampleMessages.swift; sourceTree = "<group>"; };
 		D4A892EAE021864A5505220E /* TwoDeviceEnrollmentCompletionUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TwoDeviceEnrollmentCompletionUITests.swift; sourceTree = "<group>"; };
-		D6268EEA211DB7950F45F85B /* ExpandedNotificationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExpandedNotificationTests.swift; sourceTree = "<group>"; };
 		D63D204D9B7352866266270D /* BoundedNativeJoinExchange.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BoundedNativeJoinExchange.swift; sourceTree = "<group>"; };
 		D88FC828D6959E4441371AB5 /* attention-client-m2-r1-compat.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "attention-client-m2-r1-compat.json"; sourceTree = "<group>"; };
 		D8A4AAF824FC77FD72D20CAD /* InboxListColumnCaptureHost.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InboxListColumnCaptureHost.swift; sourceTree = "<group>"; };
 		D8D93E814ACCCDA16B02D075 /* Harklight.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = Harklight.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		D8F836028D6CFB87F23BF665 /* guided-local-tls.p12 */ = {isa = PBXFileReference; path = "guided-local-tls.p12"; sourceTree = "<group>"; };
-		D9D8D3485BD6B63544A75B8A /* ExpandedNotificationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExpandedNotificationView.swift; sourceTree = "<group>"; };
 		DA73983703AF494F97B44D03 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		DAB30CCBB57C194DE6214D8E /* NativeRelayLifecycle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeRelayLifecycle.swift; sourceTree = "<group>"; };
 		DBEB99912BDB7CC6312398E5 /* ExactJSONUnboundedParsingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExactJSONUnboundedParsingTests.swift; sourceTree = "<group>"; };
@@ -611,7 +570,6 @@
 				E324FFEA53B23DC189F2078B /* DevelopmentAPNsAddressStoreTests.swift */,
 				DBEB99912BDB7CC6312398E5 /* ExactJSONUnboundedParsingTests.swift */,
 				A1AA13CA9652D73D33F60634 /* ExactTextTests.swift */,
-				D6268EEA211DB7950F45F85B /* ExpandedNotificationTests.swift */,
 				14C0B89440054ED77BE771AB /* FailedResponseDialogCopyTests.swift */,
 				85136126D64EA5FEB103F0CA /* FeatureCatalogueTests.swift */,
 				BE8020EC65EE6A59E98FDFD2 /* FirstOpenScrollResponsivenessTests.swift */,
@@ -675,7 +633,6 @@
 				D8D93E814ACCCDA16B02D075 /* Harklight.app */,
 				09DB4C20F00F7F2F62E90594 /* HarklightConversationUITestHost.app */,
 				744822124B96AC0842A6CD4D /* HarklightConversationUITests.xctest */,
-				6D8A846EAAE360CA552705EE /* HarklightNotificationContent.appex */,
 				962E8942C7FC38C447AABC29 /* HarklightTests.xctest */,
 				B3F0434BA70BF47D003E427C /* HarklightUITests.xctest */,
 			);
@@ -692,15 +649,6 @@
 				07DFC55DB3FA0088637B4C7C /* Resources */,
 			);
 			path = UITestHost;
-			sourceTree = "<group>";
-		};
-		8B2B99B4F12DEFD3552E949F /* NotificationContentExtension */ = {
-			isa = PBXGroup;
-			children = (
-				33615F4E297C31BE3E1A444D /* NotificationView.storyboard */,
-				B579FDB5FFB3BE4A9DB0AA0F /* NotificationViewController.swift */,
-			);
-			path = NotificationContentExtension;
 			sourceTree = "<group>";
 		};
 		A519C56B747BEF4CA5C1F171 /* Sources */ = {
@@ -765,10 +713,8 @@
 			isa = PBXGroup;
 			children = (
 				16F7E81C5540A0902E982908 /* Design */,
-				8B2B99B4F12DEFD3552E949F /* NotificationContentExtension */,
 				4354075FA994AADEF393D3D1 /* Packages */,
 				4F07B0696947245A002E287D /* Resources */,
-				CDF08E9B0514C32CA1C12785 /* Shared */,
 				A519C56B747BEF4CA5C1F171 /* Sources */,
 				C259D61950650AD31404EE35 /* TestResources */,
 				6BFD38E38AB4D05164ED1A05 /* Tests */,
@@ -782,8 +728,6 @@
 			isa = PBXGroup;
 			children = (
 				DEEE7C53134517618EB95752 /* attention-client-ui1-conformance-v3.json */,
-				6CE24FCD4EAA6BB3EA679780 /* expanded-notification-batch-v1.json */,
-				08BB3F6422A53A081C5CCC13 /* expanded-notification-chat-v1.json */,
 				63B7EA4C4972E87CAC642768 /* free-active.json */,
 				A70F55CB7DA79B0F71A40A29 /* free-history.json */,
 				0EBB9C23159B0ED5ABBDCEEC /* free-reactivated.json */,
@@ -793,15 +737,6 @@
 				3164F49B43CFC112CA59EEC1 /* guided-local-tls.pem */,
 			);
 			path = TestResources;
-			sourceTree = "<group>";
-		};
-		CDF08E9B0514C32CA1C12785 /* Shared */ = {
-			isa = PBXGroup;
-			children = (
-				18B48382E90E297F8F5A311F /* ExpandedNotificationPresentation.swift */,
-				D9D8D3485BD6B63544A75B8A /* ExpandedNotificationView.swift */,
-			);
-			path = Shared;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -814,12 +749,10 @@
 				9E2B8E73804442DFBB5531E1 /* Sources */,
 				77A9AB6BA1852269793FE05A /* Resources */,
 				6F776F7CC722A8469954E67F /* Frameworks */,
-				CEA1DCEB893201B065B4FB86 /* Embed Foundation Extensions */,
 			);
 			buildRules = (
 			);
 			dependencies = (
-				4CDAF179CC584ADA049E2B1C /* PBXTargetDependency */,
 			);
 			name = Harklight;
 			packageProductDependencies = (
@@ -829,24 +762,6 @@
 			productName = Harklight;
 			productReference = D8D93E814ACCCDA16B02D075 /* Harklight.app */;
 			productType = "com.apple.product-type.application";
-		};
-		70FC8BAEF8250E4D64FA18A7 /* HarklightNotificationContent */ = {
-			isa = PBXNativeTarget;
-			buildConfigurationList = DCB7C8558B1C259319890992 /* Build configuration list for PBXNativeTarget "HarklightNotificationContent" */;
-			buildPhases = (
-				4A17F7C87D1FA9E13E7E8055 /* Sources */,
-				8521D4DBC48A7B279EB6F9DE /* Resources */,
-			);
-			buildRules = (
-			);
-			dependencies = (
-			);
-			name = HarklightNotificationContent;
-			packageProductDependencies = (
-			);
-			productName = HarklightNotificationContent;
-			productReference = 6D8A846EAAE360CA552705EE /* HarklightNotificationContent.appex */;
-			productType = "com.apple.product-type.app-extension";
 		};
 		759D83DCB9456A16ABDFA1B3 /* HarklightConversationUITestHost */ = {
 			isa = PBXNativeTarget;
@@ -944,10 +859,6 @@
 						DevelopmentTeam = Z7R59J7QV8;
 						ProvisioningStyle = Automatic;
 					};
-					70FC8BAEF8250E4D64FA18A7 = {
-						DevelopmentTeam = Z7R59J7QV8;
-						ProvisioningStyle = Automatic;
-					};
 					81AC58E6E599B744FFFC142B = {
 						TestTargetID = 759D83DCB9456A16ABDFA1B3;
 					};
@@ -977,7 +888,6 @@
 				2ADDD431D61AFF533D88C48C /* Harklight */,
 				759D83DCB9456A16ABDFA1B3 /* HarklightConversationUITestHost */,
 				81AC58E6E599B744FFFC142B /* HarklightConversationUITests */,
-				70FC8BAEF8250E4D64FA18A7 /* HarklightNotificationContent */,
 				D190648242CFB697DA9999EC /* HarklightTests */,
 				D15DB2522363B6D2EB4CBF83 /* HarklightUITests */,
 			);
@@ -998,8 +908,6 @@
 				45E6B1F77CF2F6EB2E0DA45E /* attention-client-m2-fixtures.json in Resources */,
 				B5518512516A448A8F26776D /* attention-client-m2-r1-compat.json in Resources */,
 				4FDE0BB79BFA2964B9F4172B /* attention-client-ui1-conformance-v3.json in Resources */,
-				506CE785F28492DDF46CF62B /* expanded-notification-batch-v1.json in Resources */,
-				862D77AC4302B42128AA1510 /* expanded-notification-chat-v1.json in Resources */,
 				88078E1A9F4E2CE54A07A2AF /* free-active.json in Resources */,
 				4682D782AEF468386472C488 /* free-history.json in Resources */,
 				4679FDBDA2F2CFB0A1726448 /* free-reactivated.json in Resources */,
@@ -1043,14 +951,6 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		8521D4DBC48A7B279EB6F9DE /* Resources */ = {
-			isa = PBXResourcesBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-				4CCFD8177811C54946493D42 /* NotificationView.storyboard in Resources */,
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
@@ -1072,7 +972,6 @@
 				32C25EF03B9BF5D1C1095F73 /* DevelopmentAPNsAddressStoreTests.swift in Sources */,
 				D47169EC21936417F3D42B33 /* ExactJSONUnboundedParsingTests.swift in Sources */,
 				D7F046AA74D4128FA7B854C1 /* ExactTextTests.swift in Sources */,
-				EBD0A0585CB1A080439465A5 /* ExpandedNotificationTests.swift in Sources */,
 				BA42DE1B4F75C5E8FCC8CAC7 /* FailedResponseDialogCopyTests.swift in Sources */,
 				79E4029884C3F62C0C154BF8 /* FeatureCatalogueTests.swift in Sources */,
 				F6A4886AA3A0725431D10DEB /* FirstOpenScrollResponsivenessTests.swift in Sources */,
@@ -1128,16 +1027,6 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		4A17F7C87D1FA9E13E7E8055 /* Sources */ = {
-			isa = PBXSourcesBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-				4C647190ACB6F974F74787BD /* ExpandedNotificationPresentation.swift in Sources */,
-				7B880B84E4A90F98BDF84333 /* ExpandedNotificationView.swift in Sources */,
-				FC9598E2C2CBEF06ECEB7F3F /* NotificationViewController.swift in Sources */,
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
 		5E3BAD43CFB4DD3FDD8111D8 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -1148,8 +1037,6 @@
 				7BDFD2B2D70BD71596D8B6C5 /* ConversationView.swift in Sources */,
 				702B357F4163F9F769D328FD /* DeferredLedgerPersistence.swift in Sources */,
 				FD60725972D79FDF0DB82F5E /* DevelopmentPushRegistration.swift in Sources */,
-				269A439428DB7A7E092513B0 /* ExpandedNotificationPresentation.swift in Sources */,
-				D9C1344A9BE1CA46D8086D09 /* ExpandedNotificationView.swift in Sources */,
 				1603DDA9CDA3675DC1AB99A0 /* FeatureCatalogue.swift in Sources */,
 				876C7F4DBE6214DAB099A845 /* FeatureCatalogueView.swift in Sources */,
 				ADC799B02EE081019BC8EF4D /* ForegroundChatNotificationIndicator.swift in Sources */,
@@ -1221,8 +1108,6 @@
 				4132D611C16A7A8746EC9773 /* ConversationView.swift in Sources */,
 				0251A75A44FD78CF2CC704EB /* DeferredLedgerPersistence.swift in Sources */,
 				695B08E084DD584FDFDBBFC4 /* DevelopmentPushRegistration.swift in Sources */,
-				BB61F588D143CFD80DD07A06 /* ExpandedNotificationPresentation.swift in Sources */,
-				FEC6A1FB08FECBFC323193D4 /* ExpandedNotificationView.swift in Sources */,
 				83CA8F46BBF1402E385ADBB3 /* FeatureCatalogue.swift in Sources */,
 				F9E41CD2F872406DFAF3E945 /* FeatureCatalogueView.swift in Sources */,
 				C74DD75C77F1A869E7A9F430 /* ForegroundChatNotificationIndicator.swift in Sources */,
@@ -1305,11 +1190,6 @@
 			isa = PBXTargetDependency;
 			target = 2ADDD431D61AFF533D88C48C /* Harklight */;
 			targetProxy = A5D2CF80EBDF76757358E802 /* PBXContainerItemProxy */;
-		};
-		4CDAF179CC584ADA049E2B1C /* PBXTargetDependency */ = {
-			isa = PBXTargetDependency;
-			target = 70FC8BAEF8250E4D64FA18A7 /* HarklightNotificationContent */;
-			targetProxy = D8BC4BB768B381D0C540761B /* PBXContainerItemProxy */;
 		};
 		BFC32EBB987CECFF224F9C61 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
@@ -1499,30 +1379,6 @@
 			};
 			name = Release;
 		};
-		7A14755FFA462B4D1EAFAADD /* Debug */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				APPLICATION_EXTENSION_API_ONLY = YES;
-				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = Z7R59J7QV8;
-				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = NotificationContentExtension/Info.plist;
-				IPHONEOS_DEPLOYMENT_TARGET = 27.0;
-				LD_RUNPATH_SEARCH_PATHS = (
-					"$(inherited)",
-					"@executable_path/Frameworks",
-					"@executable_path/../../Frameworks",
-				);
-				MARKETING_VERSION = 0.1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = co.clicketyclacks.Harklight.NotificationContent;
-				SDKROOT = iphoneos;
-				SKIP_INSTALL = YES;
-				SWIFT_VERSION = 6.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
-			};
-			name = Debug;
-		};
 		8AD9931EFAE9E7C17CC18AB4 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -1568,30 +1424,6 @@
 				TEST_TARGET_NAME = HarklightConversationUITestHost;
 			};
 			name = Debug;
-		};
-		AD5C3A7B75E04BC8080F4F15 /* Release */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				APPLICATION_EXTENSION_API_ONLY = YES;
-				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = Z7R59J7QV8;
-				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = NotificationContentExtension/Info.plist;
-				IPHONEOS_DEPLOYMENT_TARGET = 27.0;
-				LD_RUNPATH_SEARCH_PATHS = (
-					"$(inherited)",
-					"@executable_path/Frameworks",
-					"@executable_path/../../Frameworks",
-				);
-				MARKETING_VERSION = 0.1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = co.clicketyclacks.Harklight.NotificationContent;
-				SDKROOT = iphoneos;
-				SKIP_INSTALL = YES;
-				SWIFT_VERSION = 6.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
-			};
-			name = Release;
 		};
 		CA5B3759D72C7127B58AD251 /* Release */ = {
 			isa = XCBuildConfiguration;
@@ -1744,15 +1576,6 @@
 			buildConfigurations = (
 				5494A46F2C3B7D497B4DE45F /* Debug */,
 				607A2CE1BC017C99F6AA3F90 /* Release */,
-			);
-			defaultConfigurationIsVisible = 0;
-			defaultConfigurationName = Debug;
-		};
-		DCB7C8558B1C259319890992 /* Build configuration list for PBXNativeTarget "HarklightNotificationContent" */ = {
-			isa = XCConfigurationList;
-			buildConfigurations = (
-				7A14755FFA462B4D1EAFAADD /* Debug */,
-				AD5C3A7B75E04BC8080F4F15 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;
