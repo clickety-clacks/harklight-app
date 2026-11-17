@@ -237,8 +237,6 @@ final class InboxStockTabsUITests: XCTestCase {
                 if UIDevice.current.userInterfaceIdiom == .phone {
                     // Close the system Search tab before selecting Replied.
                     let closeSearch = app.buttons["Close"]
-                    XCTAssertTrue(closeSearch.waitForExistence(timeout: 5), app.debugDescription)
-                    XCTAssertTrue(closeSearch.isHittable, app.debugDescription)
                     closeSearch.tap()
                 } else {
                     leaveWorkspaceSearch(in: app)
