@@ -110,10 +110,6 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
         guard profile.transportMode == .relay,
               relayURL.scheme == "wss",
               relayURL.path == "/relay",
-              relayURL.query == nil,
-              relayURL.fragment == nil,
-              relayURL.user == nil,
-              relayURL.password == nil,
               let host = relayURL.host,
               !host.isEmpty,
               host == profile.identity.trustedRelayAuthority.rawValue ||
@@ -1266,18 +1262,6 @@ private final class DeviceTLSDelegate: NSObject, URLSessionTaskDelegate, URLSess
                     didCompleteWithError error: Error?) {
         guard task is URLSessionWebSocketTask else { return }
         pingCoordinator.closed(error ?? URLError(.networkConnectionLost))
-    }
-
-    func urlSession(_ session: URLSession,
-                    task: URLSessionTask,
-                    willPerformHTTPRedirection response: HTTPURLResponse,
-                    newRequest request: URLRequest,
-                    completionHandler: @escaping (URLRequest?) -> Void) {
-        // Authentication belongs only to the original pinned relay endpoint.
-        onDiagnostic(NativeClientDiagnosticEvent(area: .connection, phase: .relayAdmission,
-            transition: .rejected, causeCode: "relay_redirect_refused", attemptID: attemptID,
-            transportAttemptID: attemptID))
-        completionHandler(nil)
     }
 
     func urlSession(_ session: URLSession,
