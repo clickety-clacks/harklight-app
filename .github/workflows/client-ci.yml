@@ -7,6 +7,12 @@ on:
   push:
     branches:
       - main
+  workflow_dispatch:
+    inputs:
+      run_ui:
+        description: Also run the iPhone UI suites and the iPad layout tests
+        type: boolean
+        default: false
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -16,10 +22,14 @@ permissions:
   contents: read
 
 jobs:
+  # Runner budget: pull requests run only the two short jobs below. The long
+  # simulator jobs run at most one at a time each, and never per pull request,
+  # so this repository cannot occupy every hosted macOS runner.
   ios-unit-tests:
     name: iOS unit tests
     runs-on: xcode-27
-    timeout-minutes: 120
+    # Measured 8 to 14 minutes; the limit only stops a stuck runner.
+    timeout-minutes: 40
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -36,6 +46,12 @@ jobs:
 
   ios-ui-tests:
     name: iOS UI tests
+    # About 112 minutes of serial tests today, which reaches the limit without a
+    # result. Until the suites are split and bounded, run only when asked for.
+    if: github.event_name == 'workflow_dispatch' && inputs.run_ui
+    concurrency:
+      group: harklight-heavy-ios-ui
+      cancel-in-progress: false
     runs-on: xcode-27
     timeout-minutes: 120
     steps:
@@ -54,8 +70,13 @@ jobs:
 
   ios-ipad-layout-tests:
     name: iOS iPad layout tests
+    # Measured about 21 minutes. Runs for main and on request, one at a time.
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.run_ui)
+    concurrency:
+      group: harklight-heavy-ipad-layout
+      cancel-in-progress: false
     runs-on: xcode-27
-    timeout-minutes: 120
+    timeout-minutes: 60
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -100,7 +121,8 @@ jobs:
   native-host-tests:
     name: NativeHost tests
     runs-on: xcode-27
-    timeout-minutes: 120
+    # Measured under 2 minutes.
+    timeout-minutes: 15
     steps:
       - name: Check out source
         uses: actions/checkout@v4
