@@ -172,6 +172,22 @@ final class CacheBackedActionEligibilityTests: XCTestCase {
         await NativeRelayLifecycle.shared.deactivate()
     }
 
+    func testInboxRowSwipeOffersOnlyTheApplicableActionOrNone() {
+        func action(inbox: Bool = true, replied: Bool = false, retracted: Bool = false,
+                    seen: Bool = false, noComment: Bool = false) -> InboxRowSwipeAction? {
+            InboxRowSwipeAction.applicable(inInboxTab: inbox, belongsToReplied: replied,
+                isRetracted: retracted, canMarkSeen: seen, canNoComment: noComment)
+        }
+        XCTAssertEqual(action(seen: true), .seen)
+        XCTAssertEqual(action(noComment: true), .noComment)
+        XCTAssertEqual(action(retracted: true, seen: true, noComment: true), .clearRetracted)
+        XCTAssertNil(action(), "A row with nothing applicable shows no swipe action.")
+        XCTAssertNil(action(replied: true, seen: true, noComment: true),
+                     "Replied rows have no swipe action.")
+        XCTAssertNil(action(inbox: false, seen: true),
+                     "Only the Inbox tab offers row swipe actions.")
+    }
+
     private func withConfirmedColdLaunch(_ check: (Scenario) throws -> Void) async throws {
         await NativeRelayLifecycle.shared.deactivate()
         do {

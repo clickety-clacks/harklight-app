@@ -64,6 +64,23 @@ enum InboxDuePhrase {
 
 /// An identity-bound row from an ordinary domain projection, with optional local
 /// visual metadata. Both sources use the same inbox navigation and card surface.
+/// The single swipe action an Inbox row offers (row-swipe ruling, 2026-10-19):
+/// the applicable one, or none. Replied rows have none: an accepted answer is final.
+enum InboxRowSwipeAction: Equatable {
+    case clearRetracted
+    case seen
+    case noComment
+
+    static func applicable(inInboxTab: Bool, belongsToReplied: Bool, isRetracted: Bool,
+                           canMarkSeen: Bool, canNoComment: Bool) -> InboxRowSwipeAction? {
+        guard inInboxTab, !belongsToReplied else { return nil }
+        if isRetracted { return .clearRetracted }
+        if canMarkSeen { return .seen }
+        if canNoComment { return .noComment }
+        return nil
+    }
+}
+
 enum InboxItem: Identifiable {
     case request(InboxRequestRow)
     case example(SampleMessage, SampleResponse)
