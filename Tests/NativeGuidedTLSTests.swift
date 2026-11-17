@@ -5300,6 +5300,46 @@ final class NativeGuidedTLSTests: XCTestCase {
             "An established inbox retry must keep automatic reconnection")
     }
 
+    func testLegacyOversizedSendWireObservation() async throws {
+        for sendsRefusal in [true, false] {
+            let namespace = "Harklight.legacy-oversize-observation." + UUID().uuidString
+            let identity = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
+            defer {
+                SecItemDelete([kSecClass as String: kSecClassCertificate,
+                               kSecAttrLabel as String: identity.label] as CFDictionary)
+                SecItemDelete([kSecClass as String: kSecClassKey,
+                               kSecAttrApplicationTag as String: Data(namespace.utf8)] as CFDictionary)
+            }
+            let server = try LegacyOversizeTLSRelay(expectedDevice: identity.deviceID, sendsRefusal: sendsRefusal)
+            defer { server.close() }
+            let port = try await server.start()
+            let context = ProfileContext(identity: ProfileIdentity(
+                trustedRelayAuthority: ExactText("localhost"), personID: ExactText("test-person"),
+                deviceID: ExactText(identity.deviceID)), transportMode: .relay)
+            let events = NativeDiagnosticEventCollector()
+            let session = try URLSessionInstallationSession(profile: context,
+                relayURL: XCTUnwrap(URL(string: "wss://localhost:\(port)/relay")),
+                clientIdentity: TrustedKeychainIdentity(identity.value), trustedRootDER: server.rootDER,
+                onDiagnostic: { events.append($0) })
+            try await session.attachInboxReplay(
+                Data((#"{"v":1,"type":"inbox_attach","ref":"attach"}"# + "\n").utf8), ref: "attach") { _ in }
+            let operation = UUID()
+            let text = String(repeating: "x", count: 5 * 1024 * 1024)
+            let frame = Data(("{\"v\":1,\"type\":\"answer\",\"op_id\":\"\(operation.uuidString.lowercased())\",\"value\":\"\(text)\"}\n").utf8)
+            let result = try await session.sendOriginalOperation(frame, operationID: operation)
+            await session.close()
+            let refusalEvents = events.events.filter { $0.phase == .relayErrorReply && $0.causeCode == "server_bad_frame" }
+            print("LEGACY_OVERSIZE_OBSERVATION refusal=\(sendsRefusal) result=\(result) observedBadFrame=\(refusalEvents.count) attributed=\(refusalEvents.first?.operationID == operation) headerLength=\(server.rejectedLength) bufferedAtRejection=\(server.bufferedAtRejection)")
+            XCTAssertGreaterThan(server.rejectedLength, 4 * 1024 * 1024)
+            XCTAssertLessThan(server.bufferedAtRejection, server.rejectedLength,
+                              "The old Server rejects from the length header before reading the body")
+            if !sendsRefusal {
+                XCTAssertTrue(refusalEvents.isEmpty)
+                XCTAssertEqual(result, .unresolved, "Bare loss must not become a refusal")
+            }
+        }
+    }
+
     func testFirstConnectionSurfacesSocketFailureAndServerRefusal() async throws {
         for closesSocket in [true, false] {
             let namespace = "Harklight.first-connection-failure." + UUID().uuidString
@@ -6231,4 +6271,129 @@ private actor PushRemovalProbeSession: AuthenticatedPushRemovalSession {
     }
 
     func currentPushBindingStatus() async throws -> PushBindingStatus? { status }
+}
+
+// Matches the old relay's >4 MiB header rejection: text error, then TLS EOF;
+// no WebSocket close frame, and no need to finish receiving the rejected body.
+private final class LegacyOversizeTLSRelay: @unchecked Sendable {
+    private let queue = DispatchQueue(label: "legacy-oversize-tls-fixture")
+    private let listener: NWListener
+    private var connections: [NWConnection] = []
+    private let sendsRefusal: Bool
+    let rootDER: Data
+    private var length: UInt64 = 0
+    private var buffered = 0
+    var rejectedLength: UInt64 { queue.sync { length } }
+    var bufferedAtRejection: UInt64 { queue.sync { UInt64(buffered) } }
+
+    init(expectedDevice: String, sendsRefusal: Bool) throws {
+        self.sendsRefusal = sendsRefusal
+        let (tls, root) = try LocalEnrollmentTLS.fixtureTLS(expectedDevice: expectedDevice, queue: queue)
+        rootDER = root
+        let parameters = NWParameters(tls: tls, tcp: NWProtocolTCP.Options())
+        parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: .any)
+        listener = try NWListener(using: parameters)
+    }
+
+    func start() async throws -> UInt16 {
+        try await withCheckedThrowingContinuation { continuation in
+            listener.stateUpdateHandler = { [weak self] state in
+                guard let self else { return }
+                switch state {
+                case .ready:
+                    listener.stateUpdateHandler = nil
+                    guard let port = listener.port else {
+                        continuation.resume(throwing: NativeJoinError.unavailable); return
+                    }
+                    continuation.resume(returning: port.rawValue)
+                case let .failed(error):
+                    listener.stateUpdateHandler = nil
+                    continuation.resume(throwing: error)
+                default: break
+                }
+            }
+            listener.newConnectionHandler = { [weak self] connection in
+                guard let self else { return }
+                connections.append(connection)
+                connection.start(queue: queue)
+                receive(connection, buffer: Data(), upgraded: false)
+            }
+            listener.start(queue: queue)
+        }
+    }
+
+    private func receive(_ connection: NWConnection, buffer: Data, upgraded: Bool) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 16_384) { [weak self] data, _, done, error in
+            guard let self else { return }
+            var bytes = buffer
+            if let data { bytes.append(data) }
+            if !upgraded {
+                if let boundary = bytes.range(of: Data("\r\n\r\n".utf8)),
+                   let header = String(data: bytes[..<boundary.lowerBound], encoding: .utf8),
+                   let line = header.components(separatedBy: "\r\n").first(where: { $0.lowercased().hasPrefix("sec-websocket-key:") }) {
+                    let key = line.dropFirst("sec-websocket-key:".count).trimmingCharacters(in: .whitespaces)
+                    let accept = Data(Insecure.SHA1.hash(data: Data((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").utf8))).base64EncodedString()
+                    let response = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: \(accept)\r\nSec-WebSocket-Protocol: attention-relay/1\r\n\r\n"
+                    connection.send(content: Data(response.utf8), completion: .contentProcessed { _ in })
+                    process(connection, bytes: Data(bytes[boundary.upperBound...]))
+                    return
+                }
+            } else {
+                process(connection, bytes: bytes)
+                return
+            }
+            if done || error != nil { connection.cancel(); return }
+            receive(connection, buffer: bytes, upgraded: false)
+        }
+    }
+
+    private func process(_ connection: NWConnection, bytes: Data) {
+        guard bytes.count >= 2 else { receive(connection, buffer: bytes, upgraded: true); return }
+        let shortLength = Int(bytes[1] & 0x7f)
+        let headerBytes = shortLength == 127 ? 10 : (shortLength == 126 ? 4 : 2)
+        guard bytes.count >= headerBytes else { receive(connection, buffer: bytes, upgraded: true); return }
+        let payloadLength: UInt64 = shortLength < 126 ? UInt64(shortLength) :
+            bytes[2..<headerBytes].reduce(UInt64(0)) { ($0 << 8) | UInt64($1) }
+        if payloadLength > 4 * 1024 * 1024 {
+            length = payloadLength
+            buffered = bytes.count
+            let reply = sendsRefusal ? textFrame("{\"v\":1,\"type\":\"error\",\"reason\":\"bad_frame\"}\n") : Data()
+            connection.send(content: reply, completion: .contentProcessed { _ in
+                connection.send(content: nil, contentContext: .finalMessage, isComplete: true,
+                                completion: .contentProcessed { _ in connection.cancel() })
+            })
+            return
+        }
+        let maskBytes = bytes[1] & 0x80 == 0 ? 0 : 4
+        let total = headerBytes + maskBytes + Int(payloadLength)
+        guard bytes.count >= total else { receive(connection, buffer: bytes, upgraded: true); return }
+        // The single initial inbox_attach enables the app's normal background reader.
+        let response = textFrame("{\"v\":1,\"type\":\"ok\",\"ref\":\"attach\",\"paging_version\":1,\"checkpoint_accepted\":true,\"replay_started\":true}\n") +
+            textFrame("{\"v\":1,\"type\":\"resynced\"}\n")
+        connection.send(content: response, completion: .contentProcessed { _ in })
+        let rest = Data(bytes.dropFirst(total))
+        if rest.isEmpty { receive(connection, buffer: rest, upgraded: true) }
+        else { process(connection, bytes: rest) }
+    }
+
+    private func textFrame(_ text: String) -> Data {
+        let payload = Data(text.utf8)
+        var bytes = Data([0x81])
+        if payload.count < 126 { bytes.append(UInt8(payload.count)) }
+        else {
+            bytes.append(126)
+            bytes.append(UInt8((payload.count >> 8) & 255))
+            bytes.append(UInt8(payload.count & 255))
+        }
+        bytes.append(payload)
+        return bytes
+    }
+
+    func close() {
+        queue.sync {
+            listener.cancel()
+            connections.forEach { $0.cancel() }
+            connections.removeAll()
+        }
+    }
 }
