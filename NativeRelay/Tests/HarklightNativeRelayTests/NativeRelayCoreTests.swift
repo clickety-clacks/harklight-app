@@ -479,7 +479,7 @@ final class NativeRelayCoreTests: XCTestCase {
         XCTAssertThrowsError(try store.relayCursor(context: context))
     }
 
-    func testLargeAnswerRefusalOrDropKeepsTheOriginalForExplicitRetry() async throws {
+    func testLargeAnswerRefusalRetriesAndDropAutomaticallyRecoversTheOriginal() async throws {
         for dropped in [false, true] {
             let (context, store, session) = try setup()
             let key = RequestKey(accountScope: context.identity.personID,
@@ -506,9 +506,22 @@ final class NativeRelayCoreTests: XCTestCase {
             if dropped {
                 XCTAssertThrowsError(try store.releaseFailedOperationForEdit(receipt.intentID, context: context))
             }
-            session.result = .accepted(operationID: receipt.opID, terminalSequence: 2)
-            try await core.sendOriginalOperationForUserTap(receipt.intentID)
-            XCTAssertEqual(session.sent.map(\.1), [receipt.opID, receipt.opID])
+            if dropped {
+                let reconnected = Session(context.identity)
+                reconnected.snapshotHighWater = 1
+                reconnected.initialItems = [snapshotItem(key, payload: payload)]
+                reconnected.frames = [data(#"{"v":1,"type":"resynced","seq":1}"#)]
+                reconnected.result = .accepted(operationID: receipt.opID, terminalSequence: 2)
+                let recoveredCore = try NativeRelayCore(store: store, context: context, session: reconnected)
+                _ = try await recoveredCore.resyncAndDrainOutbox()
+                XCTAssertEqual(reconnected.sent.map(\.1), [receipt.opID])
+                XCTAssertEqual(reconnected.sent.first?.0, original.wireFrame)
+            } else {
+                session.result = .accepted(operationID: receipt.opID, terminalSequence: 2)
+                try await core.sendOriginalOperationForUserTap(receipt.intentID)
+                XCTAssertEqual(session.sent.map(\.1), [receipt.opID, receipt.opID])
+                XCTAssertEqual(session.sent.last?.0, original.wireFrame)
+            }
             XCTAssertEqual(try store.lookupIntent(receipt.intentID, context: context)?.disposition, .accepted(sequence: 2))
         }
     }

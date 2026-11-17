@@ -12,7 +12,7 @@ final class SubmissionControlPhaseTests: XCTestCase {
         let cases: [(IntentDisposition, SubmissionControlPhase.Phase)] = [
             (.pending, .sending),
             (.accepted(sequence: 2), .confirmed),
-            (.lost, .failed(retryable: true, editable: false)),
+            (.lost, .sending),
             (.failed, .failed(retryable: true, editable: true)),
             (.unsupported, .failed(retryable: true, editable: true)),
             (.repairRequired, .failed(retryable: false, editable: false)),
@@ -83,13 +83,13 @@ final class SubmissionControlPhaseTests: XCTestCase {
         let receipt = try port.submit(SubmitIntent(context: port.context, selector: selector, intentID: UUID(),
             inputs: [.compatibilityText(action: ExactText("reply"), text: ExactText("My failed reply"))]))
         let live = try LivePresentationStore(store: domain, context: context)
-        XCTAssertEqual(live.submissionPhases[key]?.phase, .failed(retryable: true, editable: false))
+        XCTAssertEqual(live.submissionPhases[key]?.phase, .sending)
         XCTAssertFalse(live.releaseFailedSubmissionForEdit(key), "A send in flight cannot become a draft.")
         XCTAssertThrowsError(try domain.releaseFailedOperationForEdit(receipt.intentID, context: context))
 
         try domain.recordUnresolvedOperation(receipt.intentID, operationID: receipt.opID, context: context)
         try live.refreshFromDurableStore()
-        XCTAssertEqual(live.submissionPhases[key]?.phase, .failed(retryable: true, editable: false))
+        XCTAssertEqual(live.submissionPhases[key]?.phase, .sending)
         XCTAssertFalse(live.releaseFailedSubmissionForEdit(key),
                        "A lost send may have arrived, so it keeps its operation.")
         XCTAssertThrowsError(try domain.releaseFailedOperationForEdit(receipt.intentID, context: context))
@@ -165,7 +165,7 @@ final class SubmissionControlPhaseTests: XCTestCase {
     }
 
     @MainActor
-    func testADroppedLargeAnswerOffersRetryThenConfirmsOnlyAtAcceptance() throws {
+    func testADroppedLargeAnswerKeepsSendingAndRecoversAtAcceptance() throws {
         let fixture = try liveFixture(payload: try choicePayload())
         let text = ExactText(String(repeating: "x", count: 2 * 1024 * 1024 + 1))
         let receipt = try fixture.submit([.compatibilityText(action: ExactText("reply"), text: text)])
@@ -178,17 +178,21 @@ final class SubmissionControlPhaseTests: XCTestCase {
         try fixture.domain.recordUnresolvedOperation(receipt.intentID, operationID: receipt.opID,
                                                      context: fixture.context)
         var detail = try fixture.refresh()
-        XCTAssertEqual(detail.submissionPhase?.phase, .failed(retryable: true, editable: false))
-        XCTAssertNotNil(detail.submissionDisplay.retryAction(.answer))
-        XCTAssertTrue(detail.submissionDisplay.isFailed(.answer))
+        XCTAssertEqual(detail.submissionPhase?.phase, .sending, "Recovering is still sending, not failed.")
+        XCTAssertNil(detail.submissionDisplay.retryAction(.answer), "No Retry or failure mark while recovering.")
+        XCTAssertFalse(detail.submissionDisplay.isFailed(.answer))
         XCTAssertFalse(detail.submissionDisplay.canEdit(.answer))
         XCTAssertFalse(detail.isDurablyAccepted(.answer))
         XCTAssertTrue(detail.controlsReadOnly, "Other answers stay locked while it may have arrived.")
         fixture.live.selectAction(ExactText("b"), input: nil, for: fixture.key)
         XCTAssertEqual(try fixture.intents.map(\.operationID), [receipt.opID])
 
-        // Reconnect: the same operation is sent again, then accepted.
-        _ = try fixture.domain.queueOriginalOperationForUserTap(receipt.intentID, context: fixture.context)
+        // Reconnect automatically requeues the same bytes without a user tap.
+        try fixture.domain.queueRecoverableOperations(context: fixture.context)
+        let recovered = try XCTUnwrap(fixture.intents.first)
+        XCTAssertEqual(recovered.operationID, saved.operationID)
+        XCTAssertEqual(recovered.wireFrame, saved.wireFrame)
+        XCTAssertEqual(recovered.disposition, .pending)
         XCTAssertEqual(try fixture.refresh().submissionPhase?.phase, .sending)
         try fixture.domain.recordAcceptedOperation(receipt.intentID, operationID: receipt.opID,
                                                    terminalSequence: 2, context: fixture.context)
@@ -370,9 +374,9 @@ final class SubmissionControlPhaseTests: XCTestCase {
         try fixture.domain.recordUnresolvedOperation(receipt.intentID, operationID: receipt.opID,
                                                      context: fixture.context)
         detail = try fixture.refresh()
-        XCTAssertEqual(detail.submissionPhase?.phase, .failed(retryable: true, editable: false))
+        XCTAssertEqual(detail.submissionPhase?.phase, .sending)
         XCTAssertTrue(detail.showsNoCommentRow)
-        XCTAssertNotNil(detail.submissionDisplay.retryAction(.noComment))
+        XCTAssertNil(detail.submissionDisplay.retryAction(.noComment))
 
         _ = try fixture.domain.queueOriginalOperationForUserTap(receipt.intentID, context: fixture.context)
         try fixture.domain.recordAcceptedOperation(receipt.intentID, operationID: receipt.opID,
