@@ -1267,8 +1267,9 @@ final class NativeGuidedTLSTests: XCTestCase {
                           "A similar title cannot stand in for the linked sender/message identity.")
         XCTAssertFalse(live.submitFromUser(otherKey))
         let otherRequestWarning = try XCTUnwrap(live.actionError)
-        XCTAssertEqual(otherRequestWarning,
-                       "The relay could not be refreshed. Saved requests, answers and confirmed receipts remain on this device.")
+        // Actions are not gated on relay confirmation (#242); this payload has
+        // no answer interface, so the attempt leaves its own warning.
+        XCTAssertEqual(otherRequestWarning, "Complete the response before sending your answer.")
 
         refreshPlan.step = 1
         await app.refreshLive()
@@ -1521,7 +1522,8 @@ final class NativeGuidedTLSTests: XCTestCase {
                        "Could not verify notification. Checking again while open.")
         let retained = try XCTUnwrap(live.inboxRows.first { $0.key == key })
         XCTAssertFalse(retained.belongsToReplied)
-        XCTAssertFalse(retained.canMarkSeen, "Retained rows do not authorize actions before relay confirmation.")
+        XCTAssertTrue(retained.canMarkSeen,
+                      "Actions stay available before relay confirmation; the durable queue holds them (#242).")
         XCTAssertEqual(live.request(for: key)?.informationalSeenStatus, .available)
         XCTAssertEqual(try persistence.load(identity: context.identity), before)
 

@@ -25,7 +25,7 @@ final class CacheBackedActionEligibilityTests: XCTestCase {
             persistence: MemoryPendingActionPersistence())
         try domain.restoreCachedServerState(CachedAttentionServerState(identity: context.identity,
             requests: saved.requests, remoteStates: [:], cursor: 1, conversationCursor: 0,
-            conversations: [:], inboxView: nil, currentRequestKeys: [key]), context: context)
+            conversations: [:], inboxView: nil, currentRequestKeys: []), context: context)
         let live = try LivePresentationStore(store: domain, context: context)
         let request = try XCTUnwrap(live.request(for: key))
         XCTAssertEqual(request.informationalSeenStatus, .available)
@@ -53,40 +53,55 @@ final class CacheBackedActionEligibilityTests: XCTestCase {
             personID: ExactText("pending-reply"), deviceID: ExactText("device")), transportMode: .relay)
         let key = RequestKey(accountScope: context.identity.personID, senderID: ExactText("sender"),
                              messageID: ExactText("reply"))
+        let reply = ExactText("reply")
         let payload = try JSONValue.parse(Data(#"{"title":"Question","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"reply","label":"Reply","kind":"text"}]}}"#.utf8))
+        // A saved cache holds requests as the Server accepted them, with their acceptance order.
+        let previous = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        _ = try previous.apply(RelayEvent(sequence: 1,
+            body: .delivery(StoredRequest(key: key, originalPayload: payload), .message)), context: context)
+        let saved = try previous.snapshot(context: context)
         let domain = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
         try domain.restoreCachedServerState(CachedAttentionServerState(identity: context.identity,
-            requests: [key: StoredRequest(key: key, originalPayload: payload)], remoteStates: [:], cursor: 1,
-            conversationCursor: 0, conversations: [:], inboxView: nil, currentRequestKeys: [key]), context: context)
+            requests: saved.requests, remoteStates: [:], cursor: 1,
+            conversationCursor: 0, conversations: [:], inboxView: nil, currentRequestKeys: []), context: context)
         let port = AttentionDomainPort(store: domain)
         let selector = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first?.selector)
         let receipt = try port.submit(SubmitIntent(context: port.context, selector: selector, intentID: UUID(),
-            inputs: [.compatibilityText(action: ExactText("reply"), text: ExactText("My pending reply"))]))
+            inputs: [.compatibilityText(action: reply, text: ExactText("My pending reply"))]))
         let live = try LivePresentationStore(store: domain, context: context)
         live.beginRefresh()
         defer { live.endRefresh() }
         let pending = try XCTUnwrap(live.request(for: key))
         XCTAssertFalse(pending.inboxStateIsCurrent)
-        let detail = LiveRequestDetail(request: pending, store: live)
-        XCTAssertTrue(detail.showsPendingAnswerConfirmation)
-        XCTAssertEqual(detail.pendingAnswerText, "My pending reply")
+        XCTAssertEqual(pending.lifecycleStatus, .pending)
+        XCTAssertEqual(live.submissionPhases[key]?.phase, .sending)
+        XCTAssertEqual(pending.submittedAnswer?.compatibility.textByActionID[reply], ExactText("My pending reply"),
+                       "The sending control keeps showing the queued reply during catch-up.")
+        XCTAssertEqual(pending.receiptFacts?.ownOutcome, .unconfirmed,
+                       "A queued reply is not shown as Server-confirmed.")
         XCTAssertFalse(LiveRequestDetail.answerStatusIsComplete(lifecycleStatus: pending.lifecycleStatus,
             ownOutcome: pending.receiptFacts?.ownOutcome, answerNotDelivered: false))
+
         try domain.recordAnswerNotDelivered(receipt.intentID, operationID: receipt.opID, context: context)
         try live.refreshFromDurableStore()
-        XCTAssertTrue(live.canRetryUnconfirmedAnswer(for: key))
-        XCTAssertEqual(live.request(for: key)?.intentReceipt?.opID, receipt.opID)
+        let failed = try XCTUnwrap(live.submissionPhases[key])
+        XCTAssertEqual(failed.phase, .failed(retryable: true, editable: true))
+        XCTAssertEqual(failed.operationID, receipt.opID, "Retry offers the original operation.")
+        XCTAssertEqual(live.request(for: key)?.failedAnswer?.compatibility.textByActionID[reply],
+                       ExactText("My pending reply"))
         let retry = try domain.queueOriginalOperationForUserTap(receipt.intentID, context: context)
         XCTAssertEqual(retry.operationID, receipt.opID)
+
         try domain.recordAcceptedOperation(receipt.intentID, operationID: receipt.opID,
             terminalSequence: 2, context: context)
         try live.refreshFromDurableStore()
         let accepted = try XCTUnwrap(live.request(for: key))
-        let acceptedDetail = LiveRequestDetail(request: accepted, store: live)
-        XCTAssertTrue(acceptedDetail.showsPendingAnswerConfirmation)
-        XCTAssertEqual(acceptedDetail.pendingAnswerText, "My pending reply")
+        XCTAssertEqual(live.submissionPhases[key]?.phase, .confirmed)
+        XCTAssertTrue(LiveRequestDetail(request: accepted, store: live).isDurablyAccepted(.answer),
+                      "Durable Server acceptance is the reply's confirmation.")
         XCTAssertFalse(LiveRequestDetail.answerStatusIsComplete(lifecycleStatus: accepted.lifecycleStatus,
-            ownOutcome: accepted.receiptFacts?.ownOutcome, answerNotDelivered: false))
+            ownOutcome: accepted.receiptFacts?.ownOutcome, answerNotDelivered: false),
+                       "The request's final state still comes only from the Server.")
     }
 
     func testConfirmedCacheBackedRefreshEnablesSeenRow() async throws {

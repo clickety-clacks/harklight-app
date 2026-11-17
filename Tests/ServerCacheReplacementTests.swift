@@ -126,7 +126,8 @@ final class ServerCacheReplacementTests: XCTestCase {
         try restarted.saveInboxInitialPage(snapshotID: "original-delivery", highWater: 1,
             items: [InboxSnapshotItem(acceptance: RelayEvent(sequence: 1,
                 body: .delivery(original, .message)))], nextCursor: nil, receiptCursor: nil, context: context)
-        XCTAssertEqual(try restarted.snapshot(context: context).requests[key]?.originalPayload, original.originalPayload)
+        XCTAssertEqual(try restarted.snapshot(context: context).requests[key]?.originalPayload, revised.originalPayload,
+                       "The inbox replacement keeps the separate conversation stream, so the current revision stays shown.")
         for (sequence, payload) in [(UInt64(1), original.originalPayload), (UInt64(2), revised.originalPayload)] {
             try restarted.applyConversation(ConversationEvent(sequence: sequence,
                 binding: ConversationBinding(request: key, revision: sequence),
@@ -355,8 +356,10 @@ final class ServerCacheReplacementTests: XCTestCase {
         XCTAssertEqual(restored.operationID, queued.operationID)
         XCTAssertEqual(restored.wireFrame, queued.wireFrame)
         XCTAssertTrue(try restarted.snapshot(context: context).requests.isEmpty)
+        // The saved operation is reported to the Server with the snapshot request.
+        let batch = InboxReceiptBatch(batchID: "saved-answer", operationIDs: [queued.operationID])
         _ = try restarted.beginInboxCandidate(startupID: UUID().uuidString, since: 0,
-            batches: [], context: context)
+            batches: [batch], context: context)
         let snapshotID = UUID().uuidString
         let answered = RelayEvent(sequence: 2, body: .terminal(key, .answered, nil),
             accountAnswerOutcome: .reply(ExactText("Server answer")))
@@ -364,6 +367,8 @@ final class ServerCacheReplacementTests: XCTestCase {
             items: [InboxSnapshotItem(acceptance: RelayEvent(sequence: 1,
                 body: .delivery(request, .message)), terminal: answered)],
             nextCursor: nil, receiptCursor: nil, context: context)
+        try restarted.saveInboxReceiptBatch(batch.batchID, results: [InboxOperationReceipt(
+            operationID: queued.operationID, status: .notCommittedAtSnapshot)], context: context)
         _ = try restarted.prepareInboxCheckpointAcknowledgement(context: context)
         _ = try restarted.acceptInboxCheckpoint(snapshotID: snapshotID, highWater: 2, context: context)
 
@@ -378,7 +383,7 @@ final class ServerCacheReplacementTests: XCTestCase {
         XCTAssertNil(shown.submittedAnswer, "A queued local answer is not the server's answer.")
     }
 
-    func testCompleteServerSnapshotDropsMissingAnswerButPartialPageDoesNot() throws {
+    func testServerSnapshotWithoutTheRequestKeepsQueuedAnswerForTheServerToSettle() throws {
         let context = context()
         let missing = key("missing", context: context)
         let other = key("other", context: context)
@@ -392,21 +397,25 @@ final class ServerCacheReplacementTests: XCTestCase {
         let receipt = try port.submit(SubmitIntent(context: port.context, selector: selector,
             intentID: UUID(), inputs: [.compatibilityValue(action: ExactText("yes"))]))
         let restarted = try ClientRepository(context: context, persistence: persistence)
-        _ = try restarted.beginInboxCandidate(startupID: "fresh", since: 0, batches: [], context: context)
+        let operationID = try XCTUnwrap(restarted.lookupIntent(receipt.intentID, context: context)).operationID
+        let batch = InboxReceiptBatch(batchID: "saved-answer", operationIDs: [operationID])
+        _ = try restarted.beginInboxCandidate(startupID: "fresh", since: 0, batches: [batch], context: context)
         try restarted.saveInboxInitialPage(snapshotID: "fresh", highWater: 2,
             items: [InboxSnapshotItem(acceptance: RelayEvent(sequence: 2,
                 body: .delivery(StoredRequest(key: other, originalPayload: payload), .message)))],
             nextCursor: "older", receiptCursor: nil, context: context)
+        try restarted.saveInboxReceiptBatch(batch.batchID, results: [InboxOperationReceipt(
+            operationID: operationID, status: .notCommittedAtSnapshot)], context: context)
         _ = try restarted.prepareInboxCheckpointAcknowledgement(context: context)
         _ = try restarted.acceptInboxCheckpoint(snapshotID: "fresh", highWater: 2, context: context)
         XCTAssertNotNil(try restarted.lookupIntent(receipt.intentID, context: context),
                         "An unloaded page does not prove the request is gone.")
         try restarted.saveInboxOlderPage(snapshotID: "fresh", highWater: 2,
             cursor: "older", items: [], nextCursor: nil, context: context)
-        XCTAssertNil(try restarted.lookupIntent(receipt.intentID, context: context))
-        XCTAssertTrue(try restarted.snapshot(context: context).outbox.isEmpty)
+        XCTAssertEqual(try restarted.lookupIntent(receipt.intentID, context: context)?.operationID, operationID,
+                       "A complete snapshot without the request is not the Server's outcome for the queued answer.")
         let again = try ClientRepository(context: context, persistence: persistence)
-        XCTAssertNil(try again.lookupIntent(receipt.intentID, context: context))
+        XCTAssertEqual(try again.lookupIntent(receipt.intentID, context: context)?.operationID, operationID)
     }
 
     func testChangedServerInterfaceRebuildsDraftAndAllowsReply() throws {

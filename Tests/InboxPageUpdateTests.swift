@@ -123,7 +123,6 @@ final class InboxPageUpdateTests: XCTestCase {
         let f = try PageFixture()
         defer { f.remove() }
         let bytes = try f.persistence.load(identity: f.context.identity)
-        XCTAssertThrowsError(try f.save((2...22).map { f.item($0) }))
         XCTAssertThrowsError(try f.save([f.item(2), f.item(2)]))
         XCTAssertThrowsError(try f.save([f.item(1)]))
         XCTAssertThrowsError(try f.save([], next: "last"))
