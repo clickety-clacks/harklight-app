@@ -171,12 +171,47 @@ final class SampleWorkspaceUITests: XCTestCase {
         XCTAssertTrue(safari.wait(for: .runningForeground, timeout: 10))
         app.activate()
 
-        // The app's part is detecting each value as a system link; the actions
-        // iOS offers for a detected link are the platform's, not the app's.
-        for value in ["November 4", "415", "Infinite Loop"] {
+        // Open the stock menus without placing a call, opening Maps, or saving
+        // an event. Each must offer the platform action for the detected value
+        // (data detectors work item: a date offers the system calendar actions).
+        for (value, actionPattern) in [
+            ("November 4", "(Create Event|Add to Calendar|Show in Calendar|Open in Calendar).*"),
+            ("415", "Call.*"),
+            ("Infinite Loop", ".*(Maps|Directions).*")
+        ] {
             let link = app.links.matching(NSPredicate(format: "label CONTAINS %@", value)).firstMatch
             XCTAssertTrue(link.waitForExistence(timeout: 5), app.debugDescription)
-            XCTAssertTrue(link.isHittable, app.debugDescription)
+            // Returning from Safari or Home, the app may still be activating; a
+            // long press then is lost and no preview appears.
+            let hittable = XCTNSPredicateExpectation(predicate: NSPredicate(format: "isHittable == true"),
+                                                     object: link)
+            XCTAssertEqual(XCTWaiter().wait(for: [hittable], timeout: 5), .completed, app.debugDescription)
+            // Match only actionable system controls. The sender label contains
+            // "Calendar", so a broad descendant-label match would prove nothing.
+            let predicate = NSPredicate(format: "label MATCHES[c] %@", actionPattern)
+            let menuAction = app.menuItems.matching(predicate).firstMatch
+            let buttonAction = app.buttons.matching(predicate).firstMatch
+            func actionOffered() -> Bool {
+                let shown = XCTNSPredicateExpectation(
+                    predicate: NSPredicate { _, _ in menuAction.exists || buttonAction.exists }, object: nil)
+                return XCTWaiter().wait(for: [shown], timeout: 10) == .completed
+            }
+            link.press(forDuration: 1)
+            var offered = actionOffered()
+            if !offered {
+                // A press lost to an activation transition shows nothing at all;
+                // press once more. The action must still be offered.
+                link.press(forDuration: 1)
+                offered = actionOffered()
+            }
+            XCTAssertTrue(offered, app.debugDescription)
+            capture("message-detector-\(value)-\(style)", app)
+            // A tap outside a tall detector preview can hit its map instead
+            // of dismissing it. Leaving the app closes the system preview
+            // without invoking an action; return to the same message next.
+            XCUIDevice.shared.press(.home)
+            app.activate()
+            XCTAssertTrue(body.waitForExistence(timeout: 5), app.debugDescription)
         }
         app.terminate()
     }
