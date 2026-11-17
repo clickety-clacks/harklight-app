@@ -796,8 +796,7 @@ struct NativeEnrollmentStore {
                                  delegateQueue: nil)
         defer { session.invalidateAndCancel() }
         let (data, response) = try await session.data(for: request)
-        guard data.count <= 64 * 1024,
-              let response = response as? HTTPURLResponse else {
+        guard let response = response as? HTTPURLResponse else {
             throw NativeEnrollmentError.serverRejected
         }
         if response.statusCode == 409,
