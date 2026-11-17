@@ -89,9 +89,11 @@ case "$ACTION" in
                 -default-test-execution-time-allowance "$HARKLIGHT_TEST_TIME_ALLOWANCE" \
                 -maximum-test-execution-time-allowance "$HARKLIGHT_TEST_TIME_ALLOWANCE"
         fi
-        # Start tests on a fully booted simulator. A test runner started while the
-        # device is still finishing its boot can stall before its first test.
-        xcrun simctl bootstatus "$DEVICE_ID" -b
+        # Start tests on a fully booted simulator. A UI test runner started while
+        # the device is still finishing its boot can stall before its first test.
+        if [ "${HARKLIGHT_BOOT_SIMULATOR_FIRST:-}" = 1 ]; then
+            xcrun simctl bootstatus "$DEVICE_ID" -b
+        fi
         exec xcodebuild -project "$PROJECT" -scheme "$SCHEME" -destination "$DESTINATION" \
             -derivedDataPath "$DERIVED_DATA" -collect-test-diagnostics never CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- "$@" test
         ;;

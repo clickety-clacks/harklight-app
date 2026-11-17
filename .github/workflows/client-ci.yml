@@ -70,6 +70,7 @@ jobs:
           # Longest passing UI test measured 364 s to over 420 s. A test that
           # runs past this many seconds fails by itself instead of holding the job.
           HARKLIGHT_TEST_TIME_ALLOWANCE: "600"
+          HARKLIGHT_BOOT_SIMULATOR_FIRST: "1"
         run: Scripts/verify.sh test
 
   ios-conversation-ui-tests:
@@ -93,6 +94,7 @@ jobs:
         env:
           HARKLIGHT_ONLY_TESTING: HarklightConversationUITests
           HARKLIGHT_TEST_TIME_ALLOWANCE: "600"
+          HARKLIGHT_BOOT_SIMULATOR_FIRST: "1"
         run: Scripts/verify.sh test
 
   ios-ipad-layout-tests:
