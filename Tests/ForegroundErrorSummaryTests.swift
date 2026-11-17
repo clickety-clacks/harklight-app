@@ -34,13 +34,13 @@ final class ForegroundErrorSummaryTests: XCTestCase {
 
     func testActualResetAndClosureReconnectButRefusalAndCancellationDoNot() {
         for error in [POSIXErrorCode.ECONNRESET, .ECONNABORTED, .ENOTCONN, .EPIPE] {
-            XCTAssertTrue(NativeRelayLifecycle.isInterruptedConnection(
+            XCTAssertTrue(NativeRelayLifecycle.shouldReconnectAfterConnectionError(
                 NSError(domain: NSPOSIXErrorDomain, code: Int(error.rawValue))))
         }
-        XCTAssertTrue(NativeRelayLifecycle.isInterruptedConnection(URLError(.networkConnectionLost)))
-        XCTAssertFalse(NativeRelayLifecycle.isInterruptedConnection(CancellationError()))
-        XCTAssertFalse(NativeRelayLifecycle.isInterruptedConnection(InstallationTransportError.serverRejected))
-        XCTAssertFalse(NativeRelayLifecycle.isInterruptedConnection(AttentionStoreError.persistence("Cannot save")))
+        XCTAssertTrue(NativeRelayLifecycle.shouldReconnectAfterConnectionError(URLError(.networkConnectionLost)))
+        XCTAssertFalse(NativeRelayLifecycle.shouldReconnectAfterConnectionError(CancellationError()))
+        XCTAssertFalse(NativeRelayLifecycle.shouldReconnectAfterConnectionError(InstallationTransportError.serverRejected))
+        XCTAssertFalse(NativeRelayLifecycle.shouldReconnectAfterConnectionError(AttentionStoreError.persistence("Cannot save")))
     }
 
     func testCaughtErrorsExposeTypeAndCauseWithoutMessageContent() async {
@@ -104,4 +104,16 @@ final class ForegroundErrorSummaryTests: XCTestCase {
         XCTAssertTrue(text.contains("\nerror_type=none_observed\n"))
         XCTAssertTrue(text.contains("\nerror_description=none_observed\n"))
     }
+    func testFirstConnectionIgnoresSystemTimeoutButSurfacesObservedFailure() {
+        XCTAssertTrue(NativeRelayLifecycle.shouldReconnectAfterConnectionError(
+            URLError(.timedOut), awaitingFirstConnection: true))
+        XCTAssertFalse(NativeRelayLifecycle.shouldReconnectAfterConnectionError(
+            URLError(.networkConnectionLost), awaitingFirstConnection: true))
+        XCTAssertFalse(NativeRelayLifecycle.shouldReconnectAfterConnectionError(
+            NSError(domain: NSPOSIXErrorDomain, code: Int(POSIXErrorCode.ECONNRESET.rawValue)),
+            awaitingFirstConnection: true))
+        XCTAssertFalse(NativeRelayLifecycle.shouldReconnectAfterConnectionError(
+            InstallationTransportError.serverRejected, awaitingFirstConnection: true))
+    }
+
 }

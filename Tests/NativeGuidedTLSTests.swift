@@ -5267,6 +5267,75 @@ final class NativeGuidedTLSTests: XCTestCase {
                        kSecAttrService as String: service] as CFDictionary)
     }
 
+    func testInboxRetryUsesSavedConfirmationDespiteStaleInMemoryRecord() async throws {
+        let service = "Harklight.first-connection-confirmation." + UUID().uuidString
+        defer { deleteEnrollmentRecord(service: service) }
+        let stale = approvedRecord(foregroundRelayConfirmed: false, notificationExplanationSeen: true)
+        try saveEnrollmentRecord(stale, service: service)
+        let enrollment = NativeEnrollmentStore(service: service)
+        let context = ProfileContext(identity: ProfileIdentity(
+            trustedRelayAuthority: ExactText(stale.profileAuthority), personID: ExactText(stale.personID!),
+            deviceID: ExactText(stale.deviceID)), transportMode: .relay)
+        let domain = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        let presentation = try LivePresentationStore(store: domain, context: context)
+        let app = NativeAppLaunch(arguments: ["Harklight"], enrollmentStore: enrollment,
+                                  joinStore: NativeGuidedJoinStore(namespace: service),
+                                  initialState: .live(presentation), initialEnrollmentRecord: stale)
+        var connectionModes: [Bool] = []
+        app.guidedJoin.connectApproved = { _ in
+            connectionModes.append(try app.awaitingFirstConnection(for: context))
+            return true
+        }
+        await app.guidedJoin.restore()
+        XCTAssertEqual(app.guidedJoin.screen, .connected)
+        XCTAssertEqual(connectionModes, [true])
+        try enrollment.markForegroundRelayConfirmed(for: stale.deviceID)
+        XCTAssertEqual(app.activeEnrollmentRecord?.foregroundRelayConfirmed, false)
+        XCTAssertEqual(app.guidedJoin.currentAccount?.foregroundRelayConfirmed, false)
+        await app.retryForegroundConnection()
+        XCTAssertEqual(connectionModes, [true, false],
+                       "Inbox Retry must use saved confirmation even with stale in-memory copies")
+        XCTAssertTrue(NativeRelayLifecycle.shouldReconnectAfterConnectionError(
+            URLError(.networkConnectionLost), awaitingFirstConnection: try XCTUnwrap(connectionModes.last)),
+            "An established inbox retry must keep automatic reconnection")
+    }
+
+    func testFirstConnectionSurfacesSocketFailureAndServerRefusal() async throws {
+        for closesSocket in [true, false] {
+            let namespace = "Harklight.first-connection-failure." + UUID().uuidString
+            let installation = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
+            defer {
+                SecItemDelete([kSecClass as String: kSecClassCertificate,
+                               kSecAttrLabel as String: installation.label] as CFDictionary)
+                SecItemDelete([kSecClass as String: kSecClassKey,
+                               kSecAttrApplicationTag as String: Data(namespace.utf8)] as CFDictionary)
+            }
+            let relay = try LocalRelayWebSocket(expectedDevice: installation.deviceID,
+                                                closeAfterReply: { _ in closesSocket }) { text in
+                if closesSocket { return [] }
+                let value = try? JSONValue.parse(Data(text.utf8))
+                let ref = value?.uniqueValue(named: "ref")?.stringValue?.rawValue ?? ""
+                return ["{\"v\":1,\"type\":\"error\",\"ref\":\"\(ref)\",\"reason\":\"forbidden\"}\n"]
+            }
+            defer { relay.close() }
+            let port = try await relay.start()
+            let context = ProfileContext(identity: ProfileIdentity(
+                trustedRelayAuthority: ExactText("localhost"), personID: ExactText("first-person"),
+                deviceID: ExactText(installation.deviceID)), transportMode: .relay)
+            let store = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+            let lifecycle = NativeRelayLifecycle()
+            try await lifecycle.activate(store: store, context: context,
+                relayURL: XCTUnwrap(URL(string: "wss://localhost:\(port)/relay")),
+                clientIdentity: installation.value, trustedRootDER: relay.rootDER,
+                awaitingFirstConnection: true)
+            let result = await lifecycle.confirmForegroundProgress(for: context)
+            XCTAssertEqual(result.outcome, .incomplete)
+            XCTAssertNotNil(result.failureClass)
+            XCTAssertEqual(relay.connectionCount, 1, "First sign-in reports the observed failure for Retry")
+            await lifecycle.deactivate()
+        }
+    }
+
     func testCancellingStalledForegroundRelayPreservesSavedState() async throws {
         let namespace = "Harklight.foreground-cancellation-test." + UUID().uuidString
         let installation = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
@@ -5318,7 +5387,7 @@ final class NativeGuidedTLSTests: XCTestCase {
         let lifecycle = NativeRelayLifecycle()
         try await lifecycle.activate(store: store, context: context, relayURL: relayURL,
                                      clientIdentity: installation.value, trustedRootDER: server.rootDER,
-                                     diagnostics: diagnosticJournal, serverStateCache: cache)
+                                     diagnostics: diagnosticJournal, serverStateCache: cache, awaitingFirstConnection: true)
         var progressUpdates: [NativeForegroundConnectProgress] = []
         var operationSnapshots: [NativeForegroundOperationSnapshot] = []
         var finished = false

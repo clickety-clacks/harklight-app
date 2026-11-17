@@ -911,7 +911,8 @@ final class NativeAppLaunch {
                                                            clientIdentity: installation.keychainIdentity,
                                                            trustedRootDER: installation.trustedRootDER,
                                                            diagnostics: diagnostics,
-                                                           serverStateCache: serverStateCache)
+                                                           serverStateCache: serverStateCache,
+                                                           awaitingFirstConnection: try awaitingFirstConnection(for: installation.context))
         } catch {
             if activationGeneration != generation { return }
             diagnostics.record(area: .connection, phase: .approvedConnection, transition: .failed,
@@ -1234,6 +1235,11 @@ final class NativeAppLaunch {
         guard notificationRouter.intent?.serial == intent.serial,
               notificationRouter.intent?.locator != nil else { return }
         notificationNavigationMessage = "This notification's message has not loaded yet."
+    }
+
+    func awaitingFirstConnection(for context: ProfileContext) throws -> Bool {
+        let saved = try enrollment.load()
+        return saved?.deviceID == context.identity.deviceID.rawValue && saved?.foregroundRelayConfirmed == false
     }
 
     func retryForegroundConnection() async {
