@@ -5267,24 +5267,37 @@ final class NativeGuidedTLSTests: XCTestCase {
                        kSecAttrService as String: service] as CFDictionary)
     }
 
-    func testFirstConnectionStateUsesSavedConfirmationDespiteStaleInMemoryRecord() throws {
+    func testInboxRetryUsesSavedConfirmationDespiteStaleInMemoryRecord() async throws {
         let service = "Harklight.first-connection-confirmation." + UUID().uuidString
         defer { deleteEnrollmentRecord(service: service) }
         let stale = approvedRecord(foregroundRelayConfirmed: false, notificationExplanationSeen: true)
         try saveEnrollmentRecord(stale, service: service)
         let enrollment = NativeEnrollmentStore(service: service)
-        let app = NativeAppLaunch(arguments: ["Harklight"], enrollmentStore: enrollment,
-                                  joinStore: NativeGuidedJoinStore(namespace: service),
-                                  initialState: .enrollmentRequired, initialEnrollmentRecord: stale)
         let context = ProfileContext(identity: ProfileIdentity(
             trustedRelayAuthority: ExactText(stale.profileAuthority), personID: ExactText(stale.personID!),
             deviceID: ExactText(stale.deviceID)), transportMode: .relay)
-        XCTAssertTrue(try app.awaitingFirstConnection(for: context))
+        let domain = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        let presentation = try LivePresentationStore(store: domain, context: context)
+        let app = NativeAppLaunch(arguments: ["Harklight"], enrollmentStore: enrollment,
+                                  joinStore: NativeGuidedJoinStore(namespace: service),
+                                  initialState: .live(presentation), initialEnrollmentRecord: stale)
+        var connectionModes: [Bool] = []
+        app.guidedJoin.connectApproved = { _ in
+            connectionModes.append(try app.awaitingFirstConnection(for: context))
+            return true
+        }
+        await app.guidedJoin.restore()
+        XCTAssertEqual(app.guidedJoin.screen, .connected)
+        XCTAssertEqual(connectionModes, [true])
         try enrollment.markForegroundRelayConfirmed(for: stale.deviceID)
-        XCTAssertEqual(app.activeEnrollmentRecord?.foregroundRelayConfirmed, false,
-                       "Retry can still hold the original in-memory record")
-        XCTAssertFalse(try app.awaitingFirstConnection(for: context),
-                       "A saved first connection must keep later activation in established-account mode")
+        XCTAssertEqual(app.activeEnrollmentRecord?.foregroundRelayConfirmed, false)
+        XCTAssertEqual(app.guidedJoin.currentAccount?.foregroundRelayConfirmed, false)
+        await app.retryForegroundConnection()
+        XCTAssertEqual(connectionModes, [true, false],
+                       "Inbox Retry must use saved confirmation even with stale in-memory copies")
+        XCTAssertTrue(NativeRelayLifecycle.shouldReconnectAfterConnectionError(
+            URLError(.networkConnectionLost), awaitingFirstConnection: try XCTUnwrap(connectionModes.last)),
+            "An established inbox retry must keep automatic reconnection")
     }
 
     func testFirstConnectionSurfacesSocketFailureAndServerRefusal() async throws {

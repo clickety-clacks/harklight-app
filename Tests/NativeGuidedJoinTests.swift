@@ -783,6 +783,39 @@ final class NativeGuidedJoinTests: XCTestCase {
         XCTAssertThrowsError(try NativeJoinInvitation.decodePayload(JSONSerialization.data(withJSONObject: fields)))
     }
 
+    func testSystemTimeoutDuringFirstConnectionKeepsWaitingWithoutAnError() async throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanup() }
+        let transport = FakeTransport()
+        let store = NativeGuidedJoinStore(namespace: fixture.namespace, transport: transport)
+        let prepared = try store.prepare(fixture.invitation, deviceLabel: "My phone")
+        fixture.retainForCleanup(prepared)
+        transport.handler = { _, _, _ in
+            try response(["state": "approved", "person_id": fixture.invitation.personID,
+                          "device_id": prepared.deviceID])
+        }
+        _ = try await store.checkApproval()
+        let flow = NativeGuidedJoinCoordinator(store: store, deviceName: "My phone")
+        let (started, start) = AsyncStream<Void>.makeStream()
+        let (released, release) = AsyncStream<Void>.makeStream()
+        flow.connectApproved = { _ in
+            XCTAssertTrue(NativeRelayLifecycle.shouldReconnectAfterConnectionError(
+                URLError(.timedOut), awaitingFirstConnection: true))
+            start.yield()
+            for await _ in released { break }
+            return true
+        }
+        let connecting = Task { await flow.restore() }
+        for await _ in started { break }
+        XCTAssertEqual(flow.screen, .approvedFinishing)
+        XCTAssertTrue(flow.isShowing)
+        XCTAssertTrue(flow.isApprovedConnectBusy)
+        XCTAssertNil(flow.message, "A system timeout must keep reconnecting without showing a join error")
+        release.yield()
+        await connecting.value
+        XCTAssertEqual(flow.screen, .connected)
+    }
+
     func testConnectedScreenWaitsForOwnerApprovalAndRelayProgress() async throws {
         let fixture = try Fixture()
         defer { fixture.cleanup() }
