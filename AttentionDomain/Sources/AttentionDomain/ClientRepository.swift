@@ -424,6 +424,9 @@ public final class ClientRepository: @unchecked Sendable {
     /// The saved conversation projection disagrees with the relay. Discard it
     /// so a replay from the Server rebuilds it; the person's Chat drafts,
     /// uploads and read positions are kept in their own queues.
+    /// The ordinary inbox feed, which seeded each loaded request's thread, is
+    /// not replayed here, so those seeds are kept: without them the replayed
+    /// history is held as facts with no thread and the request's Chat is lost.
     public func discardConversationProjection(context suppliedContext: ProfileContext) throws {
         writerLock.lock()
         defer { writerLock.unlock() }
@@ -432,7 +435,11 @@ public final class ClientRepository: @unchecked Sendable {
         try validate(suppliedContext)
         guard suppliedContext.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
         var next = state
-        next.server.conversation = nil
+        var seeded = ConversationState()
+        for (key, thread) in state.server.conversation?.threads ?? [:] where state.requests[key] != nil {
+            seeded.threads[key] = thread.ordinaryFeedSeed(terminal: state.remoteStates[key]?.state)
+        }
+        next.server.conversation = seeded.threads.isEmpty ? nil : seeded
         try commit(next)
     }
 

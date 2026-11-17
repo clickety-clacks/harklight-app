@@ -607,6 +607,32 @@ public struct ConversationThread: Equatable, Codable, Sendable {
         self.revisions = [revision: payload]
         self.currentRevision = revision
     }
+
+    /// The thread as the ordinary inbox feed seeded it, for rebuilding the
+    /// conversation projection from the Server's history. Turns from the
+    /// conversation feed carry its sequence and are dropped so the replay
+    /// restores them; turns the ordinary feed added do not, and are kept.
+    /// Question revisions already delivered are kept: the replay repeats them,
+    /// and restarting at revision 1 would make each replayed revision look like
+    /// a newer question, resetting the answer and marking a queued answer lost.
+    func ordinaryFeedSeed(terminal: TerminalState?) -> ConversationThread {
+        var seed = ConversationThread(request: request, sessionHandle: sessionHandle,
+                                      revision: currentRevision, payload: currentQuestionPayload)
+        seed.revisions = revisions
+        seed.redactedRevisions = redactedRevisions
+        seed.availability = availability
+        seed.latestAvailabilityObservation = latestAvailabilityObservation
+        seed.listeningSupport = listeningSupport
+        seed.terminal = terminal
+        seed.reportedRetractedAtMilliseconds = reportedRetractedAtMilliseconds
+        seed.turns = turns.filter { $0.conversationSequence == nil }
+        for turn in seed.turns { seed.facts[turn.id] = ConversationTurnFacts() }
+        if let terminalTurn, seed.turns.contains(where: { $0.id == terminalTurn }) {
+            seed.terminalTurn = terminalTurn
+            seed.terminalAuthor = terminalAuthor
+        }
+        return seed
+    }
 }
 
 public struct ConversationRetraction: Equatable, Codable, Sendable {
