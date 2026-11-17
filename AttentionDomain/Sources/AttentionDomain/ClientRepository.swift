@@ -3766,13 +3766,11 @@ public final class ClientRepository: @unchecked Sendable {
         }
         draft.operationID = operation
         if draft.submittedAt == nil { draft.submittedAt = Date() }
-        // Register planned upload-tier files before awaiting limits or disk/HTTP.
-        // Departure during that preparation must fence this original operation too.
-        let tiers = try ConversationFileLimits(inlineDecodedBytes: 262_144, uploadCap: nil).tiers(for: draft.files)
-        let uploads = zip(draft.files, tiers).filter { $0.1 == .upload }.map { $0.0 }
-        if !uploads.isEmpty, thread.uploadGroups?[operation] == nil {
+        // Register every file as a candidate before awaiting limits or disk/HTTP.
+        // Departure must fence the operation; fetched Server limits decide its tiers.
+        if !draft.files.isEmpty, thread.uploadGroups?[operation] == nil {
             let group = ConversationUploadGroup(operationID: operation, binding: binding,
-                originals: uploads, uploaded: [], cleanupID: nil)
+                originals: draft.files, uploaded: [], cleanupID: nil)
             thread.uploadGroups = (thread.uploadGroups ?? [:]).merging([operation: group]) { _, new in new }
         }
         thread.drafts[binding.revision] = draft

@@ -1,4 +1,5 @@
 import AttentionDomain
+import CryptoKit
 import HarklightNativeRelay
 import XCTest
 
@@ -15,6 +16,8 @@ final class ConversationSubmissionTests: XCTestCase {
         var cleanupRequests: [ConversationUploadCleanup] = []
         var failCleanup = false
         var cap: UInt64?
+        var inlineBudget: UInt64 = 262_144
+        var limitsHook: (@Sendable () async throws -> Void)?
         let uploadID = UUID().uuidString.lowercased()
         init(_ identity: ProfileIdentity) { authenticatedIdentity = identity }
         private func data(_ value: String) -> Data { Data(value.utf8) }
@@ -37,7 +40,8 @@ final class ConversationSubmissionTests: XCTestCase {
         func acknowledgeConversation(_ request: Data) async throws {}
         func sendOriginalOperation(_ frame: Data, operationID: UUID) async throws -> OriginalOperationResult { .unresolved }
         func conversationFileLimits(originURL: URL) async throws -> ConversationFileLimits {
-            ConversationFileLimits(inlineDecodedBytes: 262_144, uploadCap: cap)
+            try await limitsHook?()
+            return ConversationFileLimits(inlineDecodedBytes: inlineBudget, uploadCap: cap)
         }
         func uploadConversationFile(_ file: ConversationFile, from source: URL, binding: ConversationBinding,
                                     operationID: UUID, limits: ConversationFileLimits, originURL: URL) async throws -> ConversationFile {
@@ -169,6 +173,48 @@ final class ConversationSubmissionTests: XCTestCase {
         XCTAssertEqual(session.sent.count, 1)
         XCTAssertEqual(try domain.snapshot(context: context).cursor, 1)
     }
+    private func smallFile() -> ConversationFile {
+        let bytes = Data([0, 255])
+        return ConversationFile(id: ExactText("small"), name: ExactText("small.bin"), byteCount: 2,
+            sha256: ExactText(SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()),
+            content: .inline(bytes))
+    }
+
+    func testFetchedLimitsChooseTiersWithNoUploadCap() async throws {
+        for budget: UInt64 in [1, 1024] {
+            let file = smallFile()
+            let (_, _, _, binding, session, core) = try await setup(files: [file])
+            session.inlineBudget = budget
+            session.cap = nil
+            _ = try await core.submitDiscussion(binding) { _ in URL(fileURLWithPath: "/unused") }
+            XCTAssertEqual(session.uploadAttempts, budget == 1 ? 1 : 0)
+            let frame = try JSONValue.parse(XCTUnwrap(session.sent.first?.0))
+            let sentFile = try XCTUnwrap(frame.uniqueValue(named: "files")?.arrayValues?.first)
+            XCTAssertEqual(sentFile.uniqueValue(named: "upload_id") != nil, budget == 1)
+            XCTAssertEqual(sentFile.uniqueValue(named: "data_base64") != nil, budget != 1)
+        }
+    }
+
+    func testDepartureWhileFetchingLimitsFencesEvenSmallUploadCandidates() async throws {
+        let file = smallFile()
+        let (context, _, domain, binding, session, core) = try await setup(files: [file])
+        session.inlineBudget = 1
+        session.limitsHook = {
+            let cleanups = try domain.abandonConversationUploads(for: binding.request, context: context)
+            XCTAssertEqual(cleanups.count, 1)
+        }
+        do {
+            _ = try await core.submitDiscussion(binding) { _ in URL(fileURLWithPath: "/unused") }
+            XCTFail("Departure must fence the operation before limits return")
+        } catch { XCTAssertEqual(error as? ConversationError, .pendingSubmission) }
+        XCTAssertEqual(session.uploadAttempts, 0)
+        XCTAssertTrue(session.sent.isEmpty)
+        let thread = try XCTUnwrap(domain.conversationSnapshot(context: context).threads[binding.request])
+        XCTAssertEqual(thread.drafts[1]?.text, ExactText("Exact original text"))
+        XCTAssertEqual(thread.drafts[1]?.files, [file])
+        XCTAssertNotNil(thread.uploadGroups?.values.first?.cleanupID)
+    }
+
     func testUploadCapRefusesTheWholeEntryAndRetainsNamedFileAndText() async throws {
         let file = ConversationFile(id: ExactText("retained"), name: ExactText("large.bin"), byteCount: 300_000,
             sha256: ExactText(String(repeating: "a", count: 64)), content: .localFile(ExactText("retained")))

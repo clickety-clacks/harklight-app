@@ -75,8 +75,7 @@ public struct RelayWire {
     }
 
     private func parseFrame(_ bytes: Data) throws -> JSONValue {
-        guard bytes.count <= 2 * (2 * 1024 * 1024) + 16_384,
-              let value = try? JSONValue.parse(bytes),
+        guard let value = try? JSONValue.parse(bytes),
               case .object = value,
               value.hasUniqueObjectKeys else { throw RelayWireError.invalidFrame }
         guard value.uniqueValue(named: "v")?.integerValue == 1 else { throw RelayWireError.wrongVersion }

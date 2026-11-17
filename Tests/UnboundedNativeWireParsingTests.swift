@@ -23,6 +23,11 @@ final class UnboundedNativeWireParsingTests: XCTestCase {
         XCTAssertTrue(try RelayWire(profile: context()).isResyncAccepted(bytes))
     }
 
+    func testInstalledDecoderFixtureAcceptsResyncReplyAboveFormerFrameCeiling() throws {
+        let bytes = oversizedFrame(prefix: #"{"v":1,"type":"ok","ref":"native-sync","padding":""#)
+        XCTAssertTrue(try InstalledRelayDecoder.RelayWire(profile: context()).isResyncAccepted(bytes))
+    }
+
     func testInboxPagingWireAcceptsStartReplyAboveFormerFrameCeiling() throws {
         let bytes = oversizedFrame(prefix: #"{"v":1,"type":"ok","ref":"start","paging_version":1,"snapshot_id":"snapshot","high_water":0,"items":[],"next_cursor":null,"receipt_cursor":null,"padding":""#)
         let page = try InboxPagingWire(profile: context()).decodeStart(bytes, ref: "start")
