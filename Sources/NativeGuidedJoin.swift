@@ -634,29 +634,6 @@ final class NativeGuidedJoinStore {
             guard NativeAuthorityBinding.samePerson(response.personID, attempt.invitation.personID),
                   response.deviceID == attempt.deviceID else { throw NativeJoinError.wrongApproval }
         }
-        if generation > currentGeneration,
-           response.state == "pending" || response.state == "approved" || response.state == "expired",
-           let oldCode = current.approvalCode,
-           let oldDeadline = current.approvalExpiresAt {
-            let normalizingLegacy = currentGeneration == 0 && response.approvalCode == oldCode && response.expiresAt == oldDeadline
-            if !normalizingLegacy {
-                guard let code = response.approvalCode, code != oldCode,
-                      let deadline = response.expiresAt, deadline > oldDeadline else {
-                    throw NativeJoinError.invalidResponse
-                }
-            }
-        }
-        if generation == currentGeneration {
-            if let code = response.approvalCode, let saved = current.approvalCode, code != saved {
-                throw NativeJoinError.invalidResponse
-            }
-            if let deadline = response.expiresAt, let saved = current.approvalExpiresAt, deadline != saved {
-                throw NativeJoinError.invalidResponse
-            }
-            if let deadline = response.statusExpiresAt, let saved = current.statusExpiresAt, deadline != saved {
-                throw NativeJoinError.invalidResponse
-            }
-        }
         var next = current
         if generation > 0 { next.requestGeneration = generation }
         if response.requestGeneration != nil, response.state == "pending" || response.state == "approved" {

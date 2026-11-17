@@ -551,29 +551,36 @@ final class NativeGuidedJoinTests: XCTestCase {
         }
     }
 
-    func testEqualGenerationCannotChangeTheApprovalTuple() async throws {
-        let fixture = try Fixture()
-        defer { fixture.cleanup() }
-        let transport = FakeTransport()
-        let store = NativeGuidedJoinStore(namespace: fixture.namespace, transport: transport)
-        var original = try store.prepare(fixture.invitation, deviceLabel: "My phone")
-        fixture.retainForCleanup(original)
-        let now = Int64(Date().timeIntervalSince1970 * 1000)
-        original.phase = .pending
-        original.approvalCode = "ABCDEF2345"
-        original.approvalExpiresAt = now + 86_400_000
-        original.statusExpiresAt = now + 172_800_000
-        original.requestGeneration = 2
-        try fixture.saveLegacyAttempt(original)
-        transport.handler = { _, _, _ in
-            try response(["state": "pending", "person_id": fixture.invitation.personID,
-                          "device_id": original.deviceID, "approval_code": "FGHIJK2345",
-                          "expires_at": now + 86_400_000, "status_expires_at": now + 172_800_000,
-                          "request_generation": 2])
+    func testCurrentServerGenerationOwnsTheApprovalTuple() async throws {
+        for generation in [Int64(2), Int64(3)] {
+            for code in ["ABCDEF2345", "FGHIJK2345"] {
+                let fixture = try Fixture()
+                defer { fixture.cleanup() }
+                let transport = FakeTransport()
+                let store = NativeGuidedJoinStore(namespace: fixture.namespace, transport: transport)
+                var original = try store.prepare(fixture.invitation, deviceLabel: "My phone")
+                fixture.retainForCleanup(original)
+                let now = Int64(Date().timeIntervalSince1970 * 1000)
+                original.phase = .pending
+                original.approvalCode = "ABCDEF2345"
+                original.approvalExpiresAt = now + 86_400_000
+                original.statusExpiresAt = now + 172_800_000
+                original.requestGeneration = 2
+                try fixture.saveLegacyAttempt(original)
+                transport.handler = { _, _, _ in
+                    try response(["state": "pending", "person_id": fixture.invitation.personID,
+                                  "device_id": original.deviceID, "approval_code": code,
+                                  "expires_at": now + 60_000, "status_expires_at": now + 120_000,
+                                  "request_generation": generation])
+                }
+                let updated = try await store.checkApproval()
+                XCTAssertEqual(updated.approvalCode, code)
+                XCTAssertEqual(updated.approvalExpiresAt, now + 60_000)
+                XCTAssertEqual(updated.statusExpiresAt, now + 120_000)
+                XCTAssertEqual(updated.requestGeneration, generation)
+                XCTAssertEqual(try store.loadAttempt(), updated)
+            }
         }
-        do { _ = try await store.checkApproval(); XCTFail("An unchanged generation cannot acquire a different code") }
-        catch NativeJoinError.invalidResponse {}
-        XCTAssertEqual(try store.loadAttempt(), original)
     }
 
     func testStaleCancellationReconcilesCurrentTupleAndKeepsIntentAfterLostReply() async throws {
