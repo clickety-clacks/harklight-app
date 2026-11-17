@@ -120,8 +120,13 @@ final class ReplyFocusDuringSyncTests: XCTestCase {
         XCTAssertEqual(submission.typedInputs,
                        [.compatibilityText(action: reply.id, text: ExactText("Typed locally"))],
                        "The checkmark commits the selected action and complete Reply text together.")
-        XCTAssertNil(visible.request(for: key)?.submittedAnswer,
-                     "A queued user action is not a server-confirmed answer.")
+        let pending = try XCTUnwrap(visible.request(for: key))
+        XCTAssertEqual(pending.lifecycleStatus, .pending)
+        XCTAssertEqual(pending.receiptFacts?.ownOutcome, .unconfirmed,
+                       "A queued user action is not a server-confirmed answer.")
+        XCTAssertNil(pending.accountAnswerOutcome)
+        XCTAssertEqual(pending.submittedAnswer?.compatibility.textByActionID[reply.id], ExactText("Typed locally"),
+                       "The pending control shows the committed Reply.")
         XCTAssertGreaterThan(persistence.writeCount, writesBeforeEditing,
                              "The checkmark is the first durable write for this Reply.")
     }
@@ -166,8 +171,14 @@ final class ReplyFocusDuringSyncTests: XCTestCase {
                        [.point(input: ExactText("location"), point: point),
                         .text(input: ExactText("note"), text: ExactText("Please check the partition."))],
                        "The checkmark commits every edited sender field together.")
-        XCTAssertNil(visible.request(for: key)?.submittedAnswer,
-                     "The queue retains both fields without inventing server answer state.")
+        let pending = try XCTUnwrap(visible.request(for: key))
+        XCTAssertEqual(pending.lifecycleStatus, .pending)
+        XCTAssertEqual(pending.receiptFacts?.ownOutcome, .unconfirmed,
+                       "The queue retains both fields without inventing server answer state.")
+        XCTAssertNil(pending.accountAnswerOutcome)
+        XCTAssertEqual(pending.submittedAnswer?.inputs[ExactText("location")]?.point, point)
+        XCTAssertEqual(pending.submittedAnswer?.inputs[ExactText("note")]?.text,
+                       ExactText("Please check the partition."))
         XCTAssertNil(try domain.snapshot(context: context).drafts[key],
                      "Submitting does not leave a resumable Reply draft.")
     }

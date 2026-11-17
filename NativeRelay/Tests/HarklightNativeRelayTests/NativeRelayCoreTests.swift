@@ -501,11 +501,13 @@ final class NativeRelayCoreTests: XCTestCase {
         let request = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first)
         XCTAssertEqual(request.lifecycleStatus, .open)
         XCTAssertTrue(request.noCommentUnavailable)
-        XCTAssertEqual(request.intentReceipt?.intentID, receipt.intentID,
-                       "A true refusal retains the original identity for explicit Retry.")
+        XCTAssertNil(request.intentReceipt, "A definitively failed operation is not the presented submission.")
+        XCTAssertEqual(request.failedAnswer?.noCommentSelected, true)
         XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty)
-        XCTAssertEqual(try port.lookupIntent(context: port.context, intentID: receipt.intentID)?.localState,
-                       .unsupported)
+        let retained = try XCTUnwrap(port.lookupIntent(context: port.context, intentID: receipt.intentID),
+                                     "A true refusal retains the original identity for explicit Retry.")
+        XCTAssertEqual(retained.opID, receipt.opID)
+        XCTAssertEqual(retained.localState, .unsupported)
     }
 
     func testPostAckDrainFailureNamesOperationAndSafeUnderlyingErrorWithoutWrappingIt() async throws {

@@ -31,8 +31,9 @@ final class OperationRecoveryTests: XCTestCase {
         XCTAssertEqual(try store.lookupIntent(original.intentID, context: context)?.operationID, original.operationID)
         XCTAssertEqual(try store.acceptedOperationsAwaitingTerminalReplay(context: context).map(\.operationID),
                        [original.operationID])
-        XCTAssertNil(try store.snapshot(context: context).remoteStates[key],
-                     "Acceptance stays pending until an actual Server terminal arrives.")
+        let remote = try store.snapshot(context: context).remoteStates[key]
+        XCTAssertNil(remote?.state, "Acceptance stays pending until an actual Server terminal arrives.")
+        XCTAssertNil(remote?.accountAnswerOutcome)
         await mutationCore.deactivate()
     }
 

@@ -73,8 +73,11 @@ final class RetractionPresentationTests: XCTestCase {
             try domain.apply(lifecycle, context: context)
             try domain.applyConversation(fact, context: context)
             let thread = try XCTUnwrap(domain.conversationSnapshot(context: context).threads[key])
-            XCTAssertNil(try port.inspectAnswerDraft(context: port.context, request: key, revision: 1),
-                         "A terminal server state drops the stale unsent answer draft.")
+            let savedAnswer = try XCTUnwrap(port.inspectAnswerDraft(context: port.context, request: key, revision: 1),
+                                            "A retracted request keeps its saved answer reachable.")
+            XCTAssertEqual(savedAnswer.title, ExactText("Original wording"))
+            XCTAssertEqual(savedAnswer.draft.compatibility.selectedActionID, ExactText("keep"))
+            XCTAssertNil(savedAnswer.selector, "The saved answer cannot be submitted again.")
             XCTAssertEqual(thread.currentQuestionPayload.value(named: "title")?.stringValue, ExactText("Original wording"))
             XCTAssertEqual(thread.turns.filter { $0.kind == .terminal }.count, 1)
             XCTAssertEqual(thread.terminalTurn, ExactText("3"))
@@ -110,7 +113,8 @@ final class RetractionPresentationTests: XCTestCase {
             XCTAssertTrue(model.isRetracted(key))
             XCTAssertTrue(model.conversation(for: key)?.isRetracted == true)
             XCTAssertEqual(try domain.snapshot(context: context).requests.count, 1)
-            XCTAssertNil(try port.inspectAnswerDraft(context: port.context, request: key, revision: 1))
+            XCTAssertEqual(try XCTUnwrap(port.inspectAnswerDraft(context: port.context, request: key, revision: 1))
+                .draft.compatibility.selectedActionID, ExactText("keep"))
             XCTAssertEqual(try domain.lookupIntent(receipt.intentID, context: context), retained)
 
             let relaunchedDomain = try await reopenWithServerCache(domain, context: context, persistence: persistence)
@@ -545,9 +549,11 @@ private final class RefusalSession: AuthenticatedInboxPagingSession, @unchecked 
             "message": try JSONSerialization.jsonObject(with: Data(payload.canonicalJSON.utf8)),
             "request_revision": 1, "session_handle": "handle", "event_id": "1"]]
         if !sentOperationIDs.isEmpty { item["terminal"] = try JSONSerialization.jsonObject(with: terminal) }
+        let high = sentOperationIDs.isEmpty ? 1 : 2
         return try JSONSerialization.data(withJSONObject: [
             "v": 1, "type": "ok", "ref": ref, "paging_version": 1,
-            "snapshot_id": "refusal-start", "high_water": sentOperationIDs.isEmpty ? 1 : 2,
+            // The shared fake derives later paging replies' high water from this "-h<N>" suffix.
+            "snapshot_id": "refusal-start-h\(high)", "high_water": high,
             "items": [item], "next_cursor": NSNull(), "receipt_cursor": NSNull()
         ])
     }
