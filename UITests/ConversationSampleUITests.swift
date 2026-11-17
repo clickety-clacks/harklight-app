@@ -973,7 +973,7 @@ final class ConversationSampleUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts.matching(NSPredicate(
             format: "label CONTAINS %@", "Replying to: The first option favors speed"
         )).firstMatch.exists)
-        XCTAssertTrue(app.staticTexts["Local example · nothing sent"].exists,
+        XCTAssertTrue(app.staticTexts["Local example · status is simulated; nothing was sent."].exists,
                       "The fixture must keep its local delivery state truthful")
         XCTAssertTrue(app.staticTexts["Agent"].waitForExistence(timeout: 5),
                       "An agent-authored answer must keep its distinct author in the ordinary conversation view")
@@ -1366,7 +1366,7 @@ final class ConversationSampleUITests: XCTestCase {
     func testConversationRevisionFileFactsAndClosureUseTheOrdinaryApp() {
         XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()
-        func open(_ id: String, search: String) {
+        func open(_ id: String, search: String, closed: Bool = false) {
             app.terminate()
             app.launch()
             XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
@@ -1375,7 +1375,11 @@ final class ConversationSampleUITests: XCTestCase {
             XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
             row.tap()
             app.buttons["Chat"].tap()
-            XCTAssertTrue(app.textViews["sample-chat-composer"].waitForExistence(timeout: 5))
+            XCTAssertTrue(app.scrollViews["conversation-history-scroll"].waitForExistence(timeout: 5),
+                          app.debugDescription)
+            if !closed {
+                XCTAssertTrue(app.textViews["sample-chat-composer"].waitForExistence(timeout: 5))
+            }
         }
         open("sample-approval-2", search: "Archive")
         XCTAssertTrue(app.staticTexts["Please review the sketches before archiving. The earlier answer draft is retained."].exists)
@@ -1393,10 +1397,11 @@ final class ConversationSampleUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Original bytes"].waitForExistence(timeout: 5))
         XCTAssertFalse(app.buttons["Open file"].exists, "Local examples cannot fetch from a real service")
         capture("conversation-file-metadata", app)
-        open("sample-completed-2", search: "journal is ready")
+        open("sample-completed-2", search: "journal is ready", closed: true)
         XCTAssertTrue(app.staticTexts["Request cleared"].exists)
-        XCTAssertFalse(app.textViews["sample-chat-composer"].isEnabled)
-        XCTAssertFalse(app.buttons["Send locally"].isEnabled)
+        // A closed chat shows its history with no composer or Send (chat messaging spec R4).
+        XCTAssertFalse(app.textViews["sample-chat-composer"].exists)
+        XCTAssertFalse(app.buttons["Send locally"].exists)
         capture("conversation-explicit-closure", app)
     }
 
