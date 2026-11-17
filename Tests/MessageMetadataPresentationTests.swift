@@ -4,6 +4,16 @@ import XCTest
 @testable import Harklight
 
 final class MessageMetadataPresentationTests: XCTestCase {
+    func testChoiceStylesUseSystemTreatmentsWithoutAnInnerCard() {
+        XCTAssertEqual(MessageChoiceAppearance(style: .primary), .prominent)
+        XCTAssertEqual(MessageChoiceAppearance(style: .destructive), .destructive)
+        XCTAssertTrue(MessageChoiceAppearance(style: .primary).usesSystemSurface)
+        XCTAssertTrue(MessageChoiceAppearance(style: .destructive).usesSystemSurface)
+        XCTAssertEqual(MessageChoiceAppearance(style: .secondary), .card)
+        XCTAssertEqual(MessageChoiceAppearance(style: nil), .card)
+        XCTAssertFalse(MessageChoiceAppearance(style: nil).usesSystemSurface)
+    }
+
     func testOnlyUniqueRecognizedTopLevelMembersProduceMetadata() throws {
         let context = ProfileContext(identity: ProfileIdentity(
             trustedRelayAuthority: ExactText("relay.example"),

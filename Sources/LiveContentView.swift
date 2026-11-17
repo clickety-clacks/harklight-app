@@ -392,14 +392,18 @@ private struct LiveChoiceButton<Label: View>: View {
 
     @ViewBuilder
     private func button(perform: @escaping () -> Void) -> some View {
-        switch style {
-        case .primary:
+        switch MessageChoiceAppearance(style: style) {
+        case .prominent:
             Button(action: perform) { label }
                 .buttonStyle(.borderedProminent)
+                .tint(.accentColor)
+                .environment(\.harklightChoiceAppearance, .prominent)
         case .destructive:
             Button(role: .destructive, action: perform) { label }
                 .buttonStyle(.bordered)
-        case .secondary, nil:
+                .tint(.red)
+                .environment(\.harklightChoiceAppearance, .destructive)
+        case .card:
             Button(action: perform) { label }
                 .buttonStyle(.plain)
         }
@@ -423,6 +427,7 @@ private struct ReplyChoiceCard: View {
     let isReadOnly: Bool
     let onOpen: () -> Void
 
+    @Environment(\.harklightChoiceAppearance) private var appearance
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.harklightMessageType) private var messageType
     @Environment(\.harklightSubmissionDisplay) private var submission
@@ -495,11 +500,19 @@ private struct ReplyChoiceCard: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(selected ? messageColors.pickedFill : messageColors.raised, in: shape)
+        .background {
+            if !appearance.usesSystemSurface {
+                shape.fill(selected ? messageColors.pickedFill : messageColors.raised)
+            }
+        }
         .clipShape(shape)
-        .overlay(shape.strokeBorder(selected ? messageColors.beam : messageColors.line,
-                                    style: StrokeStyle(lineWidth: HarklightDesignSystem.shape(.lineWidth),
-                                                       dash: selected ? [] : [4, 3])))
+        .overlay {
+            if !appearance.usesSystemSurface {
+                shape.strokeBorder(selected ? messageColors.beam : messageColors.line,
+                                  style: StrokeStyle(lineWidth: HarklightDesignSystem.shape(.lineWidth),
+                                                     dash: selected ? [] : [4, 3]))
+            }
+        }
         .animation(.smooth(duration: 0.25), value: selected)
 
         if showsEditor || isReadOnly || failedHere {
