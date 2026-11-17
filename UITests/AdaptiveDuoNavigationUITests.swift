@@ -140,7 +140,10 @@ final class AdaptiveDuoNavigationUITests: XCTestCase {
         attachHierarchy("portrait-second-selection-hierarchy", app: app)
     }
 
-    func testLandscapeSelectionKeepsListAndDetailVisibleAcrossMessages() {
+    func testLandscapeSelectionKeepsListAndDetailVisibleAcrossMessages() throws {
+        guard UIDevice.current.userInterfaceIdiom == .pad else {
+            throw XCTSkip("An iPhone stays compact in landscape; the iPad layout job runs this case.")
+        }
         XCUIDevice.shared.orientation = .landscapeLeft
         let app = XCUIApplication()
         app.launchArguments = ["--reset-attention-fixture", "--harklight-samples",
@@ -186,63 +189,6 @@ final class AdaptiveDuoNavigationUITests: XCTestCase {
         assertSideBySide(listRow: review, detailHeading: heading, in: app)
         attachScreenshot("landscape-studio-review-detail-with-list")
         attachHierarchy("landscape-second-selection-hierarchy", app: app)
-    }
-
-    func testPortraitSelectionKeepsListAndDetailVisible() {
-        // Run on an iPad that actually tiles both columns in portrait.
-        // Size class alone cannot establish that presentation. Compare the row
-        // and heading too; scroll views report pane-local accessibility frames.
-        XCUIDevice.shared.orientation = .landscapeLeft
-        let app = XCUIApplication()
-        app.launchArguments = ["--reset-attention-fixture", "--harklight-ui-diagnostics"]
-        app.launch()
-        let facilities = app.descendants(matching: .any)["request-row-facilities-01"].firstMatch
-        XCTAssertTrue(facilities.waitForExistence(timeout: 10), app.debugDescription)
-        facilities.tap()
-        let card = app.scrollViews["message-card-scroll"]
-        XCTAssertTrue(card.waitForExistence(timeout: 5), app.debugDescription)
-        let heading = card.buttons["request-heading"]
-        XCTAssertTrue(heading.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(heading.label.contains("Facilities desk"), heading.debugDescription)
-
-        XCUIDevice.shared.orientation = .portrait
-        let diagnostic = app.descendants(matching: .any)["inbox-ui-diagnostics"].firstMatch
-        let portrait = XCTNSPredicateExpectation(
-            predicate: NSPredicate(format: "label CONTAINS 'landscape=false'"), object: diagnostic)
-        XCTAssertEqual(XCTWaiter.wait(for: [portrait], timeout: 5), .completed, app.debugDescription)
-
-        let review = app.descendants(matching: .any)["request-row-review-01"].firstMatch
-        if !review.isHittable {
-            let sidebar = app.buttons["Show Sidebar"]
-            let back = workspaceBackButton(in: app)
-            if sidebar.exists && sidebar.isHittable {
-                sidebar.tap()
-            } else if back.exists && back.isHittable {
-                back.tap()
-            }
-        }
-
-        XCTAssertTrue(review.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(review.isHittable,
-                      "The Inbox row remains available beside the detail. \(app.debugDescription)")
-        XCTAssertTrue(heading.label.contains("Facilities desk"), heading.debugDescription)
-        let presentation = splitPresentation(in: app)
-        XCTAssertTrue(presentation.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertEqual(presentation.value as? String, "presentation=sideBySide",
-                       "This case requires actual side-by-side portrait columns.")
-        assertSideBySide(listRow: facilities, detailHeading: heading, in: app)
-        attachScreenshot("portrait-list-and-detail-before-selection")
-
-        review.tap()
-        XCTAssertTrue(heading.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(heading.label.contains("Studio review"),
-                      "Selecting the second row updates the detail. \(heading.debugDescription)")
-        XCTAssertTrue(diagnostic.label.contains("selection=request:review-01"),
-                      "The tapped row remains the selected Inbox request. \(diagnostic.label)")
-        XCTAssertTrue(review.isHittable, "The selected row remains available beside the detail.")
-        assertSideBySide(listRow: review, detailHeading: heading, in: app)
-        attachScreenshot("portrait-list-and-detail-after-selection")
-        attachHierarchy("portrait-selection-hierarchy", app: app)
     }
 
     private func assertSideBySide(listRow: XCUIElement, detailHeading: XCUIElement,

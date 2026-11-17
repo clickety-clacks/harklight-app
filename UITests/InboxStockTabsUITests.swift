@@ -24,7 +24,7 @@ final class InboxStockTabsUITests: XCTestCase {
         attachScreenshot("Explicitly opened detail before ordinary relaunch", from: app)
 
         app.terminate()
-        app.launchArguments = ["--harklight-samples"]
+        app.launchArguments = ["--attention-fixture", "--harklight-samples"]
         app.launch()
         XCTAssertTrue(inbox.waitForExistence(timeout: 10), app.debugDescription)
         XCTAssertTrue(inbox.isSelected)
