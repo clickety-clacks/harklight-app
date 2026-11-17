@@ -278,11 +278,10 @@ final class InboxFreshnessReplayTests: XCTestCase {
             XCTAssertEqual(snapshot.cursor, 4)
             if succeeds {
                 XCTAssertEqual(snapshot.threads[key("answered")]?.facts[ExactText("2")]?.delivered, true)
-                // The rebuild replays the discussion as ordinary history, not as a
-                // recovered dependency, so the recovery's origin-feed ordering
-                // around the paged terminal does not apply to it.
                 let turns = try XCTUnwrap(snapshot.threads[key("answered")]).turns
-                XCTAssertEqual(Set(turns.map(\.id)), [ExactText("1"), ExactText("2"), ExactText("3")])
+                XCTAssertLessThan(try XCTUnwrap(turns.firstIndex { $0.id == ExactText("2") }),
+                    try XCTUnwrap(turns.firstIndex { $0.id == ExactText("3") }),
+                    "The rebuilt Chat keeps the discussion before the paged answer it preceded.")
             } else {
                 XCTAssertEqual(snapshot.threads[key("answered")]?.facts[ExactText("2")]?.delivered,
                     historyCase == "missing" ? nil : true,

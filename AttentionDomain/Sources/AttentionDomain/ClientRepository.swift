@@ -3259,11 +3259,15 @@ public final class ClientRepository: @unchecked Sendable {
 
     /// The optional output reports which unchanged validation guard rejected
     /// an event; callers still receive the same ConversationError.
+    /// `feedOrigin` is the origin the relay named for this event. When it
+    /// matches the request's origin, a turn and an answer terminal paged from
+    /// the inbox share one event-ID order, and the turn keeps its place.
     @discardableResult
     public func applyConversation(_ event: ConversationEvent,
                                   context suppliedContext: ProfileContext,
                                   validationRejection: inout ConversationValidationRejection?,
-                                  locallyReceivedAtMilliseconds: UInt64? = nil) throws -> UInt64 {
+                                  locallyReceivedAtMilliseconds: UInt64? = nil,
+                                  feedOrigin: ExactText? = nil) throws -> UInt64 {
         validationRejection = nil
         writerLock.lock()
         defer { writerLock.unlock() }
@@ -3285,6 +3289,11 @@ public final class ClientRepository: @unchecked Sendable {
         } catch let error as ConversationValidationRejectionError {
             validationRejection = error.rejection
             throw ConversationError.invalidBinding
+        }
+        if case let .turn(turn) = event.fact, let feedOrigin,
+           feedOrigin == (next.remoteStates[event.binding.request]?.attentionTierOrigin ??
+                          next.inboxReferences?[event.binding.request]?.attentionTierOrigin) {
+            conversation.threads[event.binding.request]?.placeBeforePagedTerminalIfEarlier(turn.id)
         }
         if let locallyReceivedAtMilliseconds,
            case let .turn(turn) = event.fact,
