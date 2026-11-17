@@ -1486,7 +1486,8 @@ public actor NativeRelayCore {
 
         var noticeToResolve = noticedRevision
         while active {
-            let knownRevision = (try? store.snapshot(context: context).inboxView?.revision) ?? nil
+            let heldView = (try? store.snapshot(context: context).inboxView) ?? nil
+            let knownRevision = heldView?.revision
             if let noticeToResolve, noticeToResolve == knownRevision { break }
             pendingInboxViewRevision = nil
             let ref = Self.inboxRef("view")
@@ -1506,7 +1507,11 @@ public actor NativeRelayCore {
                 case .unavailable:
                     try? store.setInboxView(nil, context: context)
                 }
-                try? await saveServerStateCache()
+                // Save only when the reply changed the held view; an unchanged
+                // or unsupported reply adds nothing to the cache.
+                if ((try? store.snapshot(context: context).inboxView) ?? nil) != heldView {
+                    try? await saveServerStateCache()
+                }
                 if inboxViewUnsupportedForConnection { break }
             } catch {
                 try? store.setInboxView(nil, context: context)
