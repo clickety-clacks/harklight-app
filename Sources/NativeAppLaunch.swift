@@ -911,7 +911,8 @@ final class NativeAppLaunch {
                                                            clientIdentity: installation.keychainIdentity,
                                                            trustedRootDER: installation.trustedRootDER,
                                                            diagnostics: diagnostics,
-                                                           serverStateCache: serverStateCache)
+                                                           serverStateCache: serverStateCache,
+                                                           awaitingFirstConnection: activeEnrollmentRecord?.foregroundRelayConfirmed == false)
         } catch {
             if activationGeneration != generation { return }
             diagnostics.record(area: .connection, phase: .approvedConnection, transition: .failed,

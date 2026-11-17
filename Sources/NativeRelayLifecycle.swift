@@ -968,6 +968,7 @@ final class NativeRelayLifecycle {
     private var discussionFlights: [UUID: (token: UUID, task: Task<DiscussionOperationResult, Error>)] = [:]
     private var discussionTransports: [UUID: URLSessionInstallationSession] = [:]
     private var fileTransports: [UUID: URLSessionInstallationSession] = [:]
+    private var awaitingFirstConnection = false
     private var refreshGeneration = UUID()
     private var pathMonitor: NWPathMonitor?
     private var hasObservedInitialPath = false
@@ -1109,7 +1110,8 @@ final class NativeRelayLifecycle {
                   clientIdentity: SecIdentity,
                   trustedRootDER: Data,
                   diagnostics: NativeClientDiagnosticJournal? = nil,
-                  serverStateCache: (any ServerStateCaching)? = nil) async throws {
+                  serverStateCache: (any ServerStateCaching)? = nil,
+                  awaitingFirstConnection: Bool = false) async throws {
         let generation = UUID()
         let transportAttemptID = UUID()
         self.diagnosticJournal = diagnostics
@@ -1194,6 +1196,7 @@ final class NativeRelayLifecycle {
         featureFlags.connect(context: context, connectionID: transportAttemptID)
         installFocusReportHandler(for: nextTransport, transportID: transportAttemptID)
         configuration = (store, context, relayURL, clientIdentity, trustedRootDER, serverStateCache)
+        self.awaitingFirstConnection = awaitingFirstConnection
         observeNetworkPath(generation: generation)
         resumeSavedAnswers()
         resumeSavedDiscussions()
@@ -1598,6 +1601,7 @@ final class NativeRelayLifecycle {
                          transportAttemptID: result.transportAttemptID ?? activeTransportAttemptID,
                          receipt: nil)
         await progressDelivery?.value
+        if result.outcome == .confirmed { awaitingFirstConnection = false }
         return result
     }
 
@@ -1969,7 +1973,7 @@ final class NativeRelayLifecycle {
                     failedTransport = nil
                     continue
                 }
-                guard Self.isInterruptedConnection(error) else {
+                guard !awaitingFirstConnection, Self.isInterruptedConnection(error) else {
                     recordDiagnostic(.relay, .projectionRefresh, .failed, error: error,
                                      attemptID: activeTransportAttemptID)
                     return .failed(error: error)

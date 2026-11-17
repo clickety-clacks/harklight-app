@@ -807,6 +807,9 @@ final class NativeGuidedJoinTests: XCTestCase {
         await flow.retry()
         XCTAssertEqual(flow.screen, .approvedFinishing)
         XCTAssertTrue(flow.isShowing)
+        XCTAssertNotNil(flow.message, "An observed first-connection failure must explain why join is waiting")
+        XCTAssertFalse(flow.busy, "The visible Try again action must be enabled after failure")
+        XCTAssertFalse(flow.isApprovedConnectBusy)
         relayReached = true
         await flow.retry()
         XCTAssertEqual(flow.screen, .connected)
