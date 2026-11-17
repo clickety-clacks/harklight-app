@@ -1179,8 +1179,16 @@ final class ConversationRelayTests: XCTestCase {
 
         // The relay refuses the conversation ACK, so the projection is rebuilt
         // from the Server's history, which repeats revision 2.
+        let history = session.conversation
+        session.conversation = [history[0], history[2]]
+        var opens = 0
+        session.onConversationOpen = {
+            opens += 1
+            if opens == 2 { session.conversation = history }
+        }
         session.rejectFirstConversationACK = true
         _ = try await core.resyncAndDrainOutbox()
+        XCTAssertEqual(opens, 2, "The refused ACK rebuilds the projection from the Server's history.")
         let thread = try XCTUnwrap(try store.conversationSnapshot(context: context).threads[key])
         XCTAssertEqual(thread.currentRevision, 2)
         XCTAssertEqual(thread.currentQuestionPayload.value(named: "title")?.stringValue, ExactText("Later wording"))
