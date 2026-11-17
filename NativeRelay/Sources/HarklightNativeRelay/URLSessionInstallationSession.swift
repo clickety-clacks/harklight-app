@@ -989,10 +989,13 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
         guard RelayReplyAttribution.mayBeReply(text),
               let reply = replyAttribution.observeReply(Data(text.utf8)) else { return }
         operationRefusal.observe(Data(text.utf8), hasOtherPendingRequests: focusReportReplyRouter.hasPendingReplies)
+        let ambiguousBadFrame = focusReportReplyRouter.hasPendingReplies &&
+            RelayOperationRefusal.isUncorrelatedBadFrame(Data(text.utf8))
         onDiagnostic(NativeClientDiagnosticEvent(area: .relay, phase: .relayErrorReply, transition: .rejected,
             causeCode: NativeDiagnosticCauseCode.serverReason(reply.reason),
             attemptID: attemptID, transportAttemptID: attemptID,
-            operationID: reply.request?.operationID, relayRequestType: reply.request?.type ?? .other))
+            operationID: ambiguousBadFrame ? nil : reply.request?.operationID,
+            relayRequestType: ambiguousBadFrame ? .other : (reply.request?.type ?? .other)))
     }
 
     private func takeReceivedBadFrame(for operationID: UUID) -> Bool {

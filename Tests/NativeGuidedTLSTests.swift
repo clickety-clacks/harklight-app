@@ -5408,9 +5408,10 @@ final class NativeGuidedTLSTests: XCTestCase {
     }
 
     func testLegacyOversizedSendWireObservation() async throws {
-        for (sendsRefusal, isDiscussion, mebibytes) in [
-            (true, false, 5), (false, false, 5), (true, true, 5), (false, true, 5),
-            (true, false, 32), (false, false, 32), (true, true, 32), (false, true, 32)
+        for (sendsRefusal, isDiscussion, mebibytes, pendingFocus) in [
+            (true, false, 5, false), (false, false, 5, false), (true, true, 5, false), (false, true, 5, false),
+            (true, false, 32, false), (false, false, 32, false), (true, true, 32, false), (false, true, 32, false),
+            (true, false, 5, true), (true, true, 5, true)
         ] {
             let namespace = "Harklight.legacy-oversize-observation." + UUID().uuidString
             let identity = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
@@ -5427,12 +5428,16 @@ final class NativeGuidedTLSTests: XCTestCase {
                 trustedRelayAuthority: ExactText("localhost"), personID: ExactText("test-person"),
                 deviceID: ExactText(identity.deviceID)), transportMode: .relay)
             let events = NativeDiagnosticEventCollector()
+            let readerReady = PagingExchangeSignal()
             let session = try URLSessionInstallationSession(profile: context,
                 relayURL: XCTUnwrap(URL(string: "wss://localhost:\(port)/relay")),
                 clientIdentity: TrustedKeychainIdentity(identity.value), trustedRootDER: server.rootDER,
+                onFocusReportingReady: { readerReady.signal() },
                 onDiagnostic: { events.append($0) })
             try await session.attachInboxReplay(
                 Data((#"{"v":1,"type":"inbox_attach","ref":"attach"}"# + "\n").utf8), ref: "attach") { _ in }
+            await readerReady.wait()
+            if pendingFocus { await session.sendFocusReport(.inbox) }
             let operation = UUID()
             let text = String(repeating: "x", count: mebibytes * 1024 * 1024)
             let kind = isDiscussion ? "discussion" : "answer"
@@ -5441,18 +5446,19 @@ final class NativeGuidedTLSTests: XCTestCase {
             if isDiscussion {
                 let outcome = await session.sendDiscussion(frame, operationID: operation)
                 result = String(describing: outcome)
-                XCTAssertEqual(outcome, sendsRefusal ? .rejected(reason: ExactText("bad_frame")) : .unresolved)
+                XCTAssertEqual(outcome, sendsRefusal && !pendingFocus ? .rejected(reason: ExactText("bad_frame")) : .unresolved)
             } else {
                 let outcome = try await session.sendOriginalOperation(frame, operationID: operation)
                 result = String(describing: outcome)
-                XCTAssertEqual(outcome, sendsRefusal ? .failed(operationID: operation) : .unresolved)
+                XCTAssertEqual(outcome, sendsRefusal && !pendingFocus ? .failed(operationID: operation) : .unresolved)
             }
             await session.close()
             let refusalEvents = events.events.filter { $0.phase == .relayErrorReply && $0.causeCode == "server_bad_frame" }
-            print("LEGACY_OVERSIZE_OBSERVATION kind=\(kind) mebibytes=\(mebibytes) refusal=\(sendsRefusal) result=\(result) observedBadFrame=\(refusalEvents.count) attributed=\(refusalEvents.first?.operationID == operation) headerLength=\(server.rejectedLength) bufferedAtRejection=\(server.bufferedAtRejection)")
+            print("LEGACY_OVERSIZE_OBSERVATION kind=\(kind) mebibytes=\(mebibytes) pendingFocus=\(pendingFocus) refusal=\(sendsRefusal) result=\(result) observedBadFrame=\(refusalEvents.count) attributed=\(refusalEvents.first?.operationID == operation) headerLength=\(server.rejectedLength) bufferedAtRejection=\(server.bufferedAtRejection)")
             XCTAssertGreaterThan(server.rejectedLength, 4 * 1024 * 1024)
             XCTAssertLessThan(server.bufferedAtRejection, server.rejectedLength,
                               "The old Server rejects from the length header before reading the body")
+            if pendingFocus { XCTAssertNil(refusalEvents.first?.operationID, "An ambiguous reply names no operation") }
             if !sendsRefusal {
                 XCTAssertTrue(refusalEvents.isEmpty)
             }
@@ -6486,6 +6492,18 @@ private final class LegacyOversizeTLSRelay: @unchecked Sendable {
         let maskBytes = bytes[1] & 0x80 == 0 ? 0 : 4
         let total = headerBytes + maskBytes + Int(payloadLength)
         guard bytes.count >= total else { receive(connection, buffer: bytes, upgraded: true); return }
+        var payload = Data(bytes[(headerBytes + maskBytes)..<total])
+        if maskBytes != 0 {
+            for index in payload.indices { payload[index] ^= bytes[headerBytes + index % 4] }
+        }
+        if let request = try? JSONValue.parse(payload),
+           request.uniqueValue(named: "type")?.stringValue?.rawValue == "focus_report" {
+            // Keep this report unanswered to exercise genuinely ambiguous errors.
+            let rest = Data(bytes.dropFirst(total))
+            if rest.isEmpty { receive(connection, buffer: rest, upgraded: true) }
+            else { process(connection, bytes: rest) }
+            return
+        }
         // The single initial inbox_attach enables the app's normal background reader.
         let response = textFrame("{\"v\":1,\"type\":\"ok\",\"ref\":\"attach\",\"paging_version\":1,\"checkpoint_accepted\":true,\"replay_started\":true}\n") +
             textFrame("{\"v\":1,\"type\":\"resynced\"}\n")
