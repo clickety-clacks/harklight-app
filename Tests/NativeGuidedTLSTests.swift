@@ -5267,6 +5267,26 @@ final class NativeGuidedTLSTests: XCTestCase {
                        kSecAttrService as String: service] as CFDictionary)
     }
 
+    func testFirstConnectionStateUsesSavedConfirmationDespiteStaleInMemoryRecord() throws {
+        let service = "Harklight.first-connection-confirmation." + UUID().uuidString
+        defer { deleteEnrollmentRecord(service: service) }
+        let stale = approvedRecord(foregroundRelayConfirmed: false, notificationExplanationSeen: true)
+        try saveEnrollmentRecord(stale, service: service)
+        let enrollment = NativeEnrollmentStore(service: service)
+        let app = NativeAppLaunch(arguments: ["Harklight"], enrollmentStore: enrollment,
+                                  joinStore: NativeGuidedJoinStore(namespace: service),
+                                  initialState: .enrollmentRequired, initialEnrollmentRecord: stale)
+        let context = ProfileContext(identity: ProfileIdentity(
+            trustedRelayAuthority: ExactText(stale.profileAuthority), personID: ExactText(stale.personID!),
+            deviceID: ExactText(stale.deviceID)), transportMode: .relay)
+        XCTAssertTrue(try app.awaitingFirstConnection(for: context))
+        try enrollment.markForegroundRelayConfirmed(for: stale.deviceID)
+        XCTAssertEqual(app.activeEnrollmentRecord?.foregroundRelayConfirmed, false,
+                       "Retry can still hold the original in-memory record")
+        XCTAssertFalse(try app.awaitingFirstConnection(for: context),
+                       "A saved first connection must keep later activation in established-account mode")
+    }
+
     func testFirstConnectionSurfacesSocketFailureAndServerRefusal() async throws {
         for closesSocket in [true, false] {
             let namespace = "Harklight.first-connection-failure." + UUID().uuidString

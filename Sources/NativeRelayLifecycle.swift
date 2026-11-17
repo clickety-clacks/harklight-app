@@ -1973,7 +1973,7 @@ final class NativeRelayLifecycle {
                     failedTransport = nil
                     continue
                 }
-                guard !awaitingFirstConnection, Self.isInterruptedConnection(error) else {
+                guard Self.shouldReconnectAfterConnectionError(error, awaitingFirstConnection: awaitingFirstConnection) else {
                     recordDiagnostic(.relay, .projectionRefresh, .failed, error: error,
                                      attemptID: activeTransportAttemptID)
                     return .failed(error: error)
@@ -2023,14 +2023,14 @@ final class NativeRelayLifecycle {
         return true
     }
 
-    static func isInterruptedConnection(_ error: Error) -> Bool {
+    static func shouldReconnectAfterConnectionError(_ error: Error, awaitingFirstConnection: Bool = false) -> Bool {
         let value = error as NSError
         if value.domain == NSURLErrorDomain {
-            return value.code == URLError.networkConnectionLost.rawValue ||
-                value.code == URLError.timedOut.rawValue
+            return value.code == URLError.timedOut.rawValue ||
+                (!awaitingFirstConnection && value.code == URLError.networkConnectionLost.rawValue)
         }
         if value.domain == NSPOSIXErrorDomain {
-            return [POSIXErrorCode.ECONNRESET, .ECONNABORTED, .ENOTCONN, .EPIPE]
+            return !awaitingFirstConnection && [POSIXErrorCode.ECONNRESET, .ECONNABORTED, .ENOTCONN, .EPIPE]
                 .contains { Int($0.rawValue) == value.code }
         }
         // A refusal, invalid frame, or failed local write needs its actual
