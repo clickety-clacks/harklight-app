@@ -3544,7 +3544,7 @@ final class NativeGuidedTLSTests: XCTestCase {
             onDiagnostic: { diagnosticEvents.append($0) })
         do {
             try await session.resync(Data("{}\n".utf8)) { _ in }
-            XCTFail("A redirect cannot establish the authenticated relay")
+            XCTFail("The target returns HTTP 200 rather than upgrading to a WebSocket")
         } catch {}
         await session.close()
         XCTAssertTrue(original.receivedRequest, "The original pinned relay received the connection")
