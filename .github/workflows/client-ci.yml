@@ -44,10 +44,13 @@ jobs:
             HarklightNativeRelayTests
         run: Scripts/verify.sh test
 
+  # The two UI suites run one after the other in one concurrency group, so with
+  # the iPad layout group this repository runs at most two long simulator jobs
+  # at once. Each suite finishes well inside its limit on its own; together in
+  # one job they took about 112 minutes and hit the limit without a result.
   ios-ui-tests:
     name: iOS UI tests
-    # About 112 minutes of serial tests today, which reaches the limit without a
-    # result. Until the suites are split and bounded, run only when asked for.
+    # Run only when asked for until a full run on main shows these suites pass.
     if: github.event_name == 'workflow_dispatch' && inputs.run_ui
     concurrency:
       group: harklight-heavy-ios-ui
@@ -61,11 +64,35 @@ jobs:
       - name: Install XcodeGen
         run: brew install xcodegen
 
-      - name: Build and test iOS UI suites
+      - name: Build and test iOS UI suite
         env:
-          HARKLIGHT_ONLY_TESTING: >-
-            HarklightUITests
-            HarklightConversationUITests
+          HARKLIGHT_ONLY_TESTING: HarklightUITests
+          # Longest passing UI test measured 364 s to over 420 s. A test that
+          # runs past this many seconds fails by itself instead of holding the job.
+          HARKLIGHT_TEST_TIME_ALLOWANCE: "600"
+        run: Scripts/verify.sh test
+
+  ios-conversation-ui-tests:
+    name: iOS conversation UI tests
+    # Starts after iOS UI tests ends, whatever its result, in the same group.
+    needs: ios-ui-tests
+    if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.run_ui }}
+    concurrency:
+      group: harklight-heavy-ios-ui
+      cancel-in-progress: false
+    runs-on: xcode-27
+    timeout-minutes: 60
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Build and test iOS conversation UI suite
+        env:
+          HARKLIGHT_ONLY_TESTING: HarklightConversationUITests
+          HARKLIGHT_TEST_TIME_ALLOWANCE: "600"
         run: Scripts/verify.sh test
 
   ios-ipad-layout-tests:
