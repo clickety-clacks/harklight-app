@@ -1029,7 +1029,6 @@ public enum AttentionStoreError: Error, Equatable, LocalizedError, Sendable {
     case invalidDraft
     case invalidSubmission
     case unsupportedInterface
-    case answerTooLarge
     case requestClosed
     case competingIntent(UUID)
     case intentConflict
@@ -1058,7 +1057,6 @@ public enum AttentionStoreError: Error, Equatable, LocalizedError, Sendable {
         case .invalidDraft: return "The draft contains missing, foreign, or malformed typed input state."
         case .invalidSubmission: return "The submission does not match every declared input and selected action."
         case .unsupportedInterface: return "The complete sender interface is not supported."
-        case .answerTooLarge: return "The exact encoded answer operation exceeds the supported frame limit."
         case .requestClosed: return "The request is already terminal and cannot accept a new intent."
         case let .competingIntent(id): return "A different durable intent already owns this request: \(id.uuidString)."
         case .intentConflict: return "This intent ID is already bound to different immutable content."

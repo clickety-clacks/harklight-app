@@ -479,6 +479,54 @@ final class NativeRelayCoreTests: XCTestCase {
         XCTAssertThrowsError(try store.relayCursor(context: context))
     }
 
+    func testLargeAnswerRefusalRetriesAndDropAutomaticallyRecoversTheOriginal() async throws {
+        for dropped in [false, true] {
+            let (context, store, session) = try setup()
+            let key = RequestKey(accountScope: context.identity.personID,
+                                 senderID: ExactText("sender"), messageID: ExactText("large-answer"))
+            let payload = try JSONValue.parse(data(#"{"title":"Question","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"reply","label":"Reply","kind":"text"}]}}"#))
+            _ = try store.apply(RelayEvent(sequence: 1,
+                body: .delivery(StoredRequest(key: key, originalPayload: payload), .message)), context: context)
+            let port = AttentionDomainPort(store: store)
+            let selector = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first?.selector)
+            let text = ExactText(String(repeating: "x", count: 2 * 1024 * 1024 + 1))
+            let receipt = try port.submit(SubmitIntent(context: port.context, selector: selector, intentID: UUID(),
+                inputs: [.compatibilityText(action: ExactText("reply"), text: text)]))
+            let original = try XCTUnwrap(store.lookupIntent(receipt.intentID, context: context))
+            XCTAssertGreaterThan(original.wireFrame.count, 2 * 1024 * 1024)
+            // A reasoned Server error maps to failed; a dropped socket maps to unresolved.
+            session.result = dropped ? .unresolved : .failed(operationID: receipt.opID)
+            let core = try NativeRelayCore(store: store, context: context, session: session)
+            try await core.sendOriginalOperationForUserTap(receipt.intentID)
+            let retained = try XCTUnwrap(store.lookupIntent(receipt.intentID, context: context))
+            XCTAssertEqual(retained.disposition, dropped ? .lost : .failed)
+            XCTAssertEqual(retained.wireFrame, original.wireFrame)
+            XCTAssertEqual(session.sent.first?.0, original.wireFrame)
+            XCTAssertEqual(try port.inspect(context: port.context, request: key).requests.first?.lifecycleStatus,
+                           dropped ? .pending : .open)
+            if dropped {
+                XCTAssertThrowsError(try store.releaseFailedOperationForEdit(receipt.intentID, context: context))
+            }
+            if dropped {
+                let reconnected = Session(context.identity)
+                reconnected.snapshotHighWater = 1
+                reconnected.initialItems = [snapshotItem(key, payload: payload)]
+                reconnected.frames = [data(#"{"v":1,"type":"resynced","seq":1}"#)]
+                reconnected.result = .accepted(operationID: receipt.opID, terminalSequence: 2)
+                let recoveredCore = try NativeRelayCore(store: store, context: context, session: reconnected)
+                _ = try await recoveredCore.resyncAndDrainOutbox()
+                XCTAssertEqual(reconnected.sent.map(\.1), [receipt.opID])
+                XCTAssertEqual(reconnected.sent.first?.0, original.wireFrame)
+            } else {
+                session.result = .accepted(operationID: receipt.opID, terminalSequence: 2)
+                try await core.sendOriginalOperationForUserTap(receipt.intentID)
+                XCTAssertEqual(session.sent.map(\.1), [receipt.opID, receipt.opID])
+                XCTAssertEqual(session.sent.last?.0, original.wireFrame)
+            }
+            XCTAssertEqual(try store.lookupIntent(receipt.intentID, context: context)?.disposition, .accepted(sequence: 2))
+        }
+    }
+
     func testUnsupportedNoCommentFrameLeavesTheRequestOpenAndReleasesItsOutbox() async throws {
         let (context, store, session) = try setup()
         let key = RequestKey(accountScope: context.identity.personID,
@@ -574,7 +622,6 @@ final class NativeRelayCoreTests: XCTestCase {
             .invalidDraft,
             .invalidSubmission,
             .unsupportedInterface,
-            .answerTooLarge,
             .requestClosed,
             .competingIntent(UUID()),
             .intentConflict,

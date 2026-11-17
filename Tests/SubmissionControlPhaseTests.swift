@@ -165,9 +165,12 @@ final class SubmissionControlPhaseTests: XCTestCase {
     }
 
     @MainActor
-    func testADroppedConnectionKeepsSendingThenShowsTheAnswerAtAcceptance() throws {
+    func testADroppedLargeAnswerKeepsSendingAndRecoversAtAcceptance() throws {
         let fixture = try liveFixture(payload: try choicePayload())
-        let receipt = try fixture.submit([.compatibilityValue(action: ExactText("a"))])
+        let text = ExactText(String(repeating: "x", count: 2 * 1024 * 1024 + 1))
+        let receipt = try fixture.submit([.compatibilityText(action: ExactText("reply"), text: text)])
+        let saved = try XCTUnwrap(fixture.intents.first)
+        XCTAssertGreaterThan(saved.wireFrame.count, 2 * 1024 * 1024)
         XCTAssertEqual(try fixture.refresh().submissionPhase?.phase, .sending)
 
         // The connection drops mid-send: the outcome is unknown and the store
@@ -178,12 +181,18 @@ final class SubmissionControlPhaseTests: XCTestCase {
         XCTAssertEqual(detail.submissionPhase?.phase, .sending, "Recovering is still sending, not failed.")
         XCTAssertNil(detail.submissionDisplay.retryAction(.answer), "No Retry or failure mark while recovering.")
         XCTAssertFalse(detail.submissionDisplay.isFailed(.answer))
+        XCTAssertFalse(detail.submissionDisplay.canEdit(.answer))
+        XCTAssertFalse(detail.isDurablyAccepted(.answer))
         XCTAssertTrue(detail.controlsReadOnly, "Other answers stay locked while it may have arrived.")
         fixture.live.selectAction(ExactText("b"), input: nil, for: fixture.key)
         XCTAssertEqual(try fixture.intents.map(\.operationID), [receipt.opID])
 
-        // Reconnect: the same operation is sent again, then accepted.
-        _ = try fixture.domain.queueOriginalOperationForUserTap(receipt.intentID, context: fixture.context)
+        // Reconnect automatically requeues the same bytes without a user tap.
+        try fixture.domain.queueRecoverableOperations(context: fixture.context)
+        let recovered = try XCTUnwrap(fixture.intents.first)
+        XCTAssertEqual(recovered.operationID, saved.operationID)
+        XCTAssertEqual(recovered.wireFrame, saved.wireFrame)
+        XCTAssertEqual(recovered.disposition, .pending)
         XCTAssertEqual(try fixture.refresh().submissionPhase?.phase, .sending)
         try fixture.domain.recordAcceptedOperation(receipt.intentID, operationID: receipt.opID,
                                                    terminalSequence: 2, context: fixture.context)
@@ -290,8 +299,8 @@ final class SubmissionControlPhaseTests: XCTestCase {
     @MainActor
     func testEditOnAFailedReplyBringsBackTheSentText() throws {
         let fixture = try liveFixture(payload: try choicePayload())
-        let failed = try fixture.submit([.compatibilityText(action: ExactText("reply"),
-                                                            text: ExactText("Book the Avenida"))],
+        let text = ExactText(String(repeating: "x", count: 2 * 1024 * 1024 + 1))
+        let failed = try fixture.submit([.compatibilityText(action: ExactText("reply"), text: text)],
                                         persistDraft: false)
         try fixture.domain.recordAnswerNotDelivered(failed.intentID, operationID: failed.opID,
                                                     context: fixture.context)
@@ -304,16 +313,16 @@ final class SubmissionControlPhaseTests: XCTestCase {
         XCTAssertEqual(session.draft.compatibility.selectedActionID, ExactText("reply"),
                        "Reopening the message shows the failed reply picked.")
         XCTAssertEqual(session.draft.compatibility.textByActionID[ExactText("reply")],
-                       ExactText("Book the Avenida"), "and its sent text, locked until Edit.")
+                       text, "and its sent text, locked until Edit.")
 
         XCTAssertTrue(fixture.live.releaseFailedSubmissionForEdit(fixture.key))
         XCTAssertTrue(try fixture.intents.isEmpty)
         XCTAssertNil(fixture.live.submissionPhases[fixture.key])
         XCTAssertTrue(session.hasLocalChanges, "Edit keeps the sent text as the edited draft.")
         XCTAssertEqual(session.draft.compatibility.textByActionID[ExactText("reply")],
-                       ExactText("Book the Avenida"))
+                       text)
         XCTAssertEqual(fixture.live.draft(for: fixture.key)?.compatibility.textByActionID[ExactText("reply")],
-                       ExactText("Book the Avenida"),
+                       text,
                        "A Reply box send keeps no draft, so Edit restores the sent text.")
     }
 

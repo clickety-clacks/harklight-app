@@ -249,7 +249,7 @@ public struct SenderDocument: Equatable, Sendable {
         illustrations.first(where: { $0.id == id })
     }
 
-    public func compose(drafts: [ExactText: InputDraft], maximumBytes: Int) -> JSONValue? {
+    public func compose(drafts: [ExactText: InputDraft]) -> JSONValue? {
         let expectedIDs = Set(inputs.map(\.id))
         guard drafts.count == inputs.count, Set(drafts.keys) == expectedIDs else { return nil }
 
@@ -277,9 +277,7 @@ public struct SenderDocument: Equatable, Sendable {
             }
         }
 
-        guard let answer = evaluate(result, drafts: drafts),
-              answer.jsonString.utf8.count <= maximumBytes else { return nil }
-        return answer
+        return evaluate(result, drafts: drafts)
     }
 
     public func terminalScene(state: TerminalState, authorizedAnswer: JSONValue?) -> SceneNode {
