@@ -1321,7 +1321,6 @@ private struct RequestDetailMetadata: View {
     let stake: String?
     let key: RequestKey
     let supersedesMessageIDs: [ExactText]
-    let messageLabel: (RequestKey, String) -> String
     let secondaryTextColor: Color
 
     var body: some View {
@@ -1369,7 +1368,7 @@ private struct RequestDetailMetadata: View {
                         let targetKey = RequestKey(accountScope: key.accountScope,
                             senderID: key.senderID, messageID: messageID)
                         NavigationLink(value: RelatedMessageTarget.supersedes(targetKey)) {
-                            Text(messageLabel(targetKey, String(localized: "Earlier message")))
+                            Text(messageID.rawValue)
                                 .font(.subheadline)
                                 .textSelection(.enabled)
                         }
@@ -2232,7 +2231,6 @@ struct LiveRequestDetail: View {
                     messageType: request.messageType, messageKind: request.messageKind,
                     deadline: byWhenDate, stake: request.stakeText?.rawValue,
                     key: request.key, supersedesMessageIDs: request.supersedesMessageIDs,
-                    messageLabel: store.relatedMessageLabel,
                     secondaryTextColor: detailColors.secondary)
                 if !request.supersededByMessageKeys.isEmpty {
                     ReplacedByMessagesSection(

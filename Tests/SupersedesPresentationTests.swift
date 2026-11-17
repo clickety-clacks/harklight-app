@@ -62,7 +62,7 @@ final class SupersedesPresentationTests: XCTestCase {
         XCTAssertEqual(model.request(for: replacement)?.supersedesMessageIDs.map(\.rawValue), ["old"])
         XCTAssertEqual(model.relatedMessageLabel(for: replacement, fallback: "Replacement message"),
                        "Replacement")
-        XCTAssertEqual(model.relatedMessageLabel(for: target, fallback: "Earlier message"), "Message",
+        XCTAssertEqual(model.relatedMessageLabel(for: target, fallback: "Replacement message"), "Message",
                        "A hidden superseded message still supplies its title.")
         let unavailable = RequestKey(accountScope: context.identity.personID,
             senderID: ExactText("agent"), messageID: ExactText("not-loaded"))
@@ -70,8 +70,8 @@ final class SupersedesPresentationTests: XCTestCase {
                        "Replacement message")
         let otherSender = RequestKey(accountScope: context.identity.personID,
             senderID: ExactText("other"), messageID: replacement.messageID)
-        XCTAssertEqual(model.relatedMessageLabel(for: otherSender, fallback: "Earlier message"),
-                       "Earlier message", "Title lookup must use the complete message identity.")
+        XCTAssertEqual(model.relatedMessageLabel(for: otherSender, fallback: "Replacement message"),
+                       "Replacement message", "Title lookup must use the complete message identity.")
     }
 
     func testRelatedMessageWithNoTitleUsesPlainFallback() throws {
@@ -86,8 +86,8 @@ final class SupersedesPresentationTests: XCTestCase {
                 body: .delivery(StoredRequest(key: messageKey,
                     originalPayload: try JSONValue.parse(Data(payload.utf8))), .message)), context: context)
             let model = try LivePresentationStore(store: domain, context: context)
-            XCTAssertEqual(model.relatedMessageLabel(for: messageKey, fallback: "Earlier message"),
-                           "Earlier message")
+            XCTAssertEqual(model.relatedMessageLabel(for: messageKey, fallback: "Replacement message"),
+                           "Replacement message")
         }
     }
 
