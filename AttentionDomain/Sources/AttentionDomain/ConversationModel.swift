@@ -607,6 +607,51 @@ public struct ConversationThread: Equatable, Codable, Sendable {
         self.revisions = [revision: payload]
         self.currentRevision = revision
     }
+
+    /// Places a conversation-feed turn before an answer terminal that arrived
+    /// through inbox paging, without a conversation sequence, when the turn is
+    /// earlier in the origin feed. The caller must first match the turn's origin
+    /// to this request's origin; only then do the canonical event IDs share one
+    /// order. Other IDs are never compared.
+    mutating func placeBeforePagedTerminalIfEarlier(_ turnID: ExactText) {
+        func position(_ id: ExactText) -> UInt64? {
+            guard let value = UInt64(id.rawValue), value > 0, String(value) == id.rawValue else { return nil }
+            return value
+        }
+        guard let terminalID = terminalTurn, terminalID != turnID,
+              let terminalIndex = turns.firstIndex(where: { $0.id == terminalID }),
+              turns[terminalIndex].conversationSequence == nil,
+              let index = turns.firstIndex(where: { $0.id == turnID }), index > terminalIndex,
+              let turnPosition = position(turnID), let terminalPosition = position(terminalID),
+              turnPosition < terminalPosition else { return }
+        turns.insert(turns.remove(at: index), at: terminalIndex)
+    }
+
+    /// The thread as the ordinary inbox feed seeded it, for rebuilding the
+    /// conversation projection from the Server's history. Turns from the
+    /// conversation feed carry its sequence and are dropped so the replay
+    /// restores them; turns the ordinary feed added do not, and are kept.
+    /// Question revisions already delivered are kept: the replay repeats them,
+    /// and restarting at revision 1 would make each replayed revision look like
+    /// a newer question to the store, which resets the person's unsent answer.
+    func ordinaryFeedSeed(terminal: TerminalState?) -> ConversationThread {
+        var seed = ConversationThread(request: request, sessionHandle: sessionHandle,
+                                      revision: currentRevision, payload: currentQuestionPayload)
+        seed.revisions = revisions
+        seed.redactedRevisions = redactedRevisions
+        seed.availability = availability
+        seed.latestAvailabilityObservation = latestAvailabilityObservation
+        seed.listeningSupport = listeningSupport
+        seed.terminal = terminal
+        seed.reportedRetractedAtMilliseconds = reportedRetractedAtMilliseconds
+        seed.turns = turns.filter { $0.conversationSequence == nil }
+        for turn in seed.turns { seed.facts[turn.id] = ConversationTurnFacts() }
+        if let terminalTurn, seed.turns.contains(where: { $0.id == terminalTurn }) {
+            seed.terminalTurn = terminalTurn
+            seed.terminalAuthor = terminalAuthor
+        }
+        return seed
+    }
 }
 
 public struct ConversationRetraction: Equatable, Codable, Sendable {

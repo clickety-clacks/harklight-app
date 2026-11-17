@@ -424,6 +424,9 @@ public final class ClientRepository: @unchecked Sendable {
     /// The saved conversation projection disagrees with the relay. Discard it
     /// so a replay from the Server rebuilds it; the person's Chat drafts,
     /// uploads and read positions are kept in their own queues.
+    /// The ordinary inbox feed, which seeded each loaded request's thread, is
+    /// not replayed here, so those seeds are kept: without them the replayed
+    /// history is held as facts with no thread and the request's Chat is lost.
     public func discardConversationProjection(context suppliedContext: ProfileContext) throws {
         writerLock.lock()
         defer { writerLock.unlock() }
@@ -432,7 +435,11 @@ public final class ClientRepository: @unchecked Sendable {
         try validate(suppliedContext)
         guard suppliedContext.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
         var next = state
-        next.server.conversation = nil
+        var seeded = ConversationState()
+        for (key, thread) in state.server.conversation?.threads ?? [:] where state.requests[key] != nil {
+            seeded.threads[key] = thread.ordinaryFeedSeed(terminal: state.remoteStates[key]?.state)
+        }
+        next.server.conversation = seeded.threads.isEmpty ? nil : seeded
         try commit(next)
     }
 
@@ -3252,11 +3259,15 @@ public final class ClientRepository: @unchecked Sendable {
 
     /// The optional output reports which unchanged validation guard rejected
     /// an event; callers still receive the same ConversationError.
+    /// `feedOrigin` is the origin the relay named for this event. When it
+    /// matches the request's origin, a turn and an answer terminal paged from
+    /// the inbox share one event-ID order, and the turn keeps its place.
     @discardableResult
     public func applyConversation(_ event: ConversationEvent,
                                   context suppliedContext: ProfileContext,
                                   validationRejection: inout ConversationValidationRejection?,
-                                  locallyReceivedAtMilliseconds: UInt64? = nil) throws -> UInt64 {
+                                  locallyReceivedAtMilliseconds: UInt64? = nil,
+                                  feedOrigin: ExactText? = nil) throws -> UInt64 {
         validationRejection = nil
         writerLock.lock()
         defer { writerLock.unlock() }
@@ -3278,6 +3289,11 @@ public final class ClientRepository: @unchecked Sendable {
         } catch let error as ConversationValidationRejectionError {
             validationRejection = error.rejection
             throw ConversationError.invalidBinding
+        }
+        if case let .turn(turn) = event.fact, let feedOrigin,
+           feedOrigin == (next.remoteStates[event.binding.request]?.attentionTierOrigin ??
+                          next.inboxReferences?[event.binding.request]?.attentionTierOrigin) {
+            conversation.threads[event.binding.request]?.placeBeforePagedTerminalIfEarlier(turn.id)
         }
         if let locallyReceivedAtMilliseconds,
            case let .turn(turn) = event.fact,

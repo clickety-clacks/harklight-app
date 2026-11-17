@@ -244,11 +244,13 @@ final class InboxFreshnessReplayTests: XCTestCase {
                 serverStateCache: cache, onDiagnostic: { diagnostics.append($0) })
             _ = try await core.resyncAndDrainOutbox()
             XCTAssertEqual(session.conversationACKCountsAtOpen, [0, 0, 0, 1])
-            XCTAssertEqual(session.conversationCursorsAtOpen, [0, 1, succeeds ? 1 : 2, 4])
+            // The refused ACK discards the conversation projection, so the last
+            // open rebuilds it from 0 (#290).
+            XCTAssertEqual(session.conversationCursorsAtOpen, [0, 1, succeeds ? 1 : 2, 0])
             XCTAssertEqual(try session.conversationOpens.map {
                 try JSONValue.parse($0).uniqueValue(named: "since")?.integerValue
             }, [0, 0, succeeds ? 1 : 2, 0],
-                "Only one dependency fetch; the last open is ACK-behind replay")
+                "Only one dependency fetch; the last open rebuilds after the refused ACK")
             XCTAssertEqual(try session.conversationACKs.map {
                 try JSONValue.parse($0).uniqueValue(named: "conversation_seq")?.integerValue
             }, [4, 4])
@@ -278,7 +280,8 @@ final class InboxFreshnessReplayTests: XCTestCase {
                 XCTAssertEqual(snapshot.threads[key("answered")]?.facts[ExactText("2")]?.delivered, true)
                 let turns = try XCTUnwrap(snapshot.threads[key("answered")]).turns
                 XCTAssertLessThan(try XCTUnwrap(turns.firstIndex { $0.id == ExactText("2") }),
-                    try XCTUnwrap(turns.firstIndex { $0.id == ExactText("3") }))
+                    try XCTUnwrap(turns.firstIndex { $0.id == ExactText("3") }),
+                    "The rebuilt Chat keeps the discussion before the paged answer it preceded.")
             } else {
                 XCTAssertEqual(snapshot.threads[key("answered")]?.facts[ExactText("2")]?.delivered,
                     historyCase == "missing" ? nil : true,

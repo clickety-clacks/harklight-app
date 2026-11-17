@@ -2149,9 +2149,16 @@ public actor NativeRelayCore {
                     } else {
                         locallyReceivedAtMilliseconds = nil
                     }
+                    let feedOrigin: ExactText?
+                    if case .turn = event.fact {
+                        feedOrigin = (try? JSONValue.parse(frame))?.uniqueValue(named: "origin")?.stringValue
+                    } else {
+                        feedOrigin = nil
+                    }
                     _ = try store.applyConversation(event, context: context,
                         validationRejection: &validationRejection,
-                        locallyReceivedAtMilliseconds: locallyReceivedAtMilliseconds)
+                        locallyReceivedAtMilliseconds: locallyReceivedAtMilliseconds,
+                        feedOrigin: feedOrigin)
                     if let liveArrival,
                        try store.recordLocalLiveReplyArrival(
                            request: liveArrival.request, turnID: liveArrival.turnID,

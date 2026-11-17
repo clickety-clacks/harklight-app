@@ -1159,6 +1159,46 @@ final class ConversationRelayTests: XCTestCase {
         XCTAssertEqual(try store.snapshot(context: context).cursor, 1)
         XCTAssertEqual(session.ordinaryACKs.count, 1)
     }
+    func testConversationRebuildKeepsTheCurrentQuestionAndItsQueuedAnswer() async throws {
+        let (context, _, store, session) = try setup()
+        let actions = #""answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"seen","label":"Seen","kind":"value","value":{"acknowledgment":"seen"}}]}"#
+        session.ordinary = [data(#"{"v":1,"type":"ok","ref":"native-sync"}"#),
+            data(#"{"v":1,"type":"delivery","seq":1,"sender_id":"author","message_id":"request","origin":"origin","as":"message","message":{"title":"Question",\#(actions)},"session_handle":"handle","request_revision":1}"#),
+            data(#"{"v":1,"type":"resynced","seq":1}"#)]
+        session.conversation = [data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
+            data(#"{"v":1,"type":"conversation","conversation_seq":1,"sender_id":"author","message_id":"request","origin":"origin","session_handle":"handle","request_revision":2,"kind":"revision","author":"origin","event_id":"5","message":{"title":"Later wording",\#(actions)}}"#),
+            data(#"{"v":1,"type":"conversation_resynced","conversation_seq":1}"#)]
+        let core = try NativeRelayCore(store: store, context: context, session: session)
+        _ = try await core.resyncAndDrainOutbox()
+        let key = try XCTUnwrap(store.snapshot(context: context).requests.keys.first)
+        XCTAssertEqual(try store.conversationSnapshot(context: context).threads[key]?.currentRevision, 2)
+        let port = AttentionDomainPort(store: store)
+        let selector = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first?.selector)
+        let receipt = try port.submit(SubmitIntent(context: port.context, selector: selector, intentID: UUID(),
+            inputs: [.compatibilityValue(action: ExactText("seen"))]))
+
+        // The relay refuses the conversation ACK, so the projection is rebuilt
+        // from the Server's history, which repeats revision 2.
+        session.ordinary = [session.ordinary[0], session.ordinary[2]]
+        let history = session.conversation
+        session.conversation = [history[0], history[2]]
+        var opens = 0
+        session.onConversationOpen = {
+            opens += 1
+            if opens == 2 { session.conversation = history }
+        }
+        session.rejectFirstConversationACK = true
+        _ = try await core.resyncAndDrainOutbox()
+        XCTAssertEqual(opens, 2, "The refused ACK rebuilds the projection from the Server's history.")
+        let thread = try XCTUnwrap(try store.conversationSnapshot(context: context).threads[key])
+        XCTAssertEqual(thread.currentRevision, 2)
+        XCTAssertEqual(thread.currentQuestionPayload.value(named: "title")?.stringValue, ExactText("Later wording"))
+        let presented = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first)
+        XCTAssertEqual(presented.intentReceipt?.intentID, receipt.intentID,
+                       "Replaying a question the person already answered is not a newer question.")
+        XCTAssertEqual(presented.lifecycleStatus, .pending)
+        await core.deactivate()
+    }
     func testInlineOriginalBytesAndIndependentFileFactsDecodeWithoutInferringUse() throws {
         let (context, _, _, _) = try setup()
         let wire = try ConversationWire(profile: context)
