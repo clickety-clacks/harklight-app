@@ -5301,7 +5301,10 @@ final class NativeGuidedTLSTests: XCTestCase {
     }
 
     func testLegacyOversizedSendWireObservation() async throws {
-        for sendsRefusal in [true, false] {
+        for (sendsRefusal, isDiscussion, mebibytes) in [
+            (true, false, 5), (false, false, 5), (true, true, 5), (false, true, 5),
+            (true, false, 32), (false, false, 32), (true, true, 32), (false, true, 32)
+        ] {
             let namespace = "Harklight.legacy-oversize-observation." + UUID().uuidString
             let identity = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
             defer {
@@ -5324,18 +5327,27 @@ final class NativeGuidedTLSTests: XCTestCase {
             try await session.attachInboxReplay(
                 Data((#"{"v":1,"type":"inbox_attach","ref":"attach"}"# + "\n").utf8), ref: "attach") { _ in }
             let operation = UUID()
-            let text = String(repeating: "x", count: 5 * 1024 * 1024)
-            let frame = Data(("{\"v\":1,\"type\":\"answer\",\"op_id\":\"\(operation.uuidString.lowercased())\",\"value\":\"\(text)\"}\n").utf8)
-            let result = try await session.sendOriginalOperation(frame, operationID: operation)
+            let text = String(repeating: "x", count: mebibytes * 1024 * 1024)
+            let kind = isDiscussion ? "discussion" : "answer"
+            let frame = Data(("{\"v\":1,\"type\":\"\(kind)\",\"op_id\":\"\(operation.uuidString.lowercased())\",\"value\":\"\(text)\"}\n").utf8)
+            let result: String
+            if isDiscussion {
+                let outcome = await session.sendDiscussion(frame, operationID: operation)
+                result = String(describing: outcome)
+                if !sendsRefusal { XCTAssertEqual(outcome, .unresolved) }
+            } else {
+                let outcome = try await session.sendOriginalOperation(frame, operationID: operation)
+                result = String(describing: outcome)
+                if !sendsRefusal { XCTAssertEqual(outcome, .unresolved) }
+            }
             await session.close()
             let refusalEvents = events.events.filter { $0.phase == .relayErrorReply && $0.causeCode == "server_bad_frame" }
-            print("LEGACY_OVERSIZE_OBSERVATION refusal=\(sendsRefusal) result=\(result) observedBadFrame=\(refusalEvents.count) attributed=\(refusalEvents.first?.operationID == operation) headerLength=\(server.rejectedLength) bufferedAtRejection=\(server.bufferedAtRejection)")
+            print("LEGACY_OVERSIZE_OBSERVATION kind=\(kind) mebibytes=\(mebibytes) refusal=\(sendsRefusal) result=\(result) observedBadFrame=\(refusalEvents.count) attributed=\(refusalEvents.first?.operationID == operation) headerLength=\(server.rejectedLength) bufferedAtRejection=\(server.bufferedAtRejection)")
             XCTAssertGreaterThan(server.rejectedLength, 4 * 1024 * 1024)
             XCTAssertLessThan(server.bufferedAtRejection, server.rejectedLength,
                               "The old Server rejects from the length header before reading the body")
             if !sendsRefusal {
                 XCTAssertTrue(refusalEvents.isEmpty)
-                XCTAssertEqual(result, .unresolved, "Bare loss must not become a refusal")
             }
         }
     }
