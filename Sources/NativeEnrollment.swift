@@ -859,6 +859,7 @@ final class EnrollmentTrustDelegate: NSObject, URLSessionTaskDelegate, @unchecke
                     willPerformHTTPRedirection response: HTTPURLResponse,
                     newRequest request: URLRequest,
                     completionHandler: @escaping (URLRequest?) -> Void) {
+        // The status secret in the request body must not follow a redirect to another host.
         completionHandler(nil)
     }
 

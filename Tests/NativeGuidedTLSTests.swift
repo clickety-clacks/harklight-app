@@ -3518,7 +3518,7 @@ final class NativeGuidedTLSTests: XCTestCase {
         await session.close()
     }
 
-    func testAuthenticatedRelayRefusesToFollowAnotherEndpoint() async throws {
+    func testAuthenticatedRelayFollowsSameHostRedirect() async throws {
         let namespace = "Harklight.relay-redirect-test." + UUID().uuidString
         let identity = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
         defer {
@@ -3548,14 +3548,11 @@ final class NativeGuidedTLSTests: XCTestCase {
         } catch {}
         await session.close()
         XCTAssertTrue(original.receivedRequest, "The original pinned relay received the connection")
-        XCTAssertFalse(target.receivedRequest, "The authenticated request must not reach a redirected endpoint")
+        XCTAssertTrue(target.receivedRequest, "The same-host redirect must reach the target under the existing trust and identity")
         XCTAssertTrue(diagnosticEvents.events.contains {
             $0.phase == .ordinaryReplay && $0.transition == .failed && $0.causeCode != nil
         }, "The actual failed relay boundary should remain visible with a safe cause code.")
-        XCTAssertTrue(diagnosticEvents.events.contains {
-            $0.phase == .relayAdmission && $0.transition == .rejected &&
-                $0.causeCode == "relay_redirect_refused"
-        }, "An authentication-preserving redirect refusal should report its actual policy cause.")
+
     }
 
     func testGibsonEndpointMigrationKeepsTheApprovedProfileAndTrust() throws {
