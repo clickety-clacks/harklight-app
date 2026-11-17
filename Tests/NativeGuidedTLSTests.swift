@@ -5300,6 +5300,91 @@ final class NativeGuidedTLSTests: XCTestCase {
             "An established inbox retry must keep automatic reconnection")
     }
 
+    func testLegacyRefusalFailsOnlyItsOperationAndRetryPreservesBytesWhileBareLossRequeues() async throws {
+        for (sendsRefusal, isDiscussion) in [(true, false), (false, false), (true, true), (false, true)] {
+            let namespace = "Harklight.legacy-refusal-recovery." + UUID().uuidString
+            let identity = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
+            defer {
+                SecItemDelete([kSecClass as String: kSecClassCertificate,
+                               kSecAttrLabel as String: identity.label] as CFDictionary)
+                SecItemDelete([kSecClass as String: kSecClassKey,
+                               kSecAttrApplicationTag as String: Data(namespace.utf8)] as CFDictionary)
+            }
+            let server = try LegacyOversizeTLSRelay(expectedDevice: identity.deviceID, sendsRefusal: sendsRefusal)
+            defer { server.close() }
+            let portNumber = try await server.start()
+            let context = ProfileContext(identity: ProfileIdentity(
+                trustedRelayAuthority: ExactText("localhost"), personID: ExactText("test-person"),
+                deviceID: ExactText(identity.deviceID)), transportMode: .relay)
+            func connectedSession() async throws -> URLSessionInstallationSession {
+                let session = try URLSessionInstallationSession(profile: context,
+                    relayURL: XCTUnwrap(URL(string: "wss://localhost:\(portNumber)/relay")),
+                    clientIdentity: TrustedKeychainIdentity(identity.value), trustedRootDER: server.rootDER)
+                let replay = ConversationFrameCollector()
+                try await session.attachInboxReplay(
+                    Data((#"{"v":1,"type":"inbox_attach","ref":"attach"}"# + "\n").utf8), ref: "attach") { frame in
+                    replay.append(frame)
+                }
+                XCTAssertTrue(replay.types.contains("resynced"), "The next connection remains usable for inbox traffic")
+                return session
+            }
+            let store = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+            let key = RequestKey(accountScope: context.identity.personID, senderID: ExactText("sender"), messageID: ExactText("request"))
+            let payload = try JSONValue.parse(Data(#"{"title":"Question","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"reply","label":"Reply","kind":"text"}]}}"#.utf8))
+            _ = try store.apply(RelayEvent(sequence: 1, body: .delivery(StoredRequest(key: key, originalPayload: payload), .message),
+                conversation: RelayConversationMetadata(revision: 1, sessionHandle: ExactText("handle"), eventID: ExactText("1"))), context: context)
+            let binding = ConversationBinding(request: key, revision: 1)
+            let text = ExactText(String(repeating: "x", count: 5 * 1024 * 1024))
+            let session = try await connectedSession()
+            let core = try NativeRelayCore(store: store, context: context, session: U2ReplaySession(context.identity))
+            if isDiscussion {
+                try store.saveConversationDraft(ConversationDraft(binding: binding, text: text, files: []), context: context)
+                _ = try await core.submitDiscussion(binding, using: session) { _ in URL(fileURLWithPath: "/unused") }
+                let saved = try XCTUnwrap(store.conversationSnapshot(context: context).threads[key]?.drafts[1])
+                let operation = try XCTUnwrap(saved.operationID)
+                let bytes = try XCTUnwrap(saved.wireFrame)
+                XCTAssertEqual(saved.disposition, sendsRefusal ? .rejected(ExactText("bad_frame")) : .outcomeUnknown(operation))
+                XCTAssertFalse(saved.isPermanentlyRefused)
+                try store.queueRecoverableOperations(context: context)
+                XCTAssertEqual(try store.conversationSnapshot(context: context).threads[key]?.drafts[1]?.disposition, saved.disposition)
+                let recovery = try await connectedSession()
+                _ = try await core.submitDiscussion(binding, using: recovery) { _ in URL(fileURLWithPath: "/unused") }
+                let retried = try XCTUnwrap(store.conversationSnapshot(context: context).threads[key]?.drafts[1])
+                XCTAssertEqual(retried.operationID, operation)
+                XCTAssertEqual(retried.wireFrame, bytes)
+                if sendsRefusal {
+                    try store.saveConversationDraft(ConversationDraft(binding: binding, text: ExactText("Edited after refusal"), files: []), context: context)
+                    XCTAssertEqual(try store.conversationSnapshot(context: context).threads[key]?.drafts[1]?.text, ExactText("Edited after refusal"))
+                } else {
+                    XCTAssertThrowsError(try store.saveConversationDraft(ConversationDraft(binding: binding, text: ExactText("Cannot edit unknown send")), context: context))
+                }
+                await recovery.close()
+            } else {
+                let domainPort = AttentionDomainPort(store: store)
+                let selector = try XCTUnwrap(domainPort.inspect(context: domainPort.context, request: key).requests.first?.selector)
+                let receipt = try domainPort.submit(SubmitIntent(context: domainPort.context, selector: selector, intentID: UUID(),
+                    inputs: [.compatibilityText(action: ExactText("reply"), text: text)]))
+                let original = try XCTUnwrap(store.lookupIntent(receipt.intentID, context: context))
+                try await core.sendOriginalOperationForUserTap(receipt.intentID, using: session)
+                XCTAssertEqual(try store.lookupIntent(receipt.intentID, context: context)?.disposition, sendsRefusal ? .failed : .lost)
+                let presentation = try LivePresentationStore(store: store, context: context)
+                XCTAssertEqual(presentation.submissionPhases[key]?.phase, sendsRefusal ? .failed(retryable: true, editable: true) : .sending)
+                try store.queueRecoverableOperations(context: context)
+                XCTAssertEqual(try store.lookupIntent(receipt.intentID, context: context)?.disposition, sendsRefusal ? .failed : .pending)
+                if sendsRefusal { XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty) }
+                let recovery = try await connectedSession()
+                try await core.sendOriginalOperationForUserTap(receipt.intentID, using: recovery)
+                let retried = try XCTUnwrap(store.lookupIntent(receipt.intentID, context: context))
+                XCTAssertEqual(retried.operationID, original.operationID)
+                XCTAssertEqual(retried.wireFrame, original.wireFrame)
+                if sendsRefusal { try store.releaseFailedOperationForEdit(receipt.intentID, context: context) }
+                else { XCTAssertThrowsError(try store.releaseFailedOperationForEdit(receipt.intentID, context: context)) }
+                await recovery.close()
+            }
+            await session.close()
+        }
+    }
+
     func testBadFrameEvidenceRequiresTheSoleActiveOperationAndNoOtherPendingRequest() {
         let frame = Data(#"{"v":1,"type":"error","reason":"bad_frame"}"#.utf8)
         let operation = UUID()
