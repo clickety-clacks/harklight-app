@@ -1347,11 +1347,12 @@ final class ConversationSampleUITests: XCTestCase {
                         "An unsent saved draft is not presented as a refused answer.")
         capture("sender-retracted-retained-request", app)
         app.buttons["Chat"].tap()
-        let composer = app.textViews["sample-chat-composer"]
-        XCTAssertTrue(composer.waitForExistence(timeout: 5))
-        XCTAssertEqual(composer.value as? String, "Please keep this unsent note.")
-        XCTAssertFalse(composer.isEnabled)
-        XCTAssertFalse(app.buttons["Send locally"].isEnabled)
+        // Retraction closes the chat: no composer or Send (chat messaging spec R4),
+        // while the unsent discussion stays readable outside a composer.
+        XCTAssertTrue(app.staticTexts["Please keep this unsent note."].waitForExistence(timeout: 5),
+                      "The unsent discussion stays reachable after retraction.\n\(app.debugDescription)")
+        XCTAssertFalse(app.textViews["sample-chat-composer"].exists)
+        XCTAssertFalse(app.buttons["Send locally"].exists)
         let savedDraft = app.buttons["conversation-earlier-answer"]
         XCTAssertTrue(savedDraft.waitForExistence(timeout: 5),
                       "The unrelated unsent draft remains available when no answer was refused.")

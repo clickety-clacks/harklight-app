@@ -78,6 +78,17 @@ struct ConversationPanel: View {
     private var thread: ConversationThread? { store.conversation(for: key) }
     private var revision: UInt64 { thread?.currentRevision ?? 1 }
     private var draft: ConversationDraft { store.conversationDraft(for: key, revision: revision) }
+    /// Discussion that was never sent. Closure marks a saved draft rejected
+    /// without an operation; a draft that was sent shows as a pending submission.
+    private var closedChatUnsentDraft: ConversationDraft? {
+        let draft = draft
+        guard draft.operationID == nil,
+              !draft.text.rawValue.isEmpty || !draft.files.isEmpty else { return nil }
+        switch draft.disposition {
+        case .saved, .rejected: return draft
+        case .submitting, .outcomeUnknown, .acceptedPendingReplay: return nil
+        }
+    }
 
     private func dismissChat() {
         if let onDismissChat {
@@ -150,6 +161,19 @@ struct ConversationPanel: View {
                 }
                 if thread.terminal != nil || !thread.allowsDiscussion {
                     ConversationRetainedTextRecovery(store: store, key: key)
+                    // A closed chat offers no composer, so its never-sent discussion
+                    // stays readable here instead (chat messaging spec R4).
+                    if let unsent = closedChatUnsentDraft {
+                        ReadOnlyConversationDraftView(
+                            draft: unsent,
+                            note: "This chat is closed. Its saved discussion cannot be edited or sent."
+                        ) { file in
+                            fileError = nil
+                            inspectedFile = file
+                            inspectedFileRevision = revision
+                        }
+                            .padding(verticalSizeClass == .compact ? 4 : 12)
+                    }
                 }
                 if thread.terminal == nil && thread.allowsDiscussion {
                     ConversationUploadCleanupStatus(store: store, key: key, revision: revision)
@@ -548,6 +572,7 @@ private struct ConversationRetainedTextRecovery: View {
 @MainActor
 private struct ReadOnlyConversationDraftView: View {
     let draft: ConversationDraft
+    var note: LocalizedStringResource = "This account is disconnected. Its saved discussion cannot be edited or sent."
     let inspect: (ConversationFile) -> Void
 
     var body: some View {
@@ -566,7 +591,7 @@ private struct ReadOnlyConversationDraftView: View {
                 }
                 .buttonStyle(.plain)
             }
-            Text("This account is disconnected. Its saved discussion cannot be edited or sent.")
+            Text(note)
                 .font(.caption2).foregroundStyle(.hkSecondary)
         }
         .padding(.horizontal)
