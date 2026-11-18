@@ -2039,6 +2039,7 @@ struct InboxList: View {
         } label: {
             ReplyItemNormalRowContent(
                 reference: item.reference,
+                perReplyPriorities: parent?.inboxReplyPriorities ?? [:],
                 projection: item.projection,
                 parentTitle: item.parentTitle,
                 senderLabel: item.senderLabel,
@@ -3459,6 +3460,7 @@ struct InboxDiagnosticsSettingsSection: View {
 
 private struct ReplyItemNormalRowContent: View {
     let reference: InboxViewListItem
+    let perReplyPriorities: [UInt64: InboxMessagePriority]
     let projection: ReplyItemNormalRow?
     let parentTitle: String
     let senderLabel: String
@@ -3471,7 +3473,7 @@ private struct ReplyItemNormalRowContent: View {
     }
 
     private var priority: InboxPriorityDisplay? {
-        InboxPriorityDisplay.forScore(reference.score)
+        ReplyItemPriorityProjection.display(for: reference, perReplyPriorities: perReplyPriorities)
     }
 
     private var priorityLabel: String? {

@@ -299,21 +299,32 @@ final class SampleFixtureDomain {
                   let newestSequence = groupedReplies.last?.conversationSequence else {
                 throw ConversationError.conflict
             }
-            let perReplyScores = [earliestSequence: 0.93, newestSequence: 0.4]
+            let priorityScenario = ProcessInfo.processInfo.arguments.first {
+                $0.hasPrefix("--harklight-test-normal-reply-priority=")
+            }?.split(separator: "=", maxSplits: 1).last.map(String.init)
+            let historical = priorityScenario == "historical" || priorityScenario == "history-scoreless"
+            let priority = priorityScenario.flatMap(InboxMessagePriority.init(rawValue:))
+            let groupScore: Double? = priorityScenario == nil || priorityScenario == "historical"
+                ? 0.93 : priorityScenario == "normal-score" ? 0.5 : nil
+            let perReplyScores: [UInt64: Double] = priorityScenario == nil
+                ? [earliestSequence: 0.93, newestSequence: 0.4] : [:]
             let listItems = [
                 InboxViewListItem(kind: .reply, key: replyParent,
                     conversationSequence: newestSequence,
-                    openAtConversationSequence: earliestSequence,
-                    unseenCount: groupedReplies.count, score: 0.93, scoreKind: .current),
+                    openAtConversationSequence: historical ? newestSequence : earliestSequence,
+                    unseenCount: historical ? 0 : groupedReplies.count, score: groupScore,
+                    scoreKind: groupScore == nil ? nil : historical ? .historical : .current),
                 InboxViewListItem(kind: .message, key: replyParent)
             ]
             try domain.setFixtureInboxView(InboxView(
                 revision: ExactText("sample-reply-item-list"),
                 entries: [],
-                replies: groupedReplies.compactMap { turn in
+                replies: historical ? [] : groupedReplies.compactMap { turn in
                     guard let sequence = turn.conversationSequence else { return nil }
                     return InboxViewReply(key: replyParent, conversationSequence: sequence,
-                                          score: perReplyScores[sequence])
+                        priority: priorityScenario == nil ? nil
+                            : sequence == earliestSequence ? (priority ?? .now) : .low,
+                        score: perReplyScores[sequence])
                 },
                 listItems: listItems), context: context)
             try viewModel.refreshFromDurableStore()
