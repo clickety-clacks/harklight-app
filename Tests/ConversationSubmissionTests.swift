@@ -1,22 +1,35 @@
 import AttentionDomain
 import HarklightNativeRelay
 import XCTest
+@testable import Harklight
 
 final class ConversationSubmissionTests: XCTestCase {
     private final class Session: AuthenticatedInboxPagingSession, AuthenticatedConversationCleanupSession, @unchecked Sendable {
-        let authenticatedIdentity: ProfileIdentity
+        private let identity: ProfileIdentity
+        var identityReadHook: (@Sendable () -> Void)?
+        var authenticatedIdentity: ProfileIdentity {
+            identityReadHook?()
+            return identity
+        }
         var result: DiscussionOperationResult = .unresolved
         var sent: [(Data, UUID)] = []
         var turn: Data?
         var failReplay = false
         var failUpload = false
         var uploadAttempts = 0
+        var validateUploadReferences = false
+        var remoteUploadIDs: Set<ExactText> = []
         var uploadHook: (@Sendable () async throws -> Void)?
         var cleanupRequests: [ConversationUploadCleanup] = []
         var failCleanup = false
+        var inlineBudget: UInt64 = 262_144
+        var limitsHook: (@Sendable () async throws -> Void)?
+        var cleanupHook: (@Sendable () async throws -> Void)?
+        var sendHook: (@Sendable () async -> Void)?
+        var uploadError: ConversationFileTransportError?
         var cap: UInt64?
         let uploadID = UUID().uuidString.lowercased()
-        init(_ identity: ProfileIdentity) { authenticatedIdentity = identity }
+        init(_ identity: ProfileIdentity) { self.identity = identity }
         private func data(_ value: String) -> Data { Data(value.utf8) }
         func resync(_ request: Data, consume: @Sendable (Data) async throws -> Void) async throws {
             let since = try JSONValue.parse(request).uniqueValue(named: "since")?.integerValue ?? 0
@@ -37,25 +50,43 @@ final class ConversationSubmissionTests: XCTestCase {
         func acknowledgeConversation(_ request: Data) async throws {}
         func sendOriginalOperation(_ frame: Data, operationID: UUID) async throws -> OriginalOperationResult { .unresolved }
         func conversationFileLimits(originURL: URL) async throws -> ConversationFileLimits {
-            ConversationFileLimits(inlineDecodedBytes: 262_144, uploadCap: cap)
+            try await limitsHook?()
+            return ConversationFileLimits(inlineDecodedBytes: inlineBudget, uploadCap: cap)
         }
         func uploadConversationFile(_ file: ConversationFile, from source: URL, binding: ConversationBinding,
                                     operationID: UUID, limits: ConversationFileLimits, originURL: URL) async throws -> ConversationFile {
             uploadAttempts += 1
             try await uploadHook?()
+            if let uploadError { throw uploadError }
             if failUpload { throw ConversationFileTransportError.server(status: 503, reason: ExactText("Upload interrupted")) }
-            return ConversationFile(id: file.id, name: file.name, byteCount: file.byteCount, sha256: file.sha256, content: .uploaded(ExactText(uploadID)))
+            let handle = ExactText(validateUploadReferences ? UUID().uuidString.lowercased() : uploadID)
+            remoteUploadIDs.insert(handle)
+            return ConversationFile(id: file.id, name: file.name, byteCount: file.byteCount, sha256: file.sha256, content: .uploaded(handle))
         }
         func discardConversationUploads(_ cleanup: ConversationUploadCleanup, originURL: URL) async throws -> ConversationUploadDiscardResult {
             cleanupRequests.append(cleanup)
+            try await cleanupHook?()
             if failCleanup { throw InstallationTransportError.unexpectedServerFrame }
             return ConversationUploadDiscardResult(state: .discarded, discarded: 1)
         }
         func sendDiscussion(_ frame: Data, operationID: UUID) async -> DiscussionOperationResult {
             sent.append((frame, operationID))
+            await sendHook?()
+            if validateUploadReferences {
+                guard let value = try? JSONValue.parse(frame),
+                      let files = value.uniqueValue(named: "files")?.arrayValues else {
+                    return .rejected(reason: ExactText("invalid_files"))
+                }
+                for file in files {
+                    if let handle = file.uniqueValue(named: "upload_id")?.stringValue,
+                       !remoteUploadIDs.contains(handle) {
+                        return .rejected(reason: ExactText("upload_not_found"))
+                    }
+                }
+            }
             return result
         }
-        func acceptedTurn(operation: UUID, text: String, id: String = "2") throws {
+        func acceptedTurn(operation: UUID, text: String, id: String = "2", files: [JSONValue] = []) throws {
             turn = Data(JSONValue.object([
                 JSONMember("v", .number(JSONNumber(lexeme: "1"))), JSONMember("type", .string(ExactText("conversation"))),
                 JSONMember("conversation_seq", .number(JSONNumber(lexeme: "1"))),
@@ -64,7 +95,7 @@ final class ConversationSubmissionTests: XCTestCase {
                 JSONMember("origin", .string(ExactText("origin"))), JSONMember("session_handle", .string(ExactText("handle"))),
                 JSONMember("kind", .string(ExactText("discussion"))), JSONMember("author", .string(ExactText("person"))),
                 JSONMember("event_id", .string(ExactText(id))), JSONMember("op_id", .string(ExactText(operation.uuidString.lowercased()))),
-                JSONMember("text", .string(ExactText(text)))
+                JSONMember("text", .string(ExactText(text))), JSONMember("files", .array(files))
             ]).jsonString.utf8)
         }
     }
@@ -254,16 +285,18 @@ final class ConversationSubmissionTests: XCTestCase {
             async let navigation: Void = core.discardAbandonedUploads(for: binding.request)
             async let refresh: Void = core.discardAbandonedUploads(for: binding.request)
             _ = try await (navigation, refresh)
+            XCTAssertTrue(session.cleanupRequests.isEmpty, "Discard waits for the upload flight to finish")
         }
         do { _ = try await core.submitDiscussion(binding) { _ in URL(fileURLWithPath: "/unused") }; XCTFail("Departure must prevent send") }
         catch { XCTAssertEqual(error as? ConversationError, .pendingSubmission) }
         XCTAssertTrue(session.sent.isEmpty)
+        try await core.discardAbandonedUploads(for: binding.request)
         XCTAssertEqual(session.cleanupRequests.count, 1)
         let restored = try await reopenWithServerCache(domain, context: context, persistence: persistence)
         let thread = try XCTUnwrap(restored.conversationSnapshot(context: context).threads[binding.request])
         XCTAssertEqual(thread.drafts[1]?.text, ExactText("Exact original text"))
-        XCTAssertTrue(thread.drafts[1]?.files.isEmpty == true, "Late preparation rejection must settle already acknowledged cleanup")
-        XCTAssertEqual(thread.uploadGroups?.values.first?.uploaded.count, 1, "Retain the late response as an unready reference, not acceptance")
+        XCTAssertEqual(thread.drafts[1]?.files, [file], "Cleanup never removes original local files")
+        XCTAssertTrue(thread.uploadGroups?.isEmpty ?? true)
         XCTAssertTrue(try restored.snapshot(context: context).intents.isEmpty)
         XCTAssertTrue(try restored.snapshot(context: context).outbox.isEmpty)
     }
@@ -272,8 +305,8 @@ final class ConversationSubmissionTests: XCTestCase {
         let file = ConversationFile(id: ExactText("retained"), name: ExactText("large.bin"), byteCount: 300_000,
             sha256: ExactText(String(repeating: "a", count: 64)), content: .localFile(ExactText("retained")))
         let (context, persistence, domain, binding, session, core) = try await setup(files: [file])
+        session.result = .rejected(reason: ExactText("Refused"))
         _ = try await core.submitDiscussion(binding) { _ in URL(fileURLWithPath: "/unused") }
-        let operation = try XCTUnwrap(session.sent.first?.1)
         let cleanup = try XCTUnwrap(domain.abandonConversationUploads(for: binding.request, context: context).first)
         session.failCleanup = true
         do { try await core.discardAbandonedUploads(for: binding.request); XCTFail("Unknown cleanup must remain unknown") } catch {}
@@ -285,10 +318,277 @@ final class ConversationSubmissionTests: XCTestCase {
         try await core.discardAbandonedUploads(for: binding.request)
         XCTAssertEqual(session.cleanupRequests.map(\.id), [cleanup.id, cleanup.id])
         XCTAssertEqual(session.cleanupRequests.map(\.binding), [binding, binding])
-        XCTAssertEqual(session.sent.count, 1, "Cleanup retries never resend the ambiguous original discussion")
-        XCTAssertEqual(try domain.conversationSnapshot(context: context).threads[binding.request]?.drafts[1]?.disposition, .outcomeUnknown(operation))
-        do { _ = try await core.submitDiscussion(binding) { _ in URL(fileURLWithPath: "/unused") }; XCTFail("Abandoned operation must not resend") } catch {}
+        XCTAssertEqual(session.sent.count, 1, "Cleanup retries never resend the original discussion")
+        XCTAssertEqual(try domain.conversationSnapshot(context: context).threads[binding.request]?.drafts[1]?.disposition, .saved)
+        _ = try await core.submitDiscussion(binding) { _ in URL(fileURLWithPath: "/unused") }
+        XCTAssertEqual(session.sent.count, 2, "Cleanup cannot refuse an explicit new Send")
+    }
+
+    private actor Gate {
+        private var open = false
+        private var waiters: [CheckedContinuation<Void, Never>] = []
+        func wait() async {
+            if open { return }
+            await withCheckedContinuation { waiters.append($0) }
+        }
+        func release() {
+            open = true
+            let pending = waiters
+            waiters = []
+            for waiter in pending { waiter.resume() }
+        }
+    }
+
+    private func largeFile() -> ConversationFile {
+        ConversationFile(id: ExactText("local"), name: ExactText("file.bin"), byteCount: 300_000,
+            sha256: ExactText(String(repeating: "a", count: 64)), content: .localFile(ExactText("local")))
+    }
+
+    private func pendingCleanup(_ domain: ClientRepository, context: ProfileContext,
+                                binding: ConversationBinding, file: ConversationFile) throws {
+        let old = try domain.prepareDiscussion(binding, context: context)
+        try domain.registerConversationUpload(file, binding: binding, operation: old, context: context)
+        try domain.markDiscussionOutcome(binding, operation: old, rejection: ExactText("Refused"), context: context)
+        _ = try domain.abandonConversationUploads(for: binding.request, context: context)
+        try domain.saveConversationDraft(ConversationDraft(binding: binding, text: ExactText("New send"), files: [file]), context: context)
+    }
+
+    func testUploadSendQueuesImmediatelyAndWaitsOnlyForDiscardAlreadyInFlight() async throws {
+        let file = largeFile()
+        let (context, _, domain, binding, session, core) = try await setup(files: [file])
+        try pendingCleanup(domain, context: context, binding: binding, file: file)
+        let entered = Gate(), release = Gate(), limitsRead = Gate()
+        session.cleanupHook = {
+            await entered.release()
+            await release.wait()
+        }
+        let cleanup = Task { try await core.discardAbandonedUploads(for: binding.request) }
+        await entered.wait()
+        let queued = try domain.prepareDiscussion(binding, context: context)
+        XCTAssertEqual(try domain.conversationSnapshot(context: context).threads[binding.request]?.drafts[1]?.disposition,
+                       .submitting(queued), "Send is accepted while housekeeping is outstanding")
+        session.limitsHook = { await limitsRead.release() }
+        session.uploadHook = { try await cleanup.value }
+        session.result = .accepted(turnID: ExactText("2"))
+        let send = Task { try await core.submitDiscussion(binding) { _ in URL(fileURLWithPath: "/unused") } }
+        await limitsRead.wait()
+        XCTAssertEqual(session.uploadAttempts, 0)
+        await release.release()
+        _ = try await send.value
+        try await cleanup.value
+        XCTAssertEqual(session.uploadAttempts, 1)
         XCTAssertEqual(session.sent.count, 1)
+        XCTAssertEqual(try domain.conversationSnapshot(context: context).threads[binding.request]?.drafts[1]?.files, [file])
+    }
+
+    func testPendingDiscardYieldsToNewUploadAndRunsAfterCommit() async throws {
+        let file = largeFile()
+        let (context, _, domain, binding, session, core) = try await setup(files: [file])
+        try pendingCleanup(domain, context: context, binding: binding, file: file)
+        let committed = Gate(), discarded = Gate()
+        session.uploadHook = {
+            try await core.discardAbandonedUploads(for: binding.request)
+            XCTAssertTrue(session.cleanupRequests.isEmpty)
+        }
+        session.sendHook = { await committed.release() }
+        session.cleanupHook = { await committed.wait(); await discarded.release() }
+        session.result = .accepted(turnID: ExactText("2"))
+        _ = try await core.submitDiscussion(binding) { _ in URL(fileURLWithPath: "/unused") }
+        let operation = try XCTUnwrap(session.sent.first?.1)
+        try session.acceptedTurn(operation: operation, text: "New send", files: [.object([
+            JSONMember("name", .string(file.name)), JSONMember("tier", .string(ExactText("upload"))),
+            JSONMember("size", .number(JSONNumber(lexeme: String(file.byteCount)))),
+            JSONMember("sha256", .string(file.sha256)), JSONMember("upload_id", .string(ExactText(session.uploadID)))
+        ])])
+        _ = try await core.resyncAndDrainOutbox()
+        try await core.discardAbandonedUploads(for: binding.request)
+        await discarded.wait()
+        XCTAssertEqual(session.uploadAttempts, 1)
+        XCTAssertEqual(session.sent.count, 1)
+        let history = try domain.conversationSnapshot(context: context).threads[binding.request]?.turns.last
+        XCTAssertEqual(history?.operationID, operation)
+        XCTAssertEqual(history?.files.first?.content, .uploaded(ExactText(session.uploadID)))
+    }
+
+    func testInlineFrozenRetryThenEditAndDepartureRetainsFile() async throws {
+        let file = ConversationFile(id: ExactText("small"), name: ExactText("small.txt"), byteCount: 1,
+            sha256: ExactText("4bf5122f344554c53bde2ebb8cd2b7e3d1600ad631c385a5d7cce23c7785459a"), content: .inline(Data([1])))
+        let (context, _, domain, binding, session, core) = try await setup(files: [file])
+        session.result = .rejected(reason: ExactText("Refused"))
+        _ = try await core.submitDiscussion(binding) { _ in URL(fileURLWithPath: "/unused") }
+        _ = try await core.submitDiscussion(binding) { _ in URL(fileURLWithPath: "/unused") }
+        XCTAssertEqual(session.sent[0].0, session.sent[1].0)
+        XCTAssertEqual(session.sent[0].1, session.sent[1].1)
+        XCTAssertTrue(try domain.conversationSnapshot(context: context).threads[binding.request]?.uploadGroups?.isEmpty ?? true)
+        try domain.saveConversationDraft(ConversationDraft(binding: binding, text: ExactText("Edited"), files: [file]), context: context)
+        XCTAssertTrue(try domain.abandonConversationUploads(for: binding.request, context: context).isEmpty)
+        XCTAssertEqual(try domain.conversationSnapshot(context: context).threads[binding.request]?.drafts[1]?.files, [file])
+    }
+
+    func testFailureBeforeTierSelectionThenEditRetainsInlineFile() async throws {
+        let small = ConversationFile(id: ExactText("small"), name: ExactText("small.txt"), byteCount: 1,
+            sha256: ExactText("4bf5122f344554c53bde2ebb8cd2b7e3d1600ad631c385a5d7cce23c7785459a"), content: .inline(Data([1])))
+        let (context, _, domain, binding, session, core) = try await setup(files: [small, largeFile()])
+        session.inlineBudget = 1
+        session.cap = 1
+        do { _ = try await core.submitDiscussion(binding) { _ in URL(fileURLWithPath: "/unused") }; XCTFail("Published cap applies") }
+        catch { XCTAssertNotNil(error as? ConversationError) }
+        try domain.saveConversationDraft(ConversationDraft(binding: binding, text: ExactText("Edited"), files: [small]), context: context)
+        XCTAssertTrue(try domain.abandonConversationUploads(for: binding.request, context: context).isEmpty)
+        XCTAssertEqual(try domain.conversationSnapshot(context: context).threads[binding.request]?.drafts[1]?.files, [small])
+    }
+
+    func testDepartureDuringLimitsDiscoveryFencesUploadsAndRetainsFiles() async throws {
+        let file = largeFile()
+        let (context, _, domain, binding, session, core) = try await setup(files: [file])
+        session.limitsHook = { _ = try domain.abandonConversationUploads(for: binding.request, context: context) }
+        do { _ = try await core.submitDiscussion(binding) { _ in URL(fileURLWithPath: "/unused") }; XCTFail("Departed preparation cannot upload") }
+        catch { XCTAssertEqual(error as? ConversationError, .pendingSubmission) }
+        XCTAssertEqual(session.uploadAttempts, 0)
+        try await core.discardAbandonedUploads(for: binding.request)
+        XCTAssertEqual(try domain.conversationSnapshot(context: context).threads[binding.request]?.drafts[1]?.files, [file])
+    }
+
+    func testFailedCleanupLeavesDraftEditableAndSendUsable() async throws {
+        let file = largeFile()
+        let (context, _, domain, binding, session, core) = try await setup(files: [file])
+        try pendingCleanup(domain, context: context, binding: binding, file: file)
+        session.failCleanup = true
+        do { try await core.discardAbandonedUploads(for: binding.request); XCTFail("Offline") } catch {}
+        try await MainActor.run {
+            let model = try LivePresentationStore(store: domain, context: context)
+            XCTAssertFalse(model.uploadNeedsReselection(file, for: binding.request, revision: 1))
+            model.updateConversation(for: binding.request, revision: 1, files: [file])
+            model.navigateMessage(from: binding.request, to: nil)
+            model.navigateMessage(from: nil, to: binding.request)
+            XCTAssertEqual(model.conversationDraft(for: binding.request, revision: 1).files, [file])
+        }
+        session.result = .rejected(reason: ExactText("Refused"))
+        _ = try await core.submitDiscussion(binding) { _ in URL(fileURLWithPath: "/unused") }
+        XCTAssertEqual(session.uploadAttempts, 1)
+        XCTAssertEqual(session.sent.count, 1)
+        XCTAssertEqual(try domain.conversationSnapshot(context: context).threads[binding.request]?.drafts[1]?.files, [file])
+    }
+
+    func testLateDiscardCancellationIsDefiniteFailureAndExplicitRetryUploadsAgain() async throws {
+        let file = largeFile()
+        let (context, _, domain, binding, session, core) = try await setup(files: [file])
+        session.uploadError = .server(status: 409, reason: ExactText("upload_discarded"))
+        do { _ = try await core.submitDiscussion(binding) { _ in URL(fileURLWithPath: "/unused") }; XCTFail("Cancelled upload") } catch {}
+        let failed = try XCTUnwrap(domain.conversationSnapshot(context: context).threads[binding.request]?.drafts[1])
+        guard case .rejected = failed.disposition else { return XCTFail("A cancelled upload must offer Retry") }
+        XCTAssertEqual(failed.files, [file])
+        session.uploadError = nil
+        session.result = .rejected(reason: ExactText("Refused"))
+        _ = try await core.submitDiscussion(binding) { _ in URL(fileURLWithPath: "/unused") }
+        XCTAssertEqual(session.uploadAttempts, 2)
+        XCTAssertEqual(session.sent.count, 1)
+    }
+
+    func testInlineSendDoesNotWaitForDiscardInFlight() async throws {
+        let oldFile = largeFile()
+        let (context, _, domain, binding, session, core) = try await setup(files: [oldFile])
+        try pendingCleanup(domain, context: context, binding: binding, file: oldFile)
+        let small = ConversationFile(id: ExactText("inline"), name: ExactText("inline.txt"), byteCount: 1,
+            sha256: ExactText("4bf5122f344554c53bde2ebb8cd2b7e3d1600ad631c385a5d7cce23c7785459a"), content: .inline(Data([1])))
+        try domain.saveConversationDraft(ConversationDraft(binding: binding, text: ExactText("Inline"), files: [small]), context: context)
+        let entered = Gate(), release = Gate()
+        session.cleanupHook = { await entered.release(); await release.wait() }
+        let cleanup = Task { try await core.discardAbandonedUploads(for: binding.request) }
+        await entered.wait()
+        session.result = .rejected(reason: ExactText("Refused"))
+        _ = try await core.submitDiscussion(binding) { _ in URL(fileURLWithPath: "/unused") }
+        XCTAssertEqual(session.sent.count, 1)
+        XCTAssertEqual(session.uploadAttempts, 0)
+        await release.release()
+        try await cleanup.value
+        XCTAssertEqual(try domain.conversationSnapshot(context: context).threads[binding.request]?.drafts[1]?.files, [small])
+    }
+
+    func testPublishedInlineBudgetChoosesUploadWithoutAnInventedThreshold() async throws {
+        let file = ConversationFile(id: ExactText("one"), name: ExactText("one.txt"), byteCount: 1,
+            sha256: ExactText("4bf5122f344554c53bde2ebb8cd2b7e3d1600ad631c385a5d7cce23c7785459a"), content: .inline(Data([1])))
+        let (_, _, _, binding, session, core) = try await setup(files: [file])
+        session.inlineBudget = 0
+        session.result = .rejected(reason: ExactText("Refused"))
+        _ = try await core.submitDiscussion(binding) { _ in URL(fileURLWithPath: "/unused") }
+        XCTAssertEqual(session.uploadAttempts, 1)
+    }
+
+    func testRejectedFrozenUploadRetryRebuildsAfterInFlightDiscardAndDelivers() async throws {
+        let file = largeFile()
+        let (context, _, domain, binding, session, core) = try await setup(files: [file])
+        try pendingCleanup(domain, context: context, binding: binding, file: file)
+        session.validateUploadReferences = true
+        session.result = .rejected(reason: ExactText("Refused"))
+        let cleanupEntered = Gate(), cleanupRelease = Gate(), retryEntered = Gate()
+        session.cleanupHook = {
+            session.remoteUploadIDs.removeAll()
+            await cleanupEntered.release()
+            await cleanupRelease.wait()
+        }
+        _ = try await core.submitDiscussion(binding) { _ in URL(fileURLWithPath: "/unused") }
+        await cleanupEntered.wait()
+        let refused = try XCTUnwrap(domain.conversationSnapshot(context: context).threads[binding.request]?.drafts[1])
+        let firstOperation = try XCTUnwrap(refused.operationID)
+        XCTAssertNotNil(refused.wireFrame)
+        // Model the immediate local acceptance performed by the composer.
+        XCTAssertEqual(try domain.prepareDiscussion(binding, context: context), firstOperation)
+        session.result = .accepted(turnID: ExactText("2"))
+        // This transport boundary is read synchronously on entry to submit.
+        // The core next suspends waiting for the held discard, so releasing its
+        // reply now deterministically invalidates the already-frozen Retry.
+        session.identityReadHook = { Task { await retryEntered.release() } }
+        let retry = Task {
+            try await core.submitDiscussion(binding, using: session) { _ in URL(fileURLWithPath: "/unused") }
+        }
+        await retryEntered.wait()
+        await cleanupRelease.release()
+        do {
+            let result = try await retry.value
+            XCTAssertEqual(result, .accepted(turnID: ExactText("2")))
+        } catch { XCTFail("The requested Retry must deliver after cleanup: \(error)") }
+        XCTAssertEqual(session.uploadAttempts, 2, "Discarded bytes are uploaded again automatically")
+        XCTAssertEqual(session.sent.count, 2)
+        let delivered = try XCTUnwrap(domain.conversationSnapshot(context: context).threads[binding.request]?.drafts[1])
+        guard case .acceptedPendingReplay = delivered.disposition else {
+            return XCTFail("Retry must reach an accepted receipt rather than remain submitting")
+        }
+        XCTAssertNotEqual(delivered.operationID, firstOperation)
+        XCTAssertEqual(delivered.files, [file])
+    }
+
+    func testSecondUploadCancellationInvalidatesFirstHandleAndRetryUploadsBothFiles() async throws {
+        let first = largeFile()
+        let second = ConversationFile(id: ExactText("second"), name: ExactText("second.bin"), byteCount: first.byteCount,
+            sha256: first.sha256, content: .localFile(ExactText("second")))
+        let (context, _, domain, binding, session, core) = try await setup(files: [first])
+        try pendingCleanup(domain, context: context, binding: binding, file: first)
+        try domain.saveConversationDraft(ConversationDraft(binding: binding, text: ExactText("Two files"),
+            files: [first, second]), context: context)
+        session.validateUploadReferences = true
+        session.failCleanup = true
+        session.uploadHook = {
+            if session.uploadAttempts == 2 {
+                // The Server's late revision-wide discard removes A and cancels B.
+                session.remoteUploadIDs.removeAll()
+                throw ConversationFileTransportError.server(status: 409, reason: ExactText("upload_discarded"))
+            }
+        }
+        do { _ = try await core.submitDiscussion(binding) { _ in URL(fileURLWithPath: "/unused") }; XCTFail("Second upload cancelled") }
+        catch {}
+        let failed = try XCTUnwrap(domain.conversationSnapshot(context: context).threads[binding.request]?.drafts[1])
+        guard case .rejected = failed.disposition else { return XCTFail("Cancellation must be retryable") }
+        XCTAssertNil(failed.wireFrame, "No frame was sent for the interrupted preparation")
+        XCTAssertEqual(failed.files, [first, second])
+        session.result = .accepted(turnID: ExactText("2"))
+        let result = try await core.submitDiscussion(binding) { _ in URL(fileURLWithPath: "/unused") }
+        XCTAssertEqual(result, .accepted(turnID: ExactText("2")), "The Server accepts only live upload references")
+        XCTAssertEqual(session.uploadAttempts, 4, "Retry uploads A as well as B despite unconfirmed cleanup")
+        XCTAssertEqual(session.sent.count, 1)
+        let delivered = try XCTUnwrap(domain.conversationSnapshot(context: context).threads[binding.request]?.drafts[1])
+        guard case .acceptedPendingReplay = delivered.disposition else { return XCTFail("Retry must deliver") }
+        XCTAssertEqual(delivered.files, [first, second])
     }
 
 }

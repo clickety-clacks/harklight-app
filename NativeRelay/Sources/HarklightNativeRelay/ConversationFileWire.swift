@@ -58,7 +58,16 @@ public struct ConversationFileWire: Sendable {
         return request
     }
     public func decodeDiscard(_ data: Data, status: Int) throws -> ConversationUploadDiscardResult {
-        let value = try response(data, status: status)
+        let value: JSONValue
+        do { value = try response(data, status: status) }
+        catch let ConversationFileTransportError.server(_, reason)
+            where ["not_found", "unknown_upload", "unknown_group", "upload_discarded", "already_discarded"].contains(reason.rawValue) {
+            return ConversationUploadDiscardResult(state: .discarded, discarded: 0)
+        }
+        if let raw = value.uniqueValue(named: "state")?.stringValue,
+           ["unknown", "already_discarded"].contains(raw.rawValue) {
+            return ConversationUploadDiscardResult(state: .discarded, discarded: 0)
+        }
         guard let raw = value.uniqueValue(named: "state")?.stringValue,
               let state = ConversationUploadDiscardResult.State(rawValue: raw.rawValue) else {
             throw RelayWireError.invalidFrame

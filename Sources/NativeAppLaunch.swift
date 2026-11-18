@@ -2300,7 +2300,6 @@ final class LivePresentationStore {
                 }
             } catch {
                 UIDiagnostics.shared.record("store.navigate \(UIDiagnostics.describe(previous))->\(UIDiagnostics.describe(next)) error=\(error)")
-                conversationError = "Upload cleanup could not be saved. Return to this message and retry; deletion is not confirmed."
                 diagnose(.upload, .uploadCleanup,
                          NativeDiagnosticCauseCode.failureTransition(for: error), error: error,
                          request: previous)
@@ -2354,9 +2353,7 @@ final class LivePresentationStore {
     }
 
     func uploadNeedsReselection(_ file: ConversationFile, for key: RequestKey, revision: UInt64) -> Bool {
-        (conversationThreads[key]?.uploadGroups ?? [:]).values.contains {
-            $0.binding.revision == revision && $0.cleanupID != nil && $0.originals.contains(where: { $0.id == file.id })
-        }
+        false
     }
 
     func hasUnreadyUploadReference(for key: RequestKey, revision: UInt64) -> Bool {
@@ -2409,11 +2406,6 @@ final class LivePresentationStore {
                 return
             }
             let binding = ConversationBinding(request: key, revision: revision)
-            guard !hasPendingUploadCleanup(for: key, revision: revision),
-                  !hasUnreadyUploadReference(for: key, revision: revision) else {
-                conversationError = "Upload files are not ready to resend. Reconcile cleanup/history or remove and reselect them; your text draft is retained."
-                return
-            }
             if permitsDelivery {
                 guard !sendingDiscussionBindings.contains(binding), let files = conversationFiles else { return }
                 let context = profileContext
