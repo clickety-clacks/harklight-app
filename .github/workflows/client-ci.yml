@@ -143,7 +143,7 @@ jobs:
         env:
           HARKLIGHT_ONLY_TESTING: >-
             HarklightUITests/AdaptiveDuoNavigationUITests/testLandscapeSelectionKeepsListAndDetailVisibleAcrossMessages
-            HarklightUITests/AdaptiveDuoNavigationUITests/testSelectionFromActualOverlaidListOpensDetailAndDismissesList
+            HarklightUITests/AdaptiveDuoNavigationUITests/testSelectingAnotherMessageFromPortraitOverlayUpdatesDetailAndDismissesIt
             HarklightConversationUITests/ConversationSampleUITests/testPriorityRowsAndNewMessageAreaRenderIn250PointListColumn
         run: Scripts/verify.sh test
 
