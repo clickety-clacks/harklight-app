@@ -452,21 +452,25 @@ final class ConversationSampleUITests: XCTestCase {
         ]
         for (scenario, label) in scenarios {
             let app = XCUIApplication()
-            app.launchArguments = ["--harklight-test-inbox-list-column",
-                "--harklight-test-inbox-list-state=replyItemFullWidth",
-                "--harklight-test-reply-item-area",
-                "--harklight-test-normal-reply-priority=\(scenario)"]
+            let historical = scenario == "historical" || scenario == "history-scoreless"
+            app.launchArguments = (historical ? ["--harklight-samples"] : [
+                "--harklight-test-inbox-list-column",
+                "--harklight-test-inbox-list-state=replyItemFullWidth"
+            ]) + ["--harklight-test-reply-item-area",
+                  "--harklight-test-normal-reply-priority=\(scenario)"]
             app.launch()
+            if historical { app.tabBars.buttons["Replied"].tap() }
             let row = app.descendants(matching: .any)["normal-reply-item-sample-information-0"]
             let list = app.collectionViews.firstMatch
             XCTAssertTrue(list.waitForExistence(timeout: 10), app.debugDescription)
             for _ in 0..<8 where !row.isHittable { list.swipeUp() }
             XCTAssertTrue(row.isHittable, app.debugDescription)
-            let badges = row.descendants(matching: .any).matching(
+            let badges = row.staticTexts.matching(
                 NSPredicate(format: "identifier BEGINSWITH 'normal-reply-item-priority-'"))
             if let label {
-                XCTAssertTrue(badges.firstMatch.waitForExistence(timeout: 3), app.debugDescription)
-                XCTAssertTrue(badges.firstMatch.label.contains(label), app.debugDescription)
+                let exists = badges.firstMatch.waitForExistence(timeout: 3)
+                XCTAssertTrue(exists, app.debugDescription)
+                if exists { XCTAssertEqual(badges.firstMatch.label, label, app.debugDescription) }
             } else {
                 XCTAssertEqual(badges.count, 0, app.debugDescription)
             }
