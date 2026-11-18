@@ -119,10 +119,6 @@ final class PrototypeStore {
                 }
                 try Self.seedServerRetractionFixture(serverRetractionFixture, in: store, context: profile)
             }
-            if resetFixtureAtLaunch,
-               ProcessInfo.processInfo.arguments.contains("--harklight-test-retraction-expiry-relaunch") {
-                try Self.seedRetractionExpiryRelaunchFixture(in: store, fixtures: fixtures, context: profile)
-            }
 #endif
             createdStore = store
             createdPort = AttentionDomainPort(store: store)
@@ -268,33 +264,6 @@ final class PrototypeStore {
         try data.write(to: directory.appendingPathComponent("native-server-retraction-readback.json"),
                        options: .atomic)
         return "Server retraction persisted: \(phase)"
-    }
-
-    private static func seedRetractionExpiryRelaunchFixture(in store: ClientRepository,
-                                                           fixtures: FixtureSet,
-                                                           context: ProfileContext) throws {
-        guard let request = fixtures.requests.first(where: {
-            $0.key.messageID.rawValue == "facilities-01"
-        }) else {
-            throw ConversationError.missingRequest
-        }
-
-        let binding = ConversationBinding(request: request.key, revision: 1)
-        let sessionHandle = ExactText("retraction-expiry-relaunch-fixture")
-        let terminalTurn = ExactText("retraction-expiry-relaunch-terminal")
-        let firstSequence = try store.conversationSnapshot(context: context).cursor + 1
-        let terminalSequence = firstSequence + 1
-        let retractionSequence = terminalSequence + 1
-        let retractedAtMilliseconds = UInt64(
-            Date().addingTimeInterval(-86_400 + 180).timeIntervalSince1970 * 1_000)
-
-        try store.applyConversation(ConversationEvent(sequence: firstSequence, binding: binding,
-            fact: .request(sessionHandle: sessionHandle, payload: request.originalPayload)), context: context)
-        try store.applyConversation(ConversationEvent(sequence: terminalSequence, binding: binding,
-            fact: .terminal(turn: terminalTurn, author: .origin, state: .cleared)), context: context)
-        try store.applyConversation(ConversationEvent(sequence: retractionSequence, binding: binding,
-            fact: .retraction(turn: terminalTurn, terminalSequence: terminalSequence),
-            retractedAtMilliseconds: retractedAtMilliseconds), context: context)
     }
 #endif
 

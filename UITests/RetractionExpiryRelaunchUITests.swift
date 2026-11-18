@@ -2,36 +2,12 @@ import XCTest
 
 @MainActor
 final class RetractionExpiryRelaunchUITests: XCTestCase {
-    func testPersistedRetractionExpiresAfterAppProcessRelaunch() async throws {
-        XCUIDevice.shared.orientation = .portrait
-        let app = XCUIApplication()
-        app.launchArguments = [
-            "--reset-attention-fixture",
-            "--harklight-test-retraction-expiry-relaunch"
-        ]
-        app.launch()
-
-        let row = app.descendants(matching: .any)["request-row-facilities-01"]
-        XCTAssertTrue(row.waitForExistence(timeout: 20), app.debugDescription)
-        let retracted = app.descendants(matching: .any)["inbox-retracted-pill"]
-        XCTAssertTrue(retracted.waitForExistence(timeout: 5), app.debugDescription)
-
-        app.terminate()
-        XCTAssertTrue(app.wait(for: .notRunning, timeout: 10), "The app process must terminate before the deadline wait.")
-        try await Task.sleep(for: .seconds(195))
-
-        app.launchArguments = ["--attention-fixture"]
-        app.launch()
-        XCTAssertTrue(app.wait(for: .runningForeground, timeout: 15), app.debugDescription)
-        let unaffectedRow = app.descendants(matching: .any)["request-row-review-01"]
-        XCTAssertTrue(unaffectedRow.waitForExistence(timeout: 10), app.debugDescription)
-        XCTAssertFalse(row.waitForExistence(timeout: 3),
-                       "The retracted row must be absent after a process relaunch past its persisted 24-hour deadline.")
-        XCTAssertFalse(retracted.waitForExistence(timeout: 3), app.debugDescription)
-    }
-
-
     func testServerRetractionExpiresInForegroundAndAfterProcessRelaunch() async throws {
+        // Evidence run only: Scripts/test-server-retraction-expiry.sh installs the
+        // Server-produced fixture this test needs and sets this variable.
+        guard ProcessInfo.processInfo.environment["HARKLIGHT_SERVER_RETRACTION_EVIDENCE"] == "1" else {
+            throw XCTSkip("Requires the Server-produced retraction fixture from Scripts/test-server-retraction-expiry.sh.")
+        }
         XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()
         app.launchArguments = [

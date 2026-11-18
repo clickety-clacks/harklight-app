@@ -99,7 +99,7 @@ print(devices[0]["udid"])
 fi
 export HARKLIGHT_SIMULATOR_ID
 
-if ! HARKLIGHT_ONLY_TESTING="HarklightUITests/RetractionExpiryRelaunchUITests/testServerRetractionExpiresInForegroundAndAfterProcessRelaunch HarklightTests/RetractionPresentationTests/testRetractionExpiryUsesItsTimestampAndKeepsRowsWithoutOne HarklightTests/RetractionPresentationTests/testClearingARetractedRowIsDeviceLocalListStateOnly HarklightTests/RetractionPresentationTests/testRetractionJoinsBothDurableOrdersWithoutRewritingQueuedBindingsOrReopening" \
+if ! TEST_RUNNER_HARKLIGHT_SERVER_RETRACTION_EVIDENCE=1 HARKLIGHT_ONLY_TESTING="HarklightUITests/RetractionExpiryRelaunchUITests/testServerRetractionExpiresInForegroundAndAfterProcessRelaunch HarklightTests/RetractionPresentationTests/testRetractionExpiryUsesItsTimestampAndKeepsRowsWithoutOne HarklightTests/RetractionPresentationTests/testClearingARetractedRowIsDeviceLocalListStateOnly HarklightTests/RetractionPresentationTests/testRetractionJoinsBothDurableOrdersWithoutRewritingQueuedBindingsOrReopening" \
     "$APP_ROOT/Scripts/verify.sh" test >"$APP_LOG" 2>&1; then
     cat "$APP_LOG" >&2
     fail "The focused native-app retraction test failed. Evidence: $RUN_ROOT"
