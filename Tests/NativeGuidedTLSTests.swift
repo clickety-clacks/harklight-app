@@ -1928,14 +1928,25 @@ final class NativeGuidedTLSTests: XCTestCase {
         }
         await fulfillment(of: [sendStarted], timeout: 5)
 
-        // A file still downloads during catch-up, over HTTPS only.
+        // A file still downloads during catch-up, over HTTPS only. The file
+        // origin arrives in the reply to the catch-up request, which the client
+        // may not have read yet when the relay sees that request; until then a
+        // fetch reports `inactive`. Any other error fails at once.
         let fileCompleted = expectation(description: "File downloads before catch-up finishes")
         let download = Task { @MainActor in
             defer { fileCompleted.fulfill() }
             let file = ConversationFile(id: ExactText("file"), name: ExactText("file.txt"),
                 byteCount: UInt64(fileBytes.count), sha256: ExactText(fileHash),
                 content: .uploaded(ExactText(UUID().uuidString)))
-            try await lifecycle.fetchConversationFile(file, to: destination, expected: context)
+            let deadline = Date().addingTimeInterval(5)
+            while true {
+                do {
+                    try await lifecycle.fetchConversationFile(file, to: destination, expected: context)
+                    break
+                } catch NativeRelayCoreError.inactive where Date() < deadline {
+                    await Task.yield()
+                }
+            }
             XCTAssertFalse(refreshCompleted)
         }
         await fulfillment(of: [fileCompleted], timeout: 5)
@@ -2725,11 +2736,17 @@ final class NativeGuidedTLSTests: XCTestCase {
         let starts = try requests.snapshot().map { try JSONValue.parse($0) }.filter {
             $0.uniqueValue(named: "type")?.stringValue?.rawValue == "conversation_open"
         }.compactMap { $0.uniqueValue(named: "since")?.integerValue }
-        // Each reconnect asks only for the uncommitted suffix. Once the
-        // acknowledged catch-up completes, any later catch-up starts at the
-        // committed position 3 and never asks for saved history again.
-        XCTAssertEqual(Array(starts.prefix(3)), [0, 1, 2], "Reconnect requests only each uncommitted suffix.")
-        XCTAssertTrue(starts.dropFirst(3).allSatisfy { $0 == 3 },
+        // Each reconnect asks only for the uncommitted suffix. The relay closes
+        // the socket right after writing a turn, so the client may lose that
+        // turn with the closed connection and ask from the same position
+        // again; it must never go back to saved history or ask past what was
+        // delivered (one turn per request here). Once the acknowledged
+        // catch-up completes, any later catch-up starts at position 3.
+        XCTAssertEqual(starts.first, 0, "The first catch-up starts from the empty cache: \(starts)")
+        XCTAssertTrue(zip(starts, starts.dropFirst()).allSatisfy { $1 >= $0 && $1 <= $0 + 1 },
+                      "Reconnects never re-request saved history or skip undelivered turns: \(starts)")
+        XCTAssertTrue(starts.contains(2), "Catch-up reached the last undelivered turn: \(starts)")
+        XCTAssertTrue(starts.drop { $0 < 3 }.allSatisfy { $0 == 3 },
                       "A catch-up after the committed prefix starts at that prefix: \(starts)")
         let loaded = try await FileServerStateCache(identity: context.identity, fileURL: cacheURL).load()
         let snapshot = try XCTUnwrap(loaded)
