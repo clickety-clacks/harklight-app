@@ -2324,7 +2324,11 @@ struct InboxList: View {
 
         // Full swipe invokes the first action. Keep the applicable action first
         // while retaining the unavailable controls as visible, disabled buttons.
-        if row.isRetracted {
+        // A row that can never act here (Replied: an accepted answer is final)
+        // has no swipe action at all.
+        if !canAct {
+            EmptyView()
+        } else if row.isRetracted {
             clearButton
             seenButton
             noCommentButton
