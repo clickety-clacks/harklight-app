@@ -21,7 +21,9 @@ final class NativeClientDiagnosticsVersionUITests: XCTestCase {
         let previewQuery = app.descendants(matching: .any)
             .matching(NSPredicate(format: "label CONTAINS %@", "app_version="))
         let preview = previewQuery.firstMatch
-        XCTAssertTrue(preview.waitForExistence(timeout: 5), app.debugDescription)
+        // The system share sheet draws its preview in a separate process,
+        // which can take several seconds on a slow simulator host.
+        XCTAssertTrue(preview.waitForExistence(timeout: 10), app.debugDescription)
         let sharedText = preview.label
         XCTAssertTrue(sharedText.contains("Harklight client diagnostics"), sharedText)
 

@@ -59,7 +59,9 @@ jobs:
       group: harklight-heavy-ios-ui
       cancel-in-progress: false
     runs-on: xcode-27
-    timeout-minutes: 120
+    # Measured 109 minutes on a slow runner (run 44294069733). The limit only
+    # stops a stuck runner; the per-test allowance catches a hung test.
+    timeout-minutes: 160
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -70,9 +72,10 @@ jobs:
       - name: Build and test iOS UI suite
         env:
           HARKLIGHT_ONLY_TESTING: HarklightUITests
-          # Longest passing UI test measured 364 s to over 420 s. A test that
-          # runs past this many seconds fails by itself instead of holding the job.
-          HARKLIGHT_TEST_TIME_ALLOWANCE: "600"
+          # Slowest passing UI test measured 509 s on a slow runner (run
+          # 44294069733); this is about twice that. A test that runs past this
+          # many seconds fails by itself instead of holding the job.
+          HARKLIGHT_TEST_TIME_ALLOWANCE: "1020"
           HARKLIGHT_BOOT_SIMULATOR_FIRST: "1"
         run: Scripts/verify.sh test
 
@@ -85,7 +88,8 @@ jobs:
       group: harklight-heavy-ios-ui
       cancel-in-progress: false
     runs-on: xcode-27
-    timeout-minutes: 60
+    # Measured 58 minutes on a slow runner (run 44294069733).
+    timeout-minutes: 120
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -96,7 +100,7 @@ jobs:
       - name: Build and test iOS conversation UI suite
         env:
           HARKLIGHT_ONLY_TESTING: HarklightConversationUITests
-          HARKLIGHT_TEST_TIME_ALLOWANCE: "600"
+          HARKLIGHT_TEST_TIME_ALLOWANCE: "1020"
           HARKLIGHT_BOOT_SIMULATOR_FIRST: "1"
         run: Scripts/verify.sh test
 
