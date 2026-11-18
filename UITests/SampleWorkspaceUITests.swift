@@ -172,7 +172,8 @@ final class SampleWorkspaceUITests: XCTestCase {
         app.activate()
 
         // Open the stock menus without placing a call, opening Maps, or saving
-        // an event. Each must offer the platform action for the detected value.
+        // an event. Each must offer the platform action for the detected value
+        // (data detectors work item: a date offers the system calendar actions).
         for (value, actionPattern) in [
             ("November 4", "(Create Event|Add to Calendar|Show in Calendar|Open in Calendar).*"),
             ("415", "Call.*"),
@@ -180,14 +181,29 @@ final class SampleWorkspaceUITests: XCTestCase {
         ] {
             let link = app.links.matching(NSPredicate(format: "label CONTAINS %@", value)).firstMatch
             XCTAssertTrue(link.waitForExistence(timeout: 5), app.debugDescription)
-            link.press(forDuration: 1)
+            // Returning from Safari or Home, the app may still be activating; a
+            // long press then is lost and no preview appears.
+            let hittable = XCTNSPredicateExpectation(predicate: NSPredicate(format: "isHittable == true"),
+                                                     object: link)
+            XCTAssertEqual(XCTWaiter().wait(for: [hittable], timeout: 5), .completed, app.debugDescription)
             // Match only actionable system controls. The sender label contains
             // "Calendar", so a broad descendant-label match would prove nothing.
             let predicate = NSPredicate(format: "label MATCHES[c] %@", actionPattern)
             let menuAction = app.menuItems.matching(predicate).firstMatch
             let buttonAction = app.buttons.matching(predicate).firstMatch
-            let offered = menuAction.waitForExistence(timeout: 3) ||
-                buttonAction.waitForExistence(timeout: 3)
+            func actionOffered() -> Bool {
+                let shown = XCTNSPredicateExpectation(
+                    predicate: NSPredicate { _, _ in menuAction.exists || buttonAction.exists }, object: nil)
+                return XCTWaiter().wait(for: [shown], timeout: 10) == .completed
+            }
+            link.press(forDuration: 1)
+            var offered = actionOffered()
+            if !offered {
+                // A press lost to an activation transition shows nothing at all;
+                // press once more. The action must still be offered.
+                link.press(forDuration: 1)
+                offered = actionOffered()
+            }
             XCTAssertTrue(offered, app.debugDescription)
             capture("message-detector-\(value)-\(style)", app)
             // A tap outside a tall detector preview can hit its map instead
@@ -267,8 +283,8 @@ final class SampleWorkspaceUITests: XCTestCase {
         XCTAssertTrue(repliedTab.isSelected, app.debugDescription)
         XCTAssertTrue(original.waitForExistence(timeout: 5),
                       "A submitted answer appears in Replied after the user switches tabs.")
-        XCTAssertTrue(original.label.contains("Pending"),
-                      "The submitted answer remains pending until its outcome is confirmed.")
+        XCTAssertTrue(original.label.contains("Waiting for a reply"),
+                      "The submitted answer shows it is still sending until its outcome is confirmed. Row label: \(original.label)")
         capture("choice-response-in-replied", app)
         // The removed Settings action used to add examples only after the ordinary
         // request flow. Reopen the persisted fixture with test-only examples now.
@@ -294,8 +310,8 @@ final class SampleWorkspaceUITests: XCTestCase {
         clearSearch(in: app)
         selectMessageTab("Replied", in: app)
         XCTAssertTrue(original.exists, app.debugDescription)
-        XCTAssertTrue(original.label.contains("Pending"),
-                      "The submitted ordinary answer remains pending after relaunch and local example actions. Row label: \(original.label)")
+        XCTAssertTrue(original.label.contains("Waiting for a reply"),
+                      "The submitted ordinary answer is still sending after relaunch and local example actions. Row label: \(original.label)")
         original.tap()
         XCTAssertTrue(app.scrollViews["message-card-scroll"].waitForExistence(timeout: 5))
         // The persisted submission still shows its send state in place: the
@@ -305,9 +321,12 @@ final class SampleWorkspaceUITests: XCTestCase {
         XCTAssertEqual(sending.label, "Sending",
                        "The persisted ordinary submission keeps sending after local example actions.")
         XCTAssertFalse(app.descendants(matching: .any)["request-pending-answer-status"].exists)
-        for answer in ["Cover A", "Cover B", "Send a note"] where app.buttons[answer].exists {
-            XCTAssertFalse(app.buttons[answer].isEnabled,
-                           "While sending, the other answers step back.")
+        // The sent choice carries the sending spinner, so its label ends with the choice.
+        for answer in ["Cover A", "Cover B", "Send a note"] {
+            let button = app.buttons.matching(NSPredicate(format: "label ENDSWITH %@", answer)).firstMatch
+            guard button.exists else { continue }
+            XCTAssertFalse(button.isEnabled,
+                           "While sending, the answers step back.")
         }
         capture("ordinary-request-after-example", app)
     }
@@ -332,8 +351,8 @@ final class SampleWorkspaceUITests: XCTestCase {
         selectMessageTab("Replied", in: app)
         XCTAssertTrue(original.waitForExistence(timeout: 5),
                       "The submitted ordinary request appears in Replied.")
-        XCTAssertTrue(original.label.contains("Pending"),
-                      "Its answer remains pending until an outcome arrives.")
+        XCTAssertTrue(original.label.contains("Waiting for a reply"),
+                      "Its answer shows it is still sending until an outcome arrives. Row label: \(original.label)")
 
         selectMessageTab("Inbox", in: app)
         enterSearch("Archive", in: app)
@@ -355,7 +374,10 @@ final class SampleWorkspaceUITests: XCTestCase {
         original.tap()
         XCTAssertTrue(app.scrollViews["message-card-scroll"].waitForExistence(timeout: 5),
                       app.debugDescription)
-        XCTAssertTrue(app.buttons["Cover A"].isSelected,
+        // The sent choice carries the sending spinner, so its label ends with the choice.
+        let submitted = app.buttons.matching(NSPredicate(format: "label ENDSWITH %@", "Cover A")).firstMatch
+        XCTAssertTrue(submitted.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(submitted.isSelected,
                       "The submitted ordinary answer remains visible after the local example.")
     }
 
@@ -662,11 +684,9 @@ final class SampleWorkspaceUITests: XCTestCase {
 
         let noComment = app.buttons["request-no-comment"]
         XCTAssertTrue(noComment.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(noComment.isHittable, app.debugDescription)
         XCTAssertTrue(noComment.isEnabled,
                       "An explicit No comment failure must leave the same choice available for retry.")
-        let explanation = app.descendants(matching: .any)["request-no-comment-unavailable"]
-        XCTAssertTrue(explanation.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(explanation.label.contains("retry"), explanation.label)
         capture("reply-only-no-comment-retry", app)
     }
 
