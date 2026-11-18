@@ -28,8 +28,9 @@ struct FreeRenderedHost: View {
             .accessibilityValue(fixture.phase)
             .onChange(of: fixture.viewModel.conversation(for: fixture.olderKey)?.accountReadThroughConversationSequence) { _, turn in
                 guard let turn, turn > 0 else { return }
-                do { try fixture.replayHistoryAfterObservedRead() }
-                catch { preconditionFailure("Free read replay failed: \(error)") }
+                // A mismatch fails the test's read check instead of stopping the host.
+                do { try fixture.replayHistoryAfterObservedRead(readThrough: turn) }
+                catch { fixture.phase = "Free read replay failed: \(error)" }
             }
     }
 }
@@ -139,19 +140,18 @@ private final class FreeRenderedFixture {
         try setView(Data(contentsOf: url))
     }
 
-    func replayHistoryAfterObservedRead() throws {
+    func replayHistoryAfterObservedRead(readThrough turn: UInt64) throws {
         guard !legacy, phase.contains("unread") else { return }
+        // This fixture has no server, so the production chat's actual read effect
+        // records the read in its own store and queues nothing to acknowledge.
         let snapshot = try domain.conversationSnapshot(context: context)
-        guard let pending = snapshot.pendingChatReadPositions.first(where: { $0.request == olderKey }),
-              pending.readThroughConversationSequence == 2 else {
+        guard turn == 2,
+              !snapshot.pendingChatReadPositions.contains(where: { $0.request == olderKey }) else {
             throw ConversationError.conflict
         }
-        // This is a generated acknowledgement at the captured response's read
-        // position, triggered only by the production chat's actual read effect.
-        try domain.acceptConversationReadPosition(pending, serverPosition: 2, context: context)
         try setCapturedView("free-history")
         try viewModel.refreshFromDurableStore()
-        phase = "Captured history view · generated acknowledgement · read=2"
+        phase = "Captured history view · local read · read=2"
     }
 
     private func populateLegacy() throws {
