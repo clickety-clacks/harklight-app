@@ -1,5 +1,6 @@
 import AttentionDomain
 import Foundation
+import SwiftUI
 import XCTest
 @testable import Harklight
 
@@ -31,6 +32,45 @@ final class MessageMetadataPresentationTests: XCTestCase {
                 style: style, showsEditor: false, isReadOnly: true, failed: false), .card)
             XCTAssertEqual(MessageChoiceAppearance.writtenReply(
                 style: style, showsEditor: false, isReadOnly: false, failed: true), .card)
+        }
+    }
+
+    func testPrimaryForegroundContrastsWithAccentAndSavedPaneWhenEnabled() throws {
+        for scheme in [ColorScheme.light, .dark] {
+            let palette = HarklightDesignSystem.palette(for: scheme)
+            let accent = HarklightRGBA(token: palette.color.amber)
+            let pane = HarklightRGBA(token: palette.derived.replyPane)
+            let paneComposite = pane.mixed(pane.alpha, over: accent)
+            for hasSavedReply in [false, true] {
+                let appearance = hasSavedReply
+                    ? MessageChoiceAppearance.writtenReply(style: .primary, showsEditor: false,
+                                                           isReadOnly: false, failed: false)
+                    : MessageChoiceAppearance(style: .primary)
+                for isEnabled in [true, false] {
+                    let foreground = appearance.foregroundToken(for: scheme, isEnabled: isEnabled)
+                    let replyForeground = appearance.savedReplyForegroundToken(
+                        for: scheme, isEnabled: isEnabled)
+                    if isEnabled {
+                        XCTAssertEqual(foreground, palette.color.onBeam)
+                        XCTAssertGreaterThanOrEqual(HarklightRGBA.contrast(
+                            HarklightRGBA(token: try XCTUnwrap(foreground)), accent), 4.5)
+                        if hasSavedReply {
+                            XCTAssertEqual(replyForeground, palette.color.onAccent)
+                            XCTAssertGreaterThanOrEqual(HarklightRGBA.contrast(
+                                HarklightRGBA(token: try XCTUnwrap(replyForeground)), paneComposite), 4.5)
+                        }
+                    } else {
+                        XCTAssertNil(foreground, "Disabled primary labels and rings follow the system foreground.")
+                        XCTAssertNil(replyForeground, "Disabled summaries follow the system foreground too.")
+                    }
+                }
+            }
+            for appearance in [MessageChoiceAppearance.destructive, .card] {
+                for isEnabled in [true, false] {
+                    XCTAssertNil(appearance.foregroundToken(for: scheme, isEnabled: isEnabled))
+                    XCTAssertNil(appearance.savedReplyForegroundToken(for: scheme, isEnabled: isEnabled))
+                }
+            }
         }
     }
 
