@@ -194,6 +194,32 @@ final class HarklightTests: XCTestCase {
     }
 
     @MainActor
+    func testLiveInboxRowCarriesBaselinePriorityWithoutScore() throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                                       personID: ExactText("baseline-reader"),
+                                       deviceID: ExactText("baseline-device"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let store = try ClientRepository(context: context,
+                                         persistence: MemoryPendingActionPersistence())
+        let key = RequestKey(accountScope: identity.personID,
+                             senderID: ExactText("agent"), messageID: ExactText("baseline"))
+        let payload = try JSONValue.parse(Data(#"{"title":"Baseline message","urgency":"low"}"#.utf8))
+        try store.apply(RelayEvent(sequence: 1,
+            body: .delivery(StoredRequest(key: key, originalPayload: payload), .message)), context: context)
+        try store.setInboxView(InboxView(revision: ExactText("baseline-view"),
+            algorithm: ExactText("baseline"), basis: ExactText("selected"),
+            entries: [InboxViewEntry(key: key, priority: .now)]), context: context)
+
+        let live = try LivePresentationStore(store: store, context: context)
+        let row = try XCTUnwrap(live.inboxRows.first { $0.key == key })
+        XCTAssertEqual(row.inboxPriority, .now,
+                       "The list and New area must receive the Server priority through the live row projection.")
+        XCTAssertNil(row.inboxScore)
+        XCTAssertEqual(InboxPriorityDisplay.forEntry(score: row.inboxScore,
+                                                    priority: row.inboxPriority), .urgent)
+    }
+
+    @MainActor
     func testModelFallbackViewDisplaysServerPriorityWithoutScore() throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
                                        personID: ExactText("fallback-reader"),
