@@ -34,6 +34,28 @@ final class InboxVisualRulesTests: XCTestCase {
         XCTAssertNil(InboxPriorityDisplay.forScore(.infinity))
     }
 
+    func testServerEntryPriorityFallsBackOnlyWhenScoreIsUnusable() {
+        let priorities: [(InboxMessagePriority, InboxPriorityDisplay?)] = [
+            (.low, .low), (.normal, nil), (.high, .high), (.now, .urgent)
+        ]
+        for (priority, expected) in priorities {
+            XCTAssertEqual(InboxPriorityDisplay.forEntry(score: nil, priority: priority), expected)
+            for score in [-0.001, 1.001, Double.nan, Double.infinity] {
+                XCTAssertEqual(InboxPriorityDisplay.forEntry(score: score, priority: priority), expected)
+            }
+            // A usable Normal score omits the label even with an Urgent priority.
+            XCTAssertNil(InboxPriorityDisplay.forEntry(score: 0.50, priority: priority))
+            XCTAssertEqual(InboxPriorityDisplay.forEntry(score: 0.75, priority: priority), .high)
+        }
+        for (score, expected) in [(0.10, InboxPriorityDisplay.low), (0.75, .high), (0.95, .urgent)] {
+            XCTAssertEqual(InboxPriorityDisplay.forEntry(score: score, priority: nil), expected)
+        }
+        XCTAssertNil(InboxPriorityDisplay.forEntry(score: 0.50, priority: nil))
+        XCTAssertNil(InboxPriorityDisplay.forEntry(score: nil, priority: nil))
+        XCTAssertNil(InboxPriorityDisplay.forEntry(
+            score: nil, priority: InboxMessagePriority(rawValue: "unknown")))
+    }
+
     func testServerTierSelectsItsMatchingInboxRowStyle() {
         XCTAssertEqual(AttentionTier.top.inboxRowStyleTier, .top)
         XCTAssertEqual(AttentionTier.middle.inboxRowStyleTier, .middle)

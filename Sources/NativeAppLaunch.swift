@@ -2658,6 +2658,7 @@ final class LivePresentationStore {
                     since: progress.since)
             },
             tier: .middle,
+            inboxPriority: request.inboxPriority,
             inboxScore: request.inboxScore,
             inboxReplyScores: request.inboxReplyScores,
             thread: request.inboxThread,

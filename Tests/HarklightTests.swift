@@ -224,7 +224,7 @@ final class HarklightTests: XCTestCase {
         XCTAssertEqual(request.inboxPriority, .normal,
                        "The visible level comes from the post-attenuation view, not urgency.")
         XCTAssertEqual(request.inboxScore, 0.75)
-        XCTAssertEqual(InboxPriorityDisplay.forScore(request.inboxScore), .high)
+        XCTAssertEqual(InboxPriorityDisplay.forEntry(score: request.inboxScore, priority: request.inboxPriority), .high)
         XCTAssertEqual(request.inboxThread, ExactText("review"))
         XCTAssertEqual(request.inboxDueAtMilliseconds, 1_793_300_000_000)
         XCTAssertEqual(request.inboxReason, ExactText("server order"))
@@ -243,8 +243,9 @@ final class HarklightTests: XCTestCase {
         let legacyRequest = try XCTUnwrap(port.observe(context: port.context).requests.first)
         XCTAssertEqual(legacyRequest.inboxPriority, .now)
         XCTAssertNil(legacyRequest.inboxScore)
-        XCTAssertNil(InboxPriorityDisplay.forScore(legacyRequest.inboxScore),
-                     "A legacy categorical priority does not substitute for an absent score.")
+        XCTAssertEqual(InboxPriorityDisplay.forEntry(score: legacyRequest.inboxScore,
+                                                    priority: legacyRequest.inboxPriority), .urgent,
+                       "The Server priority supplies the level when its score is absent.")
         XCTAssertFalse(try port.observe(context: port.context).showsBasicOrderMarker,
                        "Selected basis must not show the fallback-only marker.")
 
