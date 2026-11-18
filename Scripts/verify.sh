@@ -83,6 +83,17 @@ case "$ACTION" in
                 set -- "$@" "-only-testing:$test_id"
             done
         fi
+        # A test that runs past this many seconds fails by itself instead of holding the run.
+        if [ -n "${HARKLIGHT_TEST_TIME_ALLOWANCE:-}" ]; then
+            set -- "$@" -test-timeouts-enabled YES \
+                -default-test-execution-time-allowance "$HARKLIGHT_TEST_TIME_ALLOWANCE" \
+                -maximum-test-execution-time-allowance "$HARKLIGHT_TEST_TIME_ALLOWANCE"
+        fi
+        # Start tests on a fully booted simulator. A UI test runner started while
+        # the device is still finishing its boot can stall before its first test.
+        if [ "${HARKLIGHT_BOOT_SIMULATOR_FIRST:-}" = 1 ]; then
+            xcrun simctl bootstatus "$DEVICE_ID" -b
+        fi
         exec xcodebuild -project "$PROJECT" -scheme "$SCHEME" -destination "$DESTINATION" \
             -derivedDataPath "$DERIVED_DATA" -collect-test-diagnostics never CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- "$@" test
         ;;
