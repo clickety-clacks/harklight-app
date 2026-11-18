@@ -1344,6 +1344,7 @@ private struct RequestDetailHeading: View {
 }
 
 private struct RequestDetailMetadata: View {
+    let inboxPriority: InboxMessagePriority?
     let inboxScore: Double?
     let messageType: MessageTypeValue?
     let messageKind: MessageKindValue?
@@ -1355,7 +1356,7 @@ private struct RequestDetailMetadata: View {
 
     var body: some View {
         Group {
-            if let priorityLabel = InboxPriorityDisplay.forScore(inboxScore) {
+            if let priorityLabel = InboxPriorityDisplay.forEntry(score: inboxScore, priority: inboxPriority) {
                 Label {
                     Text(priorityLabel.title)
                 } icon: {
@@ -2257,7 +2258,8 @@ struct LiveRequestDetail: View {
                     title: request.title?.rawValue ?? "Message", createdAt: request.createdAt,
                     messageType: context.messageType,
                     onOpenDetails: { requestDetailsPresented = true })
-                RequestDetailMetadata(inboxScore: request.inboxScore,
+                RequestDetailMetadata(inboxPriority: request.inboxPriority,
+                    inboxScore: request.inboxScore,
                     messageType: request.messageType, messageKind: request.messageKind,
                     deadline: byWhenDate, stake: request.stakeText?.rawValue,
                     key: request.key, supersedesMessageIDs: request.supersedesMessageIDs,

@@ -109,6 +109,13 @@ enum InboxPriorityDisplay: String, Equatable {
         }
     }
 
+    static func forEntry(score: Double?, priority: InboxMessagePriority?) -> Self? {
+        if let score, score.isFinite, (0.0...1.0).contains(score) {
+            return forScore(score)
+        }
+        return priority.flatMap { Self(rawValue: $0.rawValue) }
+    }
+
     static func forScore(_ score: Double?) -> Self? {
         guard let score, score.isFinite, (0.0...1.0).contains(score) else { return nil }
         return switch score {
@@ -638,7 +645,9 @@ struct InboxRequestRow: Identifiable {
     /// by the send queue; nil when nothing is outstanding.
     var submissionProgress: InboxRowSubmissionProgress? = nil
     var tier: InboxAttentionTier = .middle
+    var inboxPriority: InboxMessagePriority? = nil
     var inboxScore: Double? = nil
+    var inboxReplyPriorities: [UInt64: InboxMessagePriority] = [:]
     var inboxReplyScores: [UInt64: Double] = [:]
     var thread: ExactText? = nil
     var hasInboxViewEntry = false
@@ -1659,6 +1668,7 @@ struct InboxList: View {
 
         var parentTitle: String { row?.title ?? entry.parent.messageID.rawValue }
         var senderLabel: String { row?.senderLabel ?? entry.parent.senderID.rawValue }
+        var inboxReplyPriorities: [UInt64: InboxMessagePriority] { row?.inboxReplyPriorities ?? [:] }
         var inboxReplyScores: [UInt64: Double] { row?.inboxReplyScores ?? [:] }
     }
 
@@ -1933,6 +1943,7 @@ struct InboxList: View {
                 requestRevision: item.row.requestRevision,
                 createdAt: item.row.createdAt,
                 receivedAt: item.entry.receivedAt,
+                inboxPriority: item.row.inboxPriority,
                 inboxScore: item.row.inboxScore,
                 messageType: item.row.resolvedMessageType,
                 store: newMessageAreaStore,
@@ -1977,9 +1988,10 @@ struct InboxList: View {
                 entry: item.entry,
                 parentTitle: item.parentTitle,
                 senderLabel: item.senderLabel,
-                priorityScore: ReplyItemPriorityProjection.score(
+                priority: ReplyItemPriorityProjection.display(
                     for: item.entry,
                     perReplyScores: item.inboxReplyScores,
+                    perReplyPriorities: item.inboxReplyPriorities,
                     serverListItems: conversationStore?.presentation.inboxViewListItems),
                 receivedAt: item.entry.newestUnseenReply.flatMap {
                     localReplyReceiptDate(for: item.entry.parent, replyID: $0.turnID)
@@ -2916,6 +2928,7 @@ private struct NewMessageAreaRowContent: View {
     let requestRevision: UInt64
     let createdAt: Date?
     let receivedAt: Date
+    let inboxPriority: InboxMessagePriority?
     let inboxScore: Double?
     let messageType: HarklightMessageType
     let store: NewMessageAreaStore?
@@ -2928,7 +2941,7 @@ private struct NewMessageAreaRowContent: View {
     }
 
     private var scoreBadge: InboxPriorityDisplay? {
-        guard let level = InboxPriorityDisplay.forScore(inboxScore),
+        guard let level = InboxPriorityDisplay.forEntry(score: inboxScore, priority: inboxPriority),
               level == .high || level == .urgent else { return nil }
         return level
     }
@@ -2995,7 +3008,7 @@ private struct ReplyItemRowContent: View {
     let entry: ReplyItemEntry
     let parentTitle: String
     let senderLabel: String
-    let priorityScore: Double?
+    let priority: InboxPriorityDisplay?
     let receivedAt: Date?
     let selected: Bool
 
@@ -3006,7 +3019,7 @@ private struct ReplyItemRowContent: View {
     }
 
     private var scoreBadge: InboxPriorityDisplay? {
-        guard let level = InboxPriorityDisplay.forScore(priorityScore),
+        guard let level = priority,
               level == .high || level == .urgent else { return nil }
         return level
     }
@@ -3116,7 +3129,7 @@ struct InboxRowContent: View {
     private var messageType: HarklightMessageType { row.resolvedMessageType }
 
     private var priorityMarkerLevel: InboxPriorityDisplay? {
-        guard let level = InboxPriorityDisplay.forScore(row.inboxScore),
+        guard let level = InboxPriorityDisplay.forEntry(score: row.inboxScore, priority: row.inboxPriority),
               level == .high || level == .urgent else { return nil }
         return level
     }
@@ -3302,7 +3315,7 @@ struct InboxRowContent: View {
         .padding(.horizontal, HarklightDesignSystem.shape(.rowHorizontalPadding))
         .padding(.vertical, HarklightDesignSystem.shape(.rowVerticalPadding))
         .foregroundStyle(palette.text)
-        .inboxRowSurface(priority: InboxPriorityDisplay.forScore(row.inboxScore),
+        .inboxRowSurface(priority: InboxPriorityDisplay.forEntry(score: row.inboxScore, priority: row.inboxPriority),
                          openType: selected ? messageType : nil)
         .accessibilityElement(children: .combine)
     }

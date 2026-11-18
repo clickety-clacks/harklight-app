@@ -83,6 +83,20 @@ enum ReplyItemNormalRowProjection {
 }
 
 enum ReplyItemPriorityProjection {
+    static func display(for entry: ReplyItemEntry,
+                        perReplyScores: [UInt64: Double],
+                        perReplyPriorities: [UInt64: InboxMessagePriority],
+                        serverListItems: [InboxViewListItem]?) -> InboxPriorityDisplay? {
+        let priorities = entry.unseenReplies.compactMap { reply in
+            reply.conversationSequence.flatMap { perReplyPriorities[$0] }
+        }
+        let priority = [InboxMessagePriority.now, .high, .normal, .low]
+            .first { priorities.contains($0) }
+        return InboxPriorityDisplay.forEntry(
+            score: score(for: entry, perReplyScores: perReplyScores, serverListItems: serverListItems),
+            priority: priority)
+    }
+
     static func score(for entry: ReplyItemEntry,
                       perReplyScores: [UInt64: Double],
                       serverListItems: [InboxViewListItem]?) -> Double? {

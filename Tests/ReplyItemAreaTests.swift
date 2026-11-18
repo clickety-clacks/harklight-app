@@ -397,6 +397,47 @@ final class ReplyItemAreaTests: XCTestCase {
                      "The local reply receipt field is limited to origin replies.")
     }
 
+    @MainActor
+    func testNewReplyPriorityFlowsFromServerViewThroughLiveInboxRow() throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+            personID: ExactText("reply-priority"), deviceID: ExactText("device"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let store = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        let key = RequestKey(accountScope: identity.personID,
+            senderID: ExactText("sender"), messageID: ExactText("parent"))
+        let payload = try JSONValue.parse(Data(#"{"title":"Parent","urgency":"low"}"#.utf8))
+        try store.apply(RelayEvent(sequence: 1,
+            body: .delivery(StoredRequest(key: key, originalPayload: payload), .message)), context: context)
+        let entry = ReplyItemEntry(parent: key, unseenReplies: [
+            ReplyItemUnseenReply(turnID: ExactText("reply"), conversationSequence: 7, text: "Update")
+        ], receivedAt: baselineDate)
+        for (algorithm, basis) in [("baseline", "selected"), ("jev-set", "fallback")] {
+            try store.setInboxView(InboxView(revision: ExactText(algorithm),
+                algorithm: ExactText(algorithm), basis: ExactText(basis), entries: [],
+                replies: [InboxViewReply(key: key, conversationSequence: 7, priority: .now)],
+                listItems: [InboxViewListItem(kind: .reply, key: key, conversationSequence: 7,
+                    openAtConversationSequence: 7, unseenCount: 1, scoreKind: .current)]), context: context)
+            let live = try LivePresentationStore(store: store, context: context)
+            let row = try XCTUnwrap(live.inboxRows.first { $0.key == key })
+            XCTAssertEqual(row.inboxReplyPriorities, [7: .now])
+            XCTAssertTrue(row.inboxReplyScores.isEmpty)
+            XCTAssertEqual(ReplyItemPriorityProjection.display(for: entry,
+                perReplyScores: row.inboxReplyScores, perReplyPriorities: row.inboxReplyPriorities,
+                serverListItems: live.presentation.inboxViewListItems), .urgent)
+        }
+        try store.setInboxView(InboxView(revision: ExactText("both"), entries: [], replies: [
+            InboxViewReply(key: key, conversationSequence: 7, priority: .now, score: 0.50)
+        ]), context: context)
+        let live = try LivePresentationStore(store: store, context: context)
+        let row = try XCTUnwrap(live.inboxRows.first { $0.key == key })
+        XCTAssertEqual(row.inboxReplyPriorities, [7: .now])
+        XCTAssertEqual(row.inboxReplyScores, [7: 0.50])
+        XCTAssertNil(ReplyItemPriorityProjection.display(for: entry,
+            perReplyScores: row.inboxReplyScores, perReplyPriorities: row.inboxReplyPriorities,
+            serverListItems: live.presentation.inboxViewListItems),
+            "A usable Normal score wins over an Urgent reply priority.")
+    }
+
     func testNewReplyPriorityUsesServerGroupScoreOrLegacyReplyMaximum() throws {
         var ledger = ReplyItemLedger()
         ledger.reconcile([], accountScopes: [ExactText("account")], now: baselineDate)

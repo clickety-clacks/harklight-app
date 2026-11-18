@@ -1068,6 +1068,12 @@ final class NativeRelayCoreTests: XCTestCase {
                 JSONMember("sender_id", .string(ExactText("sender"))),
                 JSONMember("message_id", .string(ExactText("out-of-range-score"))),
                 JSONMember("score", .number(JSONNumber(lexeme: "1.01")))
+            ]),
+            .object([
+                JSONMember("sender_id", .string(ExactText("sender"))),
+                JSONMember("message_id", .string(ExactText("unknown-priority"))),
+                JSONMember("priority", .string(ExactText("unknown"))),
+                JSONMember("thread", .string(ExactText("retained")))
             ])
         ]
 
@@ -1079,7 +1085,7 @@ final class NativeRelayCoreTests: XCTestCase {
         XCTAssertEqual(snapshot.inboxView?.revision, ExactText("view-test"))
         let entries = try XCTUnwrap(snapshot.inboxView?.entries)
         XCTAssertEqual(entries.map { $0.key.messageID.rawValue },
-                       ["viewed", "legacy-no-score", "string-score", "out-of-range-score"])
+                       ["viewed", "legacy-no-score", "string-score", "out-of-range-score", "unknown-priority"])
         XCTAssertNil(entries[0].priority, "R4 score entries do not include a categorical priority.")
         XCTAssertEqual(entries[0].score, 0.93)
         XCTAssertEqual(entries[0].thread, ExactText("release"))
@@ -1088,6 +1094,9 @@ final class NativeRelayCoreTests: XCTestCase {
         XCTAssertNil(entries[1].score, "An older categorical entry has no numeric score.")
         XCTAssertNil(entries[2].score, "String-valued scores are unusable.")
         XCTAssertNil(entries[3].score, "Scores outside the agreed range are unusable.")
+        XCTAssertNil(entries[4].priority, "An unknown priority is ignored independently.")
+        XCTAssertNil(entries[4].score)
+        XCTAssertEqual(entries[4].thread, ExactText("retained"))
         XCTAssertNil(snapshot.inboxView?.replies,
                      "A server that sends no replies member stores no reply references.")
         let request = try XCTUnwrap(try session.requests.map(JSONValue.parse).first {
@@ -1120,12 +1129,14 @@ final class NativeRelayCoreTests: XCTestCase {
             replyReference([
                 JSONMember("sender_id", .string(ExactText("sender"))),
                 JSONMember("message_id", .string(ExactText("parent"))),
-                JSONMember("conversation_seq", .number(JSONNumber(lexeme: "9")))
+                JSONMember("conversation_seq", .number(JSONNumber(lexeme: "9"))),
+                JSONMember("priority", .string(ExactText("now")))
             ]),
             replyReference([
                 JSONMember("sender_id", .string(ExactText("sender"))),
                 JSONMember("message_id", .string(ExactText("parent"))),
                 JSONMember("conversation_seq", .number(JSONNumber(lexeme: "11"))),
+                JSONMember("priority", .string(ExactText("unknown"))),
                 JSONMember("score", .string(ExactText("0.99")))
             ]),
             replyReference([
@@ -1193,6 +1204,10 @@ final class NativeRelayCoreTests: XCTestCase {
                        "Valid references stay in order; malformed ones drop without failing the view.")
         XCTAssertEqual(replies.map(\.score), [0.93, nil, nil, nil],
                        "Only finite scores in the agreed range are usable.")
+        XCTAssertEqual(replies[1].priority, .now,
+                       "Baseline and fallback reply references carry priority without a score.")
+        XCTAssertNil(replies[1].score)
+        XCTAssertNil(replies[2].priority, "An unknown priority does not discard the reply reference.")
         XCTAssertTrue(replies.allSatisfy { $0.key.messageID == ExactText("parent") })
         XCTAssertTrue(replies.allSatisfy { $0.key.accountScope == context.identity.personID },
                       "Reply references scope to the signed-in account, like view entries.")
