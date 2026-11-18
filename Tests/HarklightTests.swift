@@ -194,6 +194,34 @@ final class HarklightTests: XCTestCase {
     }
 
     @MainActor
+    func testModelFallbackViewDisplaysServerPriorityWithoutScore() throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                                       personID: ExactText("fallback-reader"),
+                                       deviceID: ExactText("fallback-device"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let store = try ClientRepository(context: context,
+                                         persistence: MemoryPendingActionPersistence())
+        let key = RequestKey(accountScope: identity.personID,
+                             senderID: ExactText("agent"), messageID: ExactText("fallback"))
+        let payload = try JSONValue.parse(Data(#"{"title":"Fallback message","urgency":"now"}"#.utf8))
+        try store.apply(RelayEvent(sequence: 1,
+            body: .delivery(StoredRequest(key: key, originalPayload: payload), .message)), context: context)
+        try store.setInboxView(InboxView(revision: ExactText("fallback-view"),
+            algorithm: ExactText("jev-set"), basis: ExactText("fallback"),
+            entries: [InboxViewEntry(key: key, priority: .high)]), context: context)
+
+        let port = AttentionDomainPort(store: store)
+        let presentation = try port.observe(context: port.context)
+        let request = try XCTUnwrap(presentation.requests.first)
+        XCTAssertTrue(presentation.showsBasicOrderMarker)
+        XCTAssertNil(request.inboxScore)
+        XCTAssertEqual(request.inboxPriority, .high)
+        XCTAssertEqual(InboxPriorityDisplay.forEntry(score: request.inboxScore,
+                                                    priority: request.inboxPriority), .high,
+                       "A model fallback uses the Server priority, not the message urgency.")
+    }
+
+    @MainActor
     func testMessageFieldsUseServerViewAndIgnoreMalformedOptionalMembersIndependently() throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
                                        personID: ExactText("field-reader"),
