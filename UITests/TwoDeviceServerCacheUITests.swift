@@ -252,13 +252,14 @@ final class TwoDeviceServerCacheUITests: XCTestCase {
     }
 
     private func findMessage(_ message: Message, in app: XCUIApplication) throws -> XCUIElement {
+        let back = workspaceBackButton(in: app)
+        if back.exists && back.isHittable { back.tap() }
+        leaveWorkspaceSearch(in: app)
         guard app.buttons["inbox-settings"].waitForExistence(timeout: observationTimeout) else {
             // Do not capture an enrollment screen: invitation custody is
             // separate, and the diagnostic never enrolls or resets an account.
             throw Failure.missing("accepted signed-in inbox")
         }
-        let back = workspaceBackButton(in: app)
-        if back.exists && back.isHittable { back.tap() }
         let search = workspaceSearchField(in: app)
         try tap(search, stage: "search", in: app)
         let clear = search.buttons["Clear text"]
@@ -287,6 +288,9 @@ final class TwoDeviceServerCacheUITests: XCTestCase {
     private func openRepliedMessage(_ message: Message, in app: XCUIApplication) throws {
         let back = workspaceBackButton(in: app)
         if back.exists && back.isHittable { back.tap() }
+        leaveWorkspaceSearch(in: app)
+        let inbox = workspaceTab("Inbox", in: app)
+        if inbox.exists && inbox.isHittable && !inbox.isSelected { inbox.tap() }
         try tap(workspaceTab("Replied", in: app), stage: "replied-tab", in: app)
         try openMessage(message, in: app)
     }
