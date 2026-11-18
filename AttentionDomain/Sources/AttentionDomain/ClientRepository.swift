@@ -3805,6 +3805,32 @@ public final class ClientRepository: @unchecked Sendable {
         try commit(next)
     }
 
+    /// Once published limits select tiers, retain only possible or actual uploads.
+    /// A departure during the limits fetch has already fenced this operation.
+    public func selectConversationUploadFiles(_ files: [ConversationFile], binding: ConversationBinding,
+        operation: UUID, context suppliedContext: ProfileContext) throws {
+        writerLock.lock()
+        defer { writerLock.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        var next = state
+        guard var conversation = next.conversation, var thread = conversation.threads[binding.request],
+              thread.drafts[binding.revision]?.operationID == operation else { throw ConversationError.conflict }
+        guard var group = thread.uploadGroups?[operation] else { return }
+        guard group.cleanupID == nil else { throw ConversationError.pendingSubmission }
+        let retained = Set(files.map(\.id)).union(group.uploaded.map(\.id))
+        group.originals.removeAll { !retained.contains($0.id) }
+        if group.originals.isEmpty && group.uploaded.isEmpty {
+            thread.uploadGroups?.removeValue(forKey: operation)
+        } else {
+            thread.uploadGroups?[operation] = group
+        }
+        conversation.threads[binding.request] = thread
+        next.conversation = conversation
+        try commit(next)
+    }
+
     /// Called before starting an upload, not after its response: navigation may
     /// happen while the transfer is suspended or its result is unknown.
     public func registerConversationUpload(_ file: ConversationFile, binding: ConversationBinding,

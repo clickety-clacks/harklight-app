@@ -378,6 +378,9 @@ public actor NativeRelayCore {
                     try validate()
                     limits = published
                     let tiers = try published.tiers(for: frozen.files)
+                    let uploadFiles = zip(frozen.files, tiers).filter { $0.1 == .upload }.map { $0.0 }
+                    try store.selectConversationUploadFiles(uploadFiles, binding: binding,
+                        operation: operation, context: context)
                     let priorUploads = try store.conversationSnapshot(context: context)
                         .threads[binding.request]?.uploadGroups?[operation]?.uploaded ?? []
                     for (file, tier) in zip(frozen.files, tiers) {

@@ -195,6 +195,32 @@ final class ConversationSubmissionTests: XCTestCase {
         }
     }
 
+    func testInlineFilesSurviveRejectionEditDepartureAndUploadDiscard() async throws {
+        for hasUpload in [false, true] {
+            let inline = smallFile()
+            let upload = ConversationFile(id: ExactText("upload"), name: ExactText("upload.bin"), byteCount: 300_000,
+                sha256: ExactText(String(repeating: "a", count: 64)), content: .localFile(ExactText("upload")))
+            let files = hasUpload ? [inline, upload] : [inline]
+            let (context, _, domain, binding, session, core) = try await setup(files: files)
+            session.inlineBudget = 2
+            session.result = .rejected(reason: ExactText("bad_frame"))
+            _ = try await core.submitDiscussion(binding) { _ in URL(fileURLWithPath: "/unused") }
+            let rejected = try XCTUnwrap(domain.conversationSnapshot(context: context).threads[binding.request])
+            XCTAssertEqual(rejected.uploadGroups?.values.flatMap(\.originals) ?? [], hasUpload ? [upload] : [])
+            try domain.saveConversationDraft(ConversationDraft(binding: binding, text: ExactText("Edited text"), files: files), context: context)
+            let cleanups = try domain.abandonConversationUploads(for: binding.request, context: context)
+            XCTAssertEqual(cleanups.count, hasUpload ? 1 : 0)
+            for cleanup in cleanups {
+                try domain.recordConversationCleanup(cleanup.id, request: binding.request,
+                    outcome: .acknowledged(ConversationUploadDiscardResult(state: .discarded, discarded: 1)), context: context)
+            }
+            let kept = try XCTUnwrap(domain.conversationSnapshot(context: context).threads[binding.request]?.drafts[1])
+            XCTAssertEqual(kept.files, [inline], "Cleanup must not strip an inline-tier file from the edited draft")
+            XCTAssertEqual(kept.text, ExactText("Edited text"))
+            _ = try domain.prepareDiscussion(binding, context: context)
+        }
+    }
+
     func testDepartureWhileFetchingLimitsFencesEvenSmallUploadCandidates() async throws {
         let file = smallFile()
         let (context, _, domain, binding, session, core) = try await setup(files: [file])
