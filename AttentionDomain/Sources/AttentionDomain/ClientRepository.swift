@@ -3961,6 +3961,29 @@ public final class ClientRepository: @unchecked Sendable {
         try commit(next)
     }
 
+    /// A canceled upload proves this unsent preparation's remote handles may
+    /// have been discarded together. Keep the local originals for Retry.
+    public func invalidateConversationUploadPreparation(_ binding: ConversationBinding, operation: UUID,
+        context suppliedContext: ProfileContext) throws {
+        writerLock.lock()
+        defer { writerLock.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        var next = state
+        guard var conversation = next.conversation, var thread = conversation.threads[binding.request],
+              let draft = thread.drafts[binding.revision], draft.operationID == operation,
+              draft.wireFrame == nil else { throw ConversationError.conflict }
+        let committed = Set(thread.turns.compactMap(\.operationID))
+        for (id, group) in thread.uploadGroups ?? [:]
+            where group.binding == binding && !committed.contains(id) {
+            thread.uploadGroups?[id]?.uploaded.removeAll()
+        }
+        conversation.threads[binding.request] = thread
+        next.conversation = conversation
+        try commit(next)
+    }
+
     public func markDiscussionOutcome(_ binding: ConversationBinding, operation: UUID,
                                       rejection: ExactText?, context suppliedContext: ProfileContext) throws {
         writerLock.lock()

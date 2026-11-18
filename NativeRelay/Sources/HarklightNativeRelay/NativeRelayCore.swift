@@ -401,17 +401,32 @@ public actor NativeRelayCore {
             return .accepted(turnID: turn)
         }
         guard !draft.text.rawValue.isEmpty || !draft.files.isEmpty else { throw ConversationError.emptyDraft }
-        let operation = try store.prepareDiscussion(binding, context: context)
-        guard let frozen = try store.conversationSnapshot(context: context).threads[binding.request]?.drafts[binding.revision] else {
+        var operation = try store.prepareDiscussion(binding, context: context)
+        guard var frozen = try store.conversationSnapshot(context: context).threads[binding.request]?.drafts[binding.revision] else {
             throw ConversationError.missingRequest
         }
         let frame: Data
         do {
-            if let saved = frozen.wireFrame {
-                if let group = try store.conversationSnapshot(context: context)
-                    .threads[binding.request]?.uploadGroups?[operation], !group.originals.isEmpty {
-                    try await beginUploads(in: binding)
+            if frozen.wireFrame != nil,
+               let group = try store.conversationSnapshot(context: context)
+                .threads[binding.request]?.uploadGroups?[operation], !group.originals.isEmpty {
+                try await beginUploads(in: binding)
+                if try store.conversationSnapshot(context: context)
+                    .threads[binding.request]?.uploadGroups?[operation]?.cleanupID != nil {
+                    // A discard that began while this send was rejected can
+                    // invalidate its handles while Retry waits. Rebuild this
+                    // requested send from originals, never from the stale frame.
+                    // A truly unknown prior send still needs its exact replay.
+                    if case .outcomeUnknown = draft.disposition { throw ConversationError.pendingSubmission }
+                    operation = try store.prepareDiscussion(binding, context: context)
+                    guard let refreshed = try store.conversationSnapshot(context: context)
+                        .threads[binding.request]?.drafts[binding.revision] else {
+                        throw ConversationError.missingRequest
+                    }
+                    frozen = refreshed
                 }
+            }
+            if let saved = frozen.wireFrame {
                 frame = saved
             } else {
                 var prepared: [ConversationFile] = []
@@ -471,6 +486,8 @@ public actor NativeRelayCore {
                     preparedFiles: prepared, limits: limits)
                 try store.freezeDiscussionFrame(frame, binding: binding, operation: operation, context: context)
             }
+            try validate()
+            try validateUploadOperation(binding, operation: operation)
         } catch {
             // No discussion frame has been sent by this attempt. A previous
             // ambiguous attempt must still keep its exact operation frozen.
@@ -480,12 +497,19 @@ public actor NativeRelayCore {
             if case let ConversationFileTransportError.server(_, reason) = error {
                 discardedUpload = reason == ExactText("upload_discarded")
             } else { discardedUpload = false }
-            let definitiveFailure = error is ConversationError || error is CocoaError || discardedUpload
+            let previouslyUnknown: Bool
+            if case .outcomeUnknown = draft.disposition, draft.wireFrame != nil { previouslyUnknown = true }
+            else { previouslyUnknown = false }
+            let definitiveFailure = !previouslyUnknown &&
+                (error is ConversationError || error is CocoaError || discardedUpload)
             diagnose(.conversation, .discussionPreparation,
                      NativeDiagnosticCauseCode.failureTransition(for: error), error: error,
                      operationID: operation, request: binding.request, revision: binding.revision,
                      receipt: definitiveFailure ? .pendingUnconfirmed : .unknown)
             do {
+                if discardedUpload {
+                    try store.invalidateConversationUploadPreparation(binding, operation: operation, context: context)
+                }
                 try store.markDiscussionOutcome(binding, operation: operation,
                     rejection: definitiveFailure ? ExactText("Not delivered: " + (names.isEmpty ? "the discussion" : names) + " could not be prepared. Check the files and try again; your draft is saved.") : nil,
                     context: context)
@@ -497,8 +521,6 @@ public actor NativeRelayCore {
             }
             throw error
         }
-        try validate()
-        try validateUploadOperation(binding, operation: operation)
         let result = await transport.sendDiscussion(frame, operationID: operation)
         try validate()
         switch result {
