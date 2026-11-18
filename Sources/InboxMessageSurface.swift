@@ -162,8 +162,16 @@ enum MessageChoiceAppearance: Equatable {
 
     /// The accent is amber in each appearance; onBeam is its contrasting
     /// foreground (also used by the amber priority capsule).
-    func foregroundToken(for colorScheme: ColorScheme) -> String? {
-        self == .prominent ? HarklightDesignSystem.palette(for: colorScheme).color.onBeam : nil
+    func foregroundToken(for colorScheme: ColorScheme, isEnabled: Bool) -> String? {
+        self == .prominent && isEnabled
+            ? HarklightDesignSystem.palette(for: colorScheme).color.onBeam : nil
+    }
+
+    /// The translucent saved-reply pane is lighter than the accent in both
+    /// appearances, so it uses the existing dark foreground for accent content.
+    func savedReplyForegroundToken(for colorScheme: ColorScheme, isEnabled: Bool) -> String? {
+        self == .prominent && isEnabled
+            ? HarklightDesignSystem.palette(for: colorScheme).color.onAccent : nil
     }
 
     var usesSystemSurface: Bool { self != .card }
@@ -188,6 +196,7 @@ struct MessageChoiceLabel: View {
     var showsFailure = true
 
     @Environment(\.harklightChoiceAppearance) private var appearance
+    @Environment(\.isEnabled) private var isEnabled
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.harklightMessageType) private var messageType
     @Environment(\.harklightSubmissionDisplay) private var submission
@@ -197,7 +206,7 @@ struct MessageChoiceLabel: View {
     }
 
     private func choiceForeground(fallback: Color) -> AnyShapeStyle {
-        if let token = appearance.foregroundToken(for: colorScheme) {
+        if let token = appearance.foregroundToken(for: colorScheme, isEnabled: isEnabled) {
             return AnyShapeStyle(Color(harklightToken: token))
         }
         return appearance.usesSystemSurface ? AnyShapeStyle(.foreground) : AnyShapeStyle(fallback)

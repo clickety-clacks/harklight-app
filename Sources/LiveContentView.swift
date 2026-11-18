@@ -427,12 +427,21 @@ private struct ReplyChoiceCard: View {
     let isReadOnly: Bool
     let onOpen: () -> Void
 
+    @Environment(\.isEnabled) private var isEnabled
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.harklightMessageType) private var messageType
     @Environment(\.harklightSubmissionDisplay) private var submission
 
     private var messageColors: HarklightMessageColors {
         HarklightDesignSystem.palette(for: colorScheme).message(messageType)
+    }
+
+    private func savedReplyForeground(_ appearance: MessageChoiceAppearance) -> AnyShapeStyle {
+        if let token = appearance.savedReplyForegroundToken(for: colorScheme, isEnabled: isEnabled) {
+            return AnyShapeStyle(Color(harklightToken: token))
+        }
+        return appearance == .prominent
+            ? AnyShapeStyle(.foreground) : AnyShapeStyle(messageColors.text)
     }
 
     var body: some View {
@@ -470,7 +479,7 @@ private struct ReplyChoiceCard: View {
             } else if showsPane {
                 Text(text)
                     .harklightType(.messageBody)
-                    .foregroundStyle(messageColors.text)
+                    .foregroundStyle(savedReplyForeground(appearance))
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, minHeight: HarklightDesignSystem.shape(.replyPaneMinHeight),
                            alignment: .topLeading)

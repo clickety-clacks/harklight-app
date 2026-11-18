@@ -35,21 +35,42 @@ final class MessageMetadataPresentationTests: XCTestCase {
         }
     }
 
-    func testPrimaryForegroundContrastsWithAccentInBothAppearances() throws {
+    func testPrimaryForegroundContrastsWithAccentAndSavedPaneWhenEnabled() throws {
         for scheme in [ColorScheme.light, .dark] {
-            let expected = scheme == .dark ? "#070B14" : "#FFFFFF"
-            let valueAppearance = MessageChoiceAppearance(style: .primary)
-            let summaryAppearance = MessageChoiceAppearance.writtenReply(
-                style: .primary, showsEditor: false, isReadOnly: false, failed: false)
-            for appearance in [valueAppearance, summaryAppearance] {
-                let token = try XCTUnwrap(appearance.foregroundToken(for: scheme))
-                XCTAssertEqual(token, expected)
-                XCTAssertGreaterThanOrEqual(HarklightRGBA.contrast(
-                    HarklightRGBA(token: token),
-                    HarklightRGBA(token: HarklightDesignSystem.palette(for: scheme).color.amber)), 4.5)
+            let palette = HarklightDesignSystem.palette(for: scheme)
+            let accent = HarklightRGBA(token: palette.color.amber)
+            let pane = HarklightRGBA(token: palette.derived.replyPane)
+            let paneComposite = pane.mixed(pane.alpha, over: accent)
+            for hasSavedReply in [false, true] {
+                let appearance = hasSavedReply
+                    ? MessageChoiceAppearance.writtenReply(style: .primary, showsEditor: false,
+                                                           isReadOnly: false, failed: false)
+                    : MessageChoiceAppearance(style: .primary)
+                for isEnabled in [true, false] {
+                    let foreground = appearance.foregroundToken(for: scheme, isEnabled: isEnabled)
+                    let replyForeground = appearance.savedReplyForegroundToken(
+                        for: scheme, isEnabled: isEnabled)
+                    if isEnabled {
+                        XCTAssertEqual(foreground, palette.color.onBeam)
+                        XCTAssertGreaterThanOrEqual(HarklightRGBA.contrast(
+                            HarklightRGBA(token: try XCTUnwrap(foreground)), accent), 4.5)
+                        if hasSavedReply {
+                            XCTAssertEqual(replyForeground, palette.color.onAccent)
+                            XCTAssertGreaterThanOrEqual(HarklightRGBA.contrast(
+                                HarklightRGBA(token: try XCTUnwrap(replyForeground)), paneComposite), 4.5)
+                        }
+                    } else {
+                        XCTAssertNil(foreground, "Disabled primary labels and rings follow the system foreground.")
+                        XCTAssertNil(replyForeground, "Disabled summaries follow the system foreground too.")
+                    }
+                }
             }
-            XCTAssertNil(MessageChoiceAppearance.destructive.foregroundToken(for: scheme))
-            XCTAssertNil(MessageChoiceAppearance.card.foregroundToken(for: scheme))
+            for appearance in [MessageChoiceAppearance.destructive, .card] {
+                for isEnabled in [true, false] {
+                    XCTAssertNil(appearance.foregroundToken(for: scheme, isEnabled: isEnabled))
+                    XCTAssertNil(appearance.savedReplyForegroundToken(for: scheme, isEnabled: isEnabled))
+                }
+            }
         }
     }
 
