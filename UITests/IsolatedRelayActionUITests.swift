@@ -21,7 +21,7 @@ final class IsolatedRelayActionUITests: XCTestCase {
         let app = launchEnrolledApp()
         defer { collectJournal(app) }
         try openMessage(message, in: app)
-        let choice = app.buttons.containing(.staticText, identifier: "Reply").firstMatch
+        let choice = app.buttons["Reply"]
         try tap(choice, stage: "reply-choice", in: app)
         let editor = app.textViews["request-compatibility-reply-response"]
         try tap(editor, stage: "reply-editor", in: app)
@@ -58,8 +58,12 @@ final class IsolatedRelayActionUITests: XCTestCase {
         XCTAssertTrue(revealed, "The \(edge) row swipe must reveal Seen.")
         XCTAssertTrue(row.exists, "Revealing a menu must not submit Seen.")
         if revealed {
-            let header = app.descendants(matching: .any)["inbox-brand"].firstMatch
-            try tap(header, stage: "dismiss-swipe-menu", in: app)
+            try tap(row, stage: "dismiss-swipe-menu", in: app)
+            let closed = XCTNSPredicateExpectation(
+                predicate: NSPredicate(format: "exists == false"), object: action)
+            guard XCTWaiter.wait(for: [closed], timeout: 5) == .completed else {
+                throw Failure.missing("swipe menu dismissal")
+            }
         }
         try openMessage(message, in: app)
         try tap(app.buttons[control], stage: "\(edge)-seen-tap", in: app)
@@ -102,13 +106,17 @@ final class IsolatedRelayActionUITests: XCTestCase {
     }
 
     private func findMessage(_ message: Message, in app: XCUIApplication) throws -> XCUIElement {
+        let back = workspaceBackButton(in: app)
+        if back.exists && back.isHittable { back.tap() }
+        leaveWorkspaceSearch(in: app)
+        if !app.buttons["inbox-settings"].exists {
+            try tap(workspaceTab("Inbox", in: app), stage: "expand-inbox", in: app)
+        }
         guard app.buttons["inbox-settings"].waitForExistence(timeout: observationTimeout) else {
             // Do not capture an enrollment screen: invitation custody is
             // separate, and the diagnostic never enrolls or resets an account.
             throw Failure.missing("accepted signed-in inbox")
         }
-        let back = workspaceBackButton(in: app)
-        if back.exists && back.isHittable { back.tap() }
         let search = workspaceSearchField(in: app)
         try tap(search, stage: "search", in: app)
         let clear = search.buttons["Clear text"]
@@ -137,6 +145,8 @@ final class IsolatedRelayActionUITests: XCTestCase {
     private func openRepliedMessage(_ message: Message, in app: XCUIApplication) throws {
         let back = workspaceBackButton(in: app)
         if back.exists && back.isHittable { back.tap() }
+        leaveWorkspaceSearch(in: app)
+        try tap(workspaceTab("Inbox", in: app), stage: "expand-inbox", in: app)
         try tap(workspaceTab("Replied", in: app), stage: "replied-tab", in: app)
         try openMessage(message, in: app)
     }
