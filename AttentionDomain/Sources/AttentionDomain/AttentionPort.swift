@@ -340,10 +340,11 @@ public struct PresentedRequest: Equatable, Sendable {
     public let inboxDueAtMilliseconds: Int?
     public let inboxReason: ExactText?
     public let hasInboxViewEntry: Bool
-    /// Scores the server's view applies to individual chat replies in this
+    /// Priority and scores the server's view applies to individual chat replies in this
     /// request's conversation, keyed by conversation sequence. Unlike the
     /// row-level view fields these survive resolved lifecycles, because a
     /// reply item can outlive its parent's open state.
+    public let inboxReplyPriorities: [UInt64: InboxMessagePriority]
     public let inboxReplyScores: [UInt64: Double]
     /// Sender-authored fields from the message's current revision.
     public let stakeText: ExactText?
@@ -398,6 +399,7 @@ public struct PresentedRequest: Equatable, Sendable {
                 inboxDueAtMilliseconds: Int? = nil,
                 inboxReason: ExactText? = nil,
                 hasInboxViewEntry: Bool = false,
+                inboxReplyPriorities: [UInt64: InboxMessagePriority] = [:],
                 inboxReplyScores: [UInt64: Double] = [:],
                 stakeText: ExactText? = nil,
                 byWhenMilliseconds: Int? = nil,
@@ -438,6 +440,7 @@ public struct PresentedRequest: Equatable, Sendable {
         self.inboxDueAtMilliseconds = inboxDueAtMilliseconds
         self.inboxReason = inboxReason
         self.hasInboxViewEntry = hasInboxViewEntry
+        self.inboxReplyPriorities = inboxReplyPriorities
         self.inboxReplyScores = inboxReplyScores
         self.stakeText = stakeText
         self.byWhenMilliseconds = byWhenMilliseconds
@@ -575,6 +578,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
             supersededByMessageKeys: snapshot.remoteStates[key]?.supersededByMessageKeys ?? [],
             currentRevisionByWhenMilliseconds: currentRequest.byWhenMilliseconds,
             inboxViewEntry: inboxViewEntry,
+            inboxReplyPriorities: Self.replyPriorities(for: key, in: snapshot.inboxView),
             inboxReplyScores: Self.replyScores(for: key, in: snapshot.inboxView))
     }
 
@@ -1059,6 +1063,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
                                                         interface: currentRevisionRequest.interface(deliveredFileNames: deliveredFileNames))
                             : nil,
                         inboxViewEntry: inboxViewEntry,
+                        inboxReplyPriorities: Self.replyPriorities(for: item.request.key, in: currentView),
                         inboxReplyScores: Self.replyScores(for: item.request.key, in: currentView),
                         onUnprojectableScene: { unprojectable.append(item.request.key) })
         }
@@ -1150,6 +1155,15 @@ public final class AttentionDomainPort: @unchecked Sendable {
         return result
     }
 
+    private static func replyPriorities(for key: RequestKey,
+                                        in view: InboxView?) -> [UInt64: InboxMessagePriority] {
+        var priorities: [UInt64: InboxMessagePriority] = [:]
+        for reply in view?.replies ?? [] where reply.key == key {
+            if let priority = reply.priority { priorities[reply.conversationSequence] = priority }
+        }
+        return priorities
+    }
+
     private static func replyScores(for key: RequestKey,
                                     in view: InboxView?) -> [UInt64: Double] {
         guard let replies = view?.replies, !replies.isEmpty else { return [:] }
@@ -1210,6 +1224,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
                          currentRevisionByWhenMilliseconds: Int? = nil,
                          defaultAnswerAction: ProjectedActionReference? = nil,
                          inboxViewEntry: InboxViewEntry? = nil,
+                         inboxReplyPriorities: [UInt64: InboxMessagePriority] = [:],
                          inboxReplyScores: [UInt64: Double] = [:],
                          onUnprojectableScene: () -> Void = {}) throws -> PresentedRequest {
         let status: AppLifecycleStatus
@@ -1320,7 +1335,8 @@ public final class AttentionDomainPort: @unchecked Sendable {
                                    acceptanceOrder: acceptanceOrder, draft: draft, deliveredFiles: [],
                                    session: session, remote: remote, submission: submission, selector: selector,
                                    requestRevision: requestRevision, inboxStateIsCurrent: inboxStateIsCurrent,
-                                   inboxViewEntry: inboxViewEntry, inboxReplyScores: inboxReplyScores)
+                                   inboxViewEntry: inboxViewEntry, inboxReplyPriorities: inboxReplyPriorities,
+                                   inboxReplyScores: inboxReplyScores)
             }
             let inputs = document.inputs.map { input in
                 let kind: ProjectedInputKind
@@ -1401,6 +1417,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
                                     ? inboxViewEntry?.reason : nil,
                                 hasInboxViewEntry: (status == .open || status == .pending) &&
                                     inboxViewEntry != nil,
+                                inboxReplyPriorities: inboxReplyPriorities,
                                 inboxReplyScores: inboxReplyScores,
                                 stakeText: request.stakeText,
                                 byWhenMilliseconds: currentRevisionByWhenMilliseconds,

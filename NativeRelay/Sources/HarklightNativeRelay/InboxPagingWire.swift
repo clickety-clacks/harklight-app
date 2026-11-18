@@ -186,7 +186,10 @@ public struct InboxPagingWire: Sendable {
             let key = RequestKey(accountScope: profile.identity.personID,
                                  senderID: sender, messageID: message)
             guard seen.insert(ReplyIdentity(key: key, sequence: sequence)).inserted else { continue }
+            let priority = raw.uniqueValue(named: "priority")?.stringValue
+                .flatMap { InboxMessagePriority(rawValue: $0.rawValue) }
             replies.append(InboxViewReply(key: key, conversationSequence: sequence,
+                                          priority: priority,
                                           score: usableScore(raw.uniqueValue(named: "score"))))
         }
         return replies

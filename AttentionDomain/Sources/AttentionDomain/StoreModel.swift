@@ -325,11 +325,14 @@ public struct InboxViewEntry: Equatable, Codable, Sendable {
 public struct InboxViewReply: Equatable, Codable, Sendable {
     public let key: RequestKey
     public let conversationSequence: UInt64
+    public let priority: InboxMessagePriority?
     public let score: Double?
 
-    public init(key: RequestKey, conversationSequence: UInt64, score: Double? = nil) {
+    public init(key: RequestKey, conversationSequence: UInt64, priority: InboxMessagePriority? = nil,
+                score: Double? = nil) {
         self.key = key
         self.conversationSequence = conversationSequence
+        self.priority = priority
         self.score = score
     }
 }

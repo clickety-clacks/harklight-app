@@ -1129,12 +1129,14 @@ final class NativeRelayCoreTests: XCTestCase {
             replyReference([
                 JSONMember("sender_id", .string(ExactText("sender"))),
                 JSONMember("message_id", .string(ExactText("parent"))),
-                JSONMember("conversation_seq", .number(JSONNumber(lexeme: "9")))
+                JSONMember("conversation_seq", .number(JSONNumber(lexeme: "9"))),
+                JSONMember("priority", .string(ExactText("now")))
             ]),
             replyReference([
                 JSONMember("sender_id", .string(ExactText("sender"))),
                 JSONMember("message_id", .string(ExactText("parent"))),
                 JSONMember("conversation_seq", .number(JSONNumber(lexeme: "11"))),
+                JSONMember("priority", .string(ExactText("unknown"))),
                 JSONMember("score", .string(ExactText("0.99")))
             ]),
             replyReference([
@@ -1202,6 +1204,10 @@ final class NativeRelayCoreTests: XCTestCase {
                        "Valid references stay in order; malformed ones drop without failing the view.")
         XCTAssertEqual(replies.map(\.score), [0.93, nil, nil, nil],
                        "Only finite scores in the agreed range are usable.")
+        XCTAssertEqual(replies[1].priority, .now,
+                       "Baseline and fallback reply references carry priority without a score.")
+        XCTAssertNil(replies[1].score)
+        XCTAssertNil(replies[2].priority, "An unknown priority does not discard the reply reference.")
         XCTAssertTrue(replies.allSatisfy { $0.key.messageID == ExactText("parent") })
         XCTAssertTrue(replies.allSatisfy { $0.key.accountScope == context.identity.personID },
                       "Reply references scope to the signed-in account, like view entries.")

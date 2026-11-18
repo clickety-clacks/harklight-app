@@ -647,6 +647,7 @@ struct InboxRequestRow: Identifiable {
     var tier: InboxAttentionTier = .middle
     var inboxPriority: InboxMessagePriority? = nil
     var inboxScore: Double? = nil
+    var inboxReplyPriorities: [UInt64: InboxMessagePriority] = [:]
     var inboxReplyScores: [UInt64: Double] = [:]
     var thread: ExactText? = nil
     var hasInboxViewEntry = false
@@ -1667,6 +1668,7 @@ struct InboxList: View {
 
         var parentTitle: String { row?.title ?? entry.parent.messageID.rawValue }
         var senderLabel: String { row?.senderLabel ?? entry.parent.senderID.rawValue }
+        var inboxReplyPriorities: [UInt64: InboxMessagePriority] { row?.inboxReplyPriorities ?? [:] }
         var inboxReplyScores: [UInt64: Double] { row?.inboxReplyScores ?? [:] }
     }
 
@@ -1986,9 +1988,10 @@ struct InboxList: View {
                 entry: item.entry,
                 parentTitle: item.parentTitle,
                 senderLabel: item.senderLabel,
-                priorityScore: ReplyItemPriorityProjection.score(
+                priority: ReplyItemPriorityProjection.display(
                     for: item.entry,
                     perReplyScores: item.inboxReplyScores,
+                    perReplyPriorities: item.inboxReplyPriorities,
                     serverListItems: conversationStore?.presentation.inboxViewListItems),
                 receivedAt: item.entry.newestUnseenReply.flatMap {
                     localReplyReceiptDate(for: item.entry.parent, replyID: $0.turnID)
@@ -3005,7 +3008,7 @@ private struct ReplyItemRowContent: View {
     let entry: ReplyItemEntry
     let parentTitle: String
     let senderLabel: String
-    let priorityScore: Double?
+    let priority: InboxPriorityDisplay?
     let receivedAt: Date?
     let selected: Bool
 
@@ -3016,7 +3019,7 @@ private struct ReplyItemRowContent: View {
     }
 
     private var scoreBadge: InboxPriorityDisplay? {
-        guard let level = InboxPriorityDisplay.forScore(priorityScore),
+        guard let level = priority,
               level == .high || level == .urgent else { return nil }
         return level
     }

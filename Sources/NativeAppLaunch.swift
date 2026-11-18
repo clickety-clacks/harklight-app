@@ -2660,6 +2660,7 @@ final class LivePresentationStore {
             tier: .middle,
             inboxPriority: request.inboxPriority,
             inboxScore: request.inboxScore,
+            inboxReplyPriorities: request.inboxReplyPriorities,
             inboxReplyScores: request.inboxReplyScores,
             thread: request.inboxThread,
             hasInboxViewEntry: request.hasInboxViewEntry,
