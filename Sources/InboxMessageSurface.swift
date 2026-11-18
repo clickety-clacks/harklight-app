@@ -160,6 +160,12 @@ enum MessageChoiceAppearance: Equatable {
         showsEditor || isReadOnly || failed ? .card : Self(style: style)
     }
 
+    /// The accent is amber in each appearance; onBeam is its contrasting
+    /// foreground (also used by the amber priority capsule).
+    func foregroundToken(for colorScheme: ColorScheme) -> String? {
+        self == .prominent ? HarklightDesignSystem.palette(for: colorScheme).color.onBeam : nil
+    }
+
     var usesSystemSurface: Bool { self != .card }
 }
 
@@ -190,14 +196,21 @@ struct MessageChoiceLabel: View {
         HarklightDesignSystem.palette(for: colorScheme).message(messageType)
     }
 
+    private func choiceForeground(fallback: Color) -> AnyShapeStyle {
+        if let token = appearance.foregroundToken(for: colorScheme) {
+            return AnyShapeStyle(Color(harklightToken: token))
+        }
+        return appearance.usesSystemSurface ? AnyShapeStyle(.foreground) : AnyShapeStyle(fallback)
+    }
+
     private var textStyle: AnyShapeStyle {
-        appearance.usesSystemSurface ? AnyShapeStyle(.foreground) : AnyShapeStyle(messageColors.text)
+        choiceForeground(fallback: messageColors.text)
     }
     private var secondaryStyle: AnyShapeStyle {
-        appearance.usesSystemSurface ? AnyShapeStyle(.foreground) : AnyShapeStyle(messageColors.secondary)
+        choiceForeground(fallback: messageColors.secondary)
     }
     private var beamStyle: AnyShapeStyle {
-        appearance.usesSystemSurface ? AnyShapeStyle(.foreground) : AnyShapeStyle(messageColors.beam)
+        choiceForeground(fallback: messageColors.beam)
     }
 
     private var cornerRadius: CGFloat { HarklightDesignSystem.shape(.card) }

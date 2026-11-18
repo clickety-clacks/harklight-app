@@ -521,12 +521,19 @@ private struct ReplyChoiceCard: View {
                 .accessibilityElement(children: .contain)
                 .accessibilityIdentifier(target.editorCardIdentifier)
         } else {
-            liveChoiceButton(style: style, perform: onOpen) {
+            let summary = liveChoiceButton(style: style, perform: onOpen) {
                 card
             }
             .accessibilityAddTraits(.isButton)
             .accessibilityIdentifier(target.summaryIdentifier)
             .accessibilityHint(text.isEmpty ? "Opens the reply field." : "Edit your reply.")
+            if appearance.usesSystemSurface {
+                summary
+                    .buttonBorderShape(.roundedRectangle(radius: radius))
+                    .clipShape(shape)
+            } else {
+                summary
+            }
         }
     }
 }

@@ -1,5 +1,6 @@
 import AttentionDomain
 import Foundation
+import SwiftUI
 import XCTest
 @testable import Harklight
 
@@ -31,6 +32,24 @@ final class MessageMetadataPresentationTests: XCTestCase {
                 style: style, showsEditor: false, isReadOnly: true, failed: false), .card)
             XCTAssertEqual(MessageChoiceAppearance.writtenReply(
                 style: style, showsEditor: false, isReadOnly: false, failed: true), .card)
+        }
+    }
+
+    func testPrimaryForegroundContrastsWithAccentInBothAppearances() throws {
+        for scheme in [ColorScheme.light, .dark] {
+            let expected = scheme == .dark ? "#070B14" : "#FFFFFF"
+            let valueAppearance = MessageChoiceAppearance(style: .primary)
+            let summaryAppearance = MessageChoiceAppearance.writtenReply(
+                style: .primary, showsEditor: false, isReadOnly: false, failed: false)
+            for appearance in [valueAppearance, summaryAppearance] {
+                let token = try XCTUnwrap(appearance.foregroundToken(for: scheme))
+                XCTAssertEqual(token, expected)
+                XCTAssertGreaterThanOrEqual(HarklightRGBA.contrast(
+                    HarklightRGBA(token: token),
+                    HarklightRGBA(token: HarklightDesignSystem.palette(for: scheme).color.amber)), 4.5)
+            }
+            XCTAssertNil(MessageChoiceAppearance.destructive.foregroundToken(for: scheme))
+            XCTAssertNil(MessageChoiceAppearance.card.foregroundToken(for: scheme))
         }
     }
 
