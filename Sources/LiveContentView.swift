@@ -1257,6 +1257,7 @@ private struct PriorityLevelDraftEditorRow: View {
 @MainActor
 private struct ReplacedByMessagesSection: View {
     let replacementKeys: [RequestKey]
+    let messageLabel: (RequestKey, String) -> String
     let secondaryTextColor: Color
 
     private var orderedReplacementKeys: [RequestKey] {
@@ -1276,7 +1277,7 @@ private struct ReplacedByMessagesSection: View {
                     .foregroundStyle(secondaryTextColor)
                 ForEach(orderedReplacementKeys, id: \.self) { replacementKey in
                     NavigationLink(value: RelatedMessageTarget.replacement(replacementKey)) {
-                        Text(replacementKey.messageID.rawValue)
+                        Text(messageLabel(replacementKey, String(localized: "Replacement message")))
                             .font(.subheadline)
                             .textSelection(.enabled)
                     }
@@ -2234,6 +2235,7 @@ struct LiveRequestDetail: View {
                 if !request.supersededByMessageKeys.isEmpty {
                     ReplacedByMessagesSection(
                         replacementKeys: request.supersededByMessageKeys,
+                        messageLabel: store.relatedMessageLabel,
                         secondaryTextColor: detailColors.secondary)
                 }
                 if let localExample {
