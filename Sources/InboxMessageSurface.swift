@@ -142,6 +142,31 @@ struct MessageCardSurface<Content: View>: View {
     }
 }
 
+enum MessageChoiceAppearance: Equatable {
+    case card, prominent, destructive
+
+    init(style: MessageChoiceStyle?) {
+        switch style {
+        case .primary: self = .prominent
+        case .destructive: self = .destructive
+        case .secondary, nil: self = .card
+        }
+    }
+
+    /// Only the tappable summary is inside a system button. Editors, failed
+    /// replies and read-only replies keep their standalone card surface.
+    static func writtenReply(style: MessageChoiceStyle?, showsEditor: Bool,
+                             isReadOnly: Bool, failed: Bool) -> Self {
+        showsEditor || isReadOnly || failed ? .card : Self(style: style)
+    }
+
+    var usesSystemSurface: Bool { self != .card }
+}
+
+extension EnvironmentValues {
+    @Entry var harklightChoiceAppearance: MessageChoiceAppearance = .card
+}
+
 struct MessageChoiceLabel: View {
     let title: String
     let detail: String
@@ -156,12 +181,23 @@ struct MessageChoiceLabel: View {
     /// written-reply card does with its locked text, Edit and Retry.
     var showsFailure = true
 
+    @Environment(\.harklightChoiceAppearance) private var appearance
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.harklightMessageType) private var messageType
     @Environment(\.harklightSubmissionDisplay) private var submission
 
     private var messageColors: HarklightMessageColors {
         HarklightDesignSystem.palette(for: colorScheme).message(messageType)
+    }
+
+    private var textStyle: AnyShapeStyle {
+        appearance.usesSystemSurface ? AnyShapeStyle(.foreground) : AnyShapeStyle(messageColors.text)
+    }
+    private var secondaryStyle: AnyShapeStyle {
+        appearance.usesSystemSurface ? AnyShapeStyle(.foreground) : AnyShapeStyle(messageColors.secondary)
+    }
+    private var beamStyle: AnyShapeStyle {
+        appearance.usesSystemSurface ? AnyShapeStyle(.foreground) : AnyShapeStyle(messageColors.beam)
     }
 
     private var cornerRadius: CGFloat { HarklightDesignSystem.shape(.card) }
@@ -176,7 +212,7 @@ struct MessageChoiceLabel: View {
         if isSendingHere {
             ProgressView()
                 .controlSize(.small)
-                .tint(messageColors.beam)
+                .tint(appearance.usesSystemSurface ? nil : messageColors.beam)
                 .accessibilityLabel("Sending")
         } else if isFailedHere {
             Image(systemName: "exclamationmark.circle")
@@ -186,18 +222,18 @@ struct MessageChoiceLabel: View {
         } else if multiple {
             ZStack {
                 RoundedRectangle(cornerRadius: 4)
-                    .stroke(selected ? messageColors.beam : messageColors.secondary, lineWidth: 1.5)
+                    .stroke(selected ? beamStyle : secondaryStyle, lineWidth: 1.5)
                     .frame(width: 20, height: 20)
                 if selected {
                     Image(systemName: "checkmark")
                         .font(.caption.bold())
-                        .foregroundStyle(messageColors.beam)
+                        .foregroundStyle(beamStyle)
                 }
             }
         } else {
             // A picked choice's mark is a 6 point ring in the type color.
             Circle()
-                .stroke(selected ? messageColors.beam : messageColors.secondary,
+                .stroke(selected ? beamStyle : secondaryStyle,
                         lineWidth: selected ? 6 : 1.5)
                 .frame(width: 20, height: 20)
         }
@@ -212,40 +248,40 @@ struct MessageChoiceLabel: View {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     Text(title)
                         .harklightType(.choiceTitle)
-                        .foregroundStyle(messageColors.text)
+                        .foregroundStyle(textStyle)
                     if suggested {
                         Text("Suggested")
                             .textCase(.uppercase)
                             .harklightType(.suggested)
-                            .foregroundStyle(messageColors.secondary)
+                            .foregroundStyle(secondaryStyle)
                     }
                 }
                 if !detail.isEmpty {
                     Text(detail)
                         .harklightType(.choiceDetail)
-                        .foregroundStyle(messageColors.secondary)
+                        .foregroundStyle(secondaryStyle)
                 }
             }
             Spacer(minLength: 0)
             if isFailedHere, submission.retryAction(submissionKind) != nil {
                 Text("Retry")
                     .harklightType(.choiceTitle)
-                    .foregroundStyle(messageColors.beam)
+                    .foregroundStyle(beamStyle)
                     .accessibilityIdentifier("request-choice-retry")
             }
         }
-        .foregroundStyle(messageColors.text)
+        .foregroundStyle(textStyle)
         .padding(16).frame(maxWidth: .infinity, alignment: .leading)
         .background {
-            if drawsSurface {
+            if drawsSurface && !appearance.usesSystemSurface {
                 RoundedRectangle(cornerRadius: cornerRadius)
                     .fill(selected ? messageColors.pickedFill : messageColors.raised)
             }
         }
         .overlay {
-            if drawsSurface {
+            if drawsSurface && !appearance.usesSystemSurface {
                 RoundedRectangle(cornerRadius: cornerRadius)
-                    .strokeBorder(selected ? messageColors.beam : messageColors.line,
+                    .strokeBorder(selected ? beamStyle : AnyShapeStyle(messageColors.line),
                                   style: StrokeStyle(lineWidth: HarklightDesignSystem.shape(.lineWidth),
                                                      dash: ownAnswer && !selected ? [4, 3] : []))
             }
