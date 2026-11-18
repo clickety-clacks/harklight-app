@@ -5300,6 +5300,171 @@ final class NativeGuidedTLSTests: XCTestCase {
             "An established inbox retry must keep automatic reconnection")
     }
 
+    func testLegacyRefusalFailsOnlyItsOperationAndRetryPreservesBytesWhileBareLossRequeues() async throws {
+        for (sendsRefusal, isDiscussion) in [(true, false), (false, false), (true, true), (false, true)] {
+            let namespace = "Harklight.legacy-refusal-recovery." + UUID().uuidString
+            let identity = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
+            defer {
+                SecItemDelete([kSecClass as String: kSecClassCertificate,
+                               kSecAttrLabel as String: identity.label] as CFDictionary)
+                SecItemDelete([kSecClass as String: kSecClassKey,
+                               kSecAttrApplicationTag as String: Data(namespace.utf8)] as CFDictionary)
+            }
+            let server = try LegacyOversizeTLSRelay(expectedDevice: identity.deviceID, sendsRefusal: sendsRefusal)
+            defer { server.close() }
+            let portNumber = try await server.start()
+            let context = ProfileContext(identity: ProfileIdentity(
+                trustedRelayAuthority: ExactText("localhost"), personID: ExactText("test-person"),
+                deviceID: ExactText(identity.deviceID)), transportMode: .relay)
+            func connectedSession() async throws -> URLSessionInstallationSession {
+                let session = try URLSessionInstallationSession(profile: context,
+                    relayURL: XCTUnwrap(URL(string: "wss://localhost:\(portNumber)/relay")),
+                    clientIdentity: TrustedKeychainIdentity(identity.value), trustedRootDER: server.rootDER)
+                let replay = ConversationFrameCollector()
+                try await session.attachInboxReplay(
+                    Data((#"{"v":1,"type":"inbox_attach","ref":"attach"}"# + "\n").utf8), ref: "attach") { frame in
+                    replay.append(frame)
+                }
+                XCTAssertTrue(replay.types.contains("resynced"), "The next connection remains usable for inbox traffic")
+                return session
+            }
+            let store = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+            let key = RequestKey(accountScope: context.identity.personID, senderID: ExactText("sender"), messageID: ExactText("request"))
+            let payload = try JSONValue.parse(Data(#"{"title":"Question","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"reply","label":"Reply","kind":"text"}]}}"#.utf8))
+            _ = try store.apply(RelayEvent(sequence: 1, body: .delivery(StoredRequest(key: key, originalPayload: payload), .message),
+                conversation: RelayConversationMetadata(revision: 1, sessionHandle: ExactText("handle"), eventID: ExactText("1"))), context: context)
+            let binding = ConversationBinding(request: key, revision: 1)
+            let text = ExactText(String(repeating: "x", count: 5 * 1024 * 1024))
+            let session = try await connectedSession()
+            let core = try NativeRelayCore(store: store, context: context, session: U2ReplaySession(context.identity))
+            if isDiscussion {
+                try store.saveConversationDraft(ConversationDraft(binding: binding, text: text, files: []), context: context)
+                _ = try await core.submitDiscussion(binding, using: session) { _ in URL(fileURLWithPath: "/unused") }
+                let saved = try XCTUnwrap(store.conversationSnapshot(context: context).threads[key]?.drafts[1])
+                let operation = try XCTUnwrap(saved.operationID)
+                let bytes = try XCTUnwrap(saved.wireFrame)
+                XCTAssertEqual(saved.disposition, sendsRefusal ? .rejected(ExactText("bad_frame")) : .outcomeUnknown(operation))
+                XCTAssertFalse(saved.isPermanentlyRefused)
+                try store.queueRecoverableOperations(context: context)
+                XCTAssertEqual(try store.conversationSnapshot(context: context).threads[key]?.drafts[1]?.disposition, saved.disposition)
+                let recovery = try await connectedSession()
+                _ = try await core.submitDiscussion(binding, using: recovery) { _ in URL(fileURLWithPath: "/unused") }
+                let retried = try XCTUnwrap(store.conversationSnapshot(context: context).threads[key]?.drafts[1])
+                XCTAssertEqual(retried.operationID, operation)
+                XCTAssertEqual(retried.wireFrame, bytes)
+                if sendsRefusal {
+                    try store.saveConversationDraft(ConversationDraft(binding: binding, text: ExactText("Edited after refusal"), files: []), context: context)
+                    XCTAssertEqual(try store.conversationSnapshot(context: context).threads[key]?.drafts[1]?.text, ExactText("Edited after refusal"))
+                } else {
+                    XCTAssertThrowsError(try store.saveConversationDraft(ConversationDraft(binding: binding, text: ExactText("Cannot edit unknown send")), context: context))
+                }
+                await recovery.close()
+            } else {
+                let domainPort = AttentionDomainPort(store: store)
+                let selector = try XCTUnwrap(domainPort.inspect(context: domainPort.context, request: key).requests.first?.selector)
+                let receipt = try domainPort.submit(SubmitIntent(context: domainPort.context, selector: selector, intentID: UUID(),
+                    inputs: [.compatibilityText(action: ExactText("reply"), text: text)]))
+                let original = try XCTUnwrap(store.lookupIntent(receipt.intentID, context: context))
+                try await core.sendOriginalOperationForUserTap(receipt.intentID, using: session)
+                XCTAssertEqual(try store.lookupIntent(receipt.intentID, context: context)?.disposition, sendsRefusal ? .failed : .lost)
+                let presentation = try LivePresentationStore(store: store, context: context)
+                XCTAssertEqual(presentation.submissionPhases[key]?.phase, sendsRefusal ? .failed(retryable: true, editable: true) : .sending)
+                try store.queueRecoverableOperations(context: context)
+                XCTAssertEqual(try store.lookupIntent(receipt.intentID, context: context)?.disposition, sendsRefusal ? .failed : .pending)
+                if sendsRefusal { XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty) }
+                let recovery = try await connectedSession()
+                try await core.sendOriginalOperationForUserTap(receipt.intentID, using: recovery)
+                let retried = try XCTUnwrap(store.lookupIntent(receipt.intentID, context: context))
+                XCTAssertEqual(retried.operationID, original.operationID)
+                XCTAssertEqual(retried.wireFrame, original.wireFrame)
+                if sendsRefusal { try store.releaseFailedOperationForEdit(receipt.intentID, context: context) }
+                else { XCTAssertThrowsError(try store.releaseFailedOperationForEdit(receipt.intentID, context: context)) }
+                await recovery.close()
+            }
+            await session.close()
+        }
+    }
+
+    func testBadFrameEvidenceRequiresTheSoleActiveOperationAndNoOtherPendingRequest() {
+        let frame = Data(#"{"v":1,"type":"error","reason":"bad_frame"}"#.utf8)
+        let operation = UUID()
+        var evidence = RelayOperationRefusal()
+        evidence.observe(frame, hasOtherPendingRequests: false)
+        evidence.begin(operation)
+        XCTAssertFalse(evidence.take(for: operation))
+        evidence.observe(frame, hasOtherPendingRequests: true)
+        XCTAssertFalse(evidence.take(for: operation), "A pending focus reply makes the error ambiguous")
+        evidence.observe(Data(#"{"v":1,"type":"error","ref":"other","reason":"bad_frame"}"#.utf8),
+                         hasOtherPendingRequests: false)
+        XCTAssertFalse(evidence.take(for: operation))
+        evidence.observe(frame, hasOtherPendingRequests: false)
+        XCTAssertFalse(evidence.take(for: UUID()))
+        XCTAssertTrue(evidence.take(for: operation), "Already received refusal survives until classification")
+        XCTAssertFalse(evidence.take(for: operation), "Evidence is consumed exactly once")
+        evidence.observe(frame, hasOtherPendingRequests: false)
+        evidence.end()
+        evidence.begin(UUID())
+        XCTAssertFalse(evidence.take(for: operation), "Evidence never transfers to another operation")
+    }
+
+    func testLegacyOversizedSendWireObservation() async throws {
+        for (sendsRefusal, isDiscussion, mebibytes, pendingFocus) in [
+            (true, false, 5, false), (false, false, 5, false), (true, true, 5, false), (false, true, 5, false),
+            (true, false, 32, false), (false, false, 32, false), (true, true, 32, false), (false, true, 32, false),
+            (true, false, 5, true), (true, true, 5, true)
+        ] {
+            let namespace = "Harklight.legacy-oversize-observation." + UUID().uuidString
+            let identity = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
+            defer {
+                SecItemDelete([kSecClass as String: kSecClassCertificate,
+                               kSecAttrLabel as String: identity.label] as CFDictionary)
+                SecItemDelete([kSecClass as String: kSecClassKey,
+                               kSecAttrApplicationTag as String: Data(namespace.utf8)] as CFDictionary)
+            }
+            let server = try LegacyOversizeTLSRelay(expectedDevice: identity.deviceID, sendsRefusal: sendsRefusal)
+            defer { server.close() }
+            let port = try await server.start()
+            let context = ProfileContext(identity: ProfileIdentity(
+                trustedRelayAuthority: ExactText("localhost"), personID: ExactText("test-person"),
+                deviceID: ExactText(identity.deviceID)), transportMode: .relay)
+            let events = NativeDiagnosticEventCollector()
+            let readerReady = PagingExchangeSignal()
+            let session = try URLSessionInstallationSession(profile: context,
+                relayURL: XCTUnwrap(URL(string: "wss://localhost:\(port)/relay")),
+                clientIdentity: TrustedKeychainIdentity(identity.value), trustedRootDER: server.rootDER,
+                onFocusReportingReady: { readerReady.signal() },
+                onDiagnostic: { events.append($0) })
+            try await session.attachInboxReplay(
+                Data((#"{"v":1,"type":"inbox_attach","ref":"attach"}"# + "\n").utf8), ref: "attach") { _ in }
+            await readerReady.wait()
+            if pendingFocus { await session.sendFocusReport(.inbox) }
+            let operation = UUID()
+            let text = String(repeating: "x", count: mebibytes * 1024 * 1024)
+            let kind = isDiscussion ? "discussion" : "answer"
+            let frame = Data(("{\"v\":1,\"type\":\"\(kind)\",\"op_id\":\"\(operation.uuidString.lowercased())\",\"value\":\"\(text)\"}\n").utf8)
+            let result: String
+            if isDiscussion {
+                let outcome = await session.sendDiscussion(frame, operationID: operation)
+                result = String(describing: outcome)
+                XCTAssertEqual(outcome, sendsRefusal && !pendingFocus ? .rejected(reason: ExactText("bad_frame")) : .unresolved)
+            } else {
+                let outcome = try await session.sendOriginalOperation(frame, operationID: operation)
+                result = String(describing: outcome)
+                XCTAssertEqual(outcome, sendsRefusal && !pendingFocus ? .failed(operationID: operation) : .unresolved)
+            }
+            await session.close()
+            let refusalEvents = events.events.filter { $0.phase == .relayErrorReply && $0.causeCode == "server_bad_frame" }
+            print("LEGACY_OVERSIZE_OBSERVATION kind=\(kind) mebibytes=\(mebibytes) pendingFocus=\(pendingFocus) refusal=\(sendsRefusal) result=\(result) observedBadFrame=\(refusalEvents.count) attributed=\(refusalEvents.first?.operationID == operation) headerLength=\(server.rejectedLength) bufferedAtRejection=\(server.bufferedAtRejection)")
+            XCTAssertGreaterThan(server.rejectedLength, 4 * 1024 * 1024)
+            XCTAssertLessThan(server.bufferedAtRejection, server.rejectedLength,
+                              "The old Server rejects from the length header before reading the body")
+            if pendingFocus { XCTAssertNil(refusalEvents.first?.operationID, "An ambiguous reply names no operation") }
+            if !sendsRefusal {
+                XCTAssertTrue(refusalEvents.isEmpty)
+            }
+        }
+    }
+
     func testFirstConnectionSurfacesSocketFailureAndServerRefusal() async throws {
         for closesSocket in [true, false] {
             let namespace = "Harklight.first-connection-failure." + UUID().uuidString
@@ -6231,4 +6396,141 @@ private actor PushRemovalProbeSession: AuthenticatedPushRemovalSession {
     }
 
     func currentPushBindingStatus() async throws -> PushBindingStatus? { status }
+}
+
+// Matches the old relay's >4 MiB header rejection: text error, then TLS EOF;
+// no WebSocket close frame, and no need to finish receiving the rejected body.
+private final class LegacyOversizeTLSRelay: @unchecked Sendable {
+    private let queue = DispatchQueue(label: "legacy-oversize-tls-fixture")
+    private let listener: NWListener
+    private var connections: [NWConnection] = []
+    private let sendsRefusal: Bool
+    let rootDER: Data
+    private var length: UInt64 = 0
+    private var buffered = 0
+    var rejectedLength: UInt64 { queue.sync { length } }
+    var bufferedAtRejection: UInt64 { queue.sync { UInt64(buffered) } }
+
+    init(expectedDevice: String, sendsRefusal: Bool) throws {
+        self.sendsRefusal = sendsRefusal
+        let (tls, root) = try LocalEnrollmentTLS.fixtureTLS(expectedDevice: expectedDevice, queue: queue)
+        rootDER = root
+        let parameters = NWParameters(tls: tls, tcp: NWProtocolTCP.Options())
+        parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: .any)
+        listener = try NWListener(using: parameters)
+    }
+
+    func start() async throws -> UInt16 {
+        try await withCheckedThrowingContinuation { continuation in
+            listener.stateUpdateHandler = { [weak self] state in
+                guard let self else { return }
+                switch state {
+                case .ready:
+                    listener.stateUpdateHandler = nil
+                    guard let port = listener.port else {
+                        continuation.resume(throwing: NativeJoinError.unavailable); return
+                    }
+                    continuation.resume(returning: port.rawValue)
+                case let .failed(error):
+                    listener.stateUpdateHandler = nil
+                    continuation.resume(throwing: error)
+                default: break
+                }
+            }
+            listener.newConnectionHandler = { [weak self] connection in
+                guard let self else { return }
+                connections.append(connection)
+                connection.start(queue: queue)
+                receive(connection, buffer: Data(), upgraded: false)
+            }
+            listener.start(queue: queue)
+        }
+    }
+
+    private func receive(_ connection: NWConnection, buffer: Data, upgraded: Bool) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 16_384) { [weak self] data, _, done, error in
+            guard let self else { return }
+            var bytes = buffer
+            if let data { bytes.append(data) }
+            if !upgraded {
+                if let boundary = bytes.range(of: Data("\r\n\r\n".utf8)),
+                   let header = String(data: bytes[..<boundary.lowerBound], encoding: .utf8),
+                   let line = header.components(separatedBy: "\r\n").first(where: { $0.lowercased().hasPrefix("sec-websocket-key:") }) {
+                    let key = line.dropFirst("sec-websocket-key:".count).trimmingCharacters(in: .whitespaces)
+                    let accept = Data(Insecure.SHA1.hash(data: Data((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").utf8))).base64EncodedString()
+                    let response = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: \(accept)\r\nSec-WebSocket-Protocol: attention-relay/1\r\n\r\n"
+                    connection.send(content: Data(response.utf8), completion: .contentProcessed { _ in })
+                    process(connection, bytes: Data(bytes[boundary.upperBound...]))
+                    return
+                }
+            } else {
+                process(connection, bytes: bytes)
+                return
+            }
+            if done || error != nil { connection.cancel(); return }
+            receive(connection, buffer: bytes, upgraded: false)
+        }
+    }
+
+    private func process(_ connection: NWConnection, bytes: Data) {
+        guard bytes.count >= 2 else { receive(connection, buffer: bytes, upgraded: true); return }
+        let shortLength = Int(bytes[1] & 0x7f)
+        let headerBytes = shortLength == 127 ? 10 : (shortLength == 126 ? 4 : 2)
+        guard bytes.count >= headerBytes else { receive(connection, buffer: bytes, upgraded: true); return }
+        let payloadLength: UInt64 = shortLength < 126 ? UInt64(shortLength) :
+            bytes[2..<headerBytes].reduce(UInt64(0)) { ($0 << 8) | UInt64($1) }
+        if payloadLength > 4 * 1024 * 1024 {
+            length = payloadLength
+            buffered = bytes.count
+            let reply = sendsRefusal ? textFrame("{\"v\":1,\"type\":\"error\",\"reason\":\"bad_frame\"}\n") : Data()
+            connection.send(content: reply, completion: .contentProcessed { _ in
+                connection.send(content: nil, contentContext: .finalMessage, isComplete: true,
+                                completion: .contentProcessed { _ in connection.cancel() })
+            })
+            return
+        }
+        let maskBytes = bytes[1] & 0x80 == 0 ? 0 : 4
+        let total = headerBytes + maskBytes + Int(payloadLength)
+        guard bytes.count >= total else { receive(connection, buffer: bytes, upgraded: true); return }
+        var payload = Data(bytes[(headerBytes + maskBytes)..<total])
+        if maskBytes != 0 {
+            for index in payload.indices { payload[index] ^= bytes[headerBytes + index % 4] }
+        }
+        if let request = try? JSONValue.parse(payload),
+           request.uniqueValue(named: "type")?.stringValue?.rawValue == "focus_report" {
+            // Keep this report unanswered to exercise genuinely ambiguous errors.
+            let rest = Data(bytes.dropFirst(total))
+            if rest.isEmpty { receive(connection, buffer: rest, upgraded: true) }
+            else { process(connection, bytes: rest) }
+            return
+        }
+        // The single initial inbox_attach enables the app's normal background reader.
+        let response = textFrame("{\"v\":1,\"type\":\"ok\",\"ref\":\"attach\",\"paging_version\":1,\"checkpoint_accepted\":true,\"replay_started\":true}\n") +
+            textFrame("{\"v\":1,\"type\":\"resynced\"}\n")
+        connection.send(content: response, completion: .contentProcessed { _ in })
+        let rest = Data(bytes.dropFirst(total))
+        if rest.isEmpty { receive(connection, buffer: rest, upgraded: true) }
+        else { process(connection, bytes: rest) }
+    }
+
+    private func textFrame(_ text: String) -> Data {
+        let payload = Data(text.utf8)
+        var bytes = Data([0x81])
+        if payload.count < 126 { bytes.append(UInt8(payload.count)) }
+        else {
+            bytes.append(126)
+            bytes.append(UInt8((payload.count >> 8) & 255))
+            bytes.append(UInt8(payload.count & 255))
+        }
+        bytes.append(payload)
+        return bytes
+    }
+
+    func close() {
+        queue.sync {
+            listener.cancel()
+            connections.forEach { $0.cancel() }
+            connections.removeAll()
+        }
+    }
 }

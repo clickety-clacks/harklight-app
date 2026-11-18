@@ -53,3 +53,40 @@ struct RelayReplyAttribution {
         byRef.removeAll(keepingCapacity: false)
     }
 }
+
+/// Refusal evidence belongs only to the sole active operation exchange, and
+/// only if no out-of-gate request could have caused the uncorrelated error.
+struct RelayOperationRefusal {
+    private var operationID: UUID?
+    private var receivedBadFrame = false
+
+    mutating func begin(_ operationID: UUID) {
+        self.operationID = operationID
+        receivedBadFrame = false
+    }
+
+    mutating func end() {
+        operationID = nil
+        receivedBadFrame = false
+    }
+
+    static func isUncorrelatedBadFrame(_ bytes: Data) -> Bool {
+        guard let value = try? JSONValue.parse(bytes) else { return false }
+        return value.hasUniqueObjectKeys && value.uniqueValue(named: "v")?.integerValue == 1 &&
+            value.uniqueValue(named: "type")?.stringValue?.rawValue == "error" &&
+            value.uniqueValue(named: "reason")?.stringValue?.rawValue == "bad_frame" &&
+            value.uniqueValue(named: "ref") == nil
+    }
+
+    mutating func observe(_ frame: Data, hasOtherPendingRequests: Bool) {
+        if operationID != nil, !hasOtherPendingRequests, Self.isUncorrelatedBadFrame(frame) {
+            receivedBadFrame = true
+        }
+    }
+
+    mutating func take(for operationID: UUID) -> Bool {
+        guard self.operationID == operationID, receivedBadFrame else { return false }
+        receivedBadFrame = false
+        return true
+    }
+}
