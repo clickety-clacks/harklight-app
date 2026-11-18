@@ -14,6 +14,26 @@ final class MessageMetadataPresentationTests: XCTestCase {
         XCTAssertFalse(MessageChoiceAppearance(style: nil).usesSystemSurface)
     }
 
+    func testWrittenReplySummaryUsesItsOwnStyleAndStandaloneStatesKeepCards() {
+        let styles: [(MessageChoiceStyle?, MessageChoiceAppearance)] = [
+            (.primary, .prominent), (.destructive, .destructive),
+            (.secondary, .card), (nil, .card)
+        ]
+        for (style, expected) in styles {
+            // A value choice maps directly to the button appearance. A saved
+            // written reply's tappable summary must use the same treatment.
+            XCTAssertEqual(MessageChoiceAppearance(style: style), expected)
+            XCTAssertEqual(MessageChoiceAppearance.writtenReply(
+                style: style, showsEditor: false, isReadOnly: false, failed: false), expected)
+            XCTAssertEqual(MessageChoiceAppearance.writtenReply(
+                style: style, showsEditor: true, isReadOnly: false, failed: false), .card)
+            XCTAssertEqual(MessageChoiceAppearance.writtenReply(
+                style: style, showsEditor: false, isReadOnly: true, failed: false), .card)
+            XCTAssertEqual(MessageChoiceAppearance.writtenReply(
+                style: style, showsEditor: false, isReadOnly: false, failed: true), .card)
+        }
+    }
+
     func testOnlyUniqueRecognizedTopLevelMembersProduceMetadata() throws {
         let context = ProfileContext(identity: ProfileIdentity(
             trustedRelayAuthority: ExactText("relay.example"),

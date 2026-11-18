@@ -153,6 +153,13 @@ enum MessageChoiceAppearance: Equatable {
         }
     }
 
+    /// Only the tappable summary is inside a system button. Editors, failed
+    /// replies and read-only replies keep their standalone card surface.
+    static func writtenReply(style: MessageChoiceStyle?, showsEditor: Bool,
+                             isReadOnly: Bool, failed: Bool) -> Self {
+        showsEditor || isReadOnly || failed ? .card : Self(style: style)
+    }
+
     var usesSystemSurface: Bool { self != .card }
 }
 

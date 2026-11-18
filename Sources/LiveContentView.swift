@@ -427,7 +427,6 @@ private struct ReplyChoiceCard: View {
     let isReadOnly: Bool
     let onOpen: () -> Void
 
-    @Environment(\.harklightChoiceAppearance) private var appearance
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.harklightMessageType) private var messageType
     @Environment(\.harklightSubmissionDisplay) private var submission
@@ -445,6 +444,8 @@ private struct ReplyChoiceCard: View {
         let failedHere = selected && submission.isFailed(.answer)
         let showsEditor = !isReadOnly && !failedHere && (isEditing || selected)
         let showsPane = showsEditor || !text.isEmpty
+        let appearance = MessageChoiceAppearance.writtenReply(
+            style: style, showsEditor: showsEditor, isReadOnly: isReadOnly, failed: failedHere)
         let card = VStack(alignment: .leading, spacing: 0) {
             // The card's own row below shows a failure once, with Edit and Retry.
             MessageChoiceLabel(title: title, detail: detail, selected: selected,
