@@ -421,6 +421,9 @@ final class ReplyItemAreaTests: XCTestCase {
             let row = try XCTUnwrap(live.inboxRows.first { $0.key == key })
             XCTAssertEqual(row.inboxReplyPriorities, [7: .now])
             XCTAssertTrue(row.inboxReplyScores.isEmpty)
+            let reference = try XCTUnwrap(live.presentation.inboxViewListItems?.first)
+            XCTAssertEqual(ReplyItemPriorityProjection.display(for: reference,
+                perReplyPriorities: row.inboxReplyPriorities), .urgent)
             XCTAssertEqual(ReplyItemPriorityProjection.display(for: entry,
                 perReplyScores: row.inboxReplyScores, perReplyPriorities: row.inboxReplyPriorities,
                 serverListItems: live.presentation.inboxViewListItems), .urgent)
@@ -436,6 +439,29 @@ final class ReplyItemAreaTests: XCTestCase {
             perReplyScores: row.inboxReplyScores, perReplyPriorities: row.inboxReplyPriorities,
             serverListItems: live.presentation.inboxViewListItems),
             "A usable Normal score wins over an Urgent reply priority.")
+    }
+
+    func testNormalReplyPriorityUsesOnlyActiveGroupMetadataAndRetainedHistoryScore() {
+        let key = parent("priority")
+        func group(_ score: Double? = nil, historical: Bool = false) -> InboxViewListItem {
+            InboxViewListItem(kind: .reply, key: key, conversationSequence: 9,
+                openAtConversationSequence: historical ? 9 : 7, unseenCount: historical ? 0 : 2,
+                score: score, scoreKind: score == nil ? nil : historical ? .historical : .current)
+        }
+        for (priority, display) in [(InboxMessagePriority.now, InboxPriorityDisplay.urgent),
+                                    (.high, .high), (.low, .low)] {
+            XCTAssertEqual(ReplyItemPriorityProjection.display(for: group(),
+                perReplyPriorities: [6: .now, 7: priority, 9: .low, 10: .now]), display)
+        }
+        XCTAssertNil(ReplyItemPriorityProjection.display(for: group(),
+            perReplyPriorities: [7: .normal, 9: .low]))
+        XCTAssertNil(ReplyItemPriorityProjection.display(for: group(0.5),
+            perReplyPriorities: [7: .now]))
+        XCTAssertEqual(ReplyItemPriorityProjection.display(for: group(0.93, historical: true),
+            perReplyPriorities: [7: .low]), .urgent)
+        XCTAssertNil(ReplyItemPriorityProjection.display(for: group(historical: true),
+            perReplyPriorities: [9: .now]), "Current metadata cannot supply a historical priority.")
+        XCTAssertNil(ReplyItemPriorityProjection.display(for: group(), perReplyPriorities: [:]))
     }
 
     func testNewReplyPriorityUsesServerGroupScoreOrLegacyReplyMaximum() throws {

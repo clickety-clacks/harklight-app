@@ -83,6 +83,23 @@ enum ReplyItemNormalRowProjection {
 }
 
 enum ReplyItemPriorityProjection {
+    /// Normal list groups use the same highest-priority unseen replies as New.
+    /// Seen history has no per-reply priority in the current view; its retained
+    /// group score remains the only authoritative historical priority.
+    static func display(for reference: InboxViewListItem,
+                        perReplyPriorities: [UInt64: InboxMessagePriority]) -> InboxPriorityDisplay? {
+        var priority: InboxMessagePriority?
+        if reference.kind == .reply, (reference.unseenCount ?? 0) > 0,
+           reference.scoreKind != .historical,
+           let first = reference.openAtConversationSequence,
+           let last = reference.conversationSequence, first <= last {
+            let priorities = perReplyPriorities.filter { first <= $0.key && $0.key <= last }.map(\.value)
+            priority = [InboxMessagePriority.now, .high, .normal, .low]
+                .first { priorities.contains($0) }
+        }
+        return InboxPriorityDisplay.forEntry(score: reference.score, priority: priority)
+    }
+
     static func display(for entry: ReplyItemEntry,
                         perReplyScores: [UInt64: Double],
                         perReplyPriorities: [UInt64: InboxMessagePriority],

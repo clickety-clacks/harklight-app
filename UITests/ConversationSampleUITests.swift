@@ -443,6 +443,42 @@ final class ConversationSampleUITests: XCTestCase {
         }
     }
 
+    func testOrdinaryReplyPriorityUsesScorelessServerMetadata() {
+        XCUIDevice.shared.orientation = .portrait
+        let scenarios: [(String, String?)] = [
+            ("now", "Urgent"), ("high", "High priority"), ("normal", nil), ("low", nil),
+            ("normal-score", nil), ("historical", "Previous priority: Urgent"),
+            ("history-scoreless", nil)
+        ]
+        for (scenario, label) in scenarios {
+            let app = XCUIApplication()
+            app.launchArguments = ["--harklight-test-inbox-list-column",
+                "--harklight-test-inbox-list-state=replyItemFullWidth",
+                "--harklight-test-reply-item-area",
+                "--harklight-test-normal-reply-priority=\(scenario)"]
+            app.launch()
+            let row = app.descendants(matching: .any)["normal-reply-item-sample-information-0"]
+            let list = app.collectionViews.firstMatch
+            XCTAssertTrue(list.waitForExistence(timeout: 10), app.debugDescription)
+            for _ in 0..<8 where !row.isHittable { list.swipeUp() }
+            XCTAssertTrue(row.isHittable, app.debugDescription)
+            let badges = row.descendants(matching: .any).matching(
+                NSPredicate(format: "identifier BEGINSWITH 'normal-reply-item-priority-'"))
+            if let label {
+                XCTAssertTrue(badges.firstMatch.waitForExistence(timeout: 3), app.debugDescription)
+                XCTAssertTrue(badges.firstMatch.label.contains(label), app.debugDescription)
+            } else {
+                XCTAssertEqual(badges.count, 0, app.debugDescription)
+            }
+            capture("ordinary-reply-priority-\(scenario)", app)
+            let ax = XCTAttachment(string: app.debugDescription)
+            ax.name = "ordinary-reply-priority-\(scenario)-AX"
+            ax.lifetime = .keepAlways
+            add(ax)
+            app.terminate()
+        }
+    }
+
     func testReplyItemOpensParentChatScrolledToEarliestUnseenReply() {
         XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()
