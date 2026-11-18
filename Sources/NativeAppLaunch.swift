@@ -1392,6 +1392,62 @@ final class LivePresentationStore {
     private(set) var priorityLevelsRelayConfirmed = false
     private var pendingConversationTextByBinding: [ConversationBinding: String] = [:]
     private(set) var conversationError: String?
+    typealias DiscussionSubmitter = @MainActor (ConversationBinding, ProfileContext,
+        @escaping @Sendable (ConversationFile) async throws -> URL) async throws -> DiscussionOperationResult
+    @ObservationIgnored private let discussionSubmitter: DiscussionSubmitter
+
+    private struct DiscussionSubmissionNotice {
+        let context: ProfileContext
+        let operation: UUID
+        var text: String?
+        var transient = true
+    }
+    private var discussionSubmissionNotices: [ConversationBinding: DiscussionSubmissionNotice] = [:]
+
+    func conversationError(for key: RequestKey, revision: UInt64) -> String? {
+        if let conversationError { return conversationError }
+        let binding = ConversationBinding(request: key, revision: revision)
+        guard let notice = discussionSubmissionNotices[binding], notice.context == profileContext else { return nil }
+        return notice.text
+    }
+
+    private func updateDiscussionNotice(_ text: String?, transient: Bool = true,
+        binding: ConversationBinding, operation: UUID, context: ProfileContext) {
+        guard context == profileContext, var notice = discussionSubmissionNotices[binding],
+              notice.context == context, notice.operation == operation else { return }
+        notice.text = text
+        notice.transient = transient
+        if text == nil { discussionSubmissionNotices.removeValue(forKey: binding) }
+        else { discussionSubmissionNotices[binding] = notice }
+        // Refresh may already have adopted the receipt before this callback.
+        reconcileDiscussionNotices()
+    }
+
+    private func reconcileDiscussionNotices() {
+        for (binding, notice) in discussionSubmissionNotices {
+            guard notice.context == profileContext, notice.transient,
+                  let thread = conversationThreads[binding.request] else { continue }
+            let draft = thread.drafts[binding.revision]
+            let accepted: Bool
+            if case let .acceptedPendingReplay(operation, _) = draft?.disposition,
+               operation == notice.operation { accepted = true }
+            else {
+                accepted = thread.turns.contains {
+                    $0.binding == binding && $0.operationID == notice.operation &&
+                        $0.kind == .discussion && $0.author == .person
+                }
+            }
+            if accepted {
+                discussionSubmissionNotices.removeValue(forKey: binding)
+            } else if draft?.operationID == notice.operation,
+                      case let .rejected(reason) = draft?.disposition {
+                var rejected = notice
+                rejected.text = ConversationDraftPresentationText.rejectionMessage(reason)
+                rejected.transient = false
+                discussionSubmissionNotices[binding] = rejected
+            }
+        }
+    }
     @ObservationIgnored private let conversationAvailability: NativeConversationAvailability
     var conversationAvailabilityState: NativeConversationAvailability.State {
         if isLocalExample { return .available }
@@ -1571,12 +1627,14 @@ final class LivePresentationStore {
                      featureFlags: RemoteFeatureFlags = NativeRelayLifecycle.shared.featureFlags,
                      conversationAvailability: NativeConversationAvailability = NativeRelayLifecycle.shared.conversationAvailability,
                      diagnostics: NativeClientDiagnosticJournal? = nil,
+                     discussionSubmitter: DiscussionSubmitter? = nil,
                      clearedRetractionDefaults: UserDefaults = .standard,
                      newMessageAreaDefaults: UserDefaults? = nil) throws {
         guard context.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
         try self.init(store: store, context: context, permitsDelivery: true, diagnostics: diagnostics,
                       featureFlags: featureFlags,
                       conversationAvailability: conversationAvailability,
+                      discussionSubmitter: discussionSubmitter,
                       clearedRetractionDefaults: clearedRetractionDefaults,
                       newMessageAreaDefaults: newMessageAreaDefaults)
     }
@@ -1726,6 +1784,7 @@ final class LivePresentationStore {
                  diagnostics: NativeClientDiagnosticJournal? = nil,
                  featureFlags: RemoteFeatureFlags = NativeRelayLifecycle.shared.featureFlags,
                  conversationAvailability: NativeConversationAvailability = NativeRelayLifecycle.shared.conversationAvailability,
+                 discussionSubmitter: DiscussionSubmitter? = nil,
                  clearedRetractionDefaults: UserDefaults = .standard,
                  newMessageAreaDefaults: UserDefaults? = nil,
                  preparedInitialState: PreparedLivePresentationInitialState? = nil) throws {
@@ -1740,6 +1799,10 @@ final class LivePresentationStore {
         }
         self.replyAreaStore = replyStore
         self.conversationAvailability = conversationAvailability
+        self.discussionSubmitter = discussionSubmitter ?? { binding, context, retainedFile in
+            try await NativeRelayLifecycle.shared.submitDiscussion(binding, expected: context,
+                                                                   retainedFile: retainedFile)
+        }
         self.permitsDelivery = permitsDelivery
         self.profileContext = context
         self.isReadOnly = isReadOnly
@@ -2172,6 +2235,7 @@ final class LivePresentationStore {
                 thread.drafts[revision] = updated
                 conversationThreads[key] = thread
                 pendingConversationTextByBinding.removeValue(forKey: binding)
+                discussionSubmissionNotices.removeValue(forKey: binding)
                 conversationError = nil
                 return true
             }
@@ -2180,6 +2244,7 @@ final class LivePresentationStore {
             if let files { draft.files = files }
             draft.disposition = .saved
             try port.saveConversationDraft(draft, context: port.context)
+            discussionSubmissionNotices.removeValue(forKey: draft.binding)
             try refreshFromDurableStore()
             conversationError = nil
             return true
@@ -2348,16 +2413,18 @@ final class LivePresentationStore {
             }
             if permitsDelivery {
                 guard !sendingDiscussionBindings.contains(binding), let files = conversationFiles else { return }
-                _ = try attentionStore.prepareDiscussion(binding, context: profileContext)
+                let context = profileContext
+                let operation = try attentionStore.prepareDiscussion(binding, context: context)
+                discussionSubmissionNotices[binding] = DiscussionSubmissionNotice(
+                    context: context, operation: operation)
                 try refreshFromDurableStore()
                 onQueued?()
                 sendingDiscussionBindings.insert(binding)
-                conversationError = nil
                 Task { [weak self] in
                     guard let self else { return }
                     defer { sendingDiscussionBindings.remove(binding) }
                     do {
-                        let result = try await NativeRelayLifecycle.shared.submitDiscussion(binding, expected: profileContext) { file in
+                        let result = try await discussionSubmitter(binding, context) { file in
                             try files.fileURL(for: file)
                         }
                         do { try refreshFromDurableStore() }
@@ -2367,13 +2434,15 @@ final class LivePresentationStore {
                         }
                         switch result {
                         case .accepted:
-                            conversationError = nil
+                            updateDiscussionNotice(nil, binding: binding, operation: operation, context: context)
                             onResult?(true)
                         case let .rejected(reason):
-                            conversationError = ConversationDraftPresentationText.rejectionMessage(reason)
+                            updateDiscussionNotice(ConversationDraftPresentationText.rejectionMessage(reason),
+                                transient: false, binding: binding, operation: operation, context: context)
                             onResult?(false)
                         case .unresolved:
-                            conversationError = "Sending… Your text and files are saved."
+                            updateDiscussionNotice("Sending… Your text and files are saved.",
+                                binding: binding, operation: operation, context: context)
                             onResult?(false)
                         }
                     } catch {
@@ -2385,11 +2454,14 @@ final class LivePresentationStore {
                         catch { diagnose(.localStore, .projectionRefresh, .failed, error: error,
                                          request: key, revision: revision) }
                         if case InstallationTransportError.conversationsUnavailable = error {
-                            conversationError = nil // The conversation surface shows the capability message.
+                            // The conversation surface shows the capability message.
+                            updateDiscussionNotice(nil, binding: binding, operation: operation, context: context)
                         } else if (error as? ConversationError) == .emptyDraft {
-                            conversationError = "Add a message before sending these files. Your draft is retained."
+                            updateDiscussionNotice("Add a message before sending these files. Your draft is retained.",
+                                transient: false, binding: binding, operation: operation, context: context)
                         } else {
-                            conversationError = "Can't reach the server. Your text and files are saved and will resume when connected."
+                            updateDiscussionNotice("Can't reach the server. Your text and files are saved and will resume when connected.",
+                                binding: binding, operation: operation, context: context)
                         }
                     }
                 }
@@ -3771,6 +3843,7 @@ final class LivePresentationStore {
            !snapshot.requests.contains(where: { $0.key == selectedRequestKey }) {
             self.selectedRequestKey = nil
         }
+        reconcileDiscussionNotices()
         notificationProjectionDidChange?()
     }
 
@@ -3919,6 +3992,7 @@ final class LivePresentationStore {
             if selectedRequestKey.map(prepared.requestKeys.contains) != true {
                 selectedRequestKey = nil
             }
+            reconcileDiscussionNotices()
             notificationProjectionDidChange?()
             mainActorWorkNanoseconds += DispatchTime.now().uptimeNanoseconds - mainActorSegmentStartedAt
             return Double(mainActorWorkNanoseconds) / 1_000_000
