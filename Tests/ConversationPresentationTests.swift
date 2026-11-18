@@ -1516,12 +1516,22 @@ final class ConversationPresentationTests: XCTestCase {
         XCTAssertTrue(scenario.model.conversationError(for: scenario.binding.request, revision: 1)?.contains("Sending") == true)
         // Render the production panel with this real presentation store, using
         // only the synthetic authenticated transport and this test's window.
-        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 430, height: 932))
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previousKeyWindow = scene.windows.first(where: \.isKeyWindow)
+        let window = UIWindow(windowScene: scene)
+        window.frame = CGRect(x: 0, y: 0, width: 430, height: 932)
+        let appeared = expectation(description: "Production chat panel appeared")
         let panel = ConversationPanel(store: scenario.model, key: scenario.binding.request,
             sender: "Example sender", title: "Recovery chat")
+            .onAppear { appeared.fulfill() }
         window.rootViewController = UIHostingController(rootView: panel)
         window.makeKeyAndVisible()
-        defer { window.isHidden = true; window.rootViewController = nil }
+        defer {
+            window.isHidden = true
+            window.rootViewController = nil
+            previousKeyWindow?.makeKey()
+        }
+        await fulfillment(of: [appeared], timeout: 5)
         captureFooterPanel(window, name: "footer-before-automatic-recovery")
         let adopted = expectation(description: "Automatic live adoption received Delivered")
         var observed = false
@@ -1535,6 +1545,7 @@ final class ConversationPresentationTests: XCTestCase {
         defer { scenario.model.stopObserving() }
         try recoverFooter(scenario)
         await fulfillment(of: [adopted], timeout: 5)
+        await Task.yield() // Let the production panel process its observed update before capturing it.
         captureFooterPanel(window, name: "footer-after-automatic-recovery")
         try assertRecoveredFooter(scenario)
     }
