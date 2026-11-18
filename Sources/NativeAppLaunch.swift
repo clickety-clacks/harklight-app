@@ -2161,7 +2161,6 @@ final class LivePresentationStore {
             guard permitsDelivery, !isReadOnly else { throw AttentionStoreError.fixtureOnlyOperation }
             let destination = try files.previewDestination(for: file)
             try await NativeRelayLifecycle.shared.fetchConversationFile(file, to: destination, expected: profileContext)
-            try files.verify(destination, for: file)
             return destination
         } catch {
             diagnose(.fileAccess, .filePreview,

@@ -1,5 +1,4 @@
 import AttentionDomain
-import CryptoKit
 import Foundation
 
 public enum DiscussionOperationResult: Equatable, Sendable {
@@ -77,13 +76,14 @@ public struct ConversationWire: Sendable {
             switch prepared.content {
             case let .inline(bytes):
                 guard let limits else { throw ConversationError.uploadRequired(prepared.name) }
-                guard UInt64(bytes.count) == prepared.byteCount,
+                let decodedBytes = UInt64(bytes.count)
+                guard prepared.sha256.rawValue.utf8.count == 64,
+                      prepared.sha256.rawValue.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }),
                       inlineBytes <= limits.inlineDecodedBytes,
-                      prepared.byteCount <= limits.inlineDecodedBytes - inlineBytes,
-                      SHA256.hash(data: bytes).map({ String(format: "%02x", $0) }).joined() == prepared.sha256.rawValue else {
+                      decodedBytes <= limits.inlineDecodedBytes - inlineBytes else {
                     throw ConversationError.fileMismatch
                 }
-                inlineBytes += prepared.byteCount
+                inlineBytes += decodedBytes
                 fields.append(JSONMember("data_base64", .string(ExactText(bytes.base64EncodedString()))))
             case let .uploaded(id):
                 guard UUID(uuidString: id.rawValue) != nil else { throw ConversationError.fileMismatch }
@@ -518,8 +518,8 @@ public struct ConversationWire: Sendable {
             switch try text(item, "tier") {
             case "inline":
                 guard let encoded = item.uniqueValue(named: "data_base64")?.stringValue?.rawValue,
-                      let bytes = Data(base64Encoded: encoded), size == UInt64(bytes.count),
-                      SHA256.hash(data: bytes).map({ String(format: "%02x", $0) }).joined() == digest else { throw RelayWireError.invalidFrame }
+                      let bytes = Data(base64Encoded: encoded), digest.utf8.count == 64,
+                      digest.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) else { throw RelayWireError.invalidFrame }
                 content = .inline(bytes)
             case "upload":
                 let id = try text(item, "upload_id")

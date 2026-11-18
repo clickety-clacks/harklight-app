@@ -2628,7 +2628,7 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertTrue(nextConnection.register(ref: "focus-3"), "A new connection starts able to send focus.")
     }
 
-    func testFileDownloadSessionOpensNoRelayConnection() async throws {
+    func testFileDownloadCompletionPublishesOnlyVerifiedBytesAndKeepsRelayClosed() async throws {
         let namespace = "Harklight.download-no-relay-socket." + UUID().uuidString
         let identity = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
         defer {
@@ -2639,17 +2639,11 @@ final class NativeGuidedTLSTests: XCTestCase {
         }
         let fileBytes = Data("Downloaded without a relay socket".utf8)
         let fileHash = SHA256.hash(data: fileBytes).map { String(format: "%02x", $0) }.joined()
-        let origin = try LocalEnrollmentTLS(expectedDevice: identity.deviceID, replyBody: fileBytes,
-                                             responseFileHash: fileHash)
-        defer { origin.close() }
-        let originPort = try await origin.start()
         let relay = try LocalRelayWebSocket(expectedDevice: identity.deviceID, fencesEarlierConnections: true) { _ in [] }
         defer { relay.close() }
         let relayPort = try await relay.start()
         let context = ProfileContext(identity: ProfileIdentity(trustedRelayAuthority: ExactText("localhost"),
             personID: ExactText("download-person"), deviceID: ExactText(identity.deviceID)), transportMode: .relay)
-        let destination = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: destination) }
         let download = try URLSessionInstallationSession(profile: context,
             relayURL: XCTUnwrap(URL(string: "wss://localhost:\(relayPort)/relay")),
             clientIdentity: TrustedKeychainIdentity(identity.value), trustedRootDER: relay.rootDER,
@@ -2657,10 +2651,34 @@ final class NativeGuidedTLSTests: XCTestCase {
         let file = ConversationFile(id: ExactText("file"), name: ExactText("file.txt"),
             byteCount: UInt64(fileBytes.count), sha256: ExactText(fileHash),
             content: .uploaded(ExactText(UUID().uuidString)))
-        try await download.fetchConversationFile(file, to: destination,
-            originURL: XCTUnwrap(URL(string: "https://localhost:\(originPort)/origin/v1")))
+        let responses: [(String, Data)] = [
+            ("complete", fileBytes),
+            ("incomplete", Data(fileBytes.dropLast())),
+            ("wrong bytes", Data(repeating: 0, count: fileBytes.count)),
+            ("transport failure", fileBytes)
+        ]
+        for (name, body) in responses {
+            let origin = try LocalEnrollmentTLS(expectedDevice: identity.deviceID, replyBody: body,
+                responseFileHash: fileHash)
+            defer { origin.close() }
+            let originPort = try await origin.start()
+            if name == "transport failure" { origin.close() }
+            let destination = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: destination) }
+            do {
+                try await download.fetchConversationFile(file, to: destination,
+                    originURL: XCTUnwrap(URL(string: "https://localhost:\(originPort)/origin/v1")))
+                XCTAssertEqual(name, "complete", "Only a verified completed download becomes usable")
+                XCTAssertEqual(try Data(contentsOf: destination), fileBytes)
+            } catch {
+                XCTAssertNotEqual(name, "complete", "A valid download failed: \(error)")
+                if name == "transport failure" { XCTAssertNotNil(error as? URLError) }
+                else { XCTAssertEqual(error as? ConversationError, .fileMismatch) }
+                XCTAssertFalse(FileManager.default.fileExists(atPath: destination.path),
+                    "A failed download must not be published (\(name))")
+            }
+        }
         await download.close()
-        XCTAssertEqual(try Data(contentsOf: destination), fileBytes)
         XCTAssertEqual(relay.connectionCount, 0, "A download must not open a relay connection.")
     }
 

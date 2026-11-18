@@ -106,6 +106,7 @@ public struct ConversationFileWire: Sendable {
         }
         return URLRequest(url: originURL.appendingPathComponent("files").appendingPathComponent(id.rawValue))
     }
+    /// One streamed check at download completion, before the destination is usable.
     public func verify(_ url: URL, file: ConversationFile) throws {
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
