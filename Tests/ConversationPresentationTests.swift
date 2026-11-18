@@ -1723,7 +1723,7 @@ final class ConversationPresentationTests: XCTestCase {
         try scenario.model.refreshFromDurableStore()
         XCTAssertNil(scenario.model.conversationError(for: scenario.binding.request, revision: 1))
         let accepted = scenario.model.conversationDraft(for: scenario.binding.request, revision: 1)
-        XCTAssertEqual(accepted.disposition, .acceptedPendingReplay(operation, ExactText("receipt-only")))
+        XCTAssertEqual(accepted.disposition, .acceptedPendingReplay(operation: operation, turn: ExactText("receipt-only")))
         XCTAssertEqual(accepted.operationID, before.operationID)
         XCTAssertEqual(accepted.wireFrame, before.wireFrame)
         XCTAssertEqual(accepted.files, before.files)
