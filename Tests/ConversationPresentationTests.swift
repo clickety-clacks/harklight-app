@@ -1711,6 +1711,72 @@ final class ConversationPresentationTests: XCTestCase {
         XCTAssertEqual(scenario.model.conversationDraft(for: scenario.binding.request, revision: 1).disposition, .saved)
     }
 
+
+    func testAcceptedReceiptRetiresPendingNoticeBeforeTurnReplay() async throws {
+        let scenario = try await footerScenario()
+        await submitFooter(scenario)
+        XCTAssertTrue(scenario.model.conversationError(for: scenario.binding.request, revision: 1)?.contains("Sending") == true)
+        let operation = try XCTUnwrap(scenario.session.discussionOperations.first)
+        let before = scenario.model.conversationDraft(for: scenario.binding.request, revision: 1)
+        try scenario.domain.markDiscussionAccepted(scenario.binding, operation: operation,
+            turn: ExactText("receipt-only"), context: scenario.context)
+        try scenario.model.refreshFromDurableStore()
+        XCTAssertNil(scenario.model.conversationError(for: scenario.binding.request, revision: 1))
+        let accepted = scenario.model.conversationDraft(for: scenario.binding.request, revision: 1)
+        XCTAssertEqual(accepted.disposition, .acceptedPendingReplay(operation, ExactText("receipt-only")))
+        XCTAssertEqual(accepted.operationID, before.operationID)
+        XCTAssertEqual(accepted.wireFrame, before.wireFrame)
+        XCTAssertEqual(accepted.files, before.files)
+        XCTAssertEqual(ConversationSubmittedText.composerText(for: accepted), "")
+        XCTAssertFalse(scenario.model.conversation(for: scenario.binding.request)?.turns.contains(where: {
+            $0.operationID == operation
+        }) ?? true, "This exercises the receipt branch before the turn replays")
+        let port = AttentionDomainPort(store: scenario.domain)
+        _ = try await scenario.model.adoptForLiveUpdates(port.observe(context: port.context))
+        XCTAssertNil(scenario.model.conversationError(for: scenario.binding.request, revision: 1))
+        XCTAssertEqual(scenario.session.discussionOperations.count, 1)
+    }
+
+    func testImportErrorPresentBeforeAcceptanceSurvivesBothAdoptionPaths() async throws {
+        let scenario = try await footerScenario()
+        await submitFooter(scenario)
+        scenario.model.reportConversationImportError(NSError(domain: "IndependentImport", code: 1),
+            for: scenario.binding.request, revision: 1)
+        let importError = scenario.model.conversationError
+        XCTAssertNotNil(importError)
+        try recoverFooter(scenario)
+        try scenario.model.refreshFromDurableStore()
+        XCTAssertEqual(scenario.model.conversationError, importError)
+        XCTAssertEqual(scenario.model.conversationError(for: scenario.binding.request, revision: 1), importError)
+        let port = AttentionDomainPort(store: scenario.domain)
+        _ = try await scenario.model.adoptForLiveUpdates(port.observe(context: port.context))
+        XCTAssertEqual(scenario.model.conversationError, importError)
+        XCTAssertTrue(scenario.model.conversationDraft(for: scenario.binding.request, revision: 1).text.rawValue.isEmpty)
+        XCTAssertEqual(scenario.session.discussionOperations.count, 1)
+    }
+
+    func testEarlierAcceptedTurnDoesNotClearNewerPendingOperationInSameChat() async throws {
+        let scenario = try await footerScenario()
+        await submitFooter(scenario)
+        try recoverFooter(scenario)
+        try scenario.model.refreshFromDurableStore()
+        XCTAssertNil(scenario.model.conversationError(for: scenario.binding.request, revision: 1))
+        XCTAssertTrue(scenario.model.updateConversation(for: scenario.binding.request, revision: 1,
+            text: "A newer pending send", files: [scenario.original]))
+        await submitFooter(scenario)
+        let newer = scenario.model.conversationDraft(for: scenario.binding.request, revision: 1)
+        XCTAssertNotEqual(newer.operationID, scenario.session.discussionOperations.first)
+        XCTAssertEqual(newer.disposition, .outcomeUnknown(try XCTUnwrap(newer.operationID)))
+        let pendingNotice = scenario.model.conversationError(for: scenario.binding.request, revision: 1)
+        XCTAssertTrue(pendingNotice?.contains("Sending") == true)
+        try scenario.model.refreshFromDurableStore()
+        let port = AttentionDomainPort(store: scenario.domain)
+        _ = try await scenario.model.adoptForLiveUpdates(port.observe(context: port.context))
+        XCTAssertEqual(scenario.model.conversationError(for: scenario.binding.request, revision: 1), pendingNotice)
+        XCTAssertEqual(scenario.model.conversationDraft(for: scenario.binding.request, revision: 1), newer)
+        XCTAssertEqual(scenario.session.discussionOperations.count, 2)
+    }
+
     private func waitUntil(_ condition: @MainActor () -> Bool) async {
         for _ in 0..<200 {
             if condition() { return }

@@ -2493,11 +2493,12 @@ final class LivePresentationStore {
                   thread.terminal == nil, thread.allowsDiscussion else { throw ConversationError.closed }
             var draft = thread.drafts[revision] ?? ConversationDraft(binding: ConversationBinding(request: key, revision: revision))
             guard case .rejected = draft.disposition else { return }
+            let rejectedOperation = draft.operationID
             draft.disposition = .saved
             // The repository clears the failed operation's frozen identity.
             // Retry retains that identity; Edit begins a different submission.
             try port.saveConversationDraft(draft, context: port.context)
-            if let operation = draft.operationID,
+            if let operation = rejectedOperation,
                let notice = discussionSubmissionNotices[draft.binding],
                notice.context == profileContext, notice.operation == operation {
                 discussionSubmissionNotices.removeValue(forKey: draft.binding)
