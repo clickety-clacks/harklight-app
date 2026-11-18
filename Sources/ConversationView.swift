@@ -176,7 +176,6 @@ struct ConversationPanel: View {
                     }
                 }
                 if thread.terminal == nil && thread.allowsDiscussion {
-                    ConversationUploadCleanupStatus(store: store, key: key, revision: revision)
                     if let message = store.conversationUnavailableMessage {
                         Text(message)
                             .font(.callout)
@@ -778,9 +777,6 @@ private struct ConversationComposerSendButton: View {
     let isSendingDiscussion: Bool
     let allowsDiscussion: Bool
     let hasFiles: Bool
-    let hasPendingUploadCleanup: Bool
-    let hasAbandonedDiscussion: Bool
-    let hasUnreadyUploadReference: Bool
     let action: () -> Void
 
     var body: some View {
@@ -795,8 +791,7 @@ private struct ConversationComposerSendButton: View {
         .tint(HarklightColor(token: .accentFill))
         .accessibilityLabel(isLocalExample ? "Send locally" : frozen ? "Retry" : "Send message")
         .accessibilityIdentifier("sample-chat-send")
-        .disabled(isSendingDiscussion || !allowsDiscussion || hasPendingUploadCleanup ||
-                  hasAbandonedDiscussion || hasUnreadyUploadReference ||
+        .disabled(isSendingDiscussion || !allowsDiscussion ||
                   (!frozen && session.stagedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !hasFiles))
     }
 }
@@ -836,7 +831,6 @@ private struct ConversationComposer: View {
                             }
                             .buttonStyle(.plain)
                             .accessibilityLabel(file.name.rawValue)
-                            .disabled(store.uploadNeedsReselection(file, for: key, revision: revision))
                             .overlay(alignment: .topTrailing) {
                                 Button("Remove", systemImage: "xmark.circle.fill") {
                                     guard persistStagedText() else { return }
@@ -848,9 +842,6 @@ private struct ConversationComposer: View {
                                 .foregroundStyle(.hkSecondary, .hkPanel)
                                 .offset(x: 8, y: -8)
                                 .disabled(frozen)
-                            }
-                            if store.uploadNeedsReselection(file, for: key, revision: revision) {
-                                Text("Not ready · reselect after cleanup").font(.caption2).foregroundStyle(.hkSecondary)
                             }
                         }
                     }
@@ -875,7 +866,7 @@ private struct ConversationComposer: View {
                 .buttonStyle(.glass).buttonBorderShape(.circle).controlSize(.regular)
                 .accessibilityLabel(store.isLocalExample ? "Add sample attachment" : "Add attachment")
                 .accessibilityIdentifier("sample-chat-add-attachment")
-                .disabled(frozen || !allowsDraftEditing || store.hasPendingUploadCleanup(for: key, revision: revision))
+                .disabled(frozen || !allowsDraftEditing)
                 .confirmationDialog("Add a local example", isPresented: $attachmentChoices, titleVisibility: .visible) {
                     Button("Sample photo") { addExample("Photo") }
                     Button("Sample file") { addExample("Document") }
@@ -903,9 +894,6 @@ private struct ConversationComposer: View {
                 isSendingDiscussion: store.isSendingDiscussion(for: key, revision: revision),
                 allowsDiscussion: allowsDiscussion,
                 hasFiles: !draft.files.isEmpty,
-                hasPendingUploadCleanup: store.hasPendingUploadCleanup(for: key, revision: revision),
-                hasAbandonedDiscussion: store.hasAbandonedDiscussion(for: key, revision: revision),
-                hasUnreadyUploadReference: store.hasUnreadyUploadReference(for: key, revision: revision),
                 action: sendStagedText)
         }
         }
@@ -979,9 +967,6 @@ private struct ConversationComposer: View {
     private func sendStagedText() {
         textSession.textSaveTask?.cancel()
         guard !store.isSendingDiscussion(for: key, revision: revision), allowsDiscussion,
-              !store.hasPendingUploadCleanup(for: key, revision: revision),
-              !store.hasAbandonedDiscussion(for: key, revision: revision),
-              !store.hasUnreadyUploadReference(for: key, revision: revision),
               frozen || !textSession.stagedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !draft.files.isEmpty else { return }
         guard persistStagedText(), let binding = textSession.stagedBinding else { return }
         let submittedText = textSession.stagedText
@@ -1004,51 +989,6 @@ private struct ConversationComposer: View {
         var number = 1
         while draft.files.contains(where: { $0.name.rawValue == "\(kind) \(number)" }) { number += 1 }
         store.addLocalAttachment("\(kind) \(number)", for: key, revision: revision)
-    }
-}
-
-@MainActor
-private struct ConversationUploadCleanupStatus: View {
-    let store: LivePresentationStore
-    let key: RequestKey
-    let revision: UInt64
-    private var cleanups: [ConversationUploadCleanup] {
-        (store.conversation(for: key)?.uploadCleanups ?? [:]).values
-            .filter { $0.binding.revision == revision }.sorted { $0.id.uuidString < $1.id.uuidString }
-    }
-    var body: some View {
-        if !cleanups.isEmpty {
-            VStack(alignment: .leading, spacing: 6) {
-                ForEach(cleanups) { cleanup in
-                    switch cleanup.outcome {
-                    case .pending:
-                        Text("Upload cleanup pending. Deletion is not confirmed; your text draft is retained.")
-                    case .unknown:
-                        Text("Upload cleanup unconfirmed. Retry cleanup before reselecting files; your text draft is retained.")
-                    case let .acknowledged(result):
-                        Text("Cleanup acknowledged: \(result.discarded) unsubmitted uploads removed. Reselect unready files to upload again.")
-                        if result.state == .committed {
-                            Text("Some upload references are committed. Individual file status awaits synchronized history; retained draft references are not ready to resend.")
-                        }
-                    }
-                }
-                if store.hasPendingUploadCleanup(for: key, revision: revision), store.isLocalExample {
-                    Text("Local example · cleanup is unconfirmed; no service is contacted.")
-                }
-                if store.hasPendingUploadCleanup(for: key, revision: revision), !store.isLocalExample, !store.isReadOnly {
-                    Button("Retry upload cleanup") { Task { await store.retryUploadCleanup(for: key) } }
-                        .disabled(store.retryingCleanupRequests.contains(key))
-                        .accessibilityIdentifier("conversation-retry-cleanup")
-                }
-                if !store.isReadOnly &&
-                   (store.hasAbandonedDiscussion(for: key, revision: revision) || store.uploadHistoryNeedsReconciliation(for: key, revision: revision)) {
-                    Text("Refresh history to reconcile retained file and submission identities. These unready references will not be resent.")
-                    Button("Refresh discussion history") { Task { await store.refreshDiscussionHistory() } }
-                }
-            }.font(.caption).foregroundStyle(.hkSecondary).padding(.horizontal)
-            .fixedSize(horizontal: false, vertical: true)
-            .accessibilityIdentifier("conversation-upload-cleanup-status")
-        }
     }
 }
 

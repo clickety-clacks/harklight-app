@@ -234,7 +234,35 @@ public actor NativeRelayCore {
     private var pendingConversationReadPositionDrain = false
     private var inspectedConversationMetadata = false
     private var discoveredOriginURL: URL?
-    private var activeCleanupRequests: Set<UUID> = []
+    private var activeCleanupScopes: Set<ConversationBinding> = []
+    private var cleanupWaiters: [ConversationBinding: [CheckedContinuation<Void, Never>]] = [:]
+    private var uploadingScopes: Set<ConversationBinding> = []
+
+    private func finishCleanup(in binding: ConversationBinding) {
+        activeCleanupScopes.remove(binding)
+        let waiting = cleanupWaiters.removeValue(forKey: binding) ?? []
+        for waiter in waiting { waiter.resume() }
+    }
+
+    private func beginUploads(in binding: ConversationBinding) async throws {
+        // Reserve before suspending: another pending discard must yield to this
+        // send when the one already in flight ends.
+        uploadingScopes.insert(binding)
+        if activeCleanupScopes.contains(binding) {
+            await withCheckedContinuation { cleanupWaiters[binding, default: []].append($0) }
+        }
+        try validate()
+    }
+
+    private func hasUnresolvedUploads(in binding: ConversationBinding) throws -> Bool {
+        guard let thread = try store.conversationSnapshot(context: context).threads[binding.request],
+              let draft = thread.drafts[binding.revision], let operation = draft.operationID,
+              let group = thread.uploadGroups?[operation], !group.originals.isEmpty else { return false }
+        switch draft.disposition {
+        case .submitting, .outcomeUnknown: return true
+        case .saved, .rejected, .acceptedPendingReplay: return false
+        }
+    }
     // This cache contains only accepted operations that still await their exact
     // terminal replay. Removing a terminal entry keeps memory bounded by current
     // outstanding work, not the account's retained history.
@@ -253,11 +281,15 @@ public actor NativeRelayCore {
         let pending = (try store.conversationSnapshot(context: context).threads[request]?.uploadCleanups ?? [:]).values
             .filter { if case .acknowledged = $0.outcome { return false }; return true }
         for cleanup in pending {
-            // Foreground replay and explicit navigation may retry the same
-            // durable cleanup together. Keep one request in flight so a late
-            // duplicate cannot fence a newly reselected upload after success.
-            guard activeCleanupRequests.insert(cleanup.id).inserted else { continue }
-            defer { activeCleanupRequests.remove(cleanup.id) }
+            if cleanup.binding.request != request || cleanup.binding.revision == 0 || cleanup.uploadOperations.isEmpty {
+                try store.recordConversationCleanup(cleanup.id, request: request,
+                    outcome: .acknowledged(ConversationUploadDiscardResult(state: .discarded, discarded: 0)), context: context)
+                continue
+            }
+            guard !uploadingScopes.contains(cleanup.binding),
+                  try !hasUnresolvedUploads(in: cleanup.binding),
+                  activeCleanupScopes.insert(cleanup.binding).inserted else { continue }
+            defer { finishCleanup(in: cleanup.binding) }
             diagnose(.upload, .uploadCleanup, .began, operationID: cleanup.id,
                      request: request, revision: cleanup.binding.revision)
             do {
@@ -347,7 +379,17 @@ public actor NativeRelayCore {
         }
         defer { if operationSession == nil { releaseBusy() } }
         guard sendingDiscussions.insert(binding).inserted else { return .unresolved }
-        defer { sendingDiscussions.remove(binding) }
+        defer {
+            sendingDiscussions.remove(binding)
+            let usedUploads = uploadingScopes.remove(binding) != nil
+            if usedUploads,
+               let thread = try? store.conversationSnapshot(context: context).threads[binding.request],
+               (thread.uploadCleanups ?? [:]).values.contains(where: {
+                   if case .acknowledged = $0.outcome { return false }; return true
+               }) {
+                Task { try? await self.discardAbandonedUploads(for: binding.request) }
+            }
+        }
         try validate()
         guard !conversationsUnavailable else { throw InstallationTransportError.conversationsUnavailable }
         guard let transport = operationSession ?? (session as? any AuthenticatedConversationFileSession),
@@ -366,6 +408,10 @@ public actor NativeRelayCore {
         let frame: Data
         do {
             if let saved = frozen.wireFrame {
+                if let group = try store.conversationSnapshot(context: context)
+                    .threads[binding.request]?.uploadGroups?[operation], !group.originals.isEmpty {
+                    try await beginUploads(in: binding)
+                }
                 frame = saved
             } else {
                 var prepared: [ConversationFile] = []
@@ -378,8 +424,16 @@ public actor NativeRelayCore {
                     try validate()
                     limits = published
                     let tiers = try published.tiers(for: frozen.files)
+                    try store.selectConversationUploadFiles(zip(frozen.files, tiers)
+                        .filter { $0.1 == .upload }.map { $0.0 },
+                        binding: binding, operation: operation, context: context)
+                    try validateUploadOperation(binding, operation: operation)
                     let priorUploads = try store.conversationSnapshot(context: context)
                         .threads[binding.request]?.uploadGroups?[operation]?.uploaded ?? []
+                    if tiers.contains(.upload) || !priorUploads.isEmpty {
+                        try await beginUploads(in: binding)
+                        try validateUploadOperation(binding, operation: operation)
+                    }
                     for (file, tier) in zip(frozen.files, tiers) {
                         if let uploaded = priorUploads.first(where: { $0.id == file.id }) {
                             guard uploaded.name == file.name, uploaded.byteCount == file.byteCount,
@@ -389,9 +443,9 @@ public actor NativeRelayCore {
                         }
                         if case .uploaded = file.content { prepared.append(file); continue }
                         if tier == .upload {
-                            try store.registerConversationUpload(file, binding: binding, operation: operation, context: context)
                             let source = try await retainedFile(file)
                             try validateUploadOperation(binding, operation: operation)
+                            try store.registerConversationUpload(file, binding: binding, operation: operation, context: context)
                             diagnose(.upload, .uploadTransfer, .began, operationID: operation,
                                      request: binding.request, revision: binding.revision)
                             let uploaded = try await transport.uploadConversationFile(file, from: source, binding: binding,
@@ -422,7 +476,11 @@ public actor NativeRelayCore {
             // ambiguous attempt must still keep its exact operation frozen.
             // Keep all original bytes/draft; unreferenced uploads do not submit a turn.
             let names = frozen.files.map { $0.name.rawValue }.joined(separator: ", ")
-            let definitiveFailure = error is ConversationError || error is CocoaError
+            let discardedUpload: Bool
+            if case let ConversationFileTransportError.server(_, reason) = error {
+                discardedUpload = reason == ExactText("upload_discarded")
+            } else { discardedUpload = false }
+            let definitiveFailure = error is ConversationError || error is CocoaError || discardedUpload
             diagnose(.conversation, .discussionPreparation,
                      NativeDiagnosticCauseCode.failureTransition(for: error), error: error,
                      operationID: operation, request: binding.request, revision: binding.revision,
@@ -537,6 +595,7 @@ public actor NativeRelayCore {
     }
 
     public func deactivate() {
+        for binding in Array(activeCleanupScopes) { finishCleanup(in: binding) }
         active = false
         let waitingRefreshes = refreshWaiters
         refreshWaiters.removeAll()

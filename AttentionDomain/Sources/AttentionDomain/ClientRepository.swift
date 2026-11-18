@@ -3745,13 +3745,13 @@ public final class ClientRepository: @unchecked Sendable {
         guard !draft.text.rawValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !draft.files.isEmpty else {
             throw ConversationError.emptyDraft
         }
-        guard !(thread.uploadCleanups ?? [:]).values.contains(where: {
-            guard $0.binding == binding else { return false }
-            if case .acknowledged = $0.outcome { return false }; return true
-        }) else { throw ConversationError.pendingSubmission }
-        let unready = Set((thread.uploadGroups ?? [:]).values.filter { $0.cleanupID != nil }
-            .flatMap { $0.originals.map(\.id) })
-        guard !draft.files.contains(where: { unready.contains($0.id) }) else { throw ConversationError.pendingSubmission }
+        // Cleanup belongs to an older attempt, never to the person's next send.
+        if let id = draft.operationID, let group = thread.uploadGroups?[id],
+           group.cleanupID != nil {
+            draft.operationID = nil
+            draft.wireFrame = nil
+            draft.disposition = .saved
+        }
         let operation: UUID
         switch draft.disposition {
         case let .submitting(id), let .outcomeUnknown(id), let .acceptedPendingReplay(id, _):
@@ -3766,13 +3766,11 @@ public final class ClientRepository: @unchecked Sendable {
         }
         draft.operationID = operation
         if draft.submittedAt == nil { draft.submittedAt = Date() }
-        // Register planned upload-tier files before awaiting limits or disk/HTTP.
-        // Departure during that preparation must fence this original operation too.
-        let tiers = try ConversationFileLimits(inlineDecodedBytes: 262_144, uploadCap: nil).tiers(for: draft.files)
-        let uploads = zip(draft.files, tiers).filter { $0.1 == .upload }.map { $0.0 }
-        if !uploads.isEmpty, thread.uploadGroups?[operation] == nil {
+        // An empty group fences departure during limits discovery. Only an
+        // actual upload registers a file; inline files never enter the group.
+        if draft.wireFrame == nil, !draft.files.isEmpty, thread.uploadGroups?[operation] == nil {
             let group = ConversationUploadGroup(operationID: operation, binding: binding,
-                originals: uploads, uploaded: [], cleanupID: nil)
+                originals: [], uploaded: [], cleanupID: nil)
             thread.uploadGroups = (thread.uploadGroups ?? [:]).merging([operation: group]) { _, new in new }
         }
         thread.drafts[binding.revision] = draft
@@ -3780,6 +3778,27 @@ public final class ClientRepository: @unchecked Sendable {
         next.conversation = conversation
         try commit(next)
         return operation
+    }
+
+    /// Prune candidates saved by older clients once the Server chooses tiers.
+    /// New attempts register originals only immediately before an upload starts.
+    public func selectConversationUploadFiles(_ files: [ConversationFile], binding: ConversationBinding,
+        operation: UUID, context suppliedContext: ProfileContext) throws {
+        writerLock.lock()
+        defer { writerLock.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        var next = state
+        guard var conversation = next.conversation, var thread = conversation.threads[binding.request],
+              var group = thread.uploadGroups?[operation] else { return }
+        guard group.cleanupID == nil else { throw ConversationError.pendingSubmission }
+        let keep = Set(files.map(\.id) + group.uploaded.map(\.id))
+        group.originals.removeAll { !keep.contains($0.id) }
+        thread.uploadGroups?[operation] = group
+        conversation.threads[binding.request] = thread
+        next.conversation = conversation
+        try commit(next)
     }
 
     /// Persist the exact prepared request before the first send. A lost reply
@@ -3801,6 +3820,9 @@ public final class ClientRepository: @unchecked Sendable {
             return
         }
         draft.wireFrame = frame
+        if let group = thread.uploadGroups?[operation], group.originals.isEmpty {
+            thread.uploadGroups?.removeValue(forKey: operation)
+        }
         thread.drafts[binding.revision] = draft
         conversation.threads[binding.request] = thread
         next.conversation = conversation
@@ -3905,11 +3927,35 @@ public final class ClientRepository: @unchecked Sendable {
         var next = state
         guard var conversation = next.conversation, var thread = conversation.threads[request],
               var cleanup = thread.uploadCleanups?[id] else { throw ConversationError.missingRequest }
+        if cleanup.binding.request != request || cleanup.binding.revision == 0 || cleanup.uploadOperations.isEmpty {
+            thread.uploadCleanups?.removeValue(forKey: id)
+            for (operation, group) in thread.uploadGroups ?? [:] where group.cleanupID == id {
+                thread.uploadGroups?.removeValue(forKey: operation)
+            }
+            conversation.threads[request] = thread
+            next.conversation = conversation
+            try commit(next)
+            return
+        }
         // A late failure must not undo an already acknowledged cleanup.
         if case .acknowledged = cleanup.outcome { return }
         cleanup.outcome = outcome
         thread.uploadCleanups?[id] = cleanup
-        if case .acknowledged = outcome { thread.settleAbandonedDraft(revision: cleanup.binding.revision) }
+        if case .acknowledged = outcome {
+            // The existing Server discards by revision, including leftovers from
+            // a newer send that ended before this cleanup ran. Retire those
+            // handles too, while keeping every original local file.
+            var committed = Set(thread.turns.compactMap(\.operationID))
+            if case let .acceptedPendingReplay(operation, _) = thread.drafts[cleanup.binding.revision]?.disposition {
+                committed.insert(operation)
+            }
+            for (operation, group) in thread.uploadGroups ?? [:]
+                where group.binding.revision == cleanup.binding.revision && !committed.contains(operation) &&
+                    (!group.originals.isEmpty || cleanup.uploadOperations.contains(operation)) {
+                thread.uploadGroups?[operation]?.cleanupID = id
+            }
+            thread.settleAbandonedDraft(revision: cleanup.binding.revision)
+        }
         conversation.threads[request] = thread
         next.conversation = conversation
         try commit(next)
@@ -3934,6 +3980,9 @@ public final class ClientRepository: @unchecked Sendable {
         // Rejection and unknown outcomes retain text, selected files and addressed revision.
         draft.operationID = operation
         draft.disposition = rejection.map { .rejected($0) } ?? .outcomeUnknown(operation)
+        if let group = thread.uploadGroups?[operation], group.originals.isEmpty, group.cleanupID == nil {
+            thread.uploadGroups?.removeValue(forKey: operation)
+        }
         thread.drafts[binding.revision] = draft
         thread.settleAbandonedDraft(revision: binding.revision)
         conversation.threads[binding.request] = thread

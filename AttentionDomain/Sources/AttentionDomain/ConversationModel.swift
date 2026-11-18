@@ -519,19 +519,21 @@ public struct ConversationThread: Equatable, Codable, Sendable {
         default: return // Keep ambiguous and accepted operations exact for replay.
         }
         let abandoned = (uploadGroups ?? [:]).values.filter { group in
-            guard group.binding.revision == revision, let id = group.cleanupID,
-                  let cleanup = uploadCleanups?[id], case let .acknowledged(result) = cleanup.outcome,
-                  result.state == .discarded else { return false }
-            return true
+            guard group.binding.revision == revision, let id = group.cleanupID else { return false }
+            // Missing cleanup metadata cannot strand a draft either.
+            guard let cleanup = uploadCleanups?[id] else { return true }
+            if case .acknowledged = cleanup.outcome { return true }
+            return false
         }
-        let ids = Set(abandoned.flatMap { $0.originals.map(\.id) })
-        guard !ids.isEmpty else { return }
-        draft.files.removeAll { ids.contains($0.id) }
-        // Explicitly discarded uploads change the draft payload. A later Send
-        // is a new operation, never a retry of the fenced request bytes.
-        draft.operationID = nil
-        draft.wireFrame = nil
-        draft.disposition = .rejected(ExactText("Not delivered. Reselect files to upload again; text draft retained."))
+        guard !abandoned.isEmpty else { return }
+        if let operation = draft.operationID, abandoned.contains(where: { $0.operationID == operation }) {
+            draft.operationID = nil
+            draft.wireFrame = nil
+            draft.disposition = .saved
+        }
+        // Original local bytes remain attached. Discard affects remote handles,
+        // not the person's draft or their ability to send those bytes again.
+        for group in abandoned { uploadGroups?.removeValue(forKey: group.operationID) }
         drafts[revision] = draft
     }
 

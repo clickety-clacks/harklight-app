@@ -1201,12 +1201,10 @@ final class ConversationSampleUITests: XCTestCase {
         let composer = app.textViews["sample-chat-composer"]
         XCTAssertTrue(composer.waitForExistence(timeout: 5))
         XCTAssertEqual(composer.value as? String, "Keep the original mixed-result note.")
-        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label == %@",
-            "Some upload references are committed. Individual file status awaits synchronized history; retained draft references are not ready to resend.")).firstMatch.exists)
         // The drawn attachment is a thumbnail; its file name is the thumbnail's label.
         XCTAssertTrue(app.buttons["Unidentified example.txt"].exists, app.debugDescription)
-        XCTAssertTrue(app.staticTexts["Not ready · reselect after cleanup"].exists)
-        XCTAssertFalse(app.buttons["Send locally"].isEnabled)
+        XCTAssertFalse(app.staticTexts["Not ready · reselect after cleanup"].exists)
+        XCTAssertTrue(app.buttons["Send locally"].isEnabled)
         XCTAssertFalse(app.staticTexts["Committed file references remain available in history. This result does not identify individual files."].exists)
         capture("mixed-cleanup-retained-unidentified-reference", app)
     }
@@ -1237,8 +1235,9 @@ final class ConversationSampleUITests: XCTestCase {
         app.buttons["Chat"].tap()
         XCTAssertTrue(composer.waitForExistence(timeout: 5))
         XCTAssertEqual(composer.value as? String, "Keep this file note.")
-        XCTAssertTrue(app.staticTexts["Upload cleanup unconfirmed. Retry cleanup before reselecting files; your text draft is retained."].waitForExistence(timeout: 5))
-        XCTAssertFalse(app.buttons["Send locally"].isEnabled)
+        XCTAssertFalse(app.buttons["conversation-retry-cleanup"].exists)
+        XCTAssertFalse(app.otherElements["conversation-upload-cleanup-status"].exists)
+        XCTAssertTrue(app.buttons["Send locally"].isEnabled)
         capture("compact-back-upload-cleanup-retained-draft", app)
     }
 
@@ -1315,19 +1314,18 @@ final class ConversationSampleUITests: XCTestCase {
         XCTAssertTrue(returned, "Returning to the original row must restore its exact detail identity")
         if exerciseSheetLifecycle { app.buttons["Chat"].tap() }
         XCTAssertTrue(composer.waitForExistence(timeout: 5))
-        let cleanupShown = app.staticTexts["Upload cleanup unconfirmed. Retry cleanup before reselecting files; your text draft is retained."].waitForExistence(timeout: 5)
+        XCTAssertFalse(app.buttons["conversation-retry-cleanup"].exists)
         recordDiagnostics("after-return-chat", app)
-        XCTAssertTrue(cleanupShown)
+        XCTAssertFalse(app.otherElements["conversation-upload-cleanup-status"].exists)
         XCTAssertEqual(composer.value as? String, "Keep this file note.")
-        XCTAssertFalse(app.buttons["Send locally"].isEnabled)
-        XCTAssertTrue(app.staticTexts["Not ready · reselect after cleanup"].exists)
-        XCTAssertTrue(app.staticTexts["Local example · cleanup is unconfirmed; no service is contacted."].exists)
-        capture("upload-return-unconfirmed-no-resend", app)
+        XCTAssertTrue(app.buttons["Send locally"].isEnabled)
+        XCTAssertFalse(app.staticTexts["Not ready · reselect after cleanup"].exists)
+        capture("upload-return-draft-ready-to-send", app)
         XCUIDevice.shared.orientation = .portrait
         if !composer.exists { app.buttons["Chat"].tap() }
         XCTAssertTrue(composer.waitForExistence(timeout: 5))
         XCTAssertEqual(composer.value as? String, "Keep this file note.")
-        XCTAssertFalse(app.buttons["Send locally"].isEnabled)
+        XCTAssertTrue(app.buttons["Send locally"].isEnabled)
         capture("upload-cleanup-portrait-retained-draft", app)
     }
 
