@@ -1402,6 +1402,7 @@ final class ConversationPresentationTests: XCTestCase {
     private struct FooterScenario {
         let context: ProfileContext
         let domain: ClientRepository
+        let persistence: MemoryPendingActionPersistence
         let model: LivePresentationStore
         let binding: ConversationBinding
         let session: SendEligibilitySession
@@ -1427,7 +1428,8 @@ final class ConversationPresentationTests: XCTestCase {
         let context = supplied ?? ProfileContext(identity: ProfileIdentity(
             trustedRelayAuthority: ExactText("relay.example"), personID: ExactText("footer-person"),
             deviceID: ExactText("footer-device")), transportMode: .relay)
-        let domain = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        let persistence = MemoryPendingActionPersistence()
+        let domain = try ClientRepository(context: context, persistence: persistence)
         let key = RequestKey(accountScope: context.identity.personID, senderID: ExactText("sender"),
             messageID: ExactText("footer-chat"))
         let binding = ConversationBinding(request: key, revision: 1)
@@ -1464,7 +1466,7 @@ final class ConversationPresentationTests: XCTestCase {
             sha256: ExactText(SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()),
             content: .inline(bytes))
         XCTAssertTrue(model.updateConversation(for: key, revision: 1, text: "Recover this message", files: [original]))
-        return FooterScenario(context: context, domain: domain, model: model, binding: binding,
+        return FooterScenario(context: context, domain: domain, persistence: persistence, model: model, binding: binding,
             session: session, original: original)
     }
 
@@ -1641,6 +1643,72 @@ final class ConversationPresentationTests: XCTestCase {
         try assertRecoveredFooter(scenario)
         XCTAssertEqual(replacement.model.conversationError(for: replacement.binding.request, revision: 1), replacementNotice)
         XCTAssertTrue(replacementNotice?.contains("Sending") == true)
+    }
+
+
+    func testEditRejectedDiscussionRetiresOnlyItsNoticeAndRestoresOriginalDraft() async throws {
+        let scenario = try await footerScenario()
+        scenario.session.discussionResult = .rejected(reason: ExactText("temporarily refused"))
+        await submitFooter(scenario)
+        let failed = scenario.model.conversationDraft(for: scenario.binding.request, revision: 1)
+        XCTAssertNotNil(failed.operationID)
+        XCTAssertNotNil(failed.wireFrame)
+        XCTAssertEqual(scenario.model.conversationError(for: scenario.binding.request, revision: 1),
+                       "Message not sent. Your text and files are saved.")
+
+        let other = RequestKey(accountScope: scenario.context.identity.personID,
+            senderID: ExactText("sender"), messageID: ExactText("edit-sibling"))
+        let binding = ConversationBinding(request: other, revision: 1)
+        try scenario.domain.apply(RelayEvent(sequence: 2,
+            body: .delivery(StoredRequest(key: other, originalPayload: .null), .message),
+            conversation: RelayConversationMetadata(revision: 1, sessionHandle: ExactText("other-handle"))), context: scenario.context)
+        let sequence = try scenario.domain.conversationSnapshot(context: scenario.context).cursor + 1
+        try scenario.domain.applyConversation(ConversationEvent(sequence: sequence, binding: binding,
+            fact: .availability(sessionHandle: ExactText("other-handle"), .listening)), context: scenario.context)
+        try scenario.model.refreshFromDurableStore()
+        XCTAssertTrue(scenario.model.updateConversation(for: other, revision: 1, text: "Keep this other send pending"))
+        scenario.session.discussionResult = .unresolved
+        await submitFooter(scenario, key: other)
+        let otherNotice = scenario.model.conversationError(for: other, revision: 1)
+        let otherDraft = scenario.model.conversationDraft(for: other, revision: 1)
+        XCTAssertTrue(otherNotice?.contains("Sending") == true)
+
+        scenario.persistence.failNextCommit()
+        scenario.model.editRejectedDiscussion(for: scenario.binding.request, revision: 1)
+        XCTAssertEqual(scenario.model.conversationDraft(for: scenario.binding.request, revision: 1), failed,
+                       "A failed Edit must keep the frozen rejection and original files")
+        XCTAssertNotNil(scenario.model.conversationError)
+        scenario.model.editRejectedDiscussion(for: scenario.binding.request, revision: 1)
+        let restored = scenario.model.conversationDraft(for: scenario.binding.request, revision: 1)
+        XCTAssertEqual(restored.disposition, .saved)
+        XCTAssertEqual(restored.text, failed.text)
+        XCTAssertEqual(restored.files, failed.files)
+        XCTAssertNil(restored.operationID)
+        XCTAssertNil(restored.wireFrame)
+        XCTAssertNil(scenario.model.conversationError(for: scenario.binding.request, revision: 1))
+        XCTAssertEqual(scenario.model.conversationError(for: other, revision: 1), otherNotice)
+        try scenario.model.refreshFromDurableStore()
+        let port = AttentionDomainPort(store: scenario.domain)
+        _ = try await scenario.model.adoptForLiveUpdates(port.observe(context: port.context))
+        XCTAssertNil(scenario.model.conversationError(for: scenario.binding.request, revision: 1))
+        XCTAssertEqual(scenario.model.conversationError(for: other, revision: 1), otherNotice)
+        XCTAssertEqual(scenario.session.discussionOperations.count, 2, "Edit never sends again")
+
+        // A later successful Edit must also preserve an unrelated import error.
+        scenario.session.discussionResult = .rejected(reason: ExactText("temporarily refused"))
+        await submitFooter(scenario)
+        scenario.model.reportConversationImportError(NSError(domain: "OtherFileImport", code: 1),
+            for: other, revision: 1)
+        let importError = scenario.model.conversationError
+        XCTAssertNotNil(importError)
+        scenario.model.editRejectedDiscussion(for: scenario.binding.request, revision: 1)
+        XCTAssertEqual(scenario.model.conversationError, importError)
+        XCTAssertEqual(scenario.model.conversationDraft(for: other, revision: 1), otherDraft)
+        XCTAssertEqual(scenario.session.discussionOperations.count, 3)
+        try scenario.model.refreshFromDurableStore()
+        _ = try await scenario.model.adoptForLiveUpdates(port.observe(context: port.context))
+        XCTAssertEqual(scenario.model.conversationError, importError)
+        XCTAssertEqual(scenario.model.conversationDraft(for: scenario.binding.request, revision: 1).disposition, .saved)
     }
 
     private func waitUntil(_ condition: @MainActor () -> Bool) async {

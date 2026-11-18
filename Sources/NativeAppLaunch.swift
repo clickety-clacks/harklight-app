@@ -1391,7 +1391,10 @@ final class LivePresentationStore {
     private(set) var priorityLevelsLocalError: LocalizedStringResource?
     private(set) var priorityLevelsRelayConfirmed = false
     private var pendingConversationTextByBinding: [ConversationBinding: String] = [:]
-    private(set) var conversationError: String?
+    private var conversationEditErrorBinding: ConversationBinding?
+    private(set) var conversationError: String? {
+        didSet { conversationEditErrorBinding = nil }
+    }
     typealias DiscussionSubmitter = @MainActor (ConversationBinding, ProfileContext,
         @escaping @Sendable (ConversationFile) async throws -> URL) async throws -> DiscussionOperationResult
     @ObservationIgnored private let discussionSubmitter: DiscussionSubmitter
@@ -2415,6 +2418,7 @@ final class LivePresentationStore {
                 guard !sendingDiscussionBindings.contains(binding), let files = conversationFiles else { return }
                 let context = profileContext
                 let operation = try attentionStore.prepareDiscussion(binding, context: context)
+                if conversationEditErrorBinding == binding { conversationError = nil }
                 discussionSubmissionNotices[binding] = DiscussionSubmissionNotice(
                     context: context, operation: operation)
                 try refreshFromDurableStore()
@@ -2493,10 +2497,16 @@ final class LivePresentationStore {
             // The repository clears the failed operation's frozen identity.
             // Retry retains that identity; Edit begins a different submission.
             try port.saveConversationDraft(draft, context: port.context)
+            if let operation = draft.operationID,
+               let notice = discussionSubmissionNotices[draft.binding],
+               notice.context == profileContext, notice.operation == operation {
+                discussionSubmissionNotices.removeValue(forKey: draft.binding)
+            }
+            if conversationEditErrorBinding == draft.binding { conversationError = nil }
             try refreshFromDurableStore()
-            conversationError = nil
         } catch {
             conversationError = "Your message could not be opened for editing. It is still saved."
+            conversationEditErrorBinding = ConversationBinding(request: key, revision: revision)
             diagnose(.localStore, .draftSave, .failed, error: error, request: key, revision: revision)
             do { try refreshFromDurableStore() }
             catch { diagnose(.localStore, .projectionRefresh, .failed, error: error, request: key) }
