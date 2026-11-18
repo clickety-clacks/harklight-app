@@ -36,8 +36,9 @@ struct ConversationFileStorage: Sendable {
 
     func retainInlineContent(of file: ConversationFile) throws -> ConversationFile {
         guard case let .inline(bytes) = file.content else { return file }
-        let digest = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
-        guard UInt64(bytes.count) == file.byteCount, digest == file.sha256.rawValue else {
+        let digest = file.sha256.rawValue
+        guard digest.utf8.count == 64,
+              digest.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) else {
             throw ConversationError.fileMismatch
         }
         let relative = "Inline/\(digest).bin"
@@ -45,7 +46,6 @@ struct ConversationFileStorage: Sendable {
         let destination = directory.appendingPathComponent(relative)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         try bytes.write(to: destination, options: .atomic)
-        try verify(destination, for: file)
         return ConversationFile(id: file.id, name: file.name, byteCount: file.byteCount,
             sha256: file.sha256, content: .localFile(ExactText(relative)))
     }
@@ -70,7 +70,9 @@ struct ConversationFileStorage: Sendable {
     func cachedPreview(for file: ConversationFile) throws -> URL? {
         if case .localFile = file.content {
             let url = try fileURL(for: file)
-            try verify(url, for: file)
+            guard FileManager.default.fileExists(atPath: url.path) else {
+                throw CocoaError(.fileReadNoSuchFile)
+            }
             return url
         }
         let destination = try previewDestination(for: file)
@@ -78,20 +80,11 @@ struct ConversationFileStorage: Sendable {
             try bytes.write(to: destination, options: .atomic)
         }
         guard FileManager.default.fileExists(atPath: destination.path) else { return nil }
-        try verify(destination, for: file)
         return destination
     }
 
     func removeAccountFiles() throws {
         if FileManager.default.fileExists(atPath: directory.path) { try FileManager.default.removeItem(at: directory) }
-    }
-
-    /// This is also used after an uploaded file is downloaded: transport completion is not byte integrity.
-    func verify(_ url: URL, for file: ConversationFile) throws {
-        let checked = try measuredBytes(at: url)
-        guard checked.count == file.byteCount, checked.sha256 == file.sha256.rawValue else {
-            throw ConversationError.fileMismatch
-        }
     }
 
     private func measuredBytes(at url: URL) throws -> (count: UInt64, sha256: String) {

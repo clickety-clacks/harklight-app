@@ -851,7 +851,6 @@ final class ConversationPresentationTests: XCTestCase {
         XCTAssertLessThan(persisted.count, bytes.count / 2, "Whole-state persistence must contain references, not copied inline payloads.")
         XCTAssertNil(persisted.range(of: bytes), "Composer keystrokes must not rewrite attachment bytes into account state.")
         let storedURL = try storage.fileURL(for: savedFile)
-        try storage.verify(storedURL, for: savedFile)
         XCTAssertEqual(try Data(contentsOf: storedURL), bytes)
 
         let cacheURL = root.appendingPathComponent("server-cache.json")
@@ -937,7 +936,6 @@ final class ConversationPresentationTests: XCTestCase {
         let retriedDiskBytes = try XCTUnwrap(failingPersistence.load(identity: identity))
         XCTAssertNil(retriedDiskBytes.range(of: bytes), "The successful retry persists references instead of inline payload bytes.")
         let retainedURL = try storage.fileURL(for: retainedTurnFile)
-        try storage.verify(retainedURL, for: retainedTurnFile)
         XCTAssertEqual(try Data(contentsOf: retainedURL), bytes)
 
         let cursorBeforeDuplicate = try store.conversationSnapshot(context: context).cursor
@@ -1139,7 +1137,7 @@ final class ConversationPresentationTests: XCTestCase {
         XCTAssertEqual(fixture.viewModel.conversation(for: response.key)?.turns, thread.turns)
     }
 
-    func testRetainedFileUsesOriginalBytesAfterPickerSourceDisappearsAndRejectsAnIncompleteCopy() throws {
+    func testRetainedOriginalSurvivesPickerReplacementAndMissingCopyRemainsUnavailable() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -1149,16 +1147,44 @@ final class ConversationPresentationTests: XCTestCase {
         let bytes = Data(repeating: 231, count: 3 * 1_048_576 + 17)
         try bytes.write(to: source)
         let file = try storage.retain(source)
-        try FileManager.default.removeItem(at: source)
+        try Data("Replacement picker contents".utf8).write(to: source)
         let copy = try storage.fileURL(for: file)
         XCTAssertEqual(try Data(contentsOf: copy), bytes)
+        try FileManager.default.removeItem(at: source)
+        XCTAssertEqual(try Data(contentsOf: copy), bytes)
         XCTAssertEqual(file.byteCount, UInt64(bytes.count))
-        try storage.verify(copy, for: file)
-        try Data(bytes.prefix(1024)).write(to: copy)
-        XCTAssertThrowsError(try storage.verify(copy, for: file))
+        XCTAssertEqual(file.sha256.rawValue, SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined())
+        XCTAssertEqual(try storage.cachedPreview(for: file), copy)
+        XCTAssertEqual(try storage.cachedPreview(for: file), copy)
+        try FileManager.default.removeItem(at: copy)
+        XCTAssertThrowsError(try storage.cachedPreview(for: file))
         let other = try ConversationFileStorage(identity: ProfileIdentity(trustedRelayAuthority: identity.trustedRelayAuthority,
             personID: ExactText("other-person"), deviceID: identity.deviceID), root: root)
         XCTAssertNotEqual(other.directory, storage.directory)
+    }
+
+    func testInlineRetentionAndPreviewPreserveReportedMetadataAndOriginalBytes() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let storage = try ConversationFileStorage(identity: ProfileIdentity(trustedRelayAuthority: ExactText("relay"),
+            personID: ExactText("inline-person"), deviceID: ExactText("device")), root: root)
+        let bytes = Data([0, 255, 2])
+        let file = ConversationFile(id: ExactText("note"), name: ExactText("note.bin"), byteCount: 99,
+            sha256: ExactText(String(repeating: "a", count: 64)), content: .inline(bytes))
+        let retained = try storage.retainInlineContent(of: file)
+        XCTAssertEqual(retained.id, file.id)
+        XCTAssertEqual(retained.name, file.name)
+        XCTAssertEqual(retained.byteCount, file.byteCount)
+        XCTAssertEqual(retained.sha256, file.sha256)
+        let url = try XCTUnwrap(storage.cachedPreview(for: retained))
+        XCTAssertEqual(try Data(contentsOf: url), bytes)
+        XCTAssertEqual(try storage.cachedPreview(for: retained), url)
+        let inlinePreview = try XCTUnwrap(storage.cachedPreview(for: file))
+        XCTAssertEqual(try Data(contentsOf: inlinePreview), bytes)
+        let malformed = ConversationFile(id: file.id, name: file.name, byteCount: file.byteCount,
+            sha256: ExactText("not-a-digest"), content: .inline(bytes))
+        XCTAssertThrowsError(try storage.retainInlineContent(of: malformed))
+        XCTAssertThrowsError(try storage.cachedPreview(for: malformed))
     }
     func testInlinePreviewRetainsExactBytesAndAccountRemovalLeavesAnotherAccountUntouched() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

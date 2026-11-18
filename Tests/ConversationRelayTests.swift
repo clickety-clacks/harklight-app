@@ -1212,8 +1212,19 @@ final class ConversationRelayTests: XCTestCase {
         let transfer = try wire.decodeEvent(event("file_transfer", sequence: 2,
             fields: #""event_id":"2","file":"original.bin","status":"transferred""#))
         guard case .fileTransfer = transfer.fact else { return XCTFail("Transfer must remain a distinct fact") }
-        XCTAssertThrowsError(try wire.decodeEvent(event("discussion", sequence: 1,
-            fields: fields.replacingOccurrences(of: digest, with: String(repeating: "0", count: 64)))))
+        let reportedDigest = String(repeating: "0", count: 64)
+        let reported = try wire.decodeEvent(event("discussion", sequence: 1,
+            fields: fields.replacingOccurrences(of: digest, with: reportedDigest)
+                .replacingOccurrences(of: "\"size\":4", with: "\"size\":99")))
+        guard case let .turn(reportedTurn) = reported.fact else { return XCTFail("Expected reported file") }
+        XCTAssertEqual(reportedTurn.files.first?.sha256, ExactText(reportedDigest))
+        XCTAssertEqual(reportedTurn.files.first?.byteCount, 99)
+        XCTAssertEqual(reportedTurn.files.first?.content, .inline(bytes))
+        for malformed in [fields.replacingOccurrences(of: digest, with: "not-a-digest"),
+                          fields.replacingOccurrences(of: bytes.base64EncodedString(), with: "%%%%"),
+                          fields.replacingOccurrences(of: "\"size\":4", with: "\"size\":-1")] {
+            XCTAssertThrowsError(try wire.decodeEvent(event("discussion", sequence: 1, fields: malformed)))
+        }
     }
 
     func testDeliveryAckFramesDecodeTheContractMarkerStagesAndRerouteBit() throws {

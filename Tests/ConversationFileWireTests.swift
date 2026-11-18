@@ -89,6 +89,31 @@ final class ConversationFileWireTests: XCTestCase {
         XCTAssertEqual(try restored.conversationSnapshot(context: context).threads[binding.request]?.drafts[1], retained)
         XCTAssertTrue(try restored.snapshot(context: context).outbox.isEmpty, "Discussion must not become an answer operation")
     }
+    func testInlineSendKeepsFileCorrespondenceAndPublishedBudgetWithoutRemeasuringMetadata() throws {
+        let context = context(), operation = UUID()
+        let bytes = Data([0, 255, 2])
+        let original = ConversationFile(id: ExactText("retained"), name: ExactText("note.bin"), byteCount: 99,
+            sha256: ExactText(String(repeating: "a", count: 64)), content: .inline(bytes))
+        let binding = ConversationBinding(request: RequestKey(accountScope: context.identity.personID,
+            senderID: ExactText("author"), messageID: ExactText("request")), revision: 1)
+        let draft = ConversationDraft(binding: binding, text: ExactText("Attached"), files: [original],
+            disposition: .submitting(operation), operationID: operation)
+        let wire = try ConversationWire(profile: context)
+        let frame = try wire.discussion(draft, operationID: operation, preparedFiles: [original],
+            limits: ConversationFileLimits(inlineDecodedBytes: 3, uploadCap: nil))
+        let encoded = try XCTUnwrap(JSONValue.parse(frame).uniqueValue(named: "files")?.arrayValues?.first)
+        XCTAssertEqual(encoded.uniqueValue(named: "data_base64"), .string(ExactText(bytes.base64EncodedString())))
+        XCTAssertEqual(original.byteCount, 99)
+        XCTAssertEqual(original.sha256, ExactText(String(repeating: "a", count: 64)))
+        XCTAssertThrowsError(try wire.discussion(draft, operationID: operation, preparedFiles: [original],
+            limits: ConversationFileLimits(inlineDecodedBytes: 2, uploadCap: nil)))
+        let otherDescriptor = ConversationFile(id: original.id, name: original.name, byteCount: 3,
+            sha256: original.sha256, content: .inline(bytes))
+        XCTAssertThrowsError(try wire.discussion(draft, operationID: operation, preparedFiles: [otherDescriptor],
+            limits: ConversationFileLimits(inlineDecodedBytes: 3, uploadCap: nil)))
+        XCTAssertThrowsError(try wire.discussion(draft, operationID: UUID(), preparedFiles: [original],
+            limits: ConversationFileLimits(inlineDecodedBytes: 3, uploadCap: nil)))
+    }
     func testDownloadedOriginalBytesAreMeasuredBeyondTheJSONCeiling() throws {
         let wire = try wire(context())
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

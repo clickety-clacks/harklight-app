@@ -935,7 +935,6 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
             }
             let wire = try ConversationFileWire(profile: profileContext, originURL: originURL,
                                             endpointHost: relayEndpointHost)
-            try wire.verify(source, file: file)
             let request = try wire.uploadRequest(file: file, binding: binding, operationID: operationID)
             let (data, response) = try await urlSession.upload(for: request, fromFile: source)
             guard let http = response as? HTTPURLResponse else { throw InstallationTransportError.unexpectedServerFrame }
@@ -965,6 +964,7 @@ public actor URLSessionInstallationSession: AuthenticatedConversationCleanupSess
                   http.value(forHTTPHeaderField: "X-Harklight-Sha256") == file.sha256.rawValue else {
                 throw ConversationError.fileMismatch
             }
+            // Verify the completed download once, before publishing its bytes.
             try wire.verify(temporary, file: file)
             try FileManager.default.copyItem(at: temporary, to: destination)
         } catch {
