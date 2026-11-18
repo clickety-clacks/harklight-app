@@ -255,6 +255,9 @@ final class TwoDeviceServerCacheUITests: XCTestCase {
         let back = workspaceBackButton(in: app)
         if back.exists && back.isHittable { back.tap() }
         leaveWorkspaceSearch(in: app)
+        if !app.buttons["inbox-settings"].exists {
+            try tap(workspaceTab("Inbox", in: app), stage: "expand-inbox", in: app)
+        }
         guard app.buttons["inbox-settings"].waitForExistence(timeout: observationTimeout) else {
             // Do not capture an enrollment screen: invitation custody is
             // separate, and the diagnostic never enrolls or resets an account.
@@ -289,8 +292,7 @@ final class TwoDeviceServerCacheUITests: XCTestCase {
         let back = workspaceBackButton(in: app)
         if back.exists && back.isHittable { back.tap() }
         leaveWorkspaceSearch(in: app)
-        let inbox = workspaceTab("Inbox", in: app)
-        if inbox.exists && inbox.isHittable && !inbox.isSelected { inbox.tap() }
+        try tap(workspaceTab("Inbox", in: app), stage: "expand-inbox", in: app)
         try tap(workspaceTab("Replied", in: app), stage: "replied-tab", in: app)
         try openMessage(message, in: app)
     }
