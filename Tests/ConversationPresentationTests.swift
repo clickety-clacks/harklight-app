@@ -1423,7 +1423,7 @@ final class ConversationPresentationTests: XCTestCase {
         }
     }
 
-    private func footerScenario(context supplied: ProfileContext? = nil) throws -> FooterScenario {
+    private func footerScenario(context supplied: ProfileContext? = nil) async throws -> FooterScenario {
         let context = supplied ?? ProfileContext(identity: ProfileIdentity(
             trustedRelayAuthority: ExactText("relay.example"), personID: ExactText("footer-person"),
             deviceID: ExactText("footer-device")), transportMode: .relay)
@@ -1438,6 +1438,16 @@ final class ConversationPresentationTests: XCTestCase {
         try domain.applyConversation(ConversationEvent(sequence: 1, binding: binding,
             fact: .availability(sessionHandle: ExactText("handle"), .listening)), context: context)
         let session = SendEligibilitySession(identity: context.identity, key: key, payload: payload)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        addTeardownBlock {
+            await NativeRelayLifecycle.shared.deactivate()
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let confirmation = try await NativeRelayLifecycle.shared.confirmInProcessSessionForTesting(
+            store: domain, context: context, session: session,
+            serverStateCache: FileServerStateCache(identity: context.identity,
+                fileURL: directory.appendingPathComponent("server-cache.json")))
+        XCTAssertTrue(confirmation.relayConfirmed)
         let core = try NativeRelayCore(store: domain, context: context, session: session)
         let availability = NativeConversationAvailability()
         availability.confirm(for: context, conversationsUnavailable: false)
@@ -1447,6 +1457,7 @@ final class ConversationPresentationTests: XCTestCase {
                 return try await core.submitDiscussion(binding, using: session,
                     originURL: URL(string: "https://relay.example:9443/origin/v1")!, retainedFile: retained)
             })
+        XCTAssertTrue(model.canSendDiscussion(for: key), "Use actual confirmed/listening eligibility before submitting")
         let bytes = Data("Saved attachment".utf8)
         let original = ConversationFile(id: ExactText("footer-file"), name: ExactText("note.txt"),
             byteCount: UInt64(bytes.count),
@@ -1491,7 +1502,7 @@ final class ConversationPresentationTests: XCTestCase {
     }
 
     func testUnresolvedFooterClearsAfterSameOperationDeliveryThroughSynchronousRefresh() async throws {
-        let scenario = try footerScenario()
+        let scenario = try await footerScenario()
         await submitFooter(scenario)
         XCTAssertTrue(scenario.model.conversationError(for: scenario.binding.request, revision: 1)?.contains("Sending") == true)
         try recoverFooter(scenario)
@@ -1500,9 +1511,18 @@ final class ConversationPresentationTests: XCTestCase {
     }
 
     func testUnresolvedFooterClearsWhenAutomaticPreparedAdoptionDeliversSameOperation() async throws {
-        let scenario = try footerScenario()
+        let scenario = try await footerScenario()
         await submitFooter(scenario)
         XCTAssertTrue(scenario.model.conversationError(for: scenario.binding.request, revision: 1)?.contains("Sending") == true)
+        // Render the production panel with this real presentation store, using
+        // only the synthetic authenticated transport and this test's window.
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 430, height: 932))
+        let panel = ConversationPanel(store: scenario.model, key: scenario.binding.request,
+            sender: "Example sender", title: "Recovery chat")
+        window.rootViewController = UIHostingController(rootView: panel)
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true; window.rootViewController = nil }
+        captureFooterPanel(window, name: "footer-before-automatic-recovery")
         let adopted = expectation(description: "Automatic live adoption received Delivered")
         var observed = false
         scenario.model.notificationProjectionDidChange = {
@@ -1515,11 +1535,24 @@ final class ConversationPresentationTests: XCTestCase {
         defer { scenario.model.stopObserving() }
         try recoverFooter(scenario)
         await fulfillment(of: [adopted], timeout: 5)
+        captureFooterPanel(window, name: "footer-after-automatic-recovery")
         try assertRecoveredFooter(scenario)
     }
 
+    private func captureFooterPanel(_ window: UIWindow, name: String) {
+        window.setNeedsLayout()
+        window.layoutIfNeeded()
+        let image = UIGraphicsImageRenderer(bounds: window.bounds).image { _ in
+            window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
+        }
+        let attachment = XCTAttachment(image: image)
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
     func testConnectedRefreshPreservesGenuinelyPendingFooterAndExactFrozenSend() async throws {
-        let scenario = try footerScenario()
+        let scenario = try await footerScenario()
         await submitFooter(scenario)
         let before = try XCTUnwrap(scenario.domain.conversationSnapshot(context: scenario.context).threads[scenario.binding.request]?.drafts[1])
         try scenario.model.refreshFromDurableStore()
@@ -1533,11 +1566,13 @@ final class ConversationPresentationTests: XCTestCase {
     }
 
     func testDefiniteRejectionFooterAndDraftSurviveBothAdoptionPaths() async throws {
-        let scenario = try footerScenario()
+        let scenario = try await footerScenario()
         scenario.session.discussionResult = .rejected(reason: ExactText("temporarily refused"))
         await submitFooter(scenario)
         let reason = scenario.model.conversationError(for: scenario.binding.request, revision: 1)
-        XCTAssertTrue(reason?.contains("temporarily refused") == true)
+        XCTAssertEqual(reason, "Message not sent. Your text and files are saved.")
+        XCTAssertEqual(scenario.model.conversationDraft(for: scenario.binding.request, revision: 1).disposition,
+                       .rejected(ExactText("temporarily refused")))
         try scenario.model.refreshFromDurableStore()
         let port = AttentionDomainPort(store: scenario.domain)
         _ = try await scenario.model.adoptForLiveUpdates(port.observe(context: port.context))
@@ -1547,7 +1582,7 @@ final class ConversationPresentationTests: XCTestCase {
     }
 
     func testRecoveredOperationDoesNotClearAnotherChatNoticeOrFileError() async throws {
-        let scenario = try footerScenario()
+        let scenario = try await footerScenario()
         await submitFooter(scenario)
         let other = RequestKey(accountScope: scenario.context.identity.personID, senderID: ExactText("sender"), messageID: ExactText("other"))
         let binding = ConversationBinding(request: other, revision: 1)
@@ -1574,14 +1609,14 @@ final class ConversationPresentationTests: XCTestCase {
     }
 
     func testLateTransportCallbackCannotRestoreSendingAfterDeliveryOrClearNewContextNotice() async throws {
-        let scenario = try footerScenario()
+        let scenario = try await footerScenario()
         let entered = expectation(description: "Transport awaits its original response")
         let release = FooterGate()
         scenario.session.beforeDiscussionResult = { _ in entered.fulfill(); await release.wait() }
         scenario.model.sendDiscussion(for: scenario.binding.request, revision: 1)
         await fulfillment(of: [entered], timeout: 5)
         let newContext = ProfileContext(identity: scenario.context.identity, transportMode: .relay)
-        let replacement = try footerScenario(context: newContext)
+        let replacement = try await footerScenario(context: newContext)
         await submitFooter(replacement)
         let replacementNotice = replacement.model.conversationError(for: replacement.binding.request, revision: 1)
         try recoverFooter(scenario)
