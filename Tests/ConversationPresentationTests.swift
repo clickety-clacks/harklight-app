@@ -2,6 +2,7 @@ import AttentionDomain
 import CryptoKit
 import Foundation
 import SwiftUI
+import Observation
 import UIKit
 import XCTest
 @testable import Harklight
@@ -1397,6 +1398,385 @@ final class ConversationPresentationTests: XCTestCase {
     }
 
 
+
+    private struct FooterScenario {
+        let context: ProfileContext
+        let domain: ClientRepository
+        let persistence: MemoryPendingActionPersistence
+        let model: LivePresentationStore
+        let binding: ConversationBinding
+        let session: SendEligibilitySession
+        let original: ConversationFile
+    }
+
+    private actor FooterGate {
+        private var released = false
+        private var waiters: [CheckedContinuation<Void, Never>] = []
+        func wait() async {
+            if released { return }
+            await withCheckedContinuation { waiters.append($0) }
+        }
+        func release() {
+            released = true
+            let pending = waiters
+            waiters = []
+            for continuation in pending { continuation.resume() }
+        }
+    }
+
+    private func footerScenario(context supplied: ProfileContext? = nil) async throws -> FooterScenario {
+        let context = supplied ?? ProfileContext(identity: ProfileIdentity(
+            trustedRelayAuthority: ExactText("relay.example"), personID: ExactText("footer-person"),
+            deviceID: ExactText("footer-device")), transportMode: .relay)
+        let persistence = MemoryPendingActionPersistence()
+        let domain = try ClientRepository(context: context, persistence: persistence)
+        let key = RequestKey(accountScope: context.identity.personID, senderID: ExactText("sender"),
+            messageID: ExactText("footer-chat"))
+        let binding = ConversationBinding(request: key, revision: 1)
+        let payload = try JSONValue.parse(Data(#"{"title":"Recovery chat"}"#.utf8))
+        try domain.apply(RelayEvent(sequence: 1,
+            body: .delivery(StoredRequest(key: key, originalPayload: payload), .message),
+            conversation: RelayConversationMetadata(revision: 1, sessionHandle: ExactText("handle"))), context: context)
+        try domain.applyConversation(ConversationEvent(sequence: 1, binding: binding,
+            fact: .availability(sessionHandle: ExactText("handle"), .listening)), context: context)
+        let session = SendEligibilitySession(identity: context.identity, key: key, payload: payload)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        addTeardownBlock {
+            await NativeRelayLifecycle.shared.deactivate()
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let confirmation = try await NativeRelayLifecycle.shared.confirmInProcessSessionForTesting(
+            store: domain, context: context, session: session,
+            serverStateCache: FileServerStateCache(identity: context.identity,
+                fileURL: directory.appendingPathComponent("server-cache.json")))
+        XCTAssertTrue(confirmation.relayConfirmed)
+        let core = try NativeRelayCore(store: domain, context: context, session: session)
+        let availability = NativeConversationAvailability()
+        availability.confirm(for: context, conversationsUnavailable: false)
+        let model = try LivePresentationStore(store: domain, context: context,
+            conversationAvailability: availability, discussionSubmitter: { binding, expected, retained in
+                XCTAssertEqual(expected, context)
+                return try await core.submitDiscussion(binding, using: session,
+                    originURL: URL(string: "https://relay.example:9443/origin/v1")!, retainedFile: retained)
+            })
+        XCTAssertTrue(model.canSendDiscussion(for: key), "Use actual confirmed/listening eligibility before submitting")
+        let bytes = Data("Saved attachment".utf8)
+        let original = ConversationFile(id: ExactText("footer-file"), name: ExactText("note.txt"),
+            byteCount: UInt64(bytes.count),
+            sha256: ExactText(SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()),
+            content: .inline(bytes))
+        XCTAssertTrue(model.updateConversation(for: key, revision: 1, text: "Recover this message", files: [original]))
+        return FooterScenario(context: context, domain: domain, persistence: persistence, model: model, binding: binding,
+            session: session, original: original)
+    }
+
+    private func submitFooter(_ scenario: FooterScenario, key: RequestKey? = nil) async {
+        let completed = expectation(description: "Actual discussion submit returned")
+        scenario.model.sendDiscussion(for: key ?? scenario.binding.request, revision: 1,
+            onResult: { _ in completed.fulfill() })
+        await fulfillment(of: [completed], timeout: 5)
+    }
+
+    private func recoverFooter(_ scenario: FooterScenario) throws {
+        let operation = try XCTUnwrap(scenario.session.discussionOperations.first)
+        let turn = ConversationTurn(id: ExactText("recovered-turn"), binding: scenario.binding, author: .person,
+            sessionHandle: ExactText("handle"), text: ExactText("Recover this message"),
+            operationID: operation, files: [scenario.original], kind: .discussion)
+        var sequence = try scenario.domain.conversationSnapshot(context: scenario.context).cursor
+        sequence += 1
+        try scenario.domain.applyConversation(ConversationEvent(sequence: sequence, binding: scenario.binding,
+            fact: .turn(turn)), context: scenario.context)
+        try scenario.domain.applyConversation(ConversationEvent(sequence: sequence + 1, binding: scenario.binding,
+            fact: .delivered(turn: turn.id)), context: scenario.context)
+    }
+
+    private func assertRecoveredFooter(_ scenario: FooterScenario, file: StaticString = #filePath, line: UInt = #line) throws {
+        let thread = try XCTUnwrap(scenario.model.conversation(for: scenario.binding.request), file: file, line: line)
+        let turn = try XCTUnwrap(thread.turns.first(where: { $0.operationID == scenario.session.discussionOperations.first }), file: file, line: line)
+        XCTAssertEqual(ConversationSentChatStatusPresentation.delivery(for: thread.facts[turn.id] ?? ConversationTurnFacts(),
+            availability: thread.latestAvailabilityObservation, hasReply: false, nowMilliseconds: 0), .delivered, file: file, line: line)
+        XCTAssertEqual(ConversationAvailabilityNoticePresentation.notice(for: thread.latestAvailabilityObservation), .connected, file: file, line: line)
+        XCTAssertTrue(scenario.model.conversationDraft(for: scenario.binding.request, revision: 1).text.rawValue.isEmpty, file: file, line: line)
+        XCTAssertTrue(scenario.model.conversationDraft(for: scenario.binding.request, revision: 1).files.isEmpty, file: file, line: line)
+        XCTAssertEqual(turn.files.map(\.name), [scenario.original.name], file: file, line: line)
+        XCTAssertNil(scenario.model.conversationError(for: scenario.binding.request, revision: 1), file: file, line: line)
+        XCTAssertEqual(scenario.session.discussionOperations.count, 1, "Automatic recovery must not send again", file: file, line: line)
+    }
+
+    func testUnresolvedFooterClearsAfterSameOperationDeliveryThroughSynchronousRefresh() async throws {
+        let scenario = try await footerScenario()
+        await submitFooter(scenario)
+        XCTAssertTrue(scenario.model.conversationError(for: scenario.binding.request, revision: 1)?.contains("Sending") == true)
+        try recoverFooter(scenario)
+        try scenario.model.refreshFromDurableStore()
+        try assertRecoveredFooter(scenario)
+    }
+
+    func testUnresolvedFooterClearsWhenAutomaticPreparedAdoptionDeliversSameOperation() async throws {
+        let scenario = try await footerScenario()
+        await submitFooter(scenario)
+        XCTAssertTrue(scenario.model.conversationError(for: scenario.binding.request, revision: 1)?.contains("Sending") == true)
+        // Render the production panel with this real presentation store, using
+        // only the synthetic authenticated transport and this test's window.
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previousKeyWindow = scene.windows.first(where: \.isKeyWindow)
+        let window = UIWindow(windowScene: scene)
+        window.frame = CGRect(x: 0, y: 0, width: 430, height: 932)
+        let appeared = expectation(description: "Production chat panel appeared")
+        let panel = ConversationPanel(store: scenario.model, key: scenario.binding.request,
+            sender: "Example sender", title: "Recovery chat")
+            .onAppear { appeared.fulfill() }
+        window.rootViewController = UIHostingController(rootView: panel)
+        window.makeKeyAndVisible()
+        defer {
+            window.isHidden = true
+            window.rootViewController = nil
+            previousKeyWindow?.makeKey()
+        }
+        await fulfillment(of: [appeared], timeout: 5)
+        captureFooterPanel(window, name: "footer-before-automatic-recovery")
+        let adopted = expectation(description: "Automatic live adoption received Delivered")
+        var observed = false
+        scenario.model.notificationProjectionDidChange = {
+            guard !observed, let thread = scenario.model.conversation(for: scenario.binding.request),
+                  thread.facts[ExactText("recovered-turn")]?.delivered == true else { return }
+            observed = true
+            adopted.fulfill()
+        }
+        scenario.model.startObserving()
+        defer { scenario.model.stopObserving() }
+        try recoverFooter(scenario)
+        await fulfillment(of: [adopted], timeout: 5)
+        await Task.yield() // Let the production panel process its observed update before capturing it.
+        captureFooterPanel(window, name: "footer-after-automatic-recovery")
+        try assertRecoveredFooter(scenario)
+    }
+
+    private func captureFooterPanel(_ window: UIWindow, name: String) {
+        window.setNeedsLayout()
+        window.layoutIfNeeded()
+        let image = UIGraphicsImageRenderer(bounds: window.bounds).image { _ in
+            window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
+        }
+        let attachment = XCTAttachment(image: image)
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
+    func testConnectedRefreshPreservesGenuinelyPendingFooterAndExactFrozenSend() async throws {
+        let scenario = try await footerScenario()
+        await submitFooter(scenario)
+        let before = try XCTUnwrap(scenario.domain.conversationSnapshot(context: scenario.context).threads[scenario.binding.request]?.drafts[1])
+        try scenario.model.refreshFromDurableStore()
+        let port = AttentionDomainPort(store: scenario.domain)
+        _ = try await scenario.model.adoptForLiveUpdates(port.observe(context: port.context))
+        XCTAssertTrue(scenario.model.conversationError(for: scenario.binding.request, revision: 1)?.contains("Sending") == true)
+        let after = try XCTUnwrap(scenario.domain.conversationSnapshot(context: scenario.context).threads[scenario.binding.request]?.drafts[1])
+        XCTAssertEqual(after, before)
+        XCTAssertEqual(after.disposition, .outcomeUnknown(try XCTUnwrap(before.operationID)))
+        XCTAssertNotNil(after.wireFrame)
+    }
+
+    func testDefiniteRejectionFooterAndDraftSurviveBothAdoptionPaths() async throws {
+        let scenario = try await footerScenario()
+        scenario.session.discussionResult = .rejected(reason: ExactText("temporarily refused"))
+        await submitFooter(scenario)
+        let reason = scenario.model.conversationError(for: scenario.binding.request, revision: 1)
+        XCTAssertEqual(reason, "Message not sent. Your text and files are saved.")
+        XCTAssertEqual(scenario.model.conversationDraft(for: scenario.binding.request, revision: 1).disposition,
+                       .rejected(ExactText("temporarily refused")))
+        try scenario.model.refreshFromDurableStore()
+        let port = AttentionDomainPort(store: scenario.domain)
+        _ = try await scenario.model.adoptForLiveUpdates(port.observe(context: port.context))
+        XCTAssertEqual(scenario.model.conversationError(for: scenario.binding.request, revision: 1), reason)
+        XCTAssertEqual(scenario.model.conversationDraft(for: scenario.binding.request, revision: 1).files.count, 1)
+        XCTAssertEqual(scenario.model.conversationDraft(for: scenario.binding.request, revision: 1).text, ExactText("Recover this message"))
+    }
+
+    func testRecoveredOperationDoesNotClearAnotherChatNoticeOrFileError() async throws {
+        let scenario = try await footerScenario()
+        await submitFooter(scenario)
+        let other = RequestKey(accountScope: scenario.context.identity.personID, senderID: ExactText("sender"), messageID: ExactText("other"))
+        let binding = ConversationBinding(request: other, revision: 1)
+        try scenario.domain.apply(RelayEvent(sequence: 2,
+            body: .delivery(StoredRequest(key: other, originalPayload: .null), .message),
+            conversation: RelayConversationMetadata(revision: 1, sessionHandle: ExactText("other-handle"))), context: scenario.context)
+        let sequence = try scenario.domain.conversationSnapshot(context: scenario.context).cursor + 1
+        try scenario.domain.applyConversation(ConversationEvent(sequence: sequence, binding: binding,
+            fact: .availability(sessionHandle: ExactText("other-handle"), .listening)), context: scenario.context)
+        try scenario.model.refreshFromDurableStore()
+        XCTAssertTrue(scenario.model.updateConversation(for: other, revision: 1, text: "Other pending send"))
+        await submitFooter(scenario, key: other)
+        let otherNotice = scenario.model.conversationError(for: other, revision: 1)
+        XCTAssertTrue(otherNotice?.contains("Sending") == true)
+        try recoverFooter(scenario)
+        try scenario.model.refreshFromDurableStore()
+        XCTAssertNil(scenario.model.conversationError(for: scenario.binding.request, revision: 1))
+        XCTAssertEqual(scenario.model.conversationError(for: other, revision: 1), otherNotice)
+        scenario.model.reportConversationImportError(NSError(domain: "FileImport", code: 1), for: other, revision: 1)
+        let importError = scenario.model.conversationError
+        try scenario.model.refreshFromDurableStore()
+        XCTAssertEqual(scenario.model.conversationError, importError)
+        XCTAssertNotNil(importError)
+    }
+
+    func testLateTransportCallbackCannotRestoreSendingAfterDeliveryOrClearNewContextNotice() async throws {
+        let scenario = try await footerScenario()
+        let entered = expectation(description: "Transport awaits its original response")
+        let release = FooterGate()
+        scenario.session.beforeDiscussionResult = { _ in entered.fulfill(); await release.wait() }
+        scenario.model.sendDiscussion(for: scenario.binding.request, revision: 1)
+        await fulfillment(of: [entered], timeout: 5)
+        let newContext = ProfileContext(identity: scenario.context.identity, transportMode: .relay)
+        let replacement = try await footerScenario(context: newContext)
+        await submitFooter(replacement)
+        let replacementNotice = replacement.model.conversationError(for: replacement.binding.request, revision: 1)
+        try recoverFooter(scenario)
+        try scenario.model.refreshFromDurableStore()
+        let finished = expectation(description: "The original submit task ended")
+        withObservationTracking {
+            _ = scenario.model.isSendingDiscussion(for: scenario.binding.request, revision: 1)
+        } onChange: { finished.fulfill() }
+        await release.release()
+        await fulfillment(of: [finished], timeout: 5)
+        try assertRecoveredFooter(scenario)
+        XCTAssertEqual(replacement.model.conversationError(for: replacement.binding.request, revision: 1), replacementNotice)
+        XCTAssertTrue(replacementNotice?.contains("Sending") == true)
+    }
+
+
+    func testEditRejectedDiscussionRetiresOnlyItsNoticeAndRestoresOriginalDraft() async throws {
+        let scenario = try await footerScenario()
+        scenario.session.discussionResult = .rejected(reason: ExactText("temporarily refused"))
+        await submitFooter(scenario)
+        let failed = scenario.model.conversationDraft(for: scenario.binding.request, revision: 1)
+        XCTAssertNotNil(failed.operationID)
+        XCTAssertNotNil(failed.wireFrame)
+        XCTAssertEqual(scenario.model.conversationError(for: scenario.binding.request, revision: 1),
+                       "Message not sent. Your text and files are saved.")
+
+        let other = RequestKey(accountScope: scenario.context.identity.personID,
+            senderID: ExactText("sender"), messageID: ExactText("edit-sibling"))
+        let binding = ConversationBinding(request: other, revision: 1)
+        try scenario.domain.apply(RelayEvent(sequence: 2,
+            body: .delivery(StoredRequest(key: other, originalPayload: .null), .message),
+            conversation: RelayConversationMetadata(revision: 1, sessionHandle: ExactText("other-handle"))), context: scenario.context)
+        let sequence = try scenario.domain.conversationSnapshot(context: scenario.context).cursor + 1
+        try scenario.domain.applyConversation(ConversationEvent(sequence: sequence, binding: binding,
+            fact: .availability(sessionHandle: ExactText("other-handle"), .listening)), context: scenario.context)
+        try scenario.model.refreshFromDurableStore()
+        XCTAssertTrue(scenario.model.updateConversation(for: other, revision: 1, text: "Keep this other send pending"))
+        scenario.session.discussionResult = .unresolved
+        await submitFooter(scenario, key: other)
+        let otherNotice = scenario.model.conversationError(for: other, revision: 1)
+        let otherDraft = scenario.model.conversationDraft(for: other, revision: 1)
+        XCTAssertTrue(otherNotice?.contains("Sending") == true)
+
+        scenario.persistence.failNextCommit()
+        scenario.model.editRejectedDiscussion(for: scenario.binding.request, revision: 1)
+        XCTAssertEqual(scenario.model.conversationDraft(for: scenario.binding.request, revision: 1), failed,
+                       "A failed Edit must keep the frozen rejection and original files")
+        XCTAssertNotNil(scenario.model.conversationError)
+        scenario.model.editRejectedDiscussion(for: scenario.binding.request, revision: 1)
+        let restored = scenario.model.conversationDraft(for: scenario.binding.request, revision: 1)
+        XCTAssertEqual(restored.disposition, .saved)
+        XCTAssertEqual(restored.text, failed.text)
+        XCTAssertEqual(restored.files, failed.files)
+        XCTAssertNil(restored.operationID)
+        XCTAssertNil(restored.wireFrame)
+        XCTAssertNil(scenario.model.conversationError(for: scenario.binding.request, revision: 1))
+        XCTAssertEqual(scenario.model.conversationError(for: other, revision: 1), otherNotice)
+        try scenario.model.refreshFromDurableStore()
+        let port = AttentionDomainPort(store: scenario.domain)
+        _ = try await scenario.model.adoptForLiveUpdates(port.observe(context: port.context))
+        XCTAssertNil(scenario.model.conversationError(for: scenario.binding.request, revision: 1))
+        XCTAssertEqual(scenario.model.conversationError(for: other, revision: 1), otherNotice)
+        XCTAssertEqual(scenario.session.discussionOperations.count, 2, "Edit never sends again")
+
+        // A later successful Edit must also preserve an unrelated import error.
+        scenario.session.discussionResult = .rejected(reason: ExactText("temporarily refused"))
+        await submitFooter(scenario)
+        scenario.model.reportConversationImportError(NSError(domain: "OtherFileImport", code: 1),
+            for: other, revision: 1)
+        let importError = scenario.model.conversationError
+        XCTAssertNotNil(importError)
+        scenario.model.editRejectedDiscussion(for: scenario.binding.request, revision: 1)
+        XCTAssertEqual(scenario.model.conversationError, importError)
+        XCTAssertEqual(scenario.model.conversationDraft(for: other, revision: 1), otherDraft)
+        XCTAssertEqual(scenario.session.discussionOperations.count, 3)
+        try scenario.model.refreshFromDurableStore()
+        _ = try await scenario.model.adoptForLiveUpdates(port.observe(context: port.context))
+        XCTAssertEqual(scenario.model.conversationError, importError)
+        XCTAssertEqual(scenario.model.conversationDraft(for: scenario.binding.request, revision: 1).disposition, .saved)
+    }
+
+
+    func testAcceptedReceiptRetiresPendingNoticeBeforeTurnReplay() async throws {
+        let scenario = try await footerScenario()
+        await submitFooter(scenario)
+        XCTAssertTrue(scenario.model.conversationError(for: scenario.binding.request, revision: 1)?.contains("Sending") == true)
+        let operation = try XCTUnwrap(scenario.session.discussionOperations.first)
+        let before = scenario.model.conversationDraft(for: scenario.binding.request, revision: 1)
+        try scenario.domain.markDiscussionAccepted(scenario.binding, operation: operation,
+            turn: ExactText("receipt-only"), context: scenario.context)
+        try scenario.model.refreshFromDurableStore()
+        XCTAssertNil(scenario.model.conversationError(for: scenario.binding.request, revision: 1))
+        let accepted = scenario.model.conversationDraft(for: scenario.binding.request, revision: 1)
+        XCTAssertEqual(accepted.disposition, .acceptedPendingReplay(operation: operation, turn: ExactText("receipt-only")))
+        XCTAssertEqual(accepted.operationID, before.operationID)
+        XCTAssertEqual(accepted.wireFrame, before.wireFrame)
+        XCTAssertEqual(accepted.files, before.files)
+        XCTAssertEqual(ConversationSubmittedText.composerText(for: accepted), "")
+        XCTAssertFalse(scenario.model.conversation(for: scenario.binding.request)?.turns.contains(where: {
+            $0.operationID == operation
+        }) ?? true, "This exercises the receipt branch before the turn replays")
+        let port = AttentionDomainPort(store: scenario.domain)
+        _ = try await scenario.model.adoptForLiveUpdates(port.observe(context: port.context))
+        XCTAssertNil(scenario.model.conversationError(for: scenario.binding.request, revision: 1))
+        XCTAssertEqual(scenario.session.discussionOperations.count, 1)
+    }
+
+    func testImportErrorPresentBeforeAcceptanceSurvivesBothAdoptionPaths() async throws {
+        let scenario = try await footerScenario()
+        await submitFooter(scenario)
+        scenario.model.reportConversationImportError(NSError(domain: "IndependentImport", code: 1),
+            for: scenario.binding.request, revision: 1)
+        let importError = scenario.model.conversationError
+        XCTAssertNotNil(importError)
+        try recoverFooter(scenario)
+        try scenario.model.refreshFromDurableStore()
+        XCTAssertEqual(scenario.model.conversationError, importError)
+        XCTAssertEqual(scenario.model.conversationError(for: scenario.binding.request, revision: 1), importError)
+        let port = AttentionDomainPort(store: scenario.domain)
+        _ = try await scenario.model.adoptForLiveUpdates(port.observe(context: port.context))
+        XCTAssertEqual(scenario.model.conversationError, importError)
+        XCTAssertTrue(scenario.model.conversationDraft(for: scenario.binding.request, revision: 1).text.rawValue.isEmpty)
+        XCTAssertEqual(scenario.session.discussionOperations.count, 1)
+    }
+
+    func testEarlierAcceptedTurnDoesNotClearNewerPendingOperationInSameChat() async throws {
+        let scenario = try await footerScenario()
+        await submitFooter(scenario)
+        try recoverFooter(scenario)
+        try scenario.model.refreshFromDurableStore()
+        XCTAssertNil(scenario.model.conversationError(for: scenario.binding.request, revision: 1))
+        XCTAssertTrue(scenario.model.updateConversation(for: scenario.binding.request, revision: 1,
+            text: "A newer pending send", files: [scenario.original]))
+        await submitFooter(scenario)
+        let newer = scenario.model.conversationDraft(for: scenario.binding.request, revision: 1)
+        XCTAssertNotEqual(newer.operationID, scenario.session.discussionOperations.first)
+        XCTAssertEqual(newer.disposition, .outcomeUnknown(try XCTUnwrap(newer.operationID)))
+        let pendingNotice = scenario.model.conversationError(for: scenario.binding.request, revision: 1)
+        XCTAssertTrue(pendingNotice?.contains("Sending") == true)
+        try scenario.model.refreshFromDurableStore()
+        let port = AttentionDomainPort(store: scenario.domain)
+        _ = try await scenario.model.adoptForLiveUpdates(port.observe(context: port.context))
+        XCTAssertEqual(scenario.model.conversationError(for: scenario.binding.request, revision: 1), pendingNotice)
+        XCTAssertEqual(scenario.model.conversationDraft(for: scenario.binding.request, revision: 1), newer)
+        XCTAssertEqual(scenario.session.discussionOperations.count, 2)
+    }
+
     private func waitUntil(_ condition: @MainActor () -> Bool) async {
         for _ in 0..<200 {
             if condition() { return }
@@ -1441,8 +1821,11 @@ private final class FailOncePendingActionPersistence: PendingActionPersistence, 
 // Uses the ordinary inbox and conversation checkpoint path to establish a
 // current authenticated projection; it never supplies a profile-wide listener.
 private final class SendEligibilitySession: AuthenticatedInboxPagingSession,
-    AuthenticatedConversationSession, @unchecked Sendable {
+    AuthenticatedConversationFileSession, @unchecked Sendable {
     let authenticatedIdentity: ProfileIdentity
+    var discussionResult: DiscussionOperationResult = .unresolved
+    var discussionOperations: [UUID] = []
+    var beforeDiscussionResult: (@Sendable (UUID) async -> Void)?
     private let inbox: ReplyCheckpointSession
 
     init(identity: ProfileIdentity, key: RequestKey, payload: JSONValue) {
@@ -1462,8 +1845,20 @@ private final class SendEligibilitySession: AuthenticatedInboxPagingSession,
     }
     func openConversation(_ request: Data, consume: @Sendable (Data) async throws -> Void) async throws {
         let since = try JSONValue.parse(request).uniqueValue(named: "since")?.integerValue ?? 0
-        try await consume(Data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#.utf8))
+        try await consume(Data(#"{"v":1,"type":"ok","ref":"native-conversation-sync","origin_https_port":9443}"#.utf8))
         try await consume(Data("{\"v\":1,\"type\":\"conversation_resynced\",\"conversation_seq\":\(since)}".utf8))
     }
     func acknowledgeConversation(_ request: Data) async throws {}
+    func conversationFileLimits(originURL: URL) async throws -> ConversationFileLimits {
+        ConversationFileLimits(inlineDecodedBytes: 1_048_576, uploadCap: nil)
+    }
+    func uploadConversationFile(_ file: ConversationFile, from source: URL, binding: ConversationBinding,
+        operationID: UUID, limits: ConversationFileLimits, originURL: URL) async throws -> ConversationFile {
+        throw ConversationError.fileMismatch // These notice tests send small inline files.
+    }
+    func sendDiscussion(_ frame: Data, operationID: UUID) async -> DiscussionOperationResult {
+        discussionOperations.append(operationID)
+        await beforeDiscussionResult?(operationID)
+        return discussionResult
+    }
 }

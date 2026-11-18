@@ -156,7 +156,7 @@ struct ConversationPanel: View {
                     Label(thread.isRetracted ? store.retractionLabel(key) : "Request \(terminal.rawValue)", systemImage: "checkmark.circle")
                         .font(.caption).padding(8)
                 }
-                if let error = store.conversationError {
+                if let error = store.conversationError(for: key, revision: revision) {
                     Text(error).font(.caption).foregroundStyle(.hkSecondary).padding(.horizontal)
                 }
                 if thread.terminal != nil || !thread.allowsDiscussion {
