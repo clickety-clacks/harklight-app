@@ -35,7 +35,7 @@ struct NativeEnrollmentSettings {
                 .allSatisfy({ !$0.isEmpty && !$0.hasPrefix("-") && !$0.hasSuffix("-") }),
               (1...65_535).contains(enrollmentPort),
               (1...65_535).contains(relayPort),
-              !label.isEmpty, label.utf8.count <= 256,
+              !label.isEmpty,
               let root = Self.certificateDER(from: rootPEM),
               SecCertificateCreateWithData(nil, root as CFData) != nil else {
             throw NativeEnrollmentError.invalidSettings
