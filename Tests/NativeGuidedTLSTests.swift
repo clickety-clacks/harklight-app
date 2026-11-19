@@ -3691,6 +3691,49 @@ final class NativeGuidedTLSTests: XCTestCase {
                        "The stable profile authority keeps local attachment copies reachable")
     }
 
+    /// Trust comes from the enrolled root certificate, not from the relay host
+    /// matching the profile authority: a different host connects under the
+    /// enrolled root and is refused under any other root.
+    func testRelayHostDifferentFromAuthorityConnectsOnlyUnderTheEnrolledRoot() async throws {
+        let namespace = "Harklight.host-trust-test." + UUID().uuidString
+        let installation = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
+        defer {
+            SecItemDelete([kSecClass as String: kSecClassCertificate,
+                           kSecAttrLabel as String: installation.label] as CFDictionary)
+            SecItemDelete([kSecClass as String: kSecClassKey,
+                           kSecAttrApplicationTag as String: Data(namespace.utf8)] as CFDictionary)
+        }
+        let frames = [
+            #"{"v":1,"type":"ok","ref":"native-sync"}"#,
+            "{\"v\":1,\"type\":\"resynced\",\"seq\":0,\"server\":\"" +
+                String(repeating: "a", count: 32) + "\",\"feature_flags\":{}}"
+        ]
+        let relay = try LocalRelayWebSocket(expectedDevice: installation.deviceID) { _ in frames }
+        defer { relay.close() }
+        let otherRelay = try LocalRelayWebSocket(expectedDevice: installation.deviceID) { _ in frames }
+        defer { otherRelay.close() }
+        let port = try await relay.start()
+        XCTAssertNotEqual(relay.rootDER, otherRelay.rootDER)
+        // The profile authority is a different name from the relay host.
+        let context = ProfileContext(identity: ProfileIdentity(trustedRelayAuthority: ExactText(FixtureHosts.authority),
+            personID: ExactText("test-person"), deviceID: ExactText(installation.deviceID)), transportMode: .relay)
+        let relayURL = try XCTUnwrap(URL(string: "wss://localhost:\(port)/relay"))
+        let request = try RelayWire(profile: context).resync(since: 0)
+
+        let enrolledRoot = try URLSessionInstallationSession(profile: context, relayURL: relayURL,
+            clientIdentity: TrustedKeychainIdentity(installation.value), trustedRootDER: relay.rootDER)
+        try await enrolledRoot.resync(request) { _ in }
+        await enrolledRoot.close()
+
+        let foreignRoot = try URLSessionInstallationSession(profile: context, relayURL: relayURL,
+            clientIdentity: TrustedKeychainIdentity(installation.value), trustedRootDER: otherRelay.rootDER)
+        do {
+            try await foreignRoot.resync(request) { _ in }
+            XCTFail("A chain that is not under the enrolled root must be refused")
+        } catch {}
+        await foreignRoot.close()
+    }
+
     func testConversationOriginUsesTheNewEndpointWithoutChangingProfileAuthority() throws {
         let context = ProfileContext(identity: ProfileIdentity(
             trustedRelayAuthority: ExactText(FixtureHosts.authority),
