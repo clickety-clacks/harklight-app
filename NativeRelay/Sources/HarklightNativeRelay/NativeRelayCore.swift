@@ -204,8 +204,14 @@ public actor NativeRelayCore {
     private let requestConnections: any RequestConnectionSource
     private let errors: any ErrorLogging
     private let activity = ComponentActivity()
-    private var messageOpenUnsupportedForConnection = false
-    private var pendingMessageOpenDrainRequested = false
+    /// Sends Mark Seen and chat read positions on request connections,
+    /// independently of this core's replay, ACK and outbox drain.
+    private lazy var actions = PendingActions(store: store, context: context,
+        connections: requestConnections, errors: errors, activity: activity, attemptID: attemptID,
+        onDiagnostic: onDiagnostic,
+        sharedConnectionAcceptsReadPositions: { [weak self] in
+            await self?.conversationReadPositionSupportForSession ?? false
+        })
     private var priorityLevelsUnavailableForConnection = false
     private var priorityLevelsSaveRequested = false
     private var priorityLevelsDrainRequested = false
@@ -231,7 +237,6 @@ public actor NativeRelayCore {
     private var liveConversationConsumerTask: Task<Void, Never>?
     private var pendingLiveConversationReplay = false
     private var conversationReadPositionSupportForSession = false
-    private var pendingConversationReadPositionDrain = false
     private var inspectedConversationMetadata = false
     private var discoveredOriginURL: URL?
     private var activeCleanupScopes: Set<ConversationBinding> = []
@@ -743,6 +748,7 @@ public actor NativeRelayCore {
         }
         onProgress(.postAckDrainBegan)
         await readInboxSnapshotForSync()
+        await sendPendingMarkSeenForSync()
         var failedStep = NativeDiagnosticPostAckStep.replayConversationsAndAcknowledge
         do {
             inspectedConversationMetadata = true
@@ -752,8 +758,7 @@ public actor NativeRelayCore {
             if let conversationSession = session as? any AuthenticatedConversationSession {
                 failedStep = .replayConversationsAndAcknowledge
                 do {
-                    try await replayConversationAndAcknowledge(
-                        using: conversationSession, drainReadPositions: false)
+                    try await replayConversationAndAcknowledge(using: conversationSession)
                     errors.resolve(concern: .sync, operation: Self.subscribeConversationOperation)
                 } catch {
                     errors.report(ErrorLogReport(concern: .sync, connectionRole: .stream,
@@ -1594,6 +1599,18 @@ public actor NativeRelayCore {
         return outcome
     }
 
+    /// Mark Seen reports left from an earlier connection go out as soon as this
+    /// one can carry them; Sync never depends on their outcome.
+    private func sendPendingMarkSeenForSync() async {
+        if requestConnections.sharesStreamConnection {
+            // THIN FALLBACK (remove with SharedStreamConnection): queued ahead
+            // of the conversation replay on the one socket, like the read.
+            _ = await actions.sendMessageOpens()
+        } else {
+            Task { [weak self] in _ = await self?.sendPendingMessageOpens() }
+        }
+    }
+
     /// Each reconnect, foreground or push resync reads the view until a read
     /// is answered on this connection. Sync never depends on its outcome.
     private func readInboxSnapshotForSync() async {
@@ -1827,8 +1844,7 @@ public actor NativeRelayCore {
         activeInboxReplay = replay
     }
 
-    private func replayConversationAndAcknowledge(using transport: any AuthenticatedConversationSession,
-                                                 drainReadPositions: Bool = true) async throws {
+    private func replayConversationAndAcknowledge(using transport: any AuthenticatedConversationSession) async throws {
         guard !conversationsUnavailable else { return }
         diagnose(.conversation, .conversationReplay, .began)
         let wire = try ConversationWire(profile: context, endpointHost: transport.relayEndpointHost)
@@ -1839,14 +1855,6 @@ public actor NativeRelayCore {
             try await saveServerStateCache()
             var acknowledged: Bool
             (high, acknowledged) = try await acknowledgeConversationRebuildingIfRefused(high, using: transport, wire: wire)
-            if drainReadPositions,
-               try await sendPendingConversationReadPositions(using: transport) {
-                high = try await replayConversation(since: store.conversationSnapshot(context: context).cursor,
-                    using: transport, wire: wire)
-                flushCommittedLiveReplyArrivals()
-                try await saveServerStateCache()
-                (high, acknowledged) = try await acknowledgeConversationRebuildingIfRefused(high, using: transport, wire: wire)
-            }
             if acknowledged {
                 diagnose(.conversation, .acknowledgement, .completed)
             } else {
@@ -1854,6 +1862,7 @@ public actor NativeRelayCore {
                          causeCode: "conversation_ack_refused_after_rebuild", conversationSequence: high)
             }
             diagnose(.conversation, .conversationReplay, .completed)
+            scheduleReadPositionsIfPending()
         } catch InstallationTransportError.conversationsUnavailable {
             conversationsUnavailable = true
             discoveredOriginURL = nil
@@ -1881,70 +1890,22 @@ public actor NativeRelayCore {
     }
 
     /// Chat read updates are account state, separate from this device's replay
-    /// ACK. The saved operation remains queued until its idempotent reply arrives.
+    /// ACK. Actions sends them at once, without waiting for replay; the saved
+    /// operation remains queued until its idempotent reply arrives.
     public func sendPendingConversationReadPositions() async {
         guard active else { return }
-        guard !busy else {
-            pendingConversationReadPositionDrain = true
-            return
-        }
-        guard let transport = session as? any AuthenticatedConversationSession else { return }
-        busy = true
-        defer { releaseBusy() }
-        do {
-            if try await sendPendingConversationReadPositions(using: transport) {
-                try await replayConversationAndAcknowledge(using: transport, drainReadPositions: false)
-            }
-        } catch {
-            diagnose(.conversation, .conversationReadPosition,
-                     NativeDiagnosticCauseCode.failureTransition(for: error), error: error)
+        if await actions.sendReadPositions() {
+            // An accepted position created conversation events; Sync applies
+            // them from its durable cursor.
+            await replayLiveConversation()
         }
     }
 
-    private func sendPendingConversationReadPositions(
-        using transport: any AuthenticatedConversationSession
-    ) async throws -> Bool {
-        guard conversationReadPositionSupportForSession else { return false }
-        let snapshot = try store.conversationSnapshot(context: context)
-        guard snapshot.chatReadPositionSupport == true else { return false }
-        let wire = try ConversationWire(profile: context, endpointHost: transport.relayEndpointHost)
-        var createdConversationEvents = false
-        for pending in snapshot.pendingChatReadPositions {
-            try validate()
-            let frame = try wire.conversationReadPosition(pending)
-            diagnose(.conversation, .conversationReadPosition, .began,
-                     operationID: pending.operationID, request: pending.request)
-            let result = await transport.sendConversationReadPosition(frame, operationID: pending.operationID)
-            switch result {
-            case let .accepted(position, eventSequence, eventID, duplicate):
-                guard position >= pending.readThroughConversationSequence,
-                      (eventSequence == nil) == (eventID == nil) else {
-                    diagnose(.conversation, .conversationReadPosition, .unresolved,
-                             causeCode: "read_position_response_mismatch",
-                             operationID: pending.operationID, request: pending.request)
-                    continue
-                }
-                try store.acceptConversationReadPosition(pending, serverPosition: position, context: context)
-                diagnose(.conversation, .conversationReadPosition, .completed,
-                         causeCode: duplicate ? "duplicate_read_position" : nil,
-                         operationID: pending.operationID, request: pending.request)
-                createdConversationEvents = createdConversationEvents || eventSequence != nil
-            case let .rejected(reason):
-                diagnose(.conversation, .conversationReadPosition, .rejected,
-                         causeCode: "read_position_\(reason.rawValue)",
-                         operationID: pending.operationID, request: pending.request)
-                // A stated refusal is definitive for this operation. Retire it
-                // so later drains stop resending it; the Server's own read
-                // position arrives with the next conversation replay.
-                if reason.rawValue != "storage_unavailable" {
-                    try store.retireConversationReadPosition(pending, context: context)
-                }
-            case .unresolved:
-                diagnose(.conversation, .conversationReadPosition, .unresolved,
-                         operationID: pending.operationID, request: pending.request)
-            }
-        }
-        return createdConversationEvents
+    private func scheduleReadPositionsIfPending() {
+        guard let snapshot = try? store.conversationSnapshot(context: context),
+              snapshot.chatReadPositionSupport == true,
+              !snapshot.pendingChatReadPositions.isEmpty else { return }
+        Task { [weak self] in await self?.sendPendingConversationReadPositions() }
     }
 
     private func consumeLiveConversationSignals(from events: any AuthenticatedConversationEventSession) async {
@@ -2400,18 +2361,13 @@ public actor NativeRelayCore {
         }
     }
 
-    /// Sends only durable message-open outbox entries. Unsupported or uncertain
-    /// replies leave the original operation queued and never fail inbox sync.
+    /// Mark Seen: sends durable message-open reports at once through Actions,
+    /// never behind replay or ACK. Unsupported or uncertain replies leave the
+    /// original operation queued and never fail inbox sync.
     @discardableResult
     public func sendPendingMessageOpens() async -> Int {
-        guard let pagingSession = session as? any AuthenticatedInboxPagingSession else { return 0 }
-        guard !busy else {
-            pendingMessageOpenDrainRequested = true
-            return 0
-        }
-        busy = true
-        defer { releaseBusy() }
-        return await drainPendingMessageOpens(using: pagingSession)
+        guard active else { return 0 }
+        return await actions.sendMessageOpens()
     }
 
     /// Live replay and foreground refresh share this connection. Another
@@ -2482,14 +2438,6 @@ public actor NativeRelayCore {
         if pendingLiveConversationReplay {
             pendingLiveConversationReplay = false
             Task { await replayLiveConversation() }
-        }
-        if pendingConversationReadPositionDrain {
-            pendingConversationReadPositionDrain = false
-            Task { await sendPendingConversationReadPositions() }
-        }
-        if pendingMessageOpenDrainRequested {
-            pendingMessageOpenDrainRequested = false
-            Task { _ = await sendPendingMessageOpens() }
         }
         if priorityLevelsDrainRequested {
             priorityLevelsDrainRequested = false
@@ -2798,63 +2746,6 @@ public actor NativeRelayCore {
             if case .awaitingCheckpoint = result { break }
         }
         return attempted
-    }
-
-    private func drainPendingMessageOpens(using pagingSession: any AuthenticatedInboxPagingSession) async -> Int {
-        guard !messageOpenUnsupportedForConnection,
-              let pending = try? store.snapshot(context: context).pendingMessageOpens else { return 0 }
-        let wire = MessageOpenWire()
-        var retired = 0
-        for operation in pending {
-            guard !messageOpenUnsupportedForConnection else { break }
-            do {
-                try validate()
-                let response = try await pagingSession.inboxRequest(
-                    wire.request(for: operation), ref: MessageOpenWire.requestRef)
-                switch wire.decodeResult(response, for: operation) {
-                case .confirmed:
-                    _ = try store.retireMessageOpen(operation.operationID, context: context)
-                    retired += 1
-                case let .permanentlyRejected(reason):
-                    diagnose(.relay, .messageOpen, .rejected,
-                             causeCode: NativeDiagnosticCauseCode.serverReason(reason),
-                             operationIDSource: .localRequestCorrelation,
-                             operationID: operation.operationID,
-                             request: operation.requestKey, revision: operation.requestRevision,
-                             receipt: .terminal)
-                    _ = try store.retireMessageOpen(operation.operationID, context: context)
-                    retired += 1
-                case .unsupported:
-                    messageOpenUnsupportedForConnection = true
-                    diagnose(.relay, .messageOpen, .unresolved,
-                             causeCode: "message_open_unsupported",
-                             operationIDSource: .localRequestCorrelation,
-                             operationID: operation.operationID,
-                             request: operation.requestKey, revision: operation.requestRevision,
-                             receipt: .pendingUnconfirmed)
-                case .unresolved:
-                    // The operation may have committed even though this client
-                    // cannot prove it. Keep its original ID and retry later.
-                    diagnose(.relay, .messageOpen, .unresolved,
-                             causeCode: "message_open_confirmation_unresolved",
-                             operationIDSource: .localRequestCorrelation,
-                             operationID: operation.operationID,
-                             request: operation.requestKey, revision: operation.requestRevision,
-                             receipt: .pendingUnconfirmed)
-                    return retired
-                }
-            } catch {
-                // Open reporting is additive. A transport/storage uncertainty
-                // must not turn a successful inbox catch-up into a failure.
-                diagnose(.relay, .messageOpen, .unresolved, error: error,
-                         operationIDSource: .localRequestCorrelation,
-                         operationID: operation.operationID,
-                         request: operation.requestKey, revision: operation.requestRevision,
-                         receipt: .pendingUnconfirmed)
-                return retired
-            }
-        }
-        return retired
     }
 
     private func drainPriorityLevels() async {

@@ -35,6 +35,7 @@ final class ConversationRelayTests: XCTestCase {
         var onOrdinaryACK: (() throws -> Void)?
         var onConversationACK: (() throws -> Void)?
         var onConversationOpen: (() -> Void)?
+        var conversationOpenHold: (@Sendable () async -> Void)?
         var conversationOpenError: InstallationTransportError?
         var rejectFirstConversationACK = false
         var onLiveConversationWait: (() -> Void)?
@@ -117,6 +118,7 @@ final class ConversationRelayTests: XCTestCase {
         }
         func openConversation(_ request: Data, consume: @Sendable (Data) async throws -> Void) async throws {
             onConversationOpen?()
+            if let conversationOpenHold { await conversationOpenHold() }
             if let conversationOpenError { throw conversationOpenError }
             for frame in conversation {
                 consumedConversationFrames.append(frame)
@@ -634,6 +636,74 @@ final class ConversationRelayTests: XCTestCase {
         XCTAssertTrue(try XCTUnwrap(snapshot.threads[key]).hasUnreadAgentReply,
                       "A definitive refusal restores the unread badge.")
         XCTAssertEqual(session.conversationReadPositionRequests.count, 2)
+        await core.deactivate()
+    }
+
+    private final class Release: @unchecked Sendable {
+        private let lock = NSLock()
+        private var released = false
+        private var waiters: [CheckedContinuation<Void, Never>] = []
+        func wait() async {
+            await withCheckedContinuation { continuation in
+                lock.lock()
+                if released { lock.unlock(); continuation.resume(); return }
+                waiters.append(continuation)
+                lock.unlock()
+            }
+        }
+        func release() {
+            lock.lock(); released = true; let pending = waiters; waiters.removeAll(); lock.unlock()
+            pending.forEach { $0.resume() }
+        }
+    }
+
+    /// A chat read position is sent at once, not held until a conversation
+    /// replay in progress (here, a live update) has finished.
+    func testChatReadPositionIsSentWhileAConversationReplayIsInProgress() async throws {
+        let (context, _, store, session) = try setup()
+        session.conversation = [data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
+            data(#"{"v":1,"type":"conversation_resynced","conversation_seq":0,"chat_read_positions":[]}"#)]
+        let listening = expectation(description: "The live conversation feed is open")
+        listening.assertForOverFulfill = false
+        session.onLiveConversationWait = { listening.fulfill() }
+        let core = try NativeRelayCore(store: store, context: context, session: session)
+        _ = try await core.resyncAndDrainOutbox()
+        await fulfillment(of: [listening], timeout: 2)
+
+        let key = RequestKey(accountScope: context.identity.personID,
+            senderID: ExactText("author"), messageID: ExactText("request"))
+        let binding = ConversationBinding(request: key, revision: 1)
+        let handle = ExactText("handle")
+        let discussion = ConversationTurn(id: ExactText("question"), binding: binding,
+            author: .person, sessionHandle: handle, text: ExactText("Question"), kind: .discussion)
+        let reply = ConversationTurn(id: ExactText("reply"), binding: binding,
+            author: .origin, sessionHandle: handle, text: ExactText("Reply"),
+            inReplyTo: discussion.id, kind: .reply)
+        for (sequence, turn) in [(1, discussion), (2, reply)] {
+            try store.applyConversation(ConversationEvent(sequence: UInt64(sequence),
+                binding: binding, fact: .turn(turn)), context: context)
+        }
+        try store.finishConversationReplay(at: 2, chatReadPositions: [], context: context)
+
+        let replayRunning = expectation(description: "A live conversation replay is in progress")
+        let release = Release()
+        session.conversation = [data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#),
+            data(#"{"v":1,"type":"conversation_resynced","conversation_seq":2,"chat_read_positions":[]}"#)]
+        session.conversationOpenHold = { replayRunning.fulfill(); await release.wait() }
+        session.pushLiveConversation()
+        await fulfillment(of: [replayRunning], timeout: 2)
+
+        _ = try XCTUnwrap(store.markConversationRead(key, through: reply.id, context: context))
+        session.conversationReadPositionResults = [
+            .accepted(position: 2, eventSequence: nil, eventID: nil, duplicate: false)]
+        await core.sendPendingConversationReadPositions()
+
+        XCTAssertEqual(session.conversationReadPositionRequests.count, 1,
+                       "The read position went out while the replay was still running.")
+        XCTAssertTrue(try store.conversationSnapshot(context: context).pendingChatReadPositions.isEmpty,
+                      "The server confirmed it.")
+        session.conversationOpenHold = nil
+        release.release()
         await core.deactivate()
     }
 
