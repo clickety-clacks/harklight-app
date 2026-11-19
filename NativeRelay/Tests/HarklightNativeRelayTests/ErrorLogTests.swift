@@ -438,7 +438,7 @@ final class ErrorLogTests: XCTestCase {
     func testEveryDocumentedApiErrorTokenIsKeptAndOthersAreNot() {
         for token in ["not_found", "invalid_field", "stale_request", "already_answered", "already_retracted",
                       "idempotency_conflict", "precondition_failed", "cursor_expired", "unauthorized",
-                      "retry_later", "storage_unavailable", "payload_too_large", "unsupported", "forbidden"] {
+                      "retry_later", "storage_unavailable", "payload_too_large", "unsupported", "forbidden", "account_paused"] {
             XCTAssertEqual(ErrorLogReason.serverReason(token).code, token)
         }
         XCTAssertEqual(ErrorLogReason.serverReason("please_contact_dana@example.invalid").code, "other")
@@ -456,6 +456,7 @@ final class ErrorLogTests: XCTestCase {
         XCTAssertEqual(ErrorLogInitiator(serverCloseReason: "revoked"), .deviceRevoked)
         XCTAssertEqual(ErrorLogInitiator(serverCloseReason: "server_shutdown"), .serverClosed)
         XCTAssertEqual(ErrorLogInitiator(serverCloseReason: "idle_timeout"), .serverClosed)
+        XCTAssertEqual(ErrorLogInitiator(serverCloseReason: "account_paused"), .serverClosed)
         let clock = Clock(Date(timeIntervalSince1970: 1_000_000))
         let store = makeStore(clock: clock)
         store.report(ErrorLogReport(concern: .sync, connectionRole: .stream, operation: "change_feed",
