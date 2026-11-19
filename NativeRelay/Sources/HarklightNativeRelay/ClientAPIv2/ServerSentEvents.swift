@@ -63,6 +63,11 @@ extension FeedEvent {
     /// Maps a feed event: `id` is the change's `rev`, `event` its kind and
     /// `data` its JSON. A change without a numeric `id` is malformed.
     public init(_ event: ServerSentEvent) throws {
+        if event.event == "heartbeat" {
+            // Liveness only: no id, never a log change, never moves the cursor.
+            self = .heartbeat
+            return
+        }
         if event.event == "closing" {
             let object = (try? JSONSerialization.jsonObject(with: Data(event.data.utf8))) as? [String: Any]
             self = .closing(reason: (object?["reason"] as? String) ?? "other")

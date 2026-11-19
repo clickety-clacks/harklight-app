@@ -83,6 +83,8 @@ public enum APIErrorToken: String, Equatable, Sendable, CaseIterable {
     case cursorExpired = "cursor_expired"
     case unauthorized
     case forbidden
+    /// The account is paused. Not retryable; what the client holds stays readable.
+    case accountPaused = "account_paused"
     case retryLater = "retry_later"
     case storageUnavailable = "storage_unavailable"
     case payloadTooLarge = "payload_too_large"
@@ -118,8 +120,9 @@ public struct APIError: Error, Equatable, Sendable {
                   requestID: requestID ?? bodyRequestID, retryAfter: retryAfter)
     }
 
-    /// A definitive refusal: the same request will never succeed.
-    public var isPermanent: Bool { !retryable && status != 401 && status != 503 }
+    /// A definitive refusal: the same request will never succeed. A paused
+    /// account is not one: the request is kept until the pause ends.
+    public var isPermanent: Bool { !retryable && status != 401 && status != 503 && token != .accountPaused }
 }
 
 /// One change from the feed, carrying the resulting state, not a delta.
@@ -156,6 +159,8 @@ public enum FeedEvent: Equatable, Sendable {
     /// The server accepted the feed request (HTTP 200).
     case opened(requestID: String?)
     case change(FeedChange)
+    /// Sent at least every 25 s. It only shows the feed is alive.
+    case heartbeat
     /// Sent before a server-initiated end.
     case closing(reason: String)
 }

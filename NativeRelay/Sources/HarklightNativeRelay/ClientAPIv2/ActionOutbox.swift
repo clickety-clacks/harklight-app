@@ -68,8 +68,9 @@ public actor ActionOutbox {
     private var sendingTargets: Set<String> = []
     private var resendRequested: Set<String> = []
     private var retryTasks: [String: Task<Void, Never>] = [:]
-    /// Set when the server refused this device's authentication; nothing is
-    /// sent, and queued operations are kept for review after re-enrolment.
+    /// Set when the server refused this device's authentication or the account
+    /// is paused; nothing is sent, and queued operations are kept until
+    /// re-enrolment or the end of the pause.
     public private(set) var unauthorized = false
 
     public init(persistence: any OutboxPersisting, transport: any ClientAPITransport,
@@ -153,6 +154,11 @@ public actor ActionOutbox {
             remove(entry.idempotencyKey)
             errors.resolve(concern: .actions, operation: entry.operation)
             return true
+        } catch let error as APIError where error.token == .accountPaused {
+            // Kept until the pause ends; nothing is refused or dropped.
+            unauthorized = true
+            report(entry, phase: "send", error: error, initiator: .serverClosed, retryable: true)
+            return false
         } catch let error where ChangeFeedSync.isRevocation(error) {
             unauthorized = true
             report(entry, phase: "send", error: error, initiator: .deviceRevoked, retryable: false)

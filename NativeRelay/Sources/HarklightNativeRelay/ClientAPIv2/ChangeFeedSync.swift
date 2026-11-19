@@ -26,6 +26,8 @@ public actor ChangeFeedSync {
         case paused(ErrorLogInitiator)
         /// The device lost access; Sync stops until it is enrolled again.
         case stopped
+        /// The account is paused; Sync stops and the held model stays readable.
+        case accountPaused
     }
 
     static let feedOperation = "change_feed"
@@ -68,6 +70,9 @@ public actor ChangeFeedSync {
             switch end {
             case .revoked:
                 liveState = .stopped
+                return
+            case .accountPaused:
+                liveState = .accountPaused
                 return
             case .cancelled:
                 return
@@ -116,6 +121,7 @@ public actor ChangeFeedSync {
     private enum FeedEnd {
         case dropped(ErrorLogInitiator, retryPromptly: Bool)
         case revoked
+        case accountPaused
         case cancelled
     }
 
@@ -137,6 +143,9 @@ public actor ChangeFeedSync {
                     feedRequestID = requestID
                     liveState = .live
                     errors.resolve(concern: .sync, operation: Self.feedOperation)
+                case .heartbeat:
+                    // The transport's 60 s no-bytes timeout is reset by it.
+                    continue
                 case let .change(change):
                     guard change.rev > last else { continue }
                     try await apply(change)
@@ -148,6 +157,7 @@ public actor ChangeFeedSync {
                         initiator: initiator, retryable: initiator != .deviceRevoked,
                         correlation: .request(feedRequestID)))
                     if initiator == .deviceRevoked { return .revoked }
+                    if reason == "account_paused" { return .accountPaused }
                     return .dropped(initiator, retryPromptly: true)
                 }
             }
@@ -164,6 +174,9 @@ public actor ChangeFeedSync {
                 report(Self.feedOperation, phase: "rebaseline", error: error, initiator: .forFailure(error))
                 return .dropped(.forFailure(error), retryPromptly: false)
             }
+        } catch let error as APIError where error.token == .accountPaused {
+            report(Self.feedOperation, phase: "open", error: error, initiator: .serverClosed)
+            return .accountPaused
         } catch let error where Self.isRevocation(error) {
             report(Self.feedOperation, phase: "open", error: error, initiator: .deviceRevoked)
             return .revoked
@@ -229,8 +242,8 @@ public actor ChangeFeedSync {
             correlation: .request(feedRequestID)))
     }
 
-    /// The server never ends a feed for idleness; it closes only on revoke or
-    /// shutdown, with a `closing` event first.
+    /// The server never ends a feed for idleness; it closes only on revoke,
+    /// a paused account or shutdown, with a `closing` event first.
     static func initiator(forClosingReason reason: String) -> ErrorLogInitiator {
         reason == "revoked" ? .deviceRevoked : .serverClosed
     }

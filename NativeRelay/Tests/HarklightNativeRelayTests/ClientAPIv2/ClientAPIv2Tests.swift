@@ -49,6 +49,8 @@ final class ServerSentEventParserTests: XCTestCase {
         XCTAssertEqual(try FeedEvent(ServerSentEvent(id: nil, event: "closing", data: #"{"reason":"revoked"}"#)),
                        .closing(reason: "revoked"))
         XCTAssertThrowsError(try FeedEvent(ServerSentEvent(id: "x", event: "item", data: "{}")))
+        XCTAssertEqual(try FeedEvent(ServerSentEvent(id: nil, event: "heartbeat", data: "{}")), .heartbeat,
+                       "A heartbeat has no id and is not a change.")
     }
 
     func testErrorBodiesKeepOnlyTheClosedTokenList() {
@@ -189,6 +191,24 @@ final class ChangeFeedSyncTests: XCTestCase {
         XCTAssertEqual(errors.reports.map(\.initiator), [.deviceRevoked])
     }
 
+    func testHeartbeatsKeepTheFeedLiveWithoutMovingTheCursorAndAPauseStopsSync() async throws {
+        let server = FakeClientAPIServer()
+        let cursor = MemoryRevCursor(0)
+        let model = RecordingSyncModel(snapshotRev: { 0 })
+        let sync = ChangeFeedSync(transport: server, cursor: cursor, model: model,
+                                  errors: RecordingErrorLogV2(), waitBeforeRetry: noWait)
+        let run = Task { await sync.runForeground() }
+        await eventually("open") { server.openFeedCount == 1 }
+        server.heartbeat()
+        server.commit("item", "{}")
+        await eventually("applied") { model.applied == [1] }
+        XCTAssertEqual(cursor.saves, [1], "Only the change moved the cursor.")
+        server.closeFeeds(reason: "account_paused")
+        _ = await run.value
+        let state = await sync.liveState
+        XCTAssertEqual(state, .accountPaused)
+    }
+
     func testPushCatchUpAppliesEveryBatchFromTheCursor() async throws {
         let server = FakeClientAPIServer()
         for _ in 0..<5 { server.commit("item", "{}") }
@@ -292,6 +312,21 @@ final class ActionOutboxTests: XCTestCase {
         let entry = try await box.submit(target: "a", operation: "mark_seen", write: seen)
         await eventually("held") { await box.unauthorized }
         XCTAssertEqual(persistence.keys, [entry.idempotencyKey], "Kept, with its key.")
+        await box.resumeAfterReenrolment()
+        XCTAssertEqual(outcomes.accepted.map(\.0), [entry.idempotencyKey])
+    }
+
+    func testAPausedAccountKeepsWritesUntilThePauseEnds() async throws {
+        let server = FakeClientAPIServer()
+        server.nextWriteFailures = [APIError(status: 403, body: Data(#"{"error":"account_paused","retryable":false,"request_id":"r"}"#.utf8),
+                                             requestID: nil, retryAfter: nil)]
+        let persistence = MemoryOutboxPersistence()
+        let outcomes = RecordingOutcomes()
+        let box = try outbox(server, persistence, outcomes)
+        let entry = try await box.submit(target: "a", operation: "mark_seen", write: seen)
+        await eventually("held") { await box.unauthorized }
+        XCTAssertTrue(outcomes.rejected.isEmpty, "A pause never refuses the person's write.")
+        XCTAssertEqual(persistence.keys, [entry.idempotencyKey])
         await box.resumeAfterReenrolment()
         XCTAssertEqual(outcomes.accepted.map(\.0), [entry.idempotencyKey])
     }

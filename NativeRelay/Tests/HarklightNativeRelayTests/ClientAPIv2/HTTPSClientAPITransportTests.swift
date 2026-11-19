@@ -83,7 +83,7 @@ final class HTTPSClientAPITransportTests: XCTestCase {
     }
 
     func testTheFeedSplitsChunkedEventsAcrossLineEndingsAndIgnoresHeartbeats() async throws {
-        let stream = ": heartbeat\r\n\r\nid: 5\r\nevent: item\r\ndata: {\"a\"\r\n:x\r\ndata: :1}\r\n\r\nid: 6\nevent: closing\ndata: {\"reason\":\"idle_timeout\"}\n\n"
+        let stream = "event: heartbeat\r\ndata: {}\r\n\r\nid: 5\r\nevent: item\r\ndata: {\"a\"\r\n:x\r\ndata: :1}\r\n\r\nid: 6\nevent: closing\ndata: {\"reason\":\"idle_timeout\"}\n\n"
         let bytes = Array(stream.utf8)
         let chunks = stride(from: 0, to: bytes.count, by: 7).map { Data(bytes[$0..<min($0 + 7, bytes.count)]) }
         let api = transport { _ in
@@ -94,6 +94,7 @@ final class HTTPSClientAPITransportTests: XCTestCase {
         for try await event in api.changeFeed(after: 4) { events.append(event) }
         XCTAssertEqual(events, [
             .opened(requestID: "feed-1"),
+            .heartbeat,
             .change(FeedChange(rev: 5, kind: .item, data: Data("{\"a\"\n:1}".utf8))),
             .closing(reason: "idle_timeout")
         ])

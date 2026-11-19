@@ -50,6 +50,10 @@ final class FakeClientAPIServer: ClientAPITransport, @unchecked Sendable {
         }
     }
 
+    func heartbeat() {
+        lock.withLock { feeds.values.map(\.continuation) }.forEach { $0.yield(.heartbeat) }
+    }
+
     func closeFeeds(reason: String) {
         let open = lock.withLock { () -> [AsyncThrowingStream<FeedEvent, any Error>.Continuation] in
             defer { feeds.removeAll() }
