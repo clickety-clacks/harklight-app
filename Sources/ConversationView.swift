@@ -1,3 +1,4 @@
+import HarklightNativeRelay
 import AttentionDomain
 import Observation
 import SwiftUI
@@ -134,6 +135,7 @@ struct ConversationPanel: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            ErrorLogContextBanner(surface: .thread)
             if let thread {
                 let request = store.request(for: key)
                 let hasNotAcceptedCard = hasNotAcceptedCardForRetainedAnswer(thread: thread,

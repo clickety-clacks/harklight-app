@@ -698,6 +698,7 @@ struct LiveContentView: View {
                 userOpenedMessage: { launch?.userOpenedMessage() },
                 testNotificationRouter: testNotificationRouter,
                 testOpenForegroundChatIndicator: testOpenForegroundChatIndicator)
+            .environment(\.errorLogModel, launch?.errorLogModel)
             .uiDiagnostics("inbox-catch-up-diagnostics",
                 "source=\(launch != nil && !store.isLocalExample ? "live" : "fixture") " +
                 "post_ack_drain=\(progress?.outcome == .connecting && progress?.postAckDrainTransition == .began ? "running" : "not_running") " +
@@ -1069,8 +1070,7 @@ struct LiveInboxSettings: View {
                     PriorityLevelsSettingsSection(store: store)
                         .id("priority-levels-settings")
                 }
-                if let launch,
-                   launch.diagnostics.hasEvents || launch.foregroundConnectDiagnostic != nil {
+                if let launch, launch.hasDiagnosticsToShow {
                     InboxDiagnosticsSettingsSection(launch: launch, isReadOnly: store.isReadOnly,
                                                     closeSettings: { dismiss() })
                 }

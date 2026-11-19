@@ -613,7 +613,7 @@ struct NativeForegroundConnectDiagnostic: Equatable, Sendable {
     }
 }
 
-private extension NativeForegroundConnectProgress.Stage {
+extension NativeForegroundConnectProgress.Stage {
     var diagnosticValue: String {
         switch self {
         case .serverTrustValidated: "server_trust_validated"
