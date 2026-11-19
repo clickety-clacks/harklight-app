@@ -51,10 +51,20 @@ public struct ErrorLogBuild: Codable, Equatable, Sendable {
     public let build: String
     public let commit: String
 
+    private enum CodingKeys: String, CodingKey { case version, build, commit }
+
+    /// Decoding goes through the same redaction as `init`.
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(version: try values.decode(String.self, forKey: .version),
+                  build: try values.decode(String.self, forKey: .build),
+                  commit: try values.decode(String.self, forKey: .commit))
+    }
+
     public init(version: String, build: String, commit: String) {
         self.version = ErrorLogRedactor.buildField(version)
         self.build = ErrorLogRedactor.buildField(build)
-        self.commit = ErrorLogRedactor.buildField(String(commit.prefix(7)))
+        self.commit = ErrorLogRedactor.buildField(commit == "unavailable" ? commit : String(commit.prefix(7)))
     }
 
     public static let unavailable = ErrorLogBuild(version: "unavailable", build: "unavailable",
@@ -316,11 +326,21 @@ public enum ErrorLogRedactor {
 
 /// Persistent store for error records.
 ///
-/// Records are kept in memory and written to a file after every change. If a
-/// write fails the log carries on in memory for the launch and tries again on
-/// the next change; no concern is told. Retention keeps the last
-/// `minimumRetainedCount` records or every record from the last
-/// `retentionInterval`, whichever is more, and evicts resolved records first.
+/// Records are kept in memory and written to a file in the background: a
+/// change schedules one write on a private queue (repeated changes within the
+/// write delay share it), so callers never wait on disk. `flush()` forces the
+/// pending write and is called when the app goes to the background.
+///
+/// A file this store could not read is never overwritten. A file that is
+/// unreadable for now (for example before first unlock) is retried on later
+/// writes and merged with what is in memory; a file that is corrupt or from an
+/// unknown version is moved aside, and the move is the only thing done to it.
+/// If the file cannot be written the log carries on in memory and tries again.
+///
+/// Retention keeps the last `minimumRetainedCount` records or every record
+/// from the last `retentionInterval`, whichever is more, and evicts resolved
+/// records first. `maximumRetainedCount` bounds a flapping failure that
+/// resolves and fails again many times inside the window.
 public final class ErrorLogStore: ErrorLogging, @unchecked Sendable {
     public enum PersistenceStatus: Equatable, Sendable {
         case new
@@ -330,6 +350,7 @@ public final class ErrorLogStore: ErrorLogging, @unchecked Sendable {
     }
 
     public static let minimumRetainedCount = 100
+    public static let maximumRetainedCount = 500
     public static let retentionInterval: TimeInterval = 14 * 24 * 3600
 
     private struct StoredFile: Codable {
@@ -337,19 +358,36 @@ public final class ErrorLogStore: ErrorLogging, @unchecked Sendable {
         let records: [ErrorLogRecord]
     }
 
+    private enum LoadResult {
+        case absent
+        case loaded([ErrorLogRecord])
+        /// Present but not readable right now; may become readable.
+        case unreadable
+        /// Present and readable but not a log this build can use.
+        case unusable(cause: String)
+    }
+
     private let lock = NSLock()
     private let fileURL: URL?
     private let build: ErrorLogBuild
     private let now: @Sendable () -> Date
+    private let writeDelay: TimeInterval
+    private let writeQueue = DispatchQueue(label: "harklight.error-log.write", qos: .utility)
     private var stored: [ErrorLogRecord] = []
     private var status: PersistenceStatus = .new
     private var changeHandler: (@Sendable () -> Void)?
+    /// True while the file on disk has not been read into `stored`.
+    private var fileNeedsReading = false
+    private var writeScheduled = false
+    private var lastWriteStarted = Date.distantPast
 
-    public init(fileURL: URL?, build: ErrorLogBuild, now: @escaping @Sendable () -> Date = { Date() }) {
+    public init(fileURL: URL?, build: ErrorLogBuild, writeDelay: TimeInterval = 0.3,
+                now: @escaping @Sendable () -> Date = { Date() }) {
         self.fileURL = fileURL
         self.build = build
         self.now = now
-        load()
+        self.writeDelay = writeDelay
+        loadAtStart()
     }
 
     public static func defaultFileURL() -> URL? {
@@ -376,27 +414,33 @@ public final class ErrorLogStore: ErrorLogging, @unchecked Sendable {
         lock.lock(); changeHandler = handler; lock.unlock()
     }
 
+    /// Writes any pending change now and returns when it is done.
+    public func flush() {
+        writeQueue.sync { self.performWrite() }
+    }
+
     // MARK: ErrorLogging
 
     public func report(_ report: ErrorLogReport) {
-        let handler: (@Sendable () -> Void)?
         lock.lock()
         let at = report.occurredAt ?? now()
         let operation = ErrorLogRedactor.operationToken(report.operation)
         let phase = ErrorLogRedactor.operationToken(report.phase)
         let domain = ErrorLogRedactor.domainToken(report.reason.domain)
         let code = ErrorLogRedactor.reasonCode(domain: domain, code: report.reason.code)
-        // Repeats of the same (concern, operation, code) coalesce into the
-        // newest unresolved record. A failure after a resolution is a new record.
+        let operationID = report.correlation.clientOperationID
+        // Repeats of the same (concern, operation, domain, code, client
+        // operation) coalesce into the newest unresolved record. A failure after
+        // a resolution is a new record.
         if let index = stored.indices.last(where: {
             let record = stored[$0]
             return !record.isResolved && record.concern == report.concern &&
-                record.operation == operation && record.code == code
+                record.operation == operation && record.domain == domain && record.code == code &&
+                record.correlation.clientOperationID == operationID
         }) {
             stored[index].lastAt = max(stored[index].lastAt, at)
             stored[index].count += 1
             stored[index].phase = phase
-            stored[index].domain = domain
             stored[index].initiator = report.initiator
             stored[index].retryable = report.retryable
             stored[index].httpStatus = report.httpStatus ?? stored[index].httpStatus
@@ -411,8 +455,8 @@ public final class ErrorLogStore: ErrorLogging, @unchecked Sendable {
                 resolvedAt: nil, resolvedBy: nil))
         }
         applyRetention()
-        persist()
-        handler = changeHandler
+        let handler = changeHandler
+        scheduleWriteLocked()
         lock.unlock()
         handler?()
     }
@@ -431,18 +475,18 @@ public final class ErrorLogStore: ErrorLogging, @unchecked Sendable {
         }
         guard changed else { lock.unlock(); return }
         applyRetention()
-        persist()
         let handler = changeHandler
+        scheduleWriteLocked()
         lock.unlock()
         handler?()
     }
 
-    // MARK: Retention, persistence (lock held)
+    // MARK: Retention (lock held)
 
     private func applyRetention() {
         let cutoff = now().addingTimeInterval(-Self.retentionInterval)
         let recent = stored.filter { $0.lastAt >= cutoff }.count
-        let budget = max(Self.minimumRetainedCount, recent)
+        let budget = min(max(Self.minimumRetainedCount, recent), Self.maximumRetainedCount)
         guard stored.count > budget else { return }
         // Resolved records go first, oldest first; then the oldest unresolved.
         let evictionOrder = stored.sorted { lhs, rhs in
@@ -453,45 +497,128 @@ public final class ErrorLogStore: ErrorLogging, @unchecked Sendable {
         stored.removeAll { evicted.contains($0.id) }
     }
 
-    private func load() {
+    // MARK: Loading
+
+    private func readFile(at url: URL) -> LoadResult {
+        let data: Data
+        do {
+            data = try Data(contentsOf: url)
+        } catch {
+            let value = error as NSError
+            if value.domain == NSCocoaErrorDomain && value.code == CocoaError.fileReadNoSuchFile.rawValue {
+                return .absent
+            }
+            return .unreadable
+        }
+        guard let file = try? Self.decoder.decode(StoredFile.self, from: data) else {
+            return .unusable(cause: "unreadable_format")
+        }
+        guard file.version == 1 else { return .unusable(cause: "unsupported_version") }
+        // Re-apply the redaction rules to whatever was on disk.
+        return .loaded(file.records.map(Self.sanitized))
+    }
+
+    private func loadAtStart() {
         guard let fileURL else {
             status = .memoryFallback(cause: "storage_unavailable")
             return
         }
-        do {
-            let data = try Data(contentsOf: fileURL)
-            let file = try Self.decoder.decode(StoredFile.self, from: data)
-            guard file.version == 1 else {
-                status = .memoryFallback(cause: "unsupported_version")
-                return
-            }
-            // Re-apply the redaction rules to whatever was on disk.
-            stored = file.records.map(Self.sanitized)
+        applyLoad(readFile(at: fileURL), url: fileURL)
+    }
+
+    /// Applies a read result. Never writes the log file itself.
+    private func applyLoad(_ result: LoadResult, url: URL) {
+        switch result {
+        case .absent:
+            fileNeedsReading = false
+            if stored.isEmpty { status = .new }
+        case let .loaded(records):
+            fileNeedsReading = false
+            let known = Set(stored.map(\.id))
+            stored = (stored + records.filter { !known.contains($0.id) })
+            applyRetention()
             status = .saved
-        } catch {
-            let value = error as NSError
-            if value.domain == NSCocoaErrorDomain && value.code == CocoaError.fileReadNoSuchFile.rawValue {
-                status = .new
+        case .unreadable:
+            fileNeedsReading = true
+            status = .memoryFallback(cause: "read_failed")
+        case let .unusable(cause):
+            if quarantine(url) {
+                fileNeedsReading = false
+                status = .memoryFallback(cause: cause)
             } else {
+                fileNeedsReading = true
                 status = .memoryFallback(cause: "read_failed")
             }
         }
     }
 
-    private func persist() {
+    /// Moves a file this build cannot use aside so a later write cannot destroy
+    /// it. Returns false if it could not be moved.
+    private func quarantine(_ url: URL) -> Bool {
+        let stamp = Int(now().timeIntervalSince1970)
+        let aside = url.deletingLastPathComponent()
+            .appendingPathComponent("\(url.deletingPathExtension().lastPathComponent).unreadable-\(stamp).json")
+        do {
+            try FileManager.default.moveItem(at: url, to: aside)
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    // MARK: Writing
+
+    /// Schedules one background write; changes made before it runs share it.
+    private func scheduleWriteLocked() {
+        guard !writeScheduled else { return }
+        writeScheduled = true
+        let sinceLast = Date().timeIntervalSince(lastWriteStarted)
+        let delay = sinceLast >= writeDelay ? 0 : writeDelay - sinceLast
+        writeQueue.asyncAfter(deadline: .now() + delay) { [weak self] in self?.performWrite() }
+    }
+
+    /// Runs on `writeQueue` only.
+    private func performWrite() {
+        lock.lock()
+        guard writeScheduled else { lock.unlock(); return }
+        writeScheduled = false
+        lastWriteStarted = Date()
         guard let fileURL else {
             status = .memoryFallback(cause: "storage_unavailable")
+            lock.unlock()
             return
         }
+        let needsReading = fileNeedsReading
+        lock.unlock()
+
+        if needsReading {
+            // Never write over a file we could not read: try to read it again.
+            let result = readFile(at: fileURL)
+            lock.lock()
+            applyLoad(result, url: fileURL)
+            let blocked = fileNeedsReading
+            lock.unlock()
+            if blocked { return }
+        }
+
+        lock.lock()
+        let snapshot = stored
+        lock.unlock()
+        let outcome: PersistenceStatus
         do {
             try FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(),
                                                     withIntermediateDirectories: true)
-            let data = try Self.encoder.encode(StoredFile(version: 1, records: stored))
+            let data = try Self.encoder.encode(StoredFile(version: 1, records: snapshot))
             try data.write(to: fileURL, options: .atomic)
-            status = .saved
+            outcome = .saved
         } catch {
-            status = .memoryFallback(cause: "write_failed")
+            outcome = .memoryFallback(cause: "write_failed")
         }
+        lock.lock()
+        status = outcome
+        let handler = changeHandler
+        lock.unlock()
+        handler?()
     }
 
     private static func sanitized(_ record: ErrorLogRecord) -> ErrorLogRecord {
