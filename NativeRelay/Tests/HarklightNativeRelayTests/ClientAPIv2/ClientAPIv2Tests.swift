@@ -143,6 +143,8 @@ final class ChangeFeedSyncTests: XCTestCase {
         XCTAssertEqual(state, .stopped)
         XCTAssertEqual(errors.reports.map(\.initiator), [.serverClosed, .deviceRevoked],
                        "Each server-initiated end names its initiator.")
+        XCTAssertTrue(errors.reports.allSatisfy { $0.correlation.requestID?.hasPrefix("req-") == true },
+                      "Each report carries the feed's Request-Id.")
     }
 
     func testPushCatchUpAppliesEveryBatchFromTheCursor() async throws {
@@ -249,8 +251,9 @@ final class ActionOutboxTests: XCTestCase {
             write: FrozenWrite(method: .post, path: "/v2/items/a/answer", body: Data("{}".utf8)))
         await eventually("refused") { outcomes.rejected.count == 1 }
         XCTAssertEqual(outcomes.rejected.first?.1.token, .staleRequest)
-        XCTAssertEqual(errors.reports.first?.correlation.serverConnectionID, "req-x",
+        XCTAssertEqual(errors.reports.first?.correlation.requestID, "req-x",
                        "The Request-Id is kept for correlation.")
+        XCTAssertEqual(errors.reports.first?.httpStatus, 409)
         XCTAssertEqual(errors.reports.first?.retryable, false)
         let pending = await box.pending
         XCTAssertTrue(pending.isEmpty)

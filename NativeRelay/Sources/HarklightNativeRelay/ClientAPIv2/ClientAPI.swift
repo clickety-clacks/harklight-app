@@ -188,7 +188,7 @@ public protocol ClientAPITransport: Sendable {
 extension ErrorLogCorrelation {
     /// The server's `Request-Id` is the only identifier kept from a response.
     static func request(_ requestID: String?, operationID: UUID? = nil) -> Self {
-        ErrorLogCorrelation(serverConnectionID: requestID, clientOperationID: operationID)
+        ErrorLogCorrelation(clientOperationID: operationID, requestID: requestID)
     }
 }
 

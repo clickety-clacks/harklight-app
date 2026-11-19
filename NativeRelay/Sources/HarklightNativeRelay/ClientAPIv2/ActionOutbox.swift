@@ -209,7 +209,8 @@ public actor ActionOutbox {
                         retryable: Bool) {
         errors.report(ErrorLogReport(concern: .actions, connectionRole: .request, operation: entry.operation,
             phase: phase, reason: .api(error), initiator: initiator, retryable: retryable,
-            correlation: .request((error as? APIError)?.requestID, operationID: entry.idempotencyKey)))
+            correlation: .request((error as? APIError)?.requestID, operationID: entry.idempotencyKey),
+            httpStatus: (error as? APIError)?.status))
     }
 }
 

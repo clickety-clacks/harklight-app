@@ -127,10 +127,12 @@ public actor ChangeFeedSync {
         }
         liveState = .catchingUp
         var last = after
+        feedRequestID = nil
         do {
             for try await event in transport.changeFeed(after: after) {
                 switch event {
-                case .opened:
+                case let .opened(requestID):
+                    feedRequestID = requestID
                     liveState = .live
                     errors.resolve(concern: .sync, operation: Self.feedOperation)
                 case let .change(change):
@@ -141,14 +143,17 @@ public actor ChangeFeedSync {
                     let initiator = Self.initiator(forClosingReason: reason)
                     errors.report(ErrorLogReport(concern: .sync, connectionRole: .stream,
                         operation: Self.feedOperation, phase: "closing", reason: .serverReason(reason),
-                        initiator: initiator, retryable: initiator != .deviceRevoked))
+                        initiator: initiator, retryable: initiator != .deviceRevoked,
+                        correlation: .request(feedRequestID)))
                     if initiator == .deviceRevoked { return .revoked }
                     return .dropped(initiator, retryPromptly: true)
                 }
             }
             if Task.isCancelled { return .cancelled }
             // The server ended the stream without a closing event.
-            return .dropped(.serverClosed, retryPromptly: false)
+            report(Self.feedOperation, phase: "stream", reason: .app("ended_without_closing"),
+                   initiator: .unknown, retryable: true)
+            return .dropped(.unknown, retryPromptly: false)
         } catch let error as APIError where error.token == .cursorExpired {
             do {
                 _ = try await rebaseline()
@@ -205,11 +210,21 @@ public actor ChangeFeedSync {
         try cursor.save(rev)
     }
 
+    /// The open feed's Request-Id, which correlates every report about it.
+    private var feedRequestID: String?
+
     private func report(_ operation: String, phase: String, error: any Error, initiator: ErrorLogInitiator) {
-        let retryable = (error as? APIError)?.retryable ?? true
+        let apiError = error as? APIError
         errors.report(ErrorLogReport(concern: .sync, connectionRole: .stream, operation: operation,
-            phase: phase, reason: .api(error), initiator: initiator, retryable: retryable,
-            correlation: .request((error as? APIError)?.requestID)))
+            phase: phase, reason: .api(error), initiator: initiator, retryable: apiError?.retryable ?? true,
+            correlation: .request(apiError?.requestID ?? feedRequestID), httpStatus: apiError?.status))
+    }
+
+    private func report(_ operation: String, phase: String, reason: ErrorLogReason,
+                        initiator: ErrorLogInitiator, retryable: Bool) {
+        errors.report(ErrorLogReport(concern: .sync, connectionRole: .stream, operation: operation,
+            phase: phase, reason: reason, initiator: initiator, retryable: retryable,
+            correlation: .request(feedRequestID)))
     }
 
     static func initiator(forClosingReason reason: String) -> ErrorLogInitiator {
