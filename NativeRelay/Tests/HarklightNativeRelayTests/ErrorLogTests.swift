@@ -438,7 +438,7 @@ final class ErrorLogTests: XCTestCase {
     func testEveryDocumentedApiErrorTokenIsKeptAndOthersAreNot() {
         for token in ["not_found", "invalid_field", "stale_request", "already_answered", "already_retracted",
                       "idempotency_conflict", "precondition_failed", "cursor_expired", "unauthorized",
-                      "retry_later", "storage_unavailable", "payload_too_large", "unsupported"] {
+                      "retry_later", "storage_unavailable", "payload_too_large", "unsupported", "forbidden"] {
             XCTAssertEqual(ErrorLogReason.serverReason(token).code, token)
         }
         XCTAssertEqual(ErrorLogReason.serverReason("please_contact_dana@example.invalid").code, "other")
