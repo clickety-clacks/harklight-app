@@ -80,6 +80,8 @@ final class FakeClientAPIServer: ClientAPITransport, @unchecked Sendable {
     // MARK: ClientAPITransport
 
     func send(_ request: APIRequest) async throws -> APIResponse {
+        // Like URLSession, a cancelled task's request fails.
+        try Task.checkCancellation()
         let persisted = request.idempotencyKey.map { persistedKeys?().contains($0) ?? true } ?? true
         lock.withLock {
             received.append(request)

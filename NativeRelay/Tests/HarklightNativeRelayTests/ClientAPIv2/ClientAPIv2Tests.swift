@@ -209,6 +209,20 @@ final class ChangeFeedSyncTests: XCTestCase {
         XCTAssertEqual(state, .accountPaused)
     }
 
+    func testCatchUpRebaselinesOnceAndReportsASecondExpiry() async throws {
+        let server = FakeClientAPIServer()
+        for _ in 0..<3 { server.commit("item", "{}") }
+        server.prune(through: 3)
+        // A snapshot that is itself already too old to resume from.
+        let model = RecordingSyncModel(snapshotRev: { 1 })
+        let errors = RecordingErrorLogV2()
+        let sync = ChangeFeedSync(transport: server, cursor: MemoryRevCursor(1), model: model, errors: errors,
+                                  waitBeforeRetry: noWait)
+        do { try await sync.catchUp(); XCTFail("A second 410 ends the catch-up.") } catch {}
+        XCTAssertEqual(model.rebaselines, 1, "No rebaseline loop.")
+        XCTAssertEqual(errors.reports.first?.operation, "catch_up")
+    }
+
     func testPushCatchUpAppliesEveryBatchFromTheCursor() async throws {
         let server = FakeClientAPIServer()
         for _ in 0..<5 { server.commit("item", "{}") }
@@ -281,6 +295,34 @@ final class ActionOutboxTests: XCTestCase {
         XCTAssertEqual(server.head, 1, "The server applied the mutation once.")
         XCTAssertTrue(persistence.keys.isEmpty)
         XCTAssertEqual(errors.resolutions, ["actions.mark_seen"])
+    }
+
+    func testAnAutomaticRetryResendsAfterAnUnknownOutcome() async throws {
+        let server = FakeClientAPIServer()
+        server.nextWriteFailures = [URLError(.timedOut)]
+        let outcomes = RecordingOutcomes()
+        let box = try outbox(server, MemoryOutboxPersistence(), outcomes,
+                             wait: { _, _ in try await Task.sleep(for: .milliseconds(20)) })
+        let entry = try await box.submit(target: "a", operation: "mark_seen", write: seen)
+        await eventually("the retry delivered it") { outcomes.accepted.count == 1 }
+        XCTAssertEqual(server.received.map(\.idempotencyKey), [entry.idempotencyKey, entry.idempotencyKey],
+                       "The retry is not cancelled by its own send and reuses the key.")
+    }
+
+    func testAnUnknownServerErrorWithoutAContractBodyNeverDropsTheWrite() async throws {
+        let unknown = APIError(status: 502, body: Data("<html>bad gateway</html>".utf8), requestID: nil, retryAfter: nil)
+        XCTAssertTrue(unknown.retryable)
+        XCTAssertFalse(unknown.isPermanent)
+        let server = FakeClientAPIServer()
+        server.nextWriteFailures = [unknown]
+        let persistence = MemoryOutboxPersistence()
+        let outcomes = RecordingOutcomes()
+        let box = try outbox(server, persistence, outcomes)
+        let entry = try await box.submit(target: "a", operation: "mark_seen", write: seen)
+        await eventually("held") { server.received.count == 1 }
+        await box.flush()
+        XCTAssertTrue(outcomes.rejected.isEmpty)
+        XCTAssertEqual(outcomes.accepted.map(\.0), [entry.idempotencyKey])
     }
 
     func testOperationsOnOneItemGoInOrderWhileOtherItemsProceed() async throws {

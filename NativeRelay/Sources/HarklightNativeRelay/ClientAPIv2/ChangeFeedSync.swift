@@ -89,14 +89,18 @@ public actor ChangeFeedSync {
     public func catchUp() async throws {
         do {
             var after = try await startingRev()
+            var rebaselined = false
             while true {
                 let batch: FeedBatch
                 do {
                     batch = try await transport.changeBatch(after: after)
-                } catch let error as APIError where error.token == .cursorExpired {
+                } catch let error as APIError where error.token == .cursorExpired && !rebaselined {
+                    // One rebaseline per catch-up; a second 410 is reported.
+                    rebaselined = true
                     after = try await rebaseline()
                     continue
                 }
+                let before = after
                 for change in batch.changes where change.rev > after {
                     try await apply(change)
                     after = change.rev
@@ -108,6 +112,8 @@ public actor ChangeFeedSync {
                     after = batch.rev
                 }
                 guard batch.more else { break }
+                // `more` without progress would loop; stop and report it.
+                guard after > before else { throw FeedDecodingError.outOfOrder }
             }
             errors.resolve(concern: .sync, operation: Self.catchUpOperation)
         } catch {

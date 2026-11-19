@@ -114,7 +114,9 @@ public struct APIError: Error, Equatable, Sendable {
     public init(status: Int, body: Data, requestID: String?, retryAfter: TimeInterval?) {
         let object = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any]
         let token = (object?["error"] as? String).flatMap(APIErrorToken.init(rawValue:)) ?? .other
-        let retryable = (object?["retryable"] as? Bool) ?? (status == 503 || status == 429)
+        // Without a contract body (for example a proxy's 502), the outcome is
+        // unknown, so it is retryable.
+        let retryable = (object?["retryable"] as? Bool) ?? (status >= 500 || status == 429 || status == 408)
         let bodyRequestID = object?["request_id"] as? String
         self.init(status: status, token: token, retryable: retryable,
                   requestID: requestID ?? bodyRequestID, retryAfter: retryAfter)
@@ -122,7 +124,11 @@ public struct APIError: Error, Equatable, Sendable {
 
     /// A definitive refusal: the same request will never succeed. A paused
     /// account is not one: the request is kept until the pause ends.
-    public var isPermanent: Bool { !retryable && status != 401 && status != 503 && token != .accountPaused }
+    /// Only a contract refusal is definitive; an answer outside the contract
+    /// never drops the person's write.
+    public var isPermanent: Bool {
+        token != .other && !retryable && status != 401 && status < 500 && token != .accountPaused
+    }
 }
 
 /// One change from the feed, carrying the resulting state, not a delta.

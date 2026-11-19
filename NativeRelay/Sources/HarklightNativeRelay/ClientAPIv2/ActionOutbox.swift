@@ -67,7 +67,7 @@ public actor ActionOutbox {
     private var entries: [OutboxEntry]
     private var sendingTargets: Set<String> = []
     private var resendRequested: Set<String> = []
-    private var retryTasks: [String: Task<Void, Never>] = [:]
+    private var retryTasks: [String: (id: UUID, task: Task<Void, Never>)] = [:]
     /// Set when the server refused this device's authentication or the account
     /// is paused; nothing is sent, and queued operations are kept until
     /// re-enrolment or the end of the pause.
@@ -136,7 +136,10 @@ public actor ActionOutbox {
             return
         }
         defer { sendingTargets.remove(target) }
-        retryTasks.removeValue(forKey: target)?.cancel()
+        // A retry waiting for its time is replaced by this send. A retry that
+        // is itself calling send removed its own entry first, so it is never
+        // cancelled here.
+        retryTasks.removeValue(forKey: target)?.task.cancel()
         repeat {
             resendRequested.remove(target)
             while let entry = entries.first(where: { $0.target == target }) {
@@ -157,7 +160,7 @@ public actor ActionOutbox {
         } catch let error as APIError where error.token == .accountPaused {
             // Kept until the pause ends; nothing is refused or dropped.
             unauthorized = true
-            report(entry, phase: "send", error: error, initiator: .serverClosed, retryable: true)
+            report(entry, phase: "send", error: error, initiator: .serverClosed, retryable: false)
             return false
         } catch let error where ChangeFeedSync.isRevocation(error) {
             unauthorized = true
@@ -179,12 +182,23 @@ public actor ActionOutbox {
     }
 
     private func scheduleRetry(_ target: String, attempt: Int, retryAfter: TimeInterval?) {
-        retryTasks[target]?.cancel()
+        retryTasks[target]?.task.cancel()
         let wait = waitBeforeRetry
-        retryTasks[target] = Task {
+        let id = UUID()
+        let task = Task {
             do { try await wait(attempt, retryAfter) } catch { return }
+            guard await self.takeRetry(target, id: id) else { return }
             await self.send(target)
         }
+        retryTasks[target] = (id, task)
+    }
+
+    /// The retry whose time has come leaves the table before sending, so the
+    /// send does not cancel the task it runs in.
+    private func takeRetry(_ target: String, id: UUID) -> Bool {
+        guard retryTasks[target]?.id == id else { return false }
+        retryTasks[target] = nil
+        return true
     }
 
     private func noteAttempt(_ key: UUID) {
