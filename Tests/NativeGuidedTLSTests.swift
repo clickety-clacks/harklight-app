@@ -104,10 +104,6 @@ private final class MessageLinkRefreshPlan {
     var didDeliverLateMessage = false
 }
 
-/// Actual pinned TLS exercises certificate-free enrollment and the explicit
-/// identity proof required for own-device removal. The iOS listener cannot
-/// request an optional certificate; that server seam needs server integration.
-@MainActor
 /// Fixture hosts: a stable profile authority and a separate server host.
 private enum FixtureHosts {
     static let authority = "old.example.test"
@@ -120,6 +116,10 @@ private func fixtureRootSHA256(_ rootDER: Data) -> String {
     SHA256.hash(data: rootDER).map { String(format: "%02x", $0) }.joined()
 }
 
+/// Actual pinned TLS exercises certificate-free enrollment and the explicit
+/// identity proof required for own-device removal. The iOS listener cannot
+/// request an optional certificate; that server seam needs server integration.
+@MainActor
 final class NativeGuidedTLSTests: XCTestCase {
     private func confirmRequestForAction(_ store: ClientRepository, context: ProfileContext,
                                          key: RequestKey, payload: JSONValue) async throws {
