@@ -112,6 +112,13 @@ private enum FixtureHosts {
     static let relayPort = 18_443
 }
 
+private final class ProgressEventLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recorded: [NativeRelayProgressEvent] = []
+    var events: [NativeRelayProgressEvent] { lock.lock(); defer { lock.unlock() }; return recorded }
+    func record(_ event: NativeRelayProgressEvent) { lock.lock(); recorded.append(event); lock.unlock() }
+}
+
 private func fixtureRootSHA256(_ rootDER: Data) -> String {
     SHA256.hash(data: rootDER).map { String(format: "%02x", $0) }.joined()
 }
@@ -3725,13 +3732,20 @@ final class NativeGuidedTLSTests: XCTestCase {
         try await enrolledRoot.resync(request) { _ in }
         await enrolledRoot.close()
 
+        let connectionsBefore = relay.connectionCount
+        let observed = ProgressEventLog()
         let foreignRoot = try URLSessionInstallationSession(profile: context, relayURL: relayURL,
-            clientIdentity: TrustedKeychainIdentity(installation.value), trustedRootDER: otherRelay.rootDER)
+            clientIdentity: TrustedKeychainIdentity(installation.value), trustedRootDER: otherRelay.rootDER,
+            onProgress: { observed.record($0) })
         do {
             try await foreignRoot.resync(request) { _ in }
             XCTFail("A chain that is not under the enrolled root must be refused")
         } catch {}
         await foreignRoot.close()
+        XCTAssertTrue(observed.events.contains(.serverTrustRejected),
+                      "The refusal must be a trust rejection, not another failure")
+        XCTAssertEqual(relay.connectionCount, connectionsBefore,
+                       "The relay never saw a session from the untrusted root")
     }
 
     func testConversationOriginUsesTheNewEndpointWithoutChangingProfileAuthority() throws {
