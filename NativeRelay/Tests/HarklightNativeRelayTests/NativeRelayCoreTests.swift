@@ -1695,6 +1695,13 @@ final class NativeRelayCoreTests: XCTestCase {
         var replayError: any Error = CancellationError()
         private(set) var conversationOpenCount = 0
 
+        /// The real transport multiplexes inbox requests and conversation replay on
+        /// one WebSocket, so a replay abort or cancel also kills later inbox reads.
+        override func inboxRequest(_ request: Data, ref: String) async throws -> Data {
+            if conversationOpenCount > 0 { throw InstallationTransportError.unexpectedServerFrame }
+            return try await super.inboxRequest(request, ref: ref)
+        }
+
         func openConversation(_ request: Data, consume: @Sendable (Data) async throws -> Void) async throws {
             conversationOpenCount += 1
             throw replayError
@@ -1712,7 +1719,10 @@ final class NativeRelayCoreTests: XCTestCase {
     }
 
     /// A read that succeeds must reach the UI even when conversation replay
-    /// fails, and the replay failure must still be reported to the caller.
+    /// fails. The fake kills inbox requests once replay has failed, as the shared
+    /// socket does, so a fix that reads only after catching the replay error fails.
+    /// The read has to be independent of, and not later than, the replay.
+    /// and the replay failure must still be reported to the caller.
     private func assertIndependentReadSurvivesReplayFailure(_ error: any Error) async throws {
         let (context, store, _) = try setup()
         let session = FailingReplayConversationSession(context.identity)
@@ -1727,6 +1737,9 @@ final class NativeRelayCoreTests: XCTestCase {
 
         XCTAssertEqual(session.conversationOpenCount, 1, "Conversation replay was attempted.")
         XCTAssertNotNil(reported, "The replay failure is still reported, not swallowed.")
+        XCTAssertEqual((reported as NSError?)?.domain, (error as NSError).domain)
+        XCTAssertEqual((reported as NSError?)?.code, (error as NSError).code,
+                       "The original replay error is reported, not replaced.")
         let requestTypes = try session.requests.map(JSONValue.parse).compactMap {
             $0.uniqueValue(named: "type")?.stringValue?.rawValue
         }
