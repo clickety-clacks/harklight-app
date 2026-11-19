@@ -250,14 +250,13 @@ final class NativeGuidedJoinStore {
         let response = try JSONDecoder().decode(EnrollmentReply.self, from: reply.data)
         guard let code = response.approvalCode, code.utf8.count == 10,
               code.utf8.allSatisfy({ (65...90).contains($0) || (50...55).contains($0) }),
-              let deadline = response.expiresAt, deadline > 0,
-              let statusDeadline = response.statusExpiresAt else {
+              response.expiresAt.map({ $0 > 0 }) ?? true else {
             throw NativeJoinError.invalidResponse
         }
         var next = attempt
         next.approvalCode = code
-        next.approvalExpiresAt = deadline
-        next.statusExpiresAt = statusDeadline
+        next.approvalExpiresAt = response.expiresAt
+        next.statusExpiresAt = response.statusExpiresAt
         return try apply(response, to: next)
     }
 
@@ -331,8 +330,7 @@ final class NativeGuidedJoinStore {
         if response.state == "pending" || response.state == "approved" {
             // A renewal cannot display an earlier generation's tuple by
             // filling absent response fields from stale local metadata.
-            guard response.approvalCode != nil, response.expiresAt != nil,
-                  response.statusExpiresAt != nil,
+            guard response.approvalCode != nil,
                   let generation = response.requestGeneration, generation > 0 else { throw NativeJoinError.invalidResponse }
         }
         return try apply(response, to: attempt)
@@ -353,7 +351,9 @@ final class NativeGuidedJoinStore {
         // tuple asks E4 for current metadata without renewing it. It is never
         // represented as an observed approval tuple or sent to an owner.
         var currentCode = attempt.approvalCode ?? String(repeating: "A", count: 10)
-        var currentDeadline = attempt.approvalExpiresAt ?? 1
+        // The deliberately stale placeholder is only for a request with no
+        // saved code. A saved code with no deadline is the Server's own null.
+        var currentDeadline: Int64? = attempt.approvalCode == nil ? 1 : attempt.approvalExpiresAt
         // A concurrent renewal can make the saved tuple stale. Follow the
         // Server's current tuple under the same secret until cancellation is
         // confirmed; never renew as a way of fulfilling cancellation intent.
@@ -362,7 +362,8 @@ final class NativeGuidedJoinStore {
             let sentDeadline = currentDeadline
             let body = try JSONSerialization.data(withJSONObject: [
                 "status_secret": attempt.statusSecret, "approval_code": sentCode,
-                "expected_device_id": attempt.deviceID, "expected_expires_at": sentDeadline
+                "expected_device_id": attempt.deviceID,
+                "expected_expires_at": sentDeadline.map { $0 as Any } ?? NSNull()
             ], options: [.sortedKeys])
             let reply = try await transport.request(url, method: "POST", body: body,
                                                     rootDER: attempt.invitation.trustedRootDER)
@@ -372,16 +373,16 @@ final class NativeGuidedJoinStore {
                conflict.error == "stale_request",
                conflict.current.state == "pending" || conflict.current.state == "expired" {
                 let response = conflict.current
-                guard let responseCode = response.approvalCode,
-                      let responseDeadline = response.expiresAt else { throw NativeJoinError.invalidResponse }
+                guard response.approvalCode != nil else { throw NativeJoinError.invalidResponse }
                 guard NativeAuthorityBinding.samePerson(response.personID, attempt.invitation.personID),
                       response.deviceID == attempt.deviceID,
-                      response.statusExpiresAt != nil, (response.requestGeneration ?? 0) > 0 else {
+                      (response.requestGeneration ?? 0) > 0 else {
                     throw NativeJoinError.invalidResponse
                 }
                 attempt = try apply(response, to: attempt)
-                guard attempt.phase == .pending || attempt.phase == .expired, let code = attempt.approvalCode,
-                      let deadline = attempt.approvalExpiresAt else { return attempt }
+                guard attempt.phase == .pending || attempt.phase == .expired,
+                      let code = attempt.approvalCode else { return attempt }
+                let deadline = attempt.approvalExpiresAt
                 // `apply` deliberately ignores an older generation. Compare
                 // the effective saved tuple after applying the reply, so a
                 // stale Server response cannot make this loop resend the same
@@ -643,28 +644,23 @@ final class NativeGuidedJoinStore {
         if response.approvalCode != nil || response.expiresAt != nil || response.statusExpiresAt != nil {
             guard let code = response.approvalCode, code.utf8.count == 10,
                   code.utf8.allSatisfy({ (65...90).contains($0) || (50...55).contains($0) }),
-                  let deadline = response.expiresAt, deadline > 0,
-                  let statusDeadline = response.statusExpiresAt else {
+                  response.expiresAt.map({ $0 > 0 }) ?? true else {
                 throw NativeJoinError.invalidResponse
             }
             next.approvalCode = code
-            next.approvalExpiresAt = deadline
-            next.statusExpiresAt = statusDeadline
+            next.approvalExpiresAt = response.expiresAt
+            next.statusExpiresAt = response.statusExpiresAt
         }
         switch response.state {
         case "pending":
             if generation > currentGeneration {
-                guard response.approvalCode != nil, response.expiresAt != nil,
-                      response.statusExpiresAt != nil else { throw NativeJoinError.invalidResponse }
+                guard response.approvalCode != nil else { throw NativeJoinError.invalidResponse }
             }
             guard let code = next.approvalCode,
                   code.utf8.count == 10,
                   code.utf8.allSatisfy({ (65...90).contains($0) || (50...55).contains($0) }),
-                  let deadline = next.approvalExpiresAt, deadline > 0,
-                  let statusDeadline = next.statusExpiresAt else { throw NativeJoinError.invalidResponse }
+                  next.approvalExpiresAt.map({ $0 > 0 }) ?? true else { throw NativeJoinError.invalidResponse }
             next.approvalCode = code
-            next.approvalExpiresAt = deadline
-            next.statusExpiresAt = statusDeadline
             next.phase = .pending
         case "expired": next.phase = .expired
         case "declined", "denied": next.phase = .declined

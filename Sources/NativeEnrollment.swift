@@ -66,8 +66,9 @@ struct NativeEnrollmentRecord: Codable, Equatable {
     let deviceID: String
     let approvalCode: String
     let statusSecret: String
-    let expiresAt: Int64
-    let statusExpiresAt: Int64
+    /// Nil when the Server gave no deadline (it no longer expires requests).
+    let expiresAt: Int64?
+    let statusExpiresAt: Int64?
     var personID: String?
     var pushBinding: NativePushBinding? = nil
     var pushRegistrationRevisionFloor: UInt64? = nil
@@ -815,11 +816,11 @@ struct NativeEnrollmentStore {
         let error: String
     }
 
-    private struct StartResponse: Decodable {
+    struct StartResponse: Decodable {
         let approvalCode: String
         let statusSecret: String
-        let expiresAt: Int64
-        let statusExpiresAt: Int64
+        let expiresAt: Int64?
+        let statusExpiresAt: Int64?
 
         enum CodingKeys: String, CodingKey {
             case approvalCode = "approval_code"
