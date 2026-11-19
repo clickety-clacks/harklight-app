@@ -11,12 +11,19 @@ import UIKit
 final class ErrorLogModel {
     @ObservationIgnored let store: ErrorLogStore
     private(set) var records: [ErrorLogRecord]
+    @ObservationIgnored private var lifecycleObservers: [NSObjectProtocol] = []
 
     init(store: ErrorLogStore) {
         self.store = store
         records = store.records
         store.setChangeHandler { [weak self] in
             Task { @MainActor in self?.refresh() }
+        }
+        // Writes are batched in the background; make sure none is pending when
+        // the app leaves the foreground or ends.
+        for name in [UIApplication.didEnterBackgroundNotification, UIApplication.willTerminateNotification] {
+            lifecycleObservers.append(NotificationCenter.default.addObserver(
+                forName: name, object: nil, queue: nil) { [store] _ in store.flush() })
         }
     }
 

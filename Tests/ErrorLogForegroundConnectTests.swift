@@ -17,7 +17,10 @@ final class ErrorLogForegroundConnectTests: XCTestCase {
     }
 
     private func makeLog() -> ErrorLogStore {
-        ErrorLogStore(fileURL: fileURL, build: ErrorLogBuild(version: "1.0", build: "1", commit: "abcdef0"))
+        let store = ErrorLogStore(fileURL: fileURL,
+                                  build: ErrorLogBuild(version: "1.0", build: "1", commit: "abcdef0"))
+        addTeardownBlock { store.flush() }
+        return store
     }
 
     private func cancelledReplay(attempt: UUID, transport: UUID) -> NativeForegroundConnectProgress {

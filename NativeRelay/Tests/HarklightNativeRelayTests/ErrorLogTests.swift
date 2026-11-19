@@ -26,8 +26,11 @@ final class ErrorLogTests: XCTestCase {
 
     private var fileURL: URL { directory.appendingPathComponent("error-log.json") }
 
+    /// A long write delay keeps writes out of the test until `flush()`.
     private func makeStore(file: URL? = nil, clock: Clock) -> ErrorLogStore {
-        ErrorLogStore(fileURL: file ?? fileURL, build: build, now: { clock.now })
+        let store = ErrorLogStore(fileURL: file ?? fileURL, build: build, writeDelay: 3600, now: { clock.now })
+        addTeardownBlock { store.flush() }
+        return store
     }
 
     private func report(_ concern: ErrorLogConcern = .snapshot, operation: String = "read_inbox",
@@ -144,6 +147,7 @@ final class ErrorLogTests: XCTestCase {
         _ = ErrorLogDetails.text(for: first)
         _ = ErrorLogDisplay.inContext(records: first, concern: .snapshot, now: clock.now)
         XCTAssertEqual(store.records, first)
+        store.flush()
         XCTAssertEqual(ErrorLogStore(fileURL: fileURL, build: build).records, first)
     }
 
@@ -172,6 +176,7 @@ final class ErrorLogTests: XCTestCase {
                                     phase: "fetch", reason: .app(messageText), retryable: true))
         store.resolve(concern: .actions, operation: "read_inbox", resolvedBy: "token=\(secretToken)")
 
+        store.flush()
         let file_bytes = try String(contentsOf: fileURL, encoding: .utf8)
         let everything = file_bytes + ErrorLogDetails.text(for: store.records) +
             String(describing: store.records)
@@ -251,6 +256,7 @@ final class ErrorLogTests: XCTestCase {
         first.report(report(.actions, operation: "mark_seen", reason: .serverReason("retry_later")))
         clock.advance(60)
         first.resolve(concern: .actions, operation: "mark_seen")
+        first.flush()
         XCTAssertEqual(first.persistenceStatus, .saved)
 
         let second = makeStore(clock: clock)
@@ -267,28 +273,136 @@ final class ErrorLogTests: XCTestCase {
         let store = makeStore(file: blocker.appendingPathComponent("error-log.json"), clock: clock)
         store.report(report())
         store.report(report(.actions, operation: "mark_seen"))
+        store.flush()
 
         XCTAssertEqual(store.records.count, 2, "records stay available in memory")
-        XCTAssertEqual(store.persistenceStatus, .memoryFallback(cause: "write_failed"))
+        guard case .memoryFallback = store.persistenceStatus else {
+            return XCTFail("expected the memory fallback, got \(store.persistenceStatus)")
+        }
 
         try FileManager.default.removeItem(at: blocker)
         store.report(report(.sync, operation: "subscribe_conversation"))
+        store.flush()
         XCTAssertEqual(store.persistenceStatus, .saved)
         XCTAssertEqual(makeStore(file: blocker.appendingPathComponent("error-log.json"), clock: clock).records.count, 3)
     }
 
-    func testUnreadableOrFutureVersionFileFallsBackToMemory() throws {
+    func testCorruptFileIsMovedAsideNotOverwritten() throws {
         let clock = Clock(Date(timeIntervalSince1970: 1_000_000))
         try Data("not json".utf8).write(to: fileURL)
-        let corrupt = makeStore(clock: clock)
-        XCTAssertEqual(corrupt.records, [])
-        XCTAssertEqual(corrupt.persistenceStatus, .memoryFallback(cause: "read_failed"))
-        corrupt.report(report())
-        XCTAssertEqual(corrupt.records.count, 1)
-        XCTAssertEqual(corrupt.persistenceStatus, .saved)
+        let store = makeStore(clock: clock)
+        XCTAssertEqual(store.records, [])
+        XCTAssertEqual(store.persistenceStatus, .memoryFallback(cause: "unreadable_format"))
+        store.report(report())
+        store.flush()
+        XCTAssertEqual(store.persistenceStatus, .saved)
 
-        try Data(#"{"version":99,"records":[]}"#.utf8).write(to: fileURL)
-        XCTAssertEqual(makeStore(clock: clock).persistenceStatus, .memoryFallback(cause: "unsupported_version"))
+        let aside = try FileManager.default.contentsOfDirectory(atPath: directory.path)
+            .filter { $0.contains("unreadable") }
+        XCTAssertEqual(aside.count, 1)
+        XCTAssertEqual(try String(contentsOf: directory.appendingPathComponent(aside[0]), encoding: .utf8), "not json")
+        XCTAssertEqual(makeStore(clock: clock).records.count, 1)
+    }
+
+    func testFutureVersionFileIsMovedAsideNotOverwritten() throws {
+        let clock = Clock(Date(timeIntervalSince1970: 1_000_000))
+        let future = #"{"version":99,"records":[]}"#
+        try Data(future.utf8).write(to: fileURL)
+        let store = makeStore(clock: clock)
+        XCTAssertEqual(store.persistenceStatus, .memoryFallback(cause: "unsupported_version"))
+        store.report(report())
+        store.flush()
+        let aside = try FileManager.default.contentsOfDirectory(atPath: directory.path)
+            .filter { $0.contains("unreadable") }
+        XCTAssertEqual(aside.count, 1)
+        XCTAssertEqual(try String(contentsOf: directory.appendingPathComponent(aside[0]), encoding: .utf8), future)
+    }
+
+    func testTemporarilyUnreadableFileIsNeverOverwrittenAndIsMergedWhenReadable() throws {
+        let clock = Clock(Date(timeIntervalSince1970: 1_000_000))
+        let first = makeStore(clock: clock)
+        first.report(report(operation: "old_failure"))
+        first.flush()
+        let original = try Data(contentsOf: fileURL)
+
+        // Unreadable for now, like a launch before first unlock.
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: fileURL.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: fileURL.path) }
+        let second = makeStore(clock: clock)
+        XCTAssertEqual(second.records, [])
+        XCTAssertEqual(second.persistenceStatus, .memoryFallback(cause: "read_failed"))
+        second.report(report(operation: "new_failure"))
+        second.flush()
+        XCTAssertEqual(second.records.count, 1, "new failures are kept in memory")
+        XCTAssertEqual(second.persistenceStatus, .memoryFallback(cause: "read_failed"))
+
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: fileURL.path)
+        XCTAssertEqual(try Data(contentsOf: fileURL), original, "the unreadable file was not overwritten")
+
+        second.report(report(operation: "later_failure"))
+        second.flush()
+        XCTAssertEqual(second.persistenceStatus, .saved)
+        let operations = Set(makeStore(clock: clock).records.map(\.operation))
+        XCTAssertEqual(operations, ["old_failure", "new_failure", "later_failure"])
+    }
+
+    // MARK: Writes happen off the caller
+
+    func testReportDoesNotWriteOnTheCallersThreadAndFlushDoes() throws {
+        let clock = Clock(Date(timeIntervalSince1970: 1_000_000))
+        // Occupy the first immediate write so the next change is held back.
+        let store = makeStore(clock: clock)
+        store.report(report(operation: "first"))
+        store.flush()
+        try FileManager.default.removeItem(at: fileURL)
+        store.report(report(operation: "second"))
+        store.report(report(operation: "third"))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fileURL.path),
+                       "changes within the write delay are batched, not written by the caller")
+        store.flush()
+        XCTAssertEqual(makeStore(clock: clock).records.count, 3)
+    }
+
+    func testFlappingFailureIsBoundedAndKeepsUnresolvedRecords() {
+        let clock = Clock(Date(timeIntervalSince1970: 1_000_000))
+        let store = makeStore(clock: clock)
+        store.report(report(.sync, operation: "keep_failing"))
+        for _ in 0..<(ErrorLogStore.maximumRetainedCount + 100) {
+            store.report(report())
+            clock.advance(1)
+            store.resolve(concern: .snapshot, operation: "read_inbox")
+            clock.advance(1)
+        }
+        XCTAssertLessThanOrEqual(store.records.count, ErrorLogStore.maximumRetainedCount)
+        XCTAssertTrue(store.records.contains { $0.operation == "keep_failing" && !$0.isResolved })
+    }
+
+    func testCoalescingKeyIncludesTheClientOperationAndDomain() {
+        let clock = Clock(Date(timeIntervalSince1970: 1_000_000))
+        let store = makeStore(clock: clock)
+        let first = UUID()
+        let second = UUID()
+        store.report(report(.actions, operation: "send_reply", reason: .serverReason("rejected"),
+                            correlation: ErrorLogCorrelation(clientOperationID: first)))
+        store.report(report(.actions, operation: "send_reply", reason: .serverReason("rejected"),
+                            correlation: ErrorLogCorrelation(clientOperationID: second)))
+        XCTAssertEqual(store.records.count, 2, "two different replies fail separately")
+        store.report(report(.actions, operation: "send_reply", reason: .serverReason("rejected"),
+                            correlation: ErrorLogCorrelation(clientOperationID: first)))
+        XCTAssertEqual(store.records.count, 2)
+        XCTAssertEqual(store.records.first { $0.correlation.clientOperationID == first }?.count, 2)
+        store.report(report(.actions, operation: "send_reply", reason: .app("rejected"),
+                            correlation: ErrorLogCorrelation(clientOperationID: first)))
+        XCTAssertEqual(store.records.count, 3, "same code in another domain is another failure")
+    }
+
+    func testBuildFieldsAreRedactedWhenDecoded() throws {
+        let json = #"{"version":"Bearer abc def","build":"293","commit":"https://x.invalid/?t=1"}"#
+        let decoded = try JSONDecoder().decode(ErrorLogBuild.self, from: Data(json.utf8))
+        XCTAssertEqual(decoded.version, "unavailable")
+        XCTAssertEqual(decoded.build, "293")
+        XCTAssertEqual(decoded.commit, "unavailable")
+        XCTAssertEqual(ErrorLogBuild.unavailable.commit, "unavailable")
     }
 
     // MARK: Retention
@@ -432,6 +546,7 @@ final class ErrorLogTests: XCTestCase {
         let lines = ErrorLogDetails.text(for: record).split(separator: "\n").map(String.init)
         XCTAssertTrue(lines.contains("http_status: 409"))
         XCTAssertTrue(lines.contains("request_id: req-01HZX9K2"))
+        store.flush()
         XCTAssertEqual(ErrorLogStore(fileURL: fileURL, build: build).records, store.records)
     }
 
@@ -454,6 +569,7 @@ final class ErrorLogTests: XCTestCase {
         store.report(ErrorLogReport(concern: .snapshot, connectionRole: .request, operation: "read_inbox",
                                     phase: "response", reason: .urlError(-1001), retryable: true,
                                     correlation: ErrorLogCorrelation(requestID: longest)))
+        store.flush()
         XCTAssertEqual(ErrorLogStore(fileURL: fileURL, build: build).records[0].correlation.requestID, longest)
         XCTAssertTrue(ErrorLogDetails.text(for: store.records).contains("request_id: \(longest)"))
     }
