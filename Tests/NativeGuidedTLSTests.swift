@@ -3717,10 +3717,11 @@ final class NativeGuidedTLSTests: XCTestCase {
         ]
         let relay = try LocalRelayWebSocket(expectedDevice: installation.deviceID) { _ in frames }
         defer { relay.close() }
-        let otherRelay = try LocalRelayWebSocket(expectedDevice: installation.deviceID) { _ in frames }
-        defer { otherRelay.close() }
         let port = try await relay.start()
-        XCTAssertNotEqual(relay.rootDER, otherRelay.rootDER)
+        // Fixture servers share one root, so use the device's own self-signed
+        // certificate as a root that is not the relay's.
+        let foreignRootDER = installation.certificateDER
+        XCTAssertNotEqual(relay.rootDER, foreignRootDER)
         // The profile authority is a different name from the relay host.
         let context = ProfileContext(identity: ProfileIdentity(trustedRelayAuthority: ExactText(FixtureHosts.authority),
             personID: ExactText("test-person"), deviceID: ExactText(installation.deviceID)), transportMode: .relay)
@@ -3735,7 +3736,7 @@ final class NativeGuidedTLSTests: XCTestCase {
         let connectionsBefore = relay.connectionCount
         let observed = ProgressEventLog()
         let foreignRoot = try URLSessionInstallationSession(profile: context, relayURL: relayURL,
-            clientIdentity: TrustedKeychainIdentity(installation.value), trustedRootDER: otherRelay.rootDER,
+            clientIdentity: TrustedKeychainIdentity(installation.value), trustedRootDER: foreignRootDER,
             onProgress: { observed.record($0) })
         do {
             try await foreignRoot.resync(request) { _ in }
