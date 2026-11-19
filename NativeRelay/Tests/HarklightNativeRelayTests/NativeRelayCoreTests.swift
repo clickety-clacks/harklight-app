@@ -1689,6 +1689,82 @@ final class NativeRelayCoreTests: XCTestCase {
         }
     }
 
+    /// A conversation session whose replay open fails before any frame, the way
+    /// a cancelled or aborted socket does on a live connection.
+    private final class FailingReplayConversationSession: Session, AuthenticatedConversationSession, @unchecked Sendable {
+        var replayError: any Error = CancellationError()
+        private(set) var conversationOpenCount = 0
+
+        func openConversation(_ request: Data, consume: @Sendable (Data) async throws -> Void) async throws {
+            conversationOpenCount += 1
+            throw replayError
+        }
+
+        func acknowledgeConversation(_ request: Data) async throws {}
+    }
+
+    private func independentReadEntries() -> [JSONValue] {
+        [.object([
+            JSONMember("sender_id", .string(ExactText("sender"))),
+            JSONMember("message_id", .string(ExactText("viewed"))),
+            JSONMember("score", .number(JSONNumber(lexeme: "0.93")))
+        ])]
+    }
+
+    /// A read that succeeds must reach the UI even when conversation replay
+    /// fails, and the replay failure must still be reported to the caller.
+    private func assertIndependentReadSurvivesReplayFailure(_ error: any Error) async throws {
+        let (context, store, _) = try setup()
+        let session = FailingReplayConversationSession(context.identity)
+        session.replayError = error
+        session.snapshotHighWater = 1
+        session.frames = [data(#"{"v":1,"type":"resynced","seq":1}"#)]
+        session.inboxViewEntries = independentReadEntries()
+
+        let core = try NativeRelayCore(store: store, context: context, session: session)
+        var reported: (any Error)?
+        do { _ = try await core.resyncAndDrainOutbox() } catch { reported = error }
+
+        XCTAssertEqual(session.conversationOpenCount, 1, "Conversation replay was attempted.")
+        XCTAssertNotNil(reported, "The replay failure is still reported, not swallowed.")
+        let requestTypes = try session.requests.map(JSONValue.parse).compactMap {
+            $0.uniqueValue(named: "type")?.stringValue?.rawValue
+        }
+        XCTAssertTrue(requestTypes.contains("view_get"),
+                      "The independent read is attempted although replay failed.")
+        let snapshot = try store.snapshot(context: context)
+        XCTAssertEqual(snapshot.inboxView?.revision, ExactText("view-test"),
+                       "The successful read is stored and available to the UI.")
+        XCTAssertEqual(snapshot.inboxView?.entries.map { $0.key.messageID.rawValue }, ["viewed"])
+        await core.deactivate()
+    }
+
+    func testIndependentInboxReadSurvivesCancelledConversationReplay() async throws {
+        try await assertIndependentReadSurvivesReplayFailure(CancellationError())
+    }
+
+    func testIndependentInboxReadSurvivesAbortedConversationReplay() async throws {
+        try await assertIndependentReadSurvivesReplayFailure(POSIXError(.ECONNABORTED))
+    }
+
+    func testConversationReplayAndAcknowledgeProceedWhenIndependentReadFails() async throws {
+        let (context, store, _) = try setup()
+        let key = RequestKey(accountScope: context.identity.personID, senderID: ExactText("sender"),
+                             messageID: ExactText("conversation"))
+        let session = AckRuleConversationSession(context.identity, storedAck: 0, history: 3)
+        session.snapshotHighWater = 1
+        session.initialItems = [snapshotItem(key, payload: .object([]))]
+        session.inboxViewEntries = nil // view_get answers with an error frame
+
+        let core = try NativeRelayCore(store: store, context: context, session: session)
+        _ = try await core.resyncAndDrainOutbox()
+
+        XCTAssertFalse(session.opens.isEmpty, "Replay still opens.")
+        XCTAssertEqual(session.acceptedAcks.last, 3, "Replay progress is still acknowledged.")
+        XCTAssertNil(try store.snapshot(context: context).inboxView)
+        await core.deactivate()
+    }
+
     func testMismatchedConversationAckIsRebuiltFromTheServerAndNeverEndsTheConnection() async throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
             personID: ExactText("person-ack"), deviceID: ExactText("device-ack"))
