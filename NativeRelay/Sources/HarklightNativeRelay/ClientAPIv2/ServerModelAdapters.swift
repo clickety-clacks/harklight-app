@@ -1,23 +1,34 @@
 import AttentionDomain
 import Foundation
 
-/// Sync's writer over the v2 local model: applies feed changes through the
-/// version gate and saves them before returning, and rebaselines from a full
-/// inbox read after `410` or on first run.
+/// Sync's writer over the v2 local model. A batch of feed changes and the
+/// cursor are saved together; a change that cannot be read is reported to the
+/// Error Log and skipped, so the item it describes is degraded (left as it
+/// was) rather than stopping Sync. A rebaseline reads the full inbox.
 public final class ServerModelSyncWriter: SyncModelWriting, @unchecked Sendable {
     private let store: ServerModelV2Store
     private let transport: any ClientAPITransport
+    private let errors: any ErrorLogging
     private let pageLimit: Int
 
-    public init(store: ServerModelV2Store, transport: any ClientAPITransport, pageLimit: Int = 200) {
+    public init(store: ServerModelV2Store, transport: any ClientAPITransport, errors: any ErrorLogging,
+                pageLimit: Int = 200) {
         self.store = store
         self.transport = transport
+        self.errors = errors
         self.pageLimit = pageLimit
     }
 
-    public func apply(_ change: FeedChange) async throws {
-        let data = try JSONValue.parse(change.data)
-        try store.apply(kind: change.kind.name, rev: change.rev, data: data)
+    public func heldCursor() throws -> Rev? { store.heldCursor }
+
+    public func apply(_ changes: [FeedChange], cursor: Rev) async throws {
+        let errors = errors
+        try store.apply(changes.map { ServerModelV2Store.Change(rev: $0.rev, kind: $0.kind.name, data: $0.data) },
+                        cursor: cursor) { change, error in
+            errors.report(ErrorLogReport(concern: .sync, connectionRole: .stream, operation: "apply_change",
+                phase: change.kind, reason: .app("decode_failed"), initiator: .unknown, retryable: false))
+            _ = error
+        }
     }
 
     /// Reads every inbox page. The cursor is the first page's position: later

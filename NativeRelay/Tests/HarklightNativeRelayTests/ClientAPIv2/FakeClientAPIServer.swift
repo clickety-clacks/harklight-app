@@ -181,39 +181,56 @@ final class AsyncGate: @unchecked Sendable {
 }
 
 /// A local model that records what Sync applied, through the version gate.
+/// A local model that records what Sync applied, through the version gate,
+/// and holds Sync's cursor with it.
 final class RecordingSyncModel: SyncModelWriting, @unchecked Sendable {
     private let lock = NSLock()
     private var gate = RevGate()
     private(set) var applied: [Rev] = []
     private(set) var rebaselines = 0
+    private(set) var batches: [[Rev]] = []
+    var cursor = MemoryRevCursor()
     var snapshotRev: () -> Rev
     var failApplyAt: Rev?
     var onApply: ((FeedChange) -> Void)?
 
     init(snapshotRev: @escaping () -> Rev) { self.snapshotRev = snapshotRev }
 
-    func apply(_ change: FeedChange) async throws {
+    /// Starts from a held cursor (nil means first run).
+    func using(_ cursor: MemoryRevCursor) -> Self {
+        self.cursor = cursor
+        return self
+    }
+
+    func heldCursor() throws -> Rev? { try cursor.load() }
+
+    func apply(_ changes: [FeedChange], cursor rev: Rev) async throws {
+        for change in changes { onApply?(change) }
         try lock.withLock {
-            if failApplyAt == change.rev {
-                failApplyAt = nil
+            if let failApplyAt, changes.contains(where: { $0.rev == failApplyAt }) {
+                self.failApplyAt = nil
                 throw CocoaError(.fileWriteUnknown)
             }
-            if gate.admit("log", rev: change.rev) { applied.append(change.rev) }
+            batches.append(changes.map(\.rev))
+            for change in changes where gate.admit("log", rev: change.rev) { applied.append(change.rev) }
         }
-        onApply?(change)
+        try cursor.save(max((try cursor.load()) ?? 0, rev))
     }
 
     func rebaseline() async throws -> Rev {
-        lock.withLock {
+        let rev = lock.withLock { () -> Rev in
             rebaselines += 1
             let rev = snapshotRev()
             _ = gate.admit("log", rev: rev)
             return rev
         }
+        try cursor.save(rev)
+        return rev
     }
 }
 
-final class MemoryRevCursor: RevCursorStore, @unchecked Sendable {
+/// Sync's cursor as the test model holds it.
+final class MemoryRevCursor: @unchecked Sendable {
     private let lock = NSLock()
     private var value: Rev?
     private(set) var saves: [Rev] = []

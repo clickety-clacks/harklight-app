@@ -75,7 +75,7 @@ final class ChangeFeedSyncTests: XCTestCase {
         server.commit("item", "{}")
         let model = RecordingSyncModel(snapshotRev: { server.head })
         let cursor = MemoryRevCursor()
-        let sync = ChangeFeedSync(transport: server, cursor: cursor, model: model,
+        let sync = ChangeFeedSync(transport: server, model: model.using(cursor),
                                   errors: RecordingErrorLogV2(), waitBeforeRetry: noWait)
         let run = Task { await sync.runForeground() }
         await eventually("the feed is open") { server.openFeedCount == 1 }
@@ -99,7 +99,7 @@ final class ChangeFeedSyncTests: XCTestCase {
             XCTAssertLessThan((try? cursor.load()) ?? 0, change.rev)
         }
         let errors = RecordingErrorLogV2()
-        let sync = ChangeFeedSync(transport: server, cursor: cursor, model: model, errors: errors,
+        let sync = ChangeFeedSync(transport: server, model: model.using(cursor), errors: errors,
                                   waitBeforeRetry: noWait)
         server.commit("item", "{}")
         server.commit("item", "{}")
@@ -117,7 +117,7 @@ final class ChangeFeedSyncTests: XCTestCase {
         server.prune(through: 4)
         let model = RecordingSyncModel(snapshotRev: { server.head })
         let cursor = MemoryRevCursor(1)
-        let sync = ChangeFeedSync(transport: server, cursor: cursor, model: model,
+        let sync = ChangeFeedSync(transport: server, model: model.using(cursor),
                                   errors: RecordingErrorLogV2(), waitBeforeRetry: noWait)
         let run = Task { await sync.runForeground() }
         await eventually("the feed reopens from the snapshot") { server.openFeedCount == 1 }
@@ -132,7 +132,7 @@ final class ChangeFeedSyncTests: XCTestCase {
         let server = FakeClientAPIServer()
         let model = RecordingSyncModel(snapshotRev: { 0 })
         let errors = RecordingErrorLogV2()
-        let sync = ChangeFeedSync(transport: server, cursor: MemoryRevCursor(0), model: model, errors: errors,
+        let sync = ChangeFeedSync(transport: server, model: model.using(MemoryRevCursor(0)), errors: errors,
                                   waitBeforeRetry: noWait)
         let run = Task { await sync.runForeground() }
         await eventually("open") { server.openFeedCount == 1 }
@@ -156,7 +156,7 @@ final class ChangeFeedSyncTests: XCTestCase {
         let model = RecordingSyncModel(snapshotRev: { 0 })
         model.failApplyAt = 4
         let cursor = MemoryRevCursor(1)
-        let sync = ChangeFeedSync(transport: server, cursor: cursor, model: model,
+        let sync = ChangeFeedSync(transport: server, model: model.using(cursor),
                                   errors: RecordingErrorLogV2(), waitBeforeRetry: noWait)
         do { try await sync.catchUp(); XCTFail("The failed apply ends the catch-up.") } catch {}
         XCTAssertEqual(try cursor.load(), 3, "The first batch (2, 3) is kept; the failed change is not.")
@@ -172,7 +172,7 @@ final class ChangeFeedSyncTests: XCTestCase {
         server.commit("item", "{}")
         let model = RecordingSyncModel(snapshotRev: { server.head })
         let cursor = MemoryRevCursor(0)
-        let sync = ChangeFeedSync(transport: server, cursor: cursor, model: model,
+        let sync = ChangeFeedSync(transport: server, model: model.using(cursor),
                                   errors: RecordingErrorLogV2(), waitBeforeRetry: noWait)
         try await sync.catchUp()
         XCTAssertEqual(model.rebaselines, 1)
@@ -183,8 +183,7 @@ final class ChangeFeedSyncTests: XCTestCase {
         let server = FakeClientAPIServer()
         server.feedFailure = URLError(.clientCertificateRejected)
         let errors = RecordingErrorLogV2()
-        let sync = ChangeFeedSync(transport: server, cursor: MemoryRevCursor(0),
-                                  model: RecordingSyncModel(snapshotRev: { 0 }), errors: errors,
+        let sync = ChangeFeedSync(transport: server, model: RecordingSyncModel(snapshotRev: { 0 }).using(MemoryRevCursor(0)), errors: errors,
                                   waitBeforeRetry: noWait)
         await sync.runForeground()
         let state = await sync.liveState
@@ -196,7 +195,7 @@ final class ChangeFeedSyncTests: XCTestCase {
         let server = FakeClientAPIServer()
         let cursor = MemoryRevCursor(0)
         let model = RecordingSyncModel(snapshotRev: { 0 })
-        let sync = ChangeFeedSync(transport: server, cursor: cursor, model: model,
+        let sync = ChangeFeedSync(transport: server, model: model.using(cursor),
                                   errors: RecordingErrorLogV2(), waitBeforeRetry: noWait)
         let run = Task { await sync.runForeground() }
         await eventually("open") { server.openFeedCount == 1 }
@@ -217,7 +216,7 @@ final class ChangeFeedSyncTests: XCTestCase {
         // A snapshot that is itself already too old to resume from.
         let model = RecordingSyncModel(snapshotRev: { 1 })
         let errors = RecordingErrorLogV2()
-        let sync = ChangeFeedSync(transport: server, cursor: MemoryRevCursor(1), model: model, errors: errors,
+        let sync = ChangeFeedSync(transport: server, model: model.using(MemoryRevCursor(1)), errors: errors,
                                   waitBeforeRetry: noWait)
         do { try await sync.catchUp(); XCTFail("A second 410 ends the catch-up.") } catch {}
         XCTAssertEqual(model.rebaselines, 1, "No rebaseline loop.")
@@ -229,7 +228,7 @@ final class ChangeFeedSyncTests: XCTestCase {
         for _ in 0..<5 { server.commit("item", "{}") }
         let model = RecordingSyncModel(snapshotRev: { 0 })
         let cursor = MemoryRevCursor(1)
-        let sync = ChangeFeedSync(transport: server, cursor: cursor, model: model,
+        let sync = ChangeFeedSync(transport: server, model: model.using(cursor),
                                   errors: RecordingErrorLogV2(), waitBeforeRetry: noWait)
         try await sync.catchUp()
         XCTAssertEqual(model.applied, [2, 3, 4, 5])
@@ -411,8 +410,7 @@ final class ClientAPIIsolationTests: XCTestCase {
         let server = FakeClientAPIServer()
         server.feedFailure = failure
         let errors = RecordingErrorLogV2()
-        let sync = ChangeFeedSync(transport: server, cursor: MemoryRevCursor(0),
-                                  model: RecordingSyncModel(snapshotRev: { 0 }), errors: errors,
+        let sync = ChangeFeedSync(transport: server, model: RecordingSyncModel(snapshotRev: { 0 }).using(MemoryRevCursor(0)), errors: errors,
                                   waitBeforeRetry: noWait)
         let run = Task { await sync.runForeground() }
         await eventually("the feed failure was reported") { errors.reports.contains { $0.concern == .sync } }

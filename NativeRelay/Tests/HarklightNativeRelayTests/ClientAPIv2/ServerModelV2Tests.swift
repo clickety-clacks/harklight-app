@@ -29,6 +29,19 @@ enum V2Fixture {
     static func json(_ text: String) throws -> JSONValue { try JSONValue.parse(Data(text.utf8)) }
 }
 
+extension ServerModelV2Store {
+    /// Applies one feed change as Sync would, moving the cursor with it.
+    func apply(kind: String, rev: UInt64, data: JSONValue) throws {
+        try apply([Change(rev: rev, kind: kind, data: Data(data.jsonString.utf8))], cursor: rev)
+    }
+
+    /// The person opened the item: its entries were read, so feed entries are kept.
+    func open(_ itemID: String) throws {
+        try apply(APIEntriesPage(json: JSONValue.parse(Data(#"{"rev":0,"entries":[],"older":false}"#.utf8))),
+                  of: ExactText(itemID))
+    }
+}
+
 final class ServerModelV2Tests: XCTestCase {
     func testAnItemDecodesIgnoringUnknownMembersAndKeepsTheMessageExactly() throws {
         let message = #"{"title":"Deploy","message_type":"fyi","progress":{"percent":40,"stage":""},"score":0.930}"#
@@ -40,7 +53,7 @@ final class ServerModelV2Tests: XCTestCase {
     }
 
     func testABlankProgressStageItemIsKeptNotDropped() throws {
-        let store = try ServerModelV2Store(fileURL: nil)
+        let store = ServerModelV2Store(fileURL: nil)
         for (id, progress) in [("blank", #"{"percent":40,"stage":""}"#), ("absent", #"{"percent":40}"#)] {
             let message = #"{"title":"Deploy","message_type":"fyi","progress":\#(progress)}"#
             try store.apply(kind: "item", rev: 2, data: V2Fixture.json(V2Fixture.item(id, rev: 2, rankKey: id, message: message)))
@@ -49,7 +62,7 @@ final class ServerModelV2Tests: XCTestCase {
     }
 
     func testTheInboxIsInRankKeyOrderByteWiseWithSectionsKept() throws {
-        let store = try ServerModelV2Store(fileURL: nil)
+        let store = ServerModelV2Store(fileURL: nil)
         for (id, key, section) in [("c", "b0", "history"), ("a", "a1", "priority"), ("b", "B9", "priority")] {
             try store.apply(kind: "item", rev: 2, data: V2Fixture.json(V2Fixture.item(id, rev: 2, rankKey: key, section: section)))
         }
@@ -59,8 +72,9 @@ final class ServerModelV2Tests: XCTestCase {
     }
 
     func testEntriesSortByPositionAndOnlyANewerRevChangesOne() throws {
-        let store = try ServerModelV2Store(fileURL: nil)
+        let store = ServerModelV2Store(fileURL: nil)
         try store.apply(kind: "item", rev: 2, data: V2Fixture.json(V2Fixture.item("i", rev: 2, rankKey: "a")))
+        try store.open("i")
         try store.apply(kind: "entry", rev: 4, data: V2Fixture.json(V2Fixture.entry("e2", item: "i", rev: 4, position: 2)))
         try store.apply(kind: "entry", rev: 3, data: V2Fixture.json(V2Fixture.entry("e1", item: "i", rev: 3, position: 1)))
         XCTAssertEqual(store.snapshot.orderedEntries(of: ExactText("i")).map(\.entryID.rawValue), ["e1", "e2"])
@@ -72,8 +86,9 @@ final class ServerModelV2Tests: XCTestCase {
     }
 
     func testARemovedItemIsATombstoneAnOlderSnapshotCannotUndo() throws {
-        let store = try ServerModelV2Store(fileURL: nil)
+        let store = ServerModelV2Store(fileURL: nil)
         try store.apply(kind: "item", rev: 2, data: V2Fixture.json(V2Fixture.item("i", rev: 2, rankKey: "a")))
+        try store.open("i")
         try store.apply(kind: "entry", rev: 3, data: V2Fixture.json(V2Fixture.entry("e", item: "i", rev: 3, position: 1)))
         try store.apply(kind: "item_removed", rev: 6, data: V2Fixture.json(#"{"item_id":"i"}"#))
         let older = try APIInboxPage(json: V2Fixture.json(#"{"rev":4,"items":[\#(V2Fixture.item("i", rev: 2, rankKey: "a"))],"counts":{"unresolved":1}}"#))
@@ -87,9 +102,10 @@ final class ServerModelV2Tests: XCTestCase {
             chat: #"{"available":true,"started":true,"read_position":"e1","last_origin_reply":"e2","unread_replies":0}"#)))
         XCTAssertFalse(ServerModelV2().hasUnreadReplies(counted), "The server's count decides.")
 
-        let store = try ServerModelV2Store(fileURL: nil)
+        let store = ServerModelV2Store(fileURL: nil)
         try store.apply(kind: "item", rev: 2, data: V2Fixture.json(V2Fixture.item("i", rev: 2, rankKey: "a",
             chat: #"{"available":true,"started":true,"read_position":"e1","last_origin_reply":"e2"}"#)))
+        try store.open("i")
         try store.apply(kind: "entry", rev: 3, data: V2Fixture.json(V2Fixture.entry("e1", item: "i", rev: 3, position: 1)))
         try store.apply(kind: "entry", rev: 4, data: V2Fixture.json(V2Fixture.entry("e2", item: "i", rev: 4, position: 2)))
         let item = try XCTUnwrap(store.snapshot.items[ExactText("i")])
@@ -129,13 +145,14 @@ final class ServerModelV2Tests: XCTestCase {
     func testTheModelIsDurableAndAFailedSaveChangesNothing() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let url = directory.appendingPathComponent("model.json")
-        let store = try ServerModelV2Store(fileURL: url)
+        let store = ServerModelV2Store(fileURL: url)
         try store.apply(kind: "item", rev: 2, data: V2Fixture.json(V2Fixture.item("i", rev: 2, rankKey: "a")))
-        XCTAssertEqual(try ServerModelV2Store(fileURL: url).snapshot, store.snapshot, "A relaunch reads what was saved.")
+        XCTAssertEqual(ServerModelV2Store(fileURL: url).snapshot, store.snapshot, "A relaunch reads what was saved.")
+        XCTAssertEqual(ServerModelV2Store(fileURL: url).heldCursor, 2, "The cursor is saved with the model.")
 
         // A directory appearing where the file must go makes the save fail.
         let blocked = directory.appendingPathComponent("blocked")
-        let failing = try ServerModelV2Store(fileURL: blocked)
+        let failing = ServerModelV2Store(fileURL: blocked)
         try FileManager.default.createDirectory(at: blocked, withIntermediateDirectories: true)
         XCTAssertThrowsError(try failing.apply(kind: "item", rev: 2, data: V2Fixture.json(V2Fixture.item("i", rev: 2, rankKey: "a"))))
         XCTAssertTrue(failing.snapshot.items.isEmpty, "Nothing is applied unless it was saved.")
@@ -158,18 +175,20 @@ private final class InboxPagesTransport: ClientAPITransport, @unchecked Sendable
 
 final class ServerModelAdapterTests: XCTestCase {
     func testRebaselineReadsEveryPageKeepsTheFirstPositionAndDropsWhatIsGone() async throws {
-        let store = try ServerModelV2Store(fileURL: nil)
+        let store = ServerModelV2Store(fileURL: nil)
         try store.apply(kind: "item", rev: 2, data: V2Fixture.json(V2Fixture.item("gone", rev: 2, rankKey: "z")))
         try store.apply(kind: "item", rev: 2, data: V2Fixture.json(V2Fixture.item("a", rev: 2, rankKey: "a")))
+        try store.open("a")
         try store.apply(kind: "entry", rev: 3, data: V2Fixture.json(V2Fixture.entry("e", item: "a", rev: 3, position: 1)))
         let transport = InboxPagesTransport()
         transport.pages[nil] = #"{"rev":40,"items":[\#(V2Fixture.item("a", rev: 2, rankKey: "a"))],"counts":{"unresolved":2},"next_page":"p2"}"#
         transport.pages["p2"] = #"{"rev":41,"items":[\#(V2Fixture.item("b", rev: 39, rankKey: "b"))],"counts":{"unresolved":2}}"#
-        let writer = ServerModelSyncWriter(store: store, transport: transport)
+        let writer = ServerModelSyncWriter(store: store, transport: transport, errors: RecordingErrorLogV2())
 
         let position = try await writer.rebaseline()
 
         XCTAssertEqual(position, 40, "The cursor is the first page's position.")
+        XCTAssertEqual(store.heldCursor, 40)
         XCTAssertEqual(Set(store.snapshot.items.keys.map(\.rawValue)), ["a", "b"], "Items no page lists are dropped.")
         XCTAssertTrue(store.snapshot.entries.isEmpty, "Cached entries are dropped and fetched on open.")
         XCTAssertEqual(store.snapshot.counts?.unresolved, 2)
@@ -177,23 +196,25 @@ final class ServerModelAdapterTests: XCTestCase {
 
     func testSyncAppliesRealResourcesFromTheFeedIntoTheModel() async throws {
         let server = FakeClientAPIServer()
-        let store = try ServerModelV2Store(fileURL: nil)
-        let cursor = MemoryRevCursor(0)
-        let sync = ChangeFeedSync(transport: server, cursor: cursor,
-                                  model: ServerModelSyncWriter(store: store, transport: server),
-                                  errors: RecordingErrorLogV2(), waitBeforeRetry: { _ in await Task.yield() })
+        let store = ServerModelV2Store(fileURL: nil)
+        try store.rebaseline(items: [], counts: APICounts(unresolved: 0), position: 0)
+        try store.open("i")
+        let errors = RecordingErrorLogV2()
+        let sync = ChangeFeedSync(transport: server,
+                                  model: ServerModelSyncWriter(store: store, transport: server, errors: errors),
+                                  errors: errors, waitBeforeRetry: { _ in await Task.yield() })
         let run = Task { await sync.runForeground() }
         server.commit("item", V2Fixture.item("i", rev: 1, rankKey: "a"))
         server.commit("entry", V2Fixture.entry("e", item: "i", rev: 2, position: 1))
         let deadline = ContinuousClock.now + .seconds(2)
-        while ContinuousClock.now < deadline, (try? cursor.load()) != 2 { try await Task.sleep(for: .milliseconds(5)) }
-        XCTAssertEqual(try cursor.load(), 2)
+        while ContinuousClock.now < deadline, store.heldCursor != 2 { try await Task.sleep(for: .milliseconds(5)) }
+        XCTAssertEqual(store.heldCursor, 2)
         XCTAssertEqual(store.snapshot.orderedEntries(of: ExactText("i")).map(\.entryID.rawValue), ["e"])
         run.cancel()
     }
 
     func testAWriteResponseIsAppliedAtOnce() async throws {
-        let store = try ServerModelV2Store(fileURL: nil)
+        let store = ServerModelV2Store(fileURL: nil)
         let outcomes = ServerModelOutboxOutcomes(store: store, onRejected: { _, _ in })
         let entry = OutboxEntry(idempotencyKey: UUID(), target: "i", operation: "mark_seen",
                                 write: FrozenWrite(method: .post, path: "/v2/items/i/seen", body: Data("{}".utf8)),
@@ -202,5 +223,58 @@ final class ServerModelAdapterTests: XCTestCase {
         await outcomes.accepted(entry, response: APIResponse(status: 200, requestID: "r",
                                                              body: Data(#"{"rev":7,"item":\#(seen)}"#.utf8)))
         XCTAssertEqual(store.snapshot.items[ExactText("i")]?.seen, true)
+    }
+}
+
+final class ServerModelV2RobustnessTests: XCTestCase {
+    func testABadChangeIsReportedAndSkippedSoSyncKeepsGoing() async throws {
+        let server = FakeClientAPIServer()
+        let store = ServerModelV2Store(fileURL: nil)
+        try store.rebaseline(items: [], counts: APICounts(unresolved: 0), position: 0)
+        let errors = RecordingErrorLogV2()
+        let sync = ChangeFeedSync(transport: server,
+                                  model: ServerModelSyncWriter(store: store, transport: server, errors: errors),
+                                  errors: errors, waitBeforeRetry: { _ in await Task.yield() })
+        server.commit("item", #"{"item_id":"broken","rev":1}"#)
+        server.commit("item", V2Fixture.item("good", rev: 2, rankKey: "a"))
+        try await sync.catchUp()
+        XCTAssertEqual(store.heldCursor, 2, "The cursor moves past the unreadable change.")
+        XCTAssertEqual(store.snapshot.items.keys.map(\.rawValue), ["good"])
+        XCTAssertEqual(errors.reports.map(\.operation), ["apply_change"], "The bad change is in the Error Log.")
+    }
+
+    func testABatchIsOneSaveWithItsCursor() throws {
+        let store = ServerModelV2Store(fileURL: FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString).appendingPathComponent("model.json"))
+        let changes = (1...50).map { n in
+            ServerModelV2Store.Change(rev: UInt64(n), kind: "item",
+                                      data: Data(V2Fixture.item("i\(n)", rev: n, rankKey: "k\(n)").utf8))
+        }
+        try store.apply(changes, cursor: 50)
+        XCTAssertEqual(store.saveCount, 1, "One durable write per batch, not per change.")
+        XCTAssertEqual(store.heldCursor, 50)
+    }
+
+    func testAModelOfAnotherVersionIsDiscardedWithItsCursor() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            .appendingPathComponent("model.json")
+        let store = ServerModelV2Store(fileURL: url)
+        try store.apply(kind: "item", rev: 3, data: V2Fixture.json(V2Fixture.item("i", rev: 3, rankKey: "a")))
+        var stored = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        stored["version"] = ServerModelV2Store.formatVersion + 1
+        try JSONSerialization.data(withJSONObject: stored).write(to: url)
+        let reopened = ServerModelV2Store(fileURL: url)
+        XCTAssertNil(reopened.heldCursor, "No cursor without its model, so Sync takes a fresh snapshot.")
+        XCTAssertTrue(reopened.snapshot.items.isEmpty)
+    }
+
+    func testFeedEntriesAreKeptOnlyForItemsWhoseEntriesWereRead() throws {
+        let store = ServerModelV2Store(fileURL: nil)
+        try store.apply(kind: "item", rev: 2, data: V2Fixture.json(V2Fixture.item("i", rev: 2, rankKey: "a")))
+        try store.apply(kind: "entry", rev: 3, data: V2Fixture.json(V2Fixture.entry("e1", item: "i", rev: 3, position: 1)))
+        XCTAssertTrue(store.snapshot.orderedEntries(of: ExactText("i")).isEmpty, "Not opened: not kept.")
+        try store.open("i")
+        try store.apply(kind: "entry", rev: 4, data: V2Fixture.json(V2Fixture.entry("e2", item: "i", rev: 4, position: 2)))
+        XCTAssertEqual(store.snapshot.orderedEntries(of: ExactText("i")).map(\.entryID.rawValue), ["e2"])
     }
 }

@@ -11,6 +11,9 @@ public struct ServerModelV2: Equatable, Codable, Sendable {
     public internal(set) var counts: APICounts?
     public internal(set) var settings: APISettings?
     public internal(set) var gate = RevGate()
+    /// Items whose entries were read (the person opened them). Feed entries
+    /// of other items are not kept; opening an item reads its entries.
+    public internal(set) var loadedEntryItems: Set<ExactText> = []
 
     public init() {}
 
@@ -59,13 +62,17 @@ public struct ServerModelV2: Equatable, Codable, Sendable {
         items[itemID] = nil
         for entryID in (entries[itemID] ?? [:]).keys { forgetEntry(entryID) }
         entries[itemID] = nil
+        loadedEntryItems.remove(itemID)
         return true
     }
 
     @discardableResult
-    mutating func put(_ entry: APIEntry) -> Bool {
-        // Entries of a removed item are not kept.
+    mutating func put(_ entry: APIEntry, fromFeed: Bool = false) -> Bool {
+        // Entries of a removed item are not kept, nor feed entries of an item
+        // whose entries were never read.
         guard !gate.isRemoved(Self.itemKey(entry.itemID)) else { return false }
+        if fromFeed, !loadedEntryItems.contains(entry.itemID) { return false }
+        loadedEntryItems.insert(entry.itemID)
         guard gate.admit(Self.entryKey(entry.entryID), rev: entry.rev) else { return false }
         entries[entry.itemID, default: [:]][entry.entryID] = entry
         return true
@@ -96,6 +103,7 @@ public struct ServerModelV2: Equatable, Codable, Sendable {
         }
         for (_, byID) in entries { for entryID in byID.keys { forgetEntry(entryID) } }
         entries = [:]
+        loadedEntryItems = []
         for item in fresh { put(item) }
         gate.forget("counts")
         put(counts, rev: position)
@@ -111,42 +119,86 @@ extension RevGate {
     }
 }
 
-/// The durable home of `ServerModelV2`. Every change is saved before the call
-/// returns, which is what lets Sync advance its cursor afterwards.
+/// The durable home of `ServerModelV2` and Sync's cursor, saved together in
+/// one versioned file. A file of another version, or one that cannot be read,
+/// is discarded with its cursor, so Sync takes a fresh snapshot rather than
+/// resuming over a model it no longer holds.
 public final class ServerModelV2Store: @unchecked Sendable {
+    public static let formatVersion = 1
+
+    private struct Stored: Codable {
+        let version: Int
+        let cursor: UInt64?
+        let model: ServerModelV2
+    }
+
     private let lock = NSLock()
     private let fileURL: URL?
     private var model: ServerModelV2
+    private var cursor: UInt64?
     private let now: @Sendable () -> Date
+    /// Saves made so far; tests use it to check one write per batch.
+    public private(set) var saveCount = 0
 
     /// `fileURL` nil keeps the model in memory (tests, previews).
-    public init(fileURL: URL?, now: @escaping @Sendable () -> Date = { Date() }) throws {
+    public init(fileURL: URL?, now: @escaping @Sendable () -> Date = { Date() }) {
         self.fileURL = fileURL
         self.now = now
-        if let fileURL, FileManager.default.fileExists(atPath: fileURL.path) {
-            model = try JSONDecoder().decode(ServerModelV2.self, from: Data(contentsOf: fileURL))
+        if let fileURL, let data = try? Data(contentsOf: fileURL),
+           let stored = try? JSONDecoder().decode(Stored.self, from: data),
+           stored.version == Self.formatVersion {
+            model = stored.model
+            cursor = stored.cursor
         } else {
             model = ServerModelV2()
+            cursor = nil
         }
     }
 
     public var snapshot: ServerModelV2 { lock.withLock { model } }
+    public var heldCursor: UInt64? { lock.withLock { cursor } }
 
-    /// Applies one feed change. Unknown kinds are ignored.
-    public func apply(kind: String, rev: UInt64, data: JSONValue) throws {
-        try mutate { model in
-            switch kind {
-            case "item": model.put(try APIItem(json: data))
-            case "item_removed":
-                guard let id = data.uniqueValue(named: "item_id")?.stringValue else {
-                    throw ClientAPIModelError.invalid("item_removed.item_id")
+    /// One feed change as Sync delivers it.
+    public struct Change: Sendable {
+        public let rev: UInt64
+        public let kind: String
+        public let data: Data
+        public init(rev: UInt64, kind: String, data: Data) {
+            self.rev = rev
+            self.kind = kind
+            self.data = data
+        }
+    }
+
+    /// Applies feed changes and records `cursor`, in one save. A change that
+    /// cannot be read is skipped and passed to `onUnreadable`; it is never
+    /// retried, so one bad change cannot stop Sync.
+    public func apply(_ changes: [Change], cursor newCursor: UInt64,
+                      onUnreadable: (Change, any Error) -> Void = { _, _ in }) throws {
+        try mutate(cursor: newCursor) { model in
+            for change in changes {
+                do {
+                    try Self.apply(change, to: &model, now: now())
+                } catch {
+                    onUnreadable(change, error)
                 }
-                model.remove(id, rev: rev, at: now())
-            case "entry": model.put(try APIEntry(json: data))
-            case "counts": model.put(try APICounts(json: data), rev: rev)
-            case "settings": model.put(try APISettings(json: data))
-            default: break
             }
+        }
+    }
+
+    private static func apply(_ change: Change, to model: inout ServerModelV2, now: Date) throws {
+        let data = try JSONValue.parse(change.data)
+        switch change.kind {
+        case "item": model.put(try APIItem(json: data))
+        case "item_removed":
+            guard let id = data.uniqueValue(named: "item_id")?.stringValue else {
+                throw ClientAPIModelError.invalid("item_removed.item_id")
+            }
+            model.remove(id, rev: change.rev, at: now)
+        case "entry": model.put(try APIEntry(json: data), fromFeed: true)
+        case "counts": model.put(try APICounts(json: data), rev: change.rev)
+        case "settings": model.put(try APISettings(json: data))
+        default: break
         }
     }
 
@@ -157,8 +209,12 @@ public final class ServerModelV2Store: @unchecked Sendable {
         }
     }
 
-    public func apply(_ page: APIEntriesPage) throws {
-        try mutate { model in for entry in page.entries { model.put(entry) } }
+    /// Entries read for an item; its later feed entries are kept from now on.
+    public func apply(_ page: APIEntriesPage, of itemID: ExactText) throws {
+        try mutate { model in
+            model.loadedEntryItems.insert(itemID)
+            for entry in page.entries { model.put(entry) }
+        }
     }
 
     public func apply(_ result: APIWriteResult) throws {
@@ -169,20 +225,33 @@ public final class ServerModelV2Store: @unchecked Sendable {
         }
     }
 
+    /// Replaces the model from a full inbox and records its position as the
+    /// cursor, in one save.
     public func rebaseline(items: [APIItem], counts: APICounts, position: UInt64) throws {
-        try mutate { model in model.rebaseline(items: items, counts: counts, position: position, at: now()) }
+        try mutate(cursor: position, replacingCursor: true) { model in
+            model.rebaseline(items: items, counts: counts, position: position, at: now())
+        }
     }
 
-    private func mutate(_ change: (inout ServerModelV2) throws -> Void) throws {
+    private func mutate(cursor newCursor: UInt64? = nil, replacingCursor: Bool = false,
+                        _ change: (inout ServerModelV2) throws -> Void) throws {
         try lock.withLock {
             var next = model
             try change(&next)
-            if next != model, let fileURL {
+            var nextCursor = cursor
+            if let newCursor {
+                nextCursor = replacingCursor ? newCursor : max(cursor ?? 0, newCursor)
+            }
+            guard next != model || nextCursor != cursor else { return }
+            if let fileURL {
                 try FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(),
                                                         withIntermediateDirectories: true)
-                try JSONEncoder().encode(next).write(to: fileURL, options: [.atomic])
+                let stored = Stored(version: Self.formatVersion, cursor: nextCursor, model: next)
+                try JSONEncoder().encode(stored).write(to: fileURL, options: [.atomic])
             }
+            saveCount += 1
             model = next
+            cursor = nextCursor
         }
     }
 }

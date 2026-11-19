@@ -119,6 +119,8 @@ public struct APIEntry: Equatable, Codable, Sendable {
 
 public struct APICounts: Equatable, Codable, Sendable {
     public let unresolved: Int
+
+    public init(unresolved: Int) { self.unresolved = unresolved }
 }
 
 /// Settings are kept as the server sent them; priority levels and push are
