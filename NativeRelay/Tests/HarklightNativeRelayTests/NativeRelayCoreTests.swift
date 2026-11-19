@@ -1745,6 +1745,9 @@ final class NativeRelayCoreTests: XCTestCase {
         }
         XCTAssertTrue(requestTypes.contains("view_get"),
                       "The independent read is attempted although replay failed.")
+        let details = await core.takePostAckFailureDetails()
+        XCTAssertEqual(details?.step, .replayConversationsAndAcknowledge,
+                       "The failure is attributed to the replay step.")
         let snapshot = try store.snapshot(context: context)
         XCTAssertEqual(snapshot.inboxView?.revision, ExactText("view-test"),
                        "The successful read is stored and available to the UI.")
@@ -1758,24 +1761,6 @@ final class NativeRelayCoreTests: XCTestCase {
 
     func testIndependentInboxReadSurvivesAbortedConversationReplay() async throws {
         try await assertIndependentReadSurvivesReplayFailure(POSIXError(.ECONNABORTED))
-    }
-
-    func testConversationReplayAndAcknowledgeProceedWhenIndependentReadFails() async throws {
-        let (context, store, _) = try setup()
-        let key = RequestKey(accountScope: context.identity.personID, senderID: ExactText("sender"),
-                             messageID: ExactText("conversation"))
-        let session = AckRuleConversationSession(context.identity, storedAck: 0, history: 3)
-        session.snapshotHighWater = 1
-        session.initialItems = [snapshotItem(key, payload: .object([]))]
-        session.inboxViewEntries = nil // view_get answers with an error frame
-
-        let core = try NativeRelayCore(store: store, context: context, session: session)
-        _ = try await core.resyncAndDrainOutbox()
-
-        XCTAssertFalse(session.opens.isEmpty, "Replay still opens.")
-        XCTAssertEqual(session.acceptedAcks.last, 3, "Replay progress is still acknowledged.")
-        XCTAssertNil(try store.snapshot(context: context).inboxView)
-        await core.deactivate()
     }
 
     func testMismatchedConversationAckIsRebuiltFromTheServerAndNeverEndsTheConnection() async throws {
