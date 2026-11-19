@@ -1721,8 +1721,8 @@ final class NativeRelayCoreTests: XCTestCase {
     /// A read that succeeds must reach the UI even when conversation replay
     /// fails. The fake kills inbox requests once replay has failed, as the shared
     /// socket does, so a fix that reads only after catching the replay error fails.
-    /// The read has to be independent of, and not later than, the replay.
-    /// and the replay failure must still be reported to the caller.
+    /// The read has to be independent of, and not later than, the replay, and
+    /// the replay failure must still be reported to the caller.
     private func assertIndependentReadSurvivesReplayFailure(_ error: any Error) async throws {
         let (context, store, _) = try setup()
         let session = FailingReplayConversationSession(context.identity)
@@ -1761,6 +1761,170 @@ final class NativeRelayCoreTests: XCTestCase {
 
     func testIndependentInboxReadSurvivesAbortedConversationReplay() async throws {
         try await assertIndependentReadSurvivesReplayFailure(POSIXError(.ECONNABORTED))
+    }
+
+    private final class RecordingErrorLog: ErrorLogging, @unchecked Sendable {
+        private let lock = NSLock()
+        private var reports: [ErrorLogReport] = []
+        private var resolutions: [String] = []
+        var reported: [ErrorLogReport] { lock.lock(); defer { lock.unlock() }; return reports }
+        var resolved: [String] { lock.lock(); defer { lock.unlock() }; return resolutions }
+        func report(_ report: ErrorLogReport) { lock.lock(); reports.append(report); lock.unlock() }
+        func resolve(concern: ErrorLogConcern, operation: String, resolvedBy: String?) {
+            lock.lock(); resolutions.append("\(concern.rawValue).\(operation)"); lock.unlock()
+        }
+    }
+
+    private struct SeparateRequestConnection: RequestConnectionSource {
+        let session: any AuthenticatedInboxPagingSession
+        var sharesStreamConnection: Bool { false }
+        func requestConnection() async throws -> any AuthenticatedInboxPagingSession { session }
+    }
+
+    /// The stream connection's inbox reads fail as soon as the replay starts.
+    /// The view is read only on the request connection.
+    private final class ViewReadSession: Session, @unchecked Sendable {
+        var viewFailure: (any Error)?
+        var viewErrorReason: String?
+        override func inboxRequest(_ request: Data, ref: String) async throws -> Data {
+            if try JSONValue.parse(request).uniqueValue(named: "type")?.stringValue?.rawValue == "view_get" {
+                if let viewFailure {
+                    requests.append(request)
+                    throw viewFailure
+                }
+                if let viewErrorReason {
+                    requests.append(request)
+                    return Data(#"{"v":1,"type":"error","ref":"\#(ref)","reason":"\#(viewErrorReason)"}"#.utf8)
+                }
+            }
+            return try await super.inboxRequest(request, ref: ref)
+        }
+    }
+
+    private func requestTypes(_ session: Session) throws -> [String] {
+        try session.requests.map(JSONValue.parse).compactMap {
+            $0.uniqueValue(named: "type")?.stringValue?.rawValue
+        }
+    }
+
+    /// Design section 8: with the stream cancelled or aborted mid-replay, a
+    /// read on a request connection succeeds and renders, both at connection
+    /// start and when issued after the stream has already failed.
+    private func assertReadOnRequestConnectionSurvivesStreamFailure(_ error: any Error) async throws {
+        let (context, store, _) = try setup()
+        let stream = FailingReplayConversationSession(context.identity)
+        stream.replayError = error
+        stream.snapshotHighWater = 1
+        stream.frames = [data(#"{"v":1,"type":"resynced","seq":1}"#)]
+        let requests = ViewReadSession(context.identity)
+        requests.inboxViewEntries = independentReadEntries()
+        let errors = RecordingErrorLog()
+
+        let core = try NativeRelayCore(store: store, context: context, session: stream,
+                                       requestConnections: SeparateRequestConnection(session: requests),
+                                       errorLog: errors)
+        do {
+            _ = try await core.resyncAndDrainOutbox()
+            XCTFail("The replay failure is reported to the caller.")
+        } catch {}
+        XCTAssertEqual(stream.conversationOpenCount, 1)
+        XCTAssertFalse(try requestTypes(stream).contains("view_get"),
+                       "Snapshot reads never use the stream connection.")
+
+        requests.inboxViewRevision = "view-after-stream-failure"
+        let outcome = await core.readInboxSnapshot(noticedRevision: ExactText("view-after-stream-failure"))
+        XCTAssertEqual(outcome, .updated(revision: ExactText("view-after-stream-failure")),
+                       "A read issued after the stream failed still succeeds.")
+        XCTAssertEqual(try store.snapshot(context: context).inboxView?.entries.map { $0.key.messageID.rawValue },
+                       ["viewed"])
+        XCTAssertTrue(try requestTypes(requests).allSatisfy { $0 == "view_get" })
+        let reported = errors.reported
+        XCTAssertEqual(reported.map(\.concern), [.sync], "Only Sync reports the stream failure.")
+        XCTAssertEqual(reported.first?.connectionRole, .stream)
+        XCTAssertEqual(reported.first?.operation, "subscribe_conversation")
+        XCTAssertEqual(reported.first?.initiator, .unknown,
+                       "A cancel or abort names its initiator, unknown when the client cannot tell.")
+        await core.deactivate()
+    }
+
+    func testReadOnRequestConnectionSurvivesCancelledStream() async throws {
+        try await assertReadOnRequestConnectionSurvivesStreamFailure(CancellationError())
+    }
+
+    func testReadOnRequestConnectionSurvivesAbortedStream() async throws {
+        try await assertReadOnRequestConnectionSurvivesStreamFailure(POSIXError(.ECONNABORTED))
+    }
+
+    func testFailedInboxReadKeepsTheHeldViewAndIsReportedUntilTheNextSuccess() async throws {
+        let (context, store, _) = try setup()
+        let session = ViewReadSession(context.identity)
+        session.snapshotHighWater = 1
+        session.frames = [data(#"{"v":1,"type":"resynced","seq":1}"#)]
+        session.inboxViewEntries = independentReadEntries()
+        let errors = RecordingErrorLog()
+        let core = try NativeRelayCore(store: store, context: context, session: session,
+                                       errorLog: errors)
+        _ = try await core.resyncAndDrainOutbox()
+        XCTAssertEqual(try store.snapshot(context: context).inboxView?.revision, ExactText("view-test"))
+
+        session.viewFailure = POSIXError(.ECONNABORTED)
+        let failed = await core.readInboxSnapshot(noticedRevision: ExactText("view-next"))
+        XCTAssertEqual(failed, .failed)
+        XCTAssertEqual(try store.snapshot(context: context).inboxView?.revision, ExactText("view-test"),
+                       "A failed read never removes the view already on screen.")
+        let reported = errors.reported
+        XCTAssertEqual(reported.count, 1)
+        XCTAssertEqual(reported.first?.concern, .snapshot)
+        XCTAssertEqual(reported.first?.operation, "read_inbox")
+        XCTAssertEqual(reported.first?.reason, .posix(Int(POSIXErrorCode.ECONNABORTED.rawValue)))
+
+        session.viewFailure = nil
+        session.inboxViewRevision = "view-next"
+        let recovered = await core.readInboxSnapshot(noticedRevision: ExactText("view-next"))
+        XCTAssertEqual(recovered, .updated(revision: ExactText("view-next")))
+        let resolved = errors.resolved
+        XCTAssertEqual(resolved.last, "snapshot.read_inbox", "The next success resolves the failure.")
+        let stillReported = errors.reported
+        XCTAssertEqual(stillReported.count, 1, "Resolving keeps the record.")
+        await core.deactivate()
+    }
+
+    func testUnavailableInboxViewReplyKeepsTheHeldView() async throws {
+        let (context, store, _) = try setup()
+        let session = ViewReadSession(context.identity)
+        session.snapshotHighWater = 1
+        session.frames = [data(#"{"v":1,"type":"resynced","seq":1}"#)]
+        session.inboxViewEntries = independentReadEntries()
+        let errors = RecordingErrorLog()
+        let core = try NativeRelayCore(store: store, context: context, session: session,
+                                       errorLog: errors)
+        _ = try await core.resyncAndDrainOutbox()
+
+        session.viewErrorReason = "storage_unavailable"
+        let outcome = await core.readInboxSnapshot(noticedRevision: ExactText("view-other"))
+        XCTAssertEqual(outcome, .failed)
+        XCTAssertEqual(try store.snapshot(context: context).inboxView?.revision, ExactText("view-test"),
+                       "A server error reply keeps the view already on screen.")
+        let reported = errors.reported
+        XCTAssertEqual(reported.map(\.reason), [.app("view_unavailable")])
+        await core.deactivate()
+    }
+
+    func testServerWithoutAnInboxViewFallsBackToTheLocalOrder() async throws {
+        let (context, store, session) = try setup()
+        session.snapshotHighWater = 1
+        session.frames = [data(#"{"v":1,"type":"resynced","seq":1}"#)]
+        session.inboxViewEntries = independentReadEntries()
+        let core = try NativeRelayCore(store: store, context: context, session: session)
+        _ = try await core.resyncAndDrainOutbox()
+        XCTAssertNotNil(try store.snapshot(context: context).inboxView)
+
+        session.inboxViewEntries = nil
+        let outcome = await core.readInboxSnapshot(noticedRevision: ExactText("view-other"))
+        XCTAssertEqual(outcome, .unsupported)
+        XCTAssertNil(try store.snapshot(context: context).inboxView,
+                     "A server that states it has no view falls back to the local order.")
+        await core.deactivate()
     }
 
     func testMismatchedConversationAckIsRebuiltFromTheServerAndNeverEndsTheConnection() async throws {
