@@ -11,6 +11,15 @@ private enum ProgressStageStyle {
         }
     }
 
+    static func hasLabel(_ stage: String) -> Bool {
+        !stage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// "45%" or "45% · Coding"; a blank stage shows the percent alone.
+    static func summary(percent: Double, stage: String) -> String {
+        hasLabel(stage) ? "\(number(percent)) percent, \(label(stage))" : "\(number(percent)) percent"
+    }
+
     static func color(_ stage: String) -> HarklightColor {
         let token: HarklightColor.Token = switch stage {
         case "spec_writing": .sky
@@ -48,7 +57,7 @@ struct ProgressSegmentedBar: View {
         .frame(height: height)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Progress")
-        .accessibilityValue("\(ProgressStageStyle.number(snapshot.percent)) percent, \(ProgressStageStyle.label(snapshot.stage))")
+        .accessibilityValue(ProgressStageStyle.summary(percent: snapshot.percent, stage: snapshot.stage))
     }
 }
 
@@ -64,7 +73,9 @@ struct ProgressMessageRow: View {
             if let snapshot = progress.snapshot {
                 ProgressSegmentedBar(snapshot: snapshot)
                 HStack(alignment: .firstTextBaseline) {
-                    Text("\(ProgressStageStyle.number(snapshot.percent))% · \(ProgressStageStyle.label(snapshot.stage))")
+                    Text(ProgressStageStyle.hasLabel(snapshot.stage)
+                         ? "\(ProgressStageStyle.number(snapshot.percent))% · \(ProgressStageStyle.label(snapshot.stage))"
+                         : "\(ProgressStageStyle.number(snapshot.percent))%")
                     Spacer(minLength: 8)
                     Text(snapshot.updatedAt, format: .dateTime.hour().minute())
                 }
@@ -130,9 +141,11 @@ struct ProgressMessageDetail: View {
                 .font(.largeTitle.bold())
                 .monospacedDigit()
                 .foregroundStyle(.hkText)
-            Text(ProgressStageStyle.label(snapshot.stage))
-                .harklightType(.messageBody)
-                .foregroundStyle(.hkSecondary)
+            if ProgressStageStyle.hasLabel(snapshot.stage) {
+                Text(ProgressStageStyle.label(snapshot.stage))
+                    .harklightType(.messageBody)
+                    .foregroundStyle(.hkSecondary)
+            }
         }
         ProgressSegmentedBar(snapshot: snapshot, height: 22)
         LazyVGrid(columns: [GridItem(.adaptive(minimum: 130), alignment: .leading)], alignment: .leading) {
@@ -160,7 +173,9 @@ struct ProgressMessageDetail: View {
             VStack(alignment: .leading, spacing: 6) {
                 Divider().overlay(.hkLine)
                 HStack(alignment: .firstTextBaseline) {
-                    Text(ProgressStageStyle.label(visit.stage))
+                    if ProgressStageStyle.hasLabel(visit.stage) {
+                        Text(ProgressStageStyle.label(visit.stage))
+                    }
                     if let percent = visit.reportedPercent {
                         Text("\(ProgressStageStyle.number(percent))%")
                     }

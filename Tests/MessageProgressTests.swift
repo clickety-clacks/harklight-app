@@ -42,10 +42,21 @@ final class MessageProgressTests: XCTestCase {
             #"{"percent":101,"stage":"coding","segments":[]}"#,
             #"{"percent":20,"stage":"coding","segments":[{"stage":"coding","width":19}]}"#,
             #"{"percent":0,"stage":"coding","segments":[{"stage":"coding","width":-1}]}"#,
-            #"{"percent":0,"stage":"","segments":[]}"#,
             #"{"percent":0,"stage":"coding","segments":[null]}"#
         ] {
             XCTAssertEqual(MessageProgress.read(from: try message(raw.replacingOccurrences(of: "{\"percent\":", with: "{\"updated_at\":\"2026-11-09T10:00:00Z\",\"percent\":"))), .unavailable)
+        }
+    }
+
+    func testBlankStageIsAcceptedAndShowsNoLabel() throws {
+        for stage in ["", "  "] {
+            let raw = #"{"updated_at":"2026-11-09T10:00:00Z","percent":40,"stage":"\#(stage)","segments":[{"stage":"\#(stage)","width":40}]}"#
+            let snapshot = try XCTUnwrap(MessageProgress.read(from: message(raw))?.snapshot,
+                                         "A blank stage must not drop the Progress message")
+            XCTAssertEqual(snapshot.percent, 40)
+            XCTAssertEqual(snapshot.stage, stage)
+            XCTAssertEqual(snapshot.visits.count, 1)
+            XCTAssertTrue(snapshot.legend.isEmpty, "A blank stage has no legend entry")
         }
     }
 
