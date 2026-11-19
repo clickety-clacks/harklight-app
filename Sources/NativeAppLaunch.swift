@@ -912,6 +912,7 @@ final class NativeAppLaunch {
             newMessageAreaDefaults: .standard, conversationFiles: fileStorage)
         guard activationGeneration == generation else { return }
         let presentation = activation.presentation
+        NativeRelayLifecycle.shared.errorLog = errorLog
         do {
             try await NativeRelayLifecycle.shared.activate(store: store,
                                                            context: installation.context,

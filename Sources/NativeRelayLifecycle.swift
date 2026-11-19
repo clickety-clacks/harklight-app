@@ -944,6 +944,8 @@ final class NativeRelayLifecycle {
     private let foregroundProgress = ForegroundConnectProgressTracker()
     private var priorityLevelsLostTransportAttemptID: UUID?
     private var diagnosticJournal: NativeClientDiagnosticJournal?
+    /// The app's Error Log, which the relay components report failures to.
+    var errorLog: any ErrorLogging = NoopErrorLog()
 
     /// The live connection's attempt and whether it may send focus reports,
     /// for tests that follow focus suppression across reconnects.
@@ -1156,7 +1158,7 @@ final class NativeRelayLifecycle {
                                                for: context, transportAttemptID: transportAttemptID),
                                            onPriorityLevelsFeatureEnabled: priorityLevelsFeatureEnabledHandler(),
                                            onDiagnostic: diagnosticSink(),
-                                           onFeatureFlags: featureFlagsHandler(connectionID: transportAttemptID))
+                                           onFeatureFlags: featureFlagsHandler(connectionID: transportAttemptID), errorLog: errorLog)
         } catch {
             recordDiagnostic(.connection, .approvedConnection, .failed, error: error,
                              attemptID: transportAttemptID, transportAttemptID: transportAttemptID)
@@ -1246,7 +1248,7 @@ final class NativeRelayLifecycle {
                                                for: current.context, transportAttemptID: focusTransportID),
                                            onPriorityLevelsFeatureEnabled: priorityLevelsFeatureEnabledHandler(),
                                            onDiagnostic: diagnosticSink(),
-                                           onFeatureFlags: featureFlagsHandler(connectionID: focusTransportID))
+                                           onFeatureFlags: featureFlagsHandler(connectionID: focusTransportID), errorLog: errorLog)
             try await nextTransport.verifyEndpoint()
             guard refreshGeneration == expectedGeneration,
                   core === priorCore, transport === priorTransport,
@@ -2076,7 +2078,7 @@ final class NativeRelayLifecycle {
         let core = try NativeRelayCore(store: store, context: context, session: session,
                                        automaticallySendsPendingOperations: false,
                                        attemptID: attemptID, serverStateCache: serverStateCache,
-                                       onFeatureFlags: featureFlagsHandler(connectionID: attemptID))
+                                       onFeatureFlags: featureFlagsHandler(connectionID: attemptID), errorLog: errorLog)
         self.core = core
         if let pushRemovalSession {
             try await refreshProjectionAfterPendingPushRemoval(core: core, context: context, generation: generation,
@@ -2312,7 +2314,7 @@ final class NativeRelayLifecycle {
                                                for: configuration.context, transportAttemptID: transportAttemptID),
                                            onPriorityLevelsFeatureEnabled: priorityLevelsFeatureEnabledHandler(),
                                            onDiagnostic: diagnosticSink(),
-                                           onFeatureFlags: featureFlagsHandler(connectionID: transportAttemptID))
+                                           onFeatureFlags: featureFlagsHandler(connectionID: transportAttemptID), errorLog: errorLog)
         } catch {
             recordDiagnostic(.connection, .approvedConnection, .failed, error: error,
                              attemptID: transportAttemptID, transportAttemptID: transportAttemptID)
