@@ -304,6 +304,23 @@ final class ErrorLogTests: XCTestCase {
         XCTAssertEqual(makeStore(clock: clock).records.count, 1)
     }
 
+    func testOnlyTheNewestFewMovedAsideFilesAreKept() throws {
+        let clock = Clock(Date(timeIntervalSince1970: 1_000_000))
+        for round in 0..<6 {
+            try Data("bad \(round)".utf8).write(to: fileURL)
+            let store = makeStore(clock: clock)
+            store.report(report(operation: "op_\(round)"))
+            store.flush()
+            try FileManager.default.removeItem(at: fileURL)
+            clock.advance(10)
+        }
+        let aside = try FileManager.default.contentsOfDirectory(atPath: directory.path)
+            .filter { $0.contains("unreadable") }.sorted()
+        XCTAssertEqual(aside.count, ErrorLogStore.movedAsideFilesKept)
+        let contents = try aside.map { try String(contentsOf: directory.appendingPathComponent($0), encoding: .utf8) }
+        XCTAssertEqual(Set(contents), ["bad 3", "bad 4", "bad 5"], "the newest files are the ones kept")
+    }
+
     func testFutureVersionFileIsMovedAsideNotOverwritten() throws {
         let clock = Clock(Date(timeIntervalSince1970: 1_000_000))
         let future = #"{"version":99,"records":[]}"#

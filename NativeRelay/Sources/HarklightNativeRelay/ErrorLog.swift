@@ -560,9 +560,28 @@ public final class ErrorLogStore: ErrorLogging, @unchecked Sendable {
             .appendingPathComponent("\(url.deletingPathExtension().lastPathComponent).unreadable-\(stamp).json")
         do {
             try FileManager.default.moveItem(at: url, to: aside)
+            pruneMovedAsideFiles(besides: url)
             return true
         } catch {
             return false
+        }
+    }
+
+    /// Keeps only the newest few files moved aside, so a repeatedly corrupted
+    /// log cannot fill the disk with copies.
+    static let movedAsideFilesKept = 3
+
+    private func pruneMovedAsideFiles(besides url: URL) {
+        let prefix = "\(url.deletingPathExtension().lastPathComponent).unreadable-"
+        let directory = url.deletingLastPathComponent()
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: directory.path) else { return }
+        // The suffix is a Unix timestamp, so newer files sort later.
+        let aside = names.filter { $0.hasPrefix(prefix) && $0.hasSuffix(".json") }
+            .sorted { lhs, rhs in
+                lhs.count == rhs.count ? lhs < rhs : lhs.count < rhs.count
+            }
+        for name in aside.dropLast(Self.movedAsideFilesKept) {
+            try? FileManager.default.removeItem(at: directory.appendingPathComponent(name))
         }
     }
 

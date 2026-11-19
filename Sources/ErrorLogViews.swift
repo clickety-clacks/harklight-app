@@ -21,7 +21,9 @@ final class ErrorLogModel {
         }
         // Writes are batched in the background; make sure none is pending when
         // the app leaves the foreground or ends.
-        for name in [UIApplication.didEnterBackgroundNotification, UIApplication.willTerminateNotification] {
+        for name in [UIApplication.willResignActiveNotification,
+                     UIApplication.didEnterBackgroundNotification,
+                     UIApplication.willTerminateNotification] {
             lifecycleObservers.append(NotificationCenter.default.addObserver(
                 forName: name, object: nil, queue: nil) { [store] _ in store.flush() })
         }
