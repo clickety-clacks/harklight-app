@@ -415,6 +415,57 @@ final class ErrorLogTests: XCTestCase {
                                                now: clock.now))
     }
 
+    // MARK: Client API response fields
+
+    func testApiErrorFieldsAreRecordedAndCopied() throws {
+        let clock = Clock(Date(timeIntervalSince1970: 1_000_000))
+        let store = makeStore(clock: clock)
+        store.report(ErrorLogReport(
+            concern: .actions, connectionRole: .request, operation: "send_reply", phase: "response",
+            reason: .serverReason("idempotency_conflict"), initiator: .unknown, retryable: false,
+            correlation: ErrorLogCorrelation(clientOperationID: UUID(), requestID: "req-01HZX9K2"),
+            httpStatus: 409))
+        let record = try XCTUnwrap(store.records.first)
+        XCTAssertEqual(record.code, "idempotency_conflict")
+        XCTAssertEqual(record.httpStatus, 409)
+        XCTAssertEqual(record.correlation.requestID, "req-01HZX9K2")
+        let lines = ErrorLogDetails.text(for: record).split(separator: "\n").map(String.init)
+        XCTAssertTrue(lines.contains("http_status: 409"))
+        XCTAssertTrue(lines.contains("request_id: req-01HZX9K2"))
+        XCTAssertEqual(ErrorLogStore(fileURL: fileURL, build: build).records, store.records)
+    }
+
+    func testEveryDocumentedApiErrorTokenIsKeptAndOthersAreNot() {
+        for token in ["not_found", "invalid_field", "stale_request", "already_answered", "already_retracted",
+                      "idempotency_conflict", "precondition_failed", "cursor_expired", "unauthorized",
+                      "retry_later", "storage_unavailable", "payload_too_large", "unsupported"] {
+            XCTAssertEqual(ErrorLogReason.serverReason(token).code, token)
+        }
+        XCTAssertEqual(ErrorLogReason.serverReason("please_contact_dana@example.invalid").code, "other")
+    }
+
+    func testUnsafeRequestIDAndImpossibleStatusAreDropped() {
+        XCTAssertNil(ErrorLogCorrelation(requestID: "https://x.invalid/?t=1").requestID)
+        XCTAssertNil(ErrorLogCorrelation(requestID: "Bearer abc").requestID)
+        let report = ErrorLogReport(concern: .snapshot, connectionRole: .request, operation: "read_inbox",
+                                    phase: "response", reason: .urlError(-1), retryable: true, httpStatus: 99_999)
+        XCTAssertNil(report.httpStatus)
+    }
+
+    func testFeedClosingReasonsBecomeInitiatorsAndStayRecordedAsReasons() throws {
+        XCTAssertEqual(ErrorLogInitiator(serverCloseReason: "revoked"), .deviceRevoked)
+        XCTAssertEqual(ErrorLogInitiator(serverCloseReason: "server_shutdown"), .serverClosed)
+        XCTAssertEqual(ErrorLogInitiator(serverCloseReason: "idle_timeout"), .serverClosed)
+        let clock = Clock(Date(timeIntervalSince1970: 1_000_000))
+        let store = makeStore(clock: clock)
+        store.report(ErrorLogReport(concern: .sync, connectionRole: .stream, operation: "change_feed",
+                                    phase: "closing", reason: .serverReason("idle_timeout"),
+                                    initiator: ErrorLogInitiator(serverCloseReason: "idle_timeout"),
+                                    retryable: true))
+        XCTAssertEqual(store.records[0].code, "idle_timeout")
+        XCTAssertEqual(store.records[0].initiator, .serverClosed)
+    }
+
     // MARK: Copy format
 
     func testCopiedDetailsArePlainKeyValueLines() {

@@ -32,12 +32,14 @@ public enum ErrorLogInitiator: String, Codable, Sendable, CaseIterable {
     case timeout
     case unknown
 
-    /// Maps a server close-reason token (design section 6.3) to an initiator.
-    /// Anything unrecognised is `serverClosed`; the token itself is not kept.
+    /// Maps a server close-reason token to an initiator: the change feed's
+    /// `closing` reasons (`revoked`, `server_shutdown`, `idle_timeout`) and the
+    /// earlier stream-close tokens. Anything unrecognised is `serverClosed`.
+    /// The token itself is kept separately as `ErrorLogReason.serverReason`.
     public init(serverCloseReason token: String) {
         switch token {
         case "superseded_by_new_stream": self = .supersededByNewStream
-        case "device_revoked": self = .deviceRevoked
+        case "device_revoked", "revoked": self = .deviceRevoked
         default: self = .serverClosed
         }
     }
@@ -66,19 +68,24 @@ public struct ErrorLogCorrelation: Codable, Equatable, Sendable {
     public var transportAttemptID: UUID?
     public var serverConnectionID: String?
     public var clientOperationID: UUID?
+    /// The server's `Request-Id` response header (opaque, safe to log).
+    public var requestID: String?
 
     public init(attemptID: UUID? = nil, transportAttemptID: UUID? = nil,
-                serverConnectionID: String? = nil, clientOperationID: UUID? = nil) {
+                serverConnectionID: String? = nil, clientOperationID: UUID? = nil,
+                requestID: String? = nil) {
         self.attemptID = attemptID
         self.transportAttemptID = transportAttemptID
         self.serverConnectionID = serverConnectionID.flatMap(ErrorLogRedactor.safeID)
         self.clientOperationID = clientOperationID
+        self.requestID = requestID.flatMap(ErrorLogRedactor.safeID)
     }
 
     public static let none = ErrorLogCorrelation()
 
     var isEmpty: Bool {
-        attemptID == nil && transportAttemptID == nil && serverConnectionID == nil && clientOperationID == nil
+        attemptID == nil && transportAttemptID == nil && serverConnectionID == nil &&
+            clientOperationID == nil && requestID == nil
     }
 }
 
@@ -137,6 +144,8 @@ public struct ErrorLogReport: Sendable {
     public var initiator: ErrorLogInitiator
     public var retryable: Bool
     public var correlation: ErrorLogCorrelation
+    /// The HTTP status of the failed response, when there was one.
+    public var httpStatus: Int?
     public var occurredAt: Date?
 
     public init(concern: ErrorLogConcern,
@@ -147,6 +156,7 @@ public struct ErrorLogReport: Sendable {
                 initiator: ErrorLogInitiator = .unknown,
                 retryable: Bool,
                 correlation: ErrorLogCorrelation = .none,
+                httpStatus: Int? = nil,
                 occurredAt: Date? = nil) {
         self.concern = concern
         self.connectionRole = connectionRole
@@ -156,6 +166,7 @@ public struct ErrorLogReport: Sendable {
         self.initiator = initiator
         self.retryable = retryable
         self.correlation = correlation
+        self.httpStatus = httpStatus.flatMap(ErrorLogRedactor.httpStatus)
         self.occurredAt = occurredAt
     }
 }
@@ -200,6 +211,7 @@ public struct ErrorLogRecord: Codable, Equatable, Identifiable, Sendable {
     public internal(set) var initiator: ErrorLogInitiator
     public internal(set) var retryable: Bool
     public internal(set) var correlation: ErrorLogCorrelation
+    public internal(set) var httpStatus: Int?
     public internal(set) var resolvedAt: Date?
     public internal(set) var resolvedBy: String?
 
@@ -218,8 +230,16 @@ public enum ErrorLogRedactor {
         "wrong_connection_role", "retry_later", "stale_revision", "cursor_expired", "storage_unavailable",
         "superseded_by_new_stream", "device_revoked", "rejected", "unresolved", "ack_refused",
         "apply_failed", "stream_closed", "superseded", "not_found", "invalid_request", "rate_limited",
-        "internal_error", "unavailable", "forbidden", "conflict"
+        "internal_error", "unavailable", "forbidden", "conflict",
+        // Client API error tokens.
+        "not_found", "invalid_field", "stale_request", "already_answered", "already_retracted",
+        "idempotency_conflict", "precondition_failed", "payload_too_large",
+        // Change-feed `closing` reasons.
+        "revoked", "server_shutdown", "idle_timeout"
     ]
+
+    /// A real HTTP status code, or nil.
+    static func httpStatus(_ value: Int) -> Int? { (100...599).contains(value) ? value : nil }
 
     /// A lowercase snake_case token, at most 48 characters, with no long digit
     /// or hex runs. Returns nil when the text does not fit.
@@ -366,6 +386,7 @@ public final class ErrorLogStore: ErrorLogging, @unchecked Sendable {
             stored[index].domain = domain
             stored[index].initiator = report.initiator
             stored[index].retryable = report.retryable
+            stored[index].httpStatus = report.httpStatus ?? stored[index].httpStatus
             if !report.correlation.isEmpty { stored[index].correlation = report.correlation }
         } else {
             stored.append(ErrorLogRecord(
@@ -373,7 +394,8 @@ public final class ErrorLogStore: ErrorLogging, @unchecked Sendable {
                 concern: report.concern, connectionRole: report.connectionRole,
                 operation: operation, phase: phase, domain: domain, code: code,
                 initiator: report.initiator, retryable: report.retryable,
-                correlation: report.correlation, resolvedAt: nil, resolvedBy: nil))
+                correlation: report.correlation, httpStatus: report.httpStatus,
+                resolvedAt: nil, resolvedBy: nil))
         }
         applyRetention()
         persist()
@@ -465,6 +487,7 @@ public final class ErrorLogStore: ErrorLogging, @unchecked Sendable {
         copy.domain = domain
         var correlation = record.correlation
         correlation.serverConnectionID = correlation.serverConnectionID.flatMap(ErrorLogRedactor.safeID)
+        correlation.requestID = correlation.requestID.flatMap(ErrorLogRedactor.safeID)
         copy.correlation = correlation
         return ErrorLogRecord(
             id: copy.id, occurredAt: copy.occurredAt, lastAt: copy.lastAt, count: max(copy.count, 1),
@@ -473,6 +496,7 @@ public final class ErrorLogStore: ErrorLogging, @unchecked Sendable {
             phase: ErrorLogRedactor.operationToken(copy.phase), domain: domain,
             code: ErrorLogRedactor.reasonCode(domain: domain, code: copy.code),
             initiator: copy.initiator, retryable: copy.retryable, correlation: copy.correlation,
+            httpStatus: copy.httpStatus.flatMap(ErrorLogRedactor.httpStatus),
             resolvedAt: copy.resolvedAt,
             resolvedBy: copy.resolvedBy.flatMap { ErrorLogRedactor.safeID($0) ?? ErrorLogRedactor.identifier($0) })
     }
@@ -593,12 +617,14 @@ public enum ErrorLogDetails {
             "first_at: \(timestamp(record.occurredAt))",
             "last_at: \(timestamp(record.lastAt))"
         ]
+        if let status = record.httpStatus { lines.insert("http_status: \(status)", at: 10) }
         let correlation = record.correlation
         if let id = correlation.attemptID { lines.append("attempt_id: \(id.uuidString.lowercased())") }
         if let id = correlation.transportAttemptID {
             lines.append("transport_attempt_id: \(id.uuidString.lowercased())")
         }
         if let id = correlation.serverConnectionID { lines.append("server_connection_id: \(id)") }
+        if let id = correlation.requestID { lines.append("request_id: \(id)") }
         if let id = correlation.clientOperationID {
             lines.append("client_operation_id: \(id.uuidString.lowercased())")
         }
