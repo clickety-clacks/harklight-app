@@ -96,11 +96,13 @@ public actor ChangeFeedSync {
                     try await apply(change)
                     after = change.rev
                 }
-                guard batch.more else {
-                    // The last batch reflects the log through `rev`.
-                    if batch.rev > after { try advance(to: batch.rev) }
-                    break
+                // Every batch is gap-free and reflects the log through its
+                // `rev`, so the cursor advances per batch.
+                if batch.rev > after {
+                    try advance(to: batch.rev)
+                    after = batch.rev
                 }
+                guard batch.more else { break }
             }
             errors.resolve(concern: .sync, operation: Self.catchUpOperation)
         } catch {
@@ -162,7 +164,7 @@ public actor ChangeFeedSync {
                 report(Self.feedOperation, phase: "rebaseline", error: error, initiator: .forFailure(error))
                 return .dropped(.forFailure(error), retryPromptly: false)
             }
-        } catch let error as APIError where error.status == 401 {
+        } catch let error where Self.isRevocation(error) {
             report(Self.feedOperation, phase: "open", error: error, initiator: .deviceRevoked)
             return .revoked
         } catch is CancellationError {
@@ -227,13 +229,19 @@ public actor ChangeFeedSync {
             correlation: .request(feedRequestID)))
     }
 
+    /// The server never ends a feed for idleness; it closes only on revoke or
+    /// shutdown, with a `closing` event first.
     static func initiator(forClosingReason reason: String) -> ErrorLogInitiator {
-        switch reason {
-        case "revoked": .deviceRevoked
-        case "server_shutdown": .serverClosed
-        case "idle_timeout": .timeout
-        default: .serverClosed
-        }
+        reason == "revoked" ? .deviceRevoked : .serverClosed
+    }
+
+    /// A revoked device fails the TLS handshake: the server rejects its
+    /// certificate. A browser session gets 401 instead.
+    static func isRevocation(_ error: any Error) -> Bool {
+        if let error = error as? APIError { return error.status == 401 }
+        let value = error as NSError
+        return value.domain == NSURLErrorDomain &&
+            (value.code == NSURLErrorClientCertificateRejected || value.code == NSURLErrorClientCertificateRequired)
     }
 }
 

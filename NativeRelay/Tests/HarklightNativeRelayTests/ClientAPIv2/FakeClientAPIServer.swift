@@ -144,11 +144,10 @@ final class FakeClientAPIServer: ClientAPITransport, @unchecked Sendable {
             }
             let pending = log.filter { $0.rev > after }
             let page = Array(pending.prefix(2))
-            return FeedBatch(changes: page, rev: page.last?.rev ?? headUnlocked, more: pending.count > page.count)
+            return FeedBatch(changes: page, rev: page.last?.rev ?? after, more: pending.count > page.count)
         }
     }
 
-    private var headUnlocked: Rev { log.last?.rev ?? retainedFrom }
 }
 
 /// The server applied the write but the client never saw the answer.

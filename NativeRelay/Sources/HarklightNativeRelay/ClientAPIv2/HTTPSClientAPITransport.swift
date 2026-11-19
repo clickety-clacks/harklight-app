@@ -77,8 +77,11 @@ public final class HTTPSClientAPITransport: ClientAPITransport, @unchecked Senda
     // MARK: Change feed
 
     public func changeFeed(after: Rev) -> AsyncThrowingStream<FeedEvent, any Error> {
-        let request = urlRequest(for: .get("/v2/changes", query: ["after": String(after)]),
-                                 accept: "text/event-stream")
+        var feedRequest = urlRequest(for: .get("/v2/changes", query: ["after": String(after)]),
+                                     accept: "text/event-stream")
+        // Standard SSE resume; it takes precedence over `after` on the server.
+        feedRequest.setValue(String(after), forHTTPHeaderField: "Last-Event-ID")
+        let request = feedRequest
         let session = session
         return AsyncThrowingStream { continuation in
             let reading = Task {

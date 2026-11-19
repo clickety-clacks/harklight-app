@@ -82,6 +82,7 @@ public enum APIErrorToken: String, Equatable, Sendable, CaseIterable {
     case preconditionFailed = "precondition_failed"
     case cursorExpired = "cursor_expired"
     case unauthorized
+    case forbidden
     case retryLater = "retry_later"
     case storageUnavailable = "storage_unavailable"
     case payloadTooLarge = "payload_too_large"

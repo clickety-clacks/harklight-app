@@ -100,6 +100,7 @@ final class HTTPSClientAPITransportTests: XCTestCase {
         let sent = StubURLProtocol.lock.withLock { StubURLProtocol.seen.first }
         XCTAssertEqual(sent?.url?.query, "after=4")
         XCTAssertEqual(sent?.value(forHTTPHeaderField: "Accept"), "text/event-stream")
+        XCTAssertEqual(sent?.value(forHTTPHeaderField: "Last-Event-ID"), "4", "The feed resumes by the standard header.")
     }
 
     func testAnExpiredFeedCursorIsReportedAsCursorExpired() async throws {

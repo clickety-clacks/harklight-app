@@ -147,6 +147,48 @@ final class ChangeFeedSyncTests: XCTestCase {
                       "Each report carries the feed's Request-Id.")
     }
 
+    func testCatchUpAdvancesPerBatchSoAFailureResumesFromTheLastFullBatch() async throws {
+        let server = FakeClientAPIServer()
+        for _ in 0..<5 { server.commit("item", "{}") }
+        let model = RecordingSyncModel(snapshotRev: { 0 })
+        model.failApplyAt = 4
+        let cursor = MemoryRevCursor(1)
+        let sync = ChangeFeedSync(transport: server, cursor: cursor, model: model,
+                                  errors: RecordingErrorLogV2(), waitBeforeRetry: noWait)
+        do { try await sync.catchUp(); XCTFail("The failed apply ends the catch-up.") } catch {}
+        XCTAssertEqual(try cursor.load(), 3, "The first batch (2, 3) is kept; the failed change is not.")
+        try await sync.catchUp()
+        XCTAssertEqual(model.applied, [2, 3, 4, 5])
+        XCTAssertEqual(try cursor.load(), 5)
+    }
+
+    func testASeededPersonsZeroCursorRebaselinesInsteadOfReadingFromTheStart() async throws {
+        let server = FakeClientAPIServer()
+        // Seeded at cut-over: position 1, log retained only from rev 2.
+        server.prune(through: 1)
+        server.commit("item", "{}")
+        let model = RecordingSyncModel(snapshotRev: { server.head })
+        let cursor = MemoryRevCursor(0)
+        let sync = ChangeFeedSync(transport: server, cursor: cursor, model: model,
+                                  errors: RecordingErrorLogV2(), waitBeforeRetry: noWait)
+        try await sync.catchUp()
+        XCTAssertEqual(model.rebaselines, 1)
+        XCTAssertEqual(try cursor.load(), 2)
+    }
+
+    func testARejectedDeviceCertificateStopsSync() async throws {
+        let server = FakeClientAPIServer()
+        server.feedFailure = URLError(.clientCertificateRejected)
+        let errors = RecordingErrorLogV2()
+        let sync = ChangeFeedSync(transport: server, cursor: MemoryRevCursor(0),
+                                  model: RecordingSyncModel(snapshotRev: { 0 }), errors: errors,
+                                  waitBeforeRetry: noWait)
+        await sync.runForeground()
+        let state = await sync.liveState
+        XCTAssertEqual(state, .stopped, "A revoked device fails at TLS; Sync stops rather than retrying.")
+        XCTAssertEqual(errors.reports.map(\.initiator), [.deviceRevoked])
+    }
+
     func testPushCatchUpAppliesEveryBatchFromTheCursor() async throws {
         let server = FakeClientAPIServer()
         for _ in 0..<5 { server.commit("item", "{}") }
@@ -241,6 +283,30 @@ final class ActionOutboxTests: XCTestCase {
         XCTAssertEqual(outcomes.accepted.map(\.0), [other.idempotencyKey, answer.idempotencyKey, reply.idempotencyKey])
     }
 
+    func testARevokedDeviceHoldsTheOutboxForReviewAfterReenrolment() async throws {
+        let server = FakeClientAPIServer()
+        server.nextWriteFailures = [URLError(.clientCertificateRejected)]
+        let persistence = MemoryOutboxPersistence()
+        let outcomes = RecordingOutcomes()
+        let box = try outbox(server, persistence, outcomes)
+        let entry = try await box.submit(target: "a", operation: "mark_seen", write: seen)
+        await eventually("held") { await box.unauthorized }
+        XCTAssertEqual(persistence.keys, [entry.idempotencyKey], "Kept, with its key.")
+        await box.resumeAfterReenrolment()
+        XCTAssertEqual(outcomes.accepted.map(\.0), [entry.idempotencyKey])
+    }
+
+    func testAForbiddenWriteIsADefinitiveRefusal() async throws {
+        let server = FakeClientAPIServer()
+        server.nextWriteFailures = [APIError(status: 403, body: Data(#"{"error":"forbidden","retryable":false,"request_id":"r"}"#.utf8),
+                                             requestID: nil, retryAfter: nil)]
+        let outcomes = RecordingOutcomes()
+        let box = try outbox(server, MemoryOutboxPersistence(), outcomes)
+        try await box.submit(target: "a", operation: "mark_seen", write: seen)
+        await eventually("refused") { outcomes.rejected.count == 1 }
+        XCTAssertEqual(outcomes.rejected.first?.1.token, .forbidden)
+    }
+
     func testADefinitiveRefusalLeavesTheOutboxAndIsShownWithItsToken() async throws {
         let server = FakeClientAPIServer()
         server.nextWriteFailures = [APIError(status: 409, token: .staleRequest, retryable: false, requestID: "req-x")]
@@ -292,5 +358,30 @@ final class ClientAPIIsolationTests: XCTestCase {
 
     func testReadsAndMarkSeenSurviveAnAbortedFeed() async throws {
         try await assertReadsAndActionsSurviveAFailingFeed(POSIXError(.ECONNABORTED))
+    }
+}
+
+final class RevGateTests: XCTestCase {
+    func testOnlyNewerRevsApplyAndARemovalCannotBeUndoneByAnOlderSnapshot() {
+        var gate = RevGate()
+        XCTAssertTrue(gate.admit("item-a", rev: 5))
+        XCTAssertFalse(gate.admit("item-a", rev: 5), "A duplicate is a no-op.")
+        XCTAssertFalse(gate.admit("item-a", rev: 4), "An older change is a no-op.")
+        let removedAt = Date(timeIntervalSince1970: 1_000)
+        XCTAssertTrue(gate.admitRemoval("item-a", rev: 7, at: removedAt))
+        XCTAssertFalse(gate.admit("item-a", rev: 6), "An older snapshot cannot bring the item back.")
+        XCTAssertTrue(gate.isRemoved("item-a"))
+        XCTAssertTrue(gate.admit("item-a", rev: 8), "A newer write does.")
+        XCTAssertFalse(gate.isRemoved("item-a"))
+    }
+
+    func testTombstonesAreKeptForTheRetentionWindowOnly() {
+        var gate = RevGate()
+        let removedAt = Date(timeIntervalSince1970: 1_000)
+        _ = gate.admitRemoval("item-a", rev: 3, at: removedAt)
+        gate.pruneTombstones(now: removedAt.addingTimeInterval(RevGate.tombstoneRetention - 1))
+        XCTAssertTrue(gate.isRemoved("item-a"))
+        gate.pruneTombstones(now: removedAt.addingTimeInterval(RevGate.tombstoneRetention + 1))
+        XCTAssertFalse(gate.isRemoved("item-a"))
     }
 }
