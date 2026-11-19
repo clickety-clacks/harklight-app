@@ -77,6 +77,9 @@ final class NativeAppLaunch {
     let hasPriorAppState: Bool
     let guidedJoin: NativeGuidedJoinCoordinator
     let diagnostics: NativeClientDiagnosticJournal
+    /// Durable, redacted failure records that no component can clear.
+    let errorLog: ErrorLogStore
+    let errorLogModel: ErrorLogModel
     let notificationRouter: NativeNotificationRouter
     private(set) var notificationNavigation: NativeInboxNavigation?
     private(set) var notificationNavigationMessage: String?
@@ -109,7 +112,8 @@ final class NativeAppLaunch {
              await NativeRelayLifecycle.shared.refreshResultFromTrustedRelay(
                 checkBlockedPush: checkBlockedPush)
          },
-         fetchInboxPageOperation: (@MainActor (LivePresentationStore) async -> Bool)? = nil) {
+         fetchInboxPageOperation: (@MainActor (LivePresentationStore) async -> Bool)? = nil,
+         errorLog suppliedErrorLog: ErrorLogStore? = nil) {
         #if DEBUG
         let failureSeed = SubmissionFailureTestSeed.requestedKind(in: arguments)
         let fixture = failureSeed != nil ||
@@ -125,6 +129,10 @@ final class NativeAppLaunch {
             enrollment: enrollment, guidedJoin: joinStore)
         let diagnostics = NativeClientDiagnosticJournal()
         self.diagnostics = diagnostics
+        let errorLog = suppliedErrorLog ?? ErrorLogStore(
+            fileURL: ErrorLogStore.defaultFileURL(), build: Self.errorLogBuild())
+        self.errorLog = errorLog
+        errorLogModel = ErrorLogModel(store: errorLog)
         self.notificationRouter = notificationRouter
         self.refreshOperation = refreshOperation
         self.fetchInboxPageOperation = fetchInboxPageOperation
@@ -1013,8 +1021,23 @@ final class NativeAppLaunch {
         dismissedForegroundConnectFailure = nil
     }
 
+    private static func errorLogBuild() -> ErrorLogBuild {
+        func bundleValue(_ key: String) -> String {
+            Bundle.main.object(forInfoDictionaryKey: key) as? String ?? "unavailable"
+        }
+        return ErrorLogBuild(version: bundleValue("CFBundleShortVersionString"),
+                             build: bundleValue("CFBundleVersion"),
+                             commit: NativeDiagnosticSourceProvenance.current.commit)
+    }
+
+    /// Whether Settings has any diagnostics to offer.
+    var hasDiagnosticsToShow: Bool {
+        diagnostics.hasEvents || foregroundConnectDiagnostic != nil || !errorLogModel.records.isEmpty
+    }
+
     func recordForegroundConnectProgress(_ progress: NativeForegroundConnectProgress,
                                          operationSnapshot: NativeForegroundOperationSnapshot) {
+        ErrorLogForegroundConnectBridge.record(progress, in: errorLog)
         foregroundConnectProgress = progress
         foregroundConnectDiagnostic = NativeForegroundConnectDiagnostic(
             progress: progress, operationSnapshot: operationSnapshot)

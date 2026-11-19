@@ -2553,6 +2553,7 @@ struct InboxList: View {
         let areaRows = combinedNewMessageAreaRows
         let shownAreaRows = isNewMessageAreaExpanded ? areaRows : Array(areaRows.prefix(5))
         List(selection: listSelection) {
+            if tab == .inbox { ErrorLogInboxBannerRows() }
             if tab == .inbox, let route = notificationNavigation, route.request == nil {
                 let rowState = notificationPendingPresentation.flatMap {
                     $0.serial == route.serial ? $0.listRowState : nil
@@ -3419,8 +3420,7 @@ struct InboxSettings: View {
     var body: some View {
         NavigationStack {
             Form {
-                if let launch,
-                   launch.diagnostics.hasEvents || launch.foregroundConnectDiagnostic != nil {
+                if let launch, launch.hasDiagnosticsToShow {
                     InboxDiagnosticsSettingsSection(launch: launch, closeSettings: { dismiss() })
                 }
                 ReleaseNotesSettingsSection(notes: HarklightReleaseNotes.settingsHistory(
@@ -3444,6 +3444,14 @@ struct InboxDiagnosticsSettingsSection: View {
 
     var body: some View {
         HarklightFormSection("Diagnostics") {
+            NavigationLink {
+                ErrorLogDiagnosticsScreen(model: launch.errorLogModel)
+            } label: {
+                Label("Error log", systemImage: "list.bullet.rectangle")
+            }
+            .accessibilityIdentifier("error-log-open")
+            Text("Every recorded failure, kept after recovery. Details exclude message text and credentials.")
+                .font(.footnote).foregroundStyle(.hkSecondary)
             if launch.diagnostics.hasEvents {
                 ShareLink(item: launch.diagnostics.shareText) {
                     Label("Share diagnostics", systemImage: "square.and.arrow.up")
