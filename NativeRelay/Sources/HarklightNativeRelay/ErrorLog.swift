@@ -260,9 +260,22 @@ public enum ErrorLogRedactor {
 
     static func operationToken(_ text: String) -> String { identifier(text) ?? "other" }
 
-    /// A server-issued identifier: letters, digits, `-`, `_`, at most 64
-    /// characters, and not a bearer-style string.
+    /// A server-issued opaque identifier such as a `Request-Id`: up to 128
+    /// characters (the contract's OpaqueId maximum) of letters, digits and
+    /// `- _ . : ~ = + /`. Whitespace, `?`, `#`, `&`, `@` and `%` are refused, so
+    /// a URL with a query, an address or a sentence cannot pass as an id.
     static func safeID(_ text: String) -> String? {
+        guard !text.isEmpty, text.utf8.count <= 128,
+              text.utf8.allSatisfy({
+                  (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) ||
+                      [45, 95, 46, 58, 126, 61, 43, 47].contains($0)
+              }) else { return nil }
+        return text
+    }
+
+    /// A short id the app itself supplies (such as an attempt UUID): letters,
+    /// digits, `-`, `_`, at most 64 characters.
+    static func simpleID(_ text: String) -> String? {
         guard !text.isEmpty, text.utf8.count <= 64,
               text.utf8.allSatisfy({
                   (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) ||
@@ -406,7 +419,7 @@ public final class ErrorLogStore: ErrorLogging, @unchecked Sendable {
 
     public func resolve(concern: ErrorLogConcern, operation: String, resolvedBy: String?) {
         let token = ErrorLogRedactor.operationToken(operation)
-        let by = resolvedBy.flatMap { ErrorLogRedactor.safeID($0) ?? ErrorLogRedactor.identifier($0) } ?? "success"
+        let by = resolvedBy.flatMap { ErrorLogRedactor.simpleID($0) ?? ErrorLogRedactor.identifier($0) } ?? "success"
         lock.lock()
         let at = now()
         var changed = false
@@ -498,7 +511,7 @@ public final class ErrorLogStore: ErrorLogging, @unchecked Sendable {
             initiator: copy.initiator, retryable: copy.retryable, correlation: copy.correlation,
             httpStatus: copy.httpStatus.flatMap(ErrorLogRedactor.httpStatus),
             resolvedAt: copy.resolvedAt,
-            resolvedBy: copy.resolvedBy.flatMap { ErrorLogRedactor.safeID($0) ?? ErrorLogRedactor.identifier($0) })
+            resolvedBy: copy.resolvedBy.flatMap { ErrorLogRedactor.simpleID($0) ?? ErrorLogRedactor.identifier($0) })
     }
 
     private static let encoder: JSONEncoder = {

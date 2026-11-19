@@ -201,7 +201,7 @@ final class ErrorLogTests: XCTestCase {
     func testSafeServerConnectionIDIsKeptAndUnsafeOneIsDropped() {
         XCTAssertEqual(ErrorLogCorrelation(serverConnectionID: "conn-7f3a_9").serverConnectionID, "conn-7f3a_9")
         XCTAssertNil(ErrorLogCorrelation(serverConnectionID: "has space").serverConnectionID)
-        XCTAssertNil(ErrorLogCorrelation(serverConnectionID: String(repeating: "a", count: 65)).serverConnectionID)
+        XCTAssertNil(ErrorLogCorrelation(serverConnectionID: String(repeating: "a", count: 129)).serverConnectionID)
     }
 
     func testErrorClassificationUsesDomainAndCodeOnly() {
@@ -444,7 +444,23 @@ final class ErrorLogTests: XCTestCase {
         XCTAssertEqual(ErrorLogReason.serverReason("please_contact_dana@example.invalid").code, "other")
     }
 
+    func testRequestIDUpToTheContractMaximumIsKept() {
+        let longest = String(repeating: "a", count: 100) + "-_.:~=+/" + String(repeating: "Z9", count: 10)
+        XCTAssertEqual(longest.count, 128)
+        XCTAssertEqual(ErrorLogCorrelation(requestID: longest).requestID, longest)
+        XCTAssertNil(ErrorLogCorrelation(requestID: longest + "a").requestID)
+        let clock = Clock(Date(timeIntervalSince1970: 1_000_000))
+        let store = makeStore(clock: clock)
+        store.report(ErrorLogReport(concern: .snapshot, connectionRole: .request, operation: "read_inbox",
+                                    phase: "response", reason: .urlError(-1001), retryable: true,
+                                    correlation: ErrorLogCorrelation(requestID: longest)))
+        XCTAssertEqual(ErrorLogStore(fileURL: fileURL, build: build).records[0].correlation.requestID, longest)
+        XCTAssertTrue(ErrorLogDetails.text(for: store.records).contains("request_id: \(longest)"))
+    }
+
     func testUnsafeRequestIDAndImpossibleStatusAreDropped() {
+        XCTAssertNil(ErrorLogCorrelation(requestID: "a@b.invalid").requestID)
+        XCTAssertNil(ErrorLogCorrelation(requestID: "id#frag").requestID)
         XCTAssertNil(ErrorLogCorrelation(requestID: "https://x.invalid/?t=1").requestID)
         XCTAssertNil(ErrorLogCorrelation(requestID: "Bearer abc").requestID)
         let report = ErrorLogReport(concern: .snapshot, connectionRole: .request, operation: "read_inbox",
