@@ -1,0 +1,363 @@
+import Foundation
+
+// Resources of the Harklight client API v2 (docs/client-api-v2.md, accepted
+// edff7e9, with contract rulings round 2). Decoded from exact JSON: unknown
+// members are ignored, and the sender's message content passes through
+// unchanged.
+
+public enum ClientAPIModelError: Error, Equatable {
+    case invalid(String)
+}
+
+public struct APIFileRef: Equatable, Codable, Sendable {
+    public let fileID: ExactText
+    public let name: ExactText
+    public let size: UInt64
+    public let sha256: String
+    public let contentType: String?
+}
+
+public struct APIChat: Equatable, Codable, Sendable {
+    /// Informational only; it gates nothing (chat is never closed by rule).
+    public let available: Bool
+    public let started: Bool
+    public let readPosition: ExactText?
+    public let lastOriginReply: ExactText?
+    /// Server-computed count of agent replies after the read position.
+    public let unreadReplies: Int?
+}
+
+public struct APIAvailability: Equatable, Codable, Sendable {
+    /// listening, not_listening, gone or unsupported. Information, never a block.
+    public let state: String
+    public let lastDetachedAtMs: UInt64?
+}
+
+/// An answer as recorded by the server, shown on every device of the person.
+public struct APIAnswer: Equatable, Codable, Sendable {
+    public let choice: ExactText?
+    public let value: JSONValue?
+    public let comment: ExactText?
+    public let result: JSONValue?
+}
+
+public struct APITerminal: Equatable, Codable, Sendable {
+    /// answered, cleared, expired, superseded or retracted.
+    public let state: String
+    public let atMs: UInt64
+    public let noComment: Bool
+    public let byThisPerson: Bool
+    public let answer: APIAnswer?
+}
+
+public struct APIOriginResult: Equatable, Codable, Sendable {
+    public let status: ExactText
+    public let resultRef: ExactText?
+    public let revision: UInt64
+}
+
+public struct APIRank: Equatable, Codable, Sendable {
+    /// Sort ascending, byte-wise, for the server's inbox order.
+    public let key: ExactText
+    public let score: JSONNumber?
+    public let dueAtMs: UInt64?
+    /// Server-assigned inbox section; a heading is drawn where it changes.
+    public let section: String?
+}
+
+public struct APIItem: Equatable, Codable, Sendable {
+    public let itemID: ExactText
+    public let rev: UInt64
+    public let sender: ExactText
+    public let requestRevision: UInt64
+    /// The sender's current message content, unchanged.
+    public let message: JSONValue
+    public let files: [APIFileRef]
+    public let seen: Bool
+    /// `message` or `knock` when this client is a recipient, not the origin.
+    public let recipientAs: String?
+    public let chat: APIChat
+    public let availability: APIAvailability?
+    public let terminal: APITerminal?
+    public let result: APIOriginResult?
+    public let rank: APIRank
+}
+
+public struct APIEntryDelivery: Equatable, Codable, Sendable {
+    public let delivered: Bool?
+    public let acted: Bool?
+}
+
+public struct APIEntry: Equatable, Codable, Sendable {
+    public let entryID: ExactText
+    public let itemID: ExactText
+    public let rev: UInt64
+    /// Immutable creation order within the item; entries sort by it.
+    public let position: UInt64
+    /// reply, answer, lifecycle, revision, availability or receipt.
+    public let kind: String
+    /// person, origin or server.
+    public let author: String
+    public let atMs: UInt64
+    public let requestRevision: UInt64
+    public let text: ExactText?
+    public let files: [APIFileRef]
+    public let inReplyTo: ExactText?
+    /// active, withdrawn or retracted; entries are never removed.
+    public let state: String?
+    public let terminal: APITerminal?
+    public let availability: APIAvailability?
+    public let delivery: APIEntryDelivery?
+    public let answer: APIAnswer?
+}
+
+public struct APICounts: Equatable, Codable, Sendable {
+    public let unresolved: Int
+}
+
+/// Settings are kept as the server sent them; priority levels and push are
+/// read from them where used.
+public struct APISettings: Equatable, Codable, Sendable {
+    public let rev: UInt64
+    public let body: JSONValue
+}
+
+// MARK: Decoding
+
+fileprivate struct Reader {
+    let value: JSONValue
+    let context: String
+
+    init(_ value: JSONValue, _ context: String) throws {
+        guard case .object = value, value.hasUniqueObjectKeys else {
+            throw ClientAPIModelError.invalid(context)
+        }
+        self.value = value
+        self.context = context
+    }
+
+    private func member(_ name: String) -> JSONValue? {
+        guard let found = value.uniqueValue(named: name), found != .null else { return nil }
+        return found
+    }
+
+    func string(_ name: String) throws -> ExactText {
+        guard let text = member(name)?.stringValue else { throw ClientAPIModelError.invalid("\(context).\(name)") }
+        return text
+    }
+
+    func optionalString(_ name: String) throws -> ExactText? {
+        guard let found = member(name) else { return nil }
+        guard let text = found.stringValue else { throw ClientAPIModelError.invalid("\(context).\(name)") }
+        return text
+    }
+
+    func unsigned(_ name: String) throws -> UInt64 {
+        guard let found = try optionalUnsigned(name) else { throw ClientAPIModelError.invalid("\(context).\(name)") }
+        return found
+    }
+
+    func optionalUnsigned(_ name: String) throws -> UInt64? {
+        guard let found = member(name) else { return nil }
+        guard let integer = found.integerValue, integer >= 0 else {
+            throw ClientAPIModelError.invalid("\(context).\(name)")
+        }
+        return UInt64(integer)
+    }
+
+    func bool(_ name: String) throws -> Bool {
+        guard let found = try optionalBool(name) else { throw ClientAPIModelError.invalid("\(context).\(name)") }
+        return found
+    }
+
+    func optionalBool(_ name: String) throws -> Bool? {
+        guard let found = member(name) else { return nil }
+        guard case let .bool(flag) = found else { throw ClientAPIModelError.invalid("\(context).\(name)") }
+        return flag
+    }
+
+    func object(_ name: String) throws -> Reader {
+        guard let found = member(name) else { throw ClientAPIModelError.invalid("\(context).\(name)") }
+        return try Reader(found, "\(context).\(name)")
+    }
+
+    func optionalObject(_ name: String) throws -> Reader? {
+        guard let found = member(name) else { return nil }
+        return try Reader(found, "\(context).\(name)")
+    }
+
+    func raw(_ name: String) -> JSONValue? { member(name) }
+
+    func array(_ name: String) throws -> [JSONValue] {
+        guard let found = member(name) else { return [] }
+        guard let values = found.arrayValues else { throw ClientAPIModelError.invalid("\(context).\(name)") }
+        return values
+    }
+}
+
+extension APIFileRef {
+    fileprivate init(_ reader: Reader) throws {
+        fileID = try reader.string("file_id")
+        name = try reader.string("name")
+        size = try reader.unsigned("size")
+        sha256 = try reader.string("sha256").rawValue
+        contentType = try reader.optionalString("content_type")?.rawValue
+    }
+
+    fileprivate static func list(_ values: [JSONValue], _ context: String) throws -> [APIFileRef] {
+        try values.map { try APIFileRef(Reader($0, context)) }
+    }
+}
+
+extension APIAvailability {
+    fileprivate init(_ reader: Reader) throws {
+        state = try reader.string("state").rawValue
+        lastDetachedAtMs = try reader.optionalUnsigned("last_detached_at_ms")
+    }
+}
+
+extension APIAnswer {
+    fileprivate init(_ reader: Reader) throws {
+        choice = try reader.optionalString("choice")
+        value = reader.raw("value")
+        comment = try reader.optionalString("comment")
+        result = reader.raw("result")
+    }
+}
+
+extension APITerminal {
+    fileprivate init(_ reader: Reader) throws {
+        state = try reader.string("state").rawValue
+        atMs = try reader.unsigned("at_ms")
+        noComment = try reader.optionalBool("no_comment") ?? false
+        byThisPerson = try reader.optionalBool("by_this_person") ?? false
+        answer = try reader.optionalObject("answer").map(APIAnswer.init)
+    }
+}
+
+extension APIItem {
+    public init(json: JSONValue) throws {
+        let reader = try Reader(json, "item")
+        itemID = try reader.string("item_id")
+        rev = try reader.unsigned("rev")
+        sender = try reader.string("sender")
+        requestRevision = try reader.unsigned("request_revision")
+        guard let message = reader.raw("message"), case .object = message else {
+            throw ClientAPIModelError.invalid("item.message")
+        }
+        self.message = message
+        files = try APIFileRef.list(reader.array("files"), "item.files")
+        seen = try reader.bool("seen")
+        recipientAs = try reader.optionalString("as")?.rawValue
+        let chat = try reader.object("chat")
+        self.chat = APIChat(available: try chat.bool("available"), started: try chat.bool("started"),
+                            readPosition: try chat.optionalString("read_position"),
+                            lastOriginReply: try chat.optionalString("last_origin_reply"),
+                            unreadReplies: try chat.optionalUnsigned("unread_replies").map { Int($0) })
+        availability = try reader.optionalObject("availability").map(APIAvailability.init)
+        terminal = try reader.optionalObject("terminal").map(APITerminal.init)
+        result = try reader.optionalObject("result").map { result in
+            APIOriginResult(status: try result.string("status"), resultRef: try result.optionalString("result_ref"),
+                            revision: try result.unsigned("revision"))
+        }
+        let rank = try reader.object("rank")
+        let score: JSONNumber?
+        if let raw = rank.raw("score") {
+            guard case let .number(number) = raw else { throw ClientAPIModelError.invalid("item.rank.score") }
+            score = number
+        } else {
+            score = nil
+        }
+        self.rank = APIRank(key: try rank.string("key"), score: score,
+                            dueAtMs: try rank.optionalUnsigned("due_at_ms"),
+                            section: try rank.optionalString("section")?.rawValue)
+        guard rev >= 1 else { throw ClientAPIModelError.invalid("item.rev") }
+    }
+}
+
+extension APIEntry {
+    public init(json: JSONValue) throws {
+        let reader = try Reader(json, "entry")
+        entryID = try reader.string("entry_id")
+        itemID = try reader.string("item_id")
+        rev = try reader.unsigned("rev")
+        position = try reader.unsigned("position")
+        kind = try reader.string("kind").rawValue
+        author = try reader.string("author").rawValue
+        atMs = try reader.unsigned("at_ms")
+        requestRevision = try reader.unsigned("request_revision")
+        text = try reader.optionalString("text")
+        files = try APIFileRef.list(reader.array("files"), "entry.files")
+        inReplyTo = try reader.optionalString("in_reply_to")
+        state = try reader.optionalString("state")?.rawValue
+        terminal = try reader.optionalObject("terminal").map(APITerminal.init)
+        availability = try reader.optionalObject("availability").map(APIAvailability.init)
+        delivery = try reader.optionalObject("delivery").map { delivery in
+            APIEntryDelivery(delivered: try delivery.optionalBool("delivered"), acted: try delivery.optionalBool("acted"))
+        }
+        answer = try reader.optionalObject("answer").map(APIAnswer.init)
+        guard rev >= 1, position >= 1 else { throw ClientAPIModelError.invalid("entry.rev") }
+    }
+}
+
+extension APICounts {
+    public init(json: JSONValue) throws {
+        let reader = try Reader(json, "counts")
+        let unresolved = try reader.unsigned("unresolved")
+        self.unresolved = Int(unresolved)
+    }
+}
+
+extension APISettings {
+    public init(json: JSONValue) throws {
+        let reader = try Reader(json, "settings")
+        rev = try reader.unsigned("rev")
+        body = json
+    }
+}
+
+/// `{rev, items, counts, next_page?}`
+public struct APIInboxPage: Equatable, Sendable {
+    public let position: UInt64
+    public let items: [APIItem]
+    public let counts: APICounts
+    public let nextPage: ExactText?
+
+    public init(json: JSONValue) throws {
+        let reader = try Reader(json, "inbox")
+        position = try reader.unsigned("rev")
+        items = try reader.array("items").map(APIItem.init(json:))
+        counts = try APICounts(json: reader.raw("counts") ?? .null)
+        nextPage = try reader.optionalString("next_page")
+    }
+}
+
+/// `{rev, entries, older}`
+public struct APIEntriesPage: Equatable, Sendable {
+    public let position: UInt64
+    public let entries: [APIEntry]
+    public let older: Bool
+
+    public init(json: JSONValue) throws {
+        let reader = try Reader(json, "entries")
+        position = try reader.unsigned("rev")
+        entries = try reader.array("entries").map(APIEntry.init(json:))
+        older = try reader.bool("older")
+    }
+}
+
+/// `{rev, item?, entry?, settings?}`: what a write changed.
+public struct APIWriteResult: Equatable, Sendable {
+    public let position: UInt64
+    public let item: APIItem?
+    public let entry: APIEntry?
+    public let settings: APISettings?
+
+    public init(json: JSONValue) throws {
+        let reader = try Reader(json, "write")
+        position = try reader.unsigned("rev")
+        item = try reader.raw("item").map(APIItem.init(json:))
+        entry = try reader.raw("entry").map(APIEntry.init(json:))
+        settings = try reader.raw("settings").map(APISettings.init(json:))
+    }
+}
