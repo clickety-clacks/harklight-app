@@ -198,12 +198,12 @@ public actor NativeRelayCore {
     private var activeInboxStartupID: String?
     private var postCheckpointInboxConsumerTask: Task<Void, Never>?
     private var postCheckpointInboxFailure: (any Error)?
-    private var inboxViewRequestedOnConnection = false
-    private var inboxViewUnsupportedForConnection = false
-    private var inboxViewFetchInProgress = false
-    private var pendingInboxViewRevision: ExactText?
-    private var inboxViewNoticeTask: Task<Void, Never>?
-    private var latestInboxViewNotice: ExactText?
+    /// Fetches snapshots for display on request connections, independently
+    /// of this core's replay, ACK and outbox drain.
+    private let snapshotReader: SnapshotReader
+    private let requestConnections: any RequestConnectionSource
+    private let errors: any ErrorLogging
+    private let activity = ComponentActivity()
     private var messageOpenUnsupportedForConnection = false
     private var pendingMessageOpenDrainRequested = false
     private var priorityLevelsUnavailableForConnection = false
@@ -586,7 +586,35 @@ public actor NativeRelayCore {
                 onPriorityLevelsConnectionLost: @escaping @Sendable () -> Void = {},
                 onPriorityLevelsFeatureEnabled: @escaping @Sendable () async -> Bool = { false },
                 onDiagnostic: @escaping NativeClientDiagnosticSink = { _ in },
-                onFeatureFlags: @escaping @Sendable (RemoteFeatureFlagSnapshot) async -> Void = { _ in }) throws {
+                onFeatureFlags: @escaping @Sendable (RemoteFeatureFlagSnapshot) async -> Void = { _ in },
+                errorLog: any ErrorLogging = NoopErrorLog()) throws {
+        try self.init(store: store, context: context, session: session,
+                      requestConnections: SharedStreamConnection(session: session),
+                      automaticallySendsPendingOperations: automaticallySendsPendingOperations,
+                      attemptID: attemptID, serverStateCache: serverStateCache, onProgress: onProgress,
+                      onPriorityLevelsChanged: onPriorityLevelsChanged,
+                      onPriorityLevelsConnectionLost: onPriorityLevelsConnectionLost,
+                      onPriorityLevelsFeatureEnabled: onPriorityLevelsFeatureEnabled,
+                      onDiagnostic: onDiagnostic, onFeatureFlags: onFeatureFlags,
+                      errorLog: errorLog)
+    }
+
+    /// `requestConnections` supplies the connections that snapshot reads use.
+    /// `session` remains the stream connection that owns replay and ACK.
+    init(store: ClientRepository,
+         context: ProfileContext,
+         session: any AuthenticatedInstallationSession,
+         requestConnections: any RequestConnectionSource,
+         automaticallySendsPendingOperations: Bool = true,
+         attemptID: UUID? = nil,
+         serverStateCache: (any ServerStateCaching)? = nil,
+         onProgress: @escaping @Sendable (NativeRelayProgressEvent) -> Void = { _ in },
+         onPriorityLevelsChanged: @escaping @Sendable () -> Void = {},
+         onPriorityLevelsConnectionLost: @escaping @Sendable () -> Void = {},
+         onPriorityLevelsFeatureEnabled: @escaping @Sendable () async -> Bool = { false },
+         onDiagnostic: @escaping NativeClientDiagnosticSink = { _ in },
+         onFeatureFlags: @escaping @Sendable (RemoteFeatureFlagSnapshot) async -> Void = { _ in },
+         errorLog: any ErrorLogging = NoopErrorLog()) throws {
         guard context.transportMode == .relay else { throw NativeRelayCoreError.fixtureProfile }
         guard session.authenticatedIdentity == context.identity else {
             throw NativeRelayCoreError.wrongInstallation
@@ -605,7 +633,15 @@ public actor NativeRelayCore {
         self.onDiagnostic = onDiagnostic
         self.onFeatureFlags = onFeatureFlags
         self.wire = try RelayWire(profile: context)
-        self.inboxWire = try InboxPagingWire(profile: context)
+        let inboxWire = try InboxPagingWire(profile: context)
+        self.inboxWire = inboxWire
+        self.requestConnections = requestConnections
+        self.errors = errorLog
+        let cache = self.serverStateCache
+        snapshotReader = SnapshotReader(store: store, context: context, inboxWire: inboxWire,
+            connections: requestConnections, errors: errorLog, activity: activity,
+            correlation: ErrorLogCorrelation(attemptID: attemptID, transportAttemptID: attemptID),
+            persist: { try await Self.saveServerStateCache(store: store, context: context, cache: cache) })
     }
 
     /// Discards every saved copy of Server state, in the repository and in
@@ -619,14 +655,12 @@ public actor NativeRelayCore {
     public func deactivate() {
         for binding in Array(activeCleanupScopes) { finishCleanup(in: binding) }
         active = false
+        activity.deactivate()
         let waitingRefreshes = refreshWaiters
         refreshWaiters.removeAll()
         for waiter in waitingRefreshes {
             waiter.continuation.resume(throwing: NativeRelayCoreError.inactive)
         }
-        inboxViewNoticeTask?.cancel()
-        inboxViewNoticeTask = nil
-        latestInboxViewNotice = nil
         postCheckpointInboxConsumerTask?.cancel()
         postCheckpointInboxConsumerTask = nil
         postCheckpointAcknowledgementTask?.cancel()
@@ -708,6 +742,7 @@ public actor NativeRelayCore {
             inboxBootstrapped = true
         }
         onProgress(.postAckDrainBegan)
+        await readInboxSnapshotForSync()
         var failedStep = NativeDiagnosticPostAckStep.replayConversationsAndAcknowledge
         do {
             inspectedConversationMetadata = true
@@ -716,12 +751,17 @@ public actor NativeRelayCore {
             // message, and that progress still needs its conversation ACK.
             if let conversationSession = session as? any AuthenticatedConversationSession {
                 failedStep = .replayConversationsAndAcknowledge
-                try await replayConversationAndAcknowledge(
-                    using: conversationSession, drainReadPositions: false)
-            }
-            if !inboxViewRequestedOnConnection {
-                inboxViewRequestedOnConnection = true
-                await refreshInboxView(using: pagingSession)
+                do {
+                    try await replayConversationAndAcknowledge(
+                        using: conversationSession, drainReadPositions: false)
+                    errors.resolve(concern: .sync, operation: Self.subscribeConversationOperation)
+                } catch {
+                    errors.report(ErrorLogReport(concern: .sync, connectionRole: .stream,
+                        operation: Self.subscribeConversationOperation, phase: "replay_and_acknowledge",
+                        reason: .relay(error), initiator: .forFailure(error), retryable: true,
+                        correlation: ErrorLogCorrelation(attemptID: attemptID, transportAttemptID: attemptID)))
+                    throw error
+                }
             }
             // Replay/current revision wins before an interrupted user operation
             // is eligible to resume. Never rebuild its payload or operation ID.
@@ -1478,7 +1518,7 @@ public actor NativeRelayCore {
                 }
                 let update = try wire.decodeUpdate(frame)
                 if case let .viewChanged(revision) = update {
-                    scheduleInboxViewRefresh(using: eventStream, noticedRevision: revision)
+                    scheduleInboxViewRefresh(noticedRevision: revision)
                     continue
                 }
                 if case .ignoredUnsequenced = update { continue }
@@ -1532,79 +1572,40 @@ public actor NativeRelayCore {
         }
     }
 
-    private func scheduleInboxViewRefresh(using transport: any AuthenticatedInboxPagingSession,
-                                         noticedRevision: ExactText) {
-        guard active, !inboxViewUnsupportedForConnection else { return }
-        latestInboxViewNotice = noticedRevision
-        guard inboxViewNoticeTask == nil else { return }
-        // View replies share the socket reader with ordinary events. Keep its
-        // bounded inbox mailbox draining while a view request waits for a reply.
-        inboxViewNoticeTask = Task { [weak self] in
-            guard let self else { return }
-            await self.refreshNoticedInboxViews(using: transport)
+    private func scheduleInboxViewRefresh(noticedRevision: ExactText) {
+        guard active else { return }
+        // View replies share the socket reader with ordinary events on the
+        // fallback connection, so the read never runs on the event consumer.
+        Task { [weak self] in
+            _ = await self?.readInboxSnapshot(noticedRevision: noticedRevision)
         }
     }
 
-    private func refreshNoticedInboxViews(using transport: any AuthenticatedInboxPagingSession) async {
-        defer { inboxViewNoticeTask = nil }
-        while active, !Task.isCancelled, let revision = latestInboxViewNotice {
-            latestInboxViewNotice = nil
-            await refreshInboxView(using: transport, noticedRevision: revision)
+    /// Reads the server inbox view through the Snapshot Reader. It never waits
+    /// for replay, ACK or the outbox drain, and a failed read keeps the held
+    /// view.
+    @discardableResult
+    public func readInboxSnapshot(noticedRevision: ExactText? = nil) async -> InboxSnapshotReadOutcome {
+        let outcome = await snapshotReader.readInbox(noticedRevision: noticedRevision)
+        switch outcome {
+        case .updated, .unchanged: scheduleInboxViewPageLoad()
+        case .unsupported, .failed, .inactive: break
         }
+        return outcome
     }
 
-    private func refreshInboxView(using transport: any AuthenticatedInboxPagingSession,
-                                  noticedRevision: ExactText? = nil) async {
-        guard !inboxViewUnsupportedForConnection else { return }
-        let heldRevision = (try? store.snapshot(context: context).inboxView?.revision) ?? nil
-        if let noticedRevision, heldRevision == noticedRevision { return }
-        if inboxViewFetchInProgress {
-            pendingInboxViewRevision = noticedRevision
-            return
-        }
-        inboxViewFetchInProgress = true
-        defer { inboxViewFetchInProgress = false }
-
-        var noticeToResolve = noticedRevision
-        while active {
-            let heldView = (try? store.snapshot(context: context).inboxView) ?? nil
-            let knownRevision = heldView?.revision
-            if let noticeToResolve, noticeToResolve == knownRevision { break }
-            pendingInboxViewRevision = nil
-            let ref = Self.inboxRef("view")
-            do {
-                let reply = try await transport.inboxRequest(
-                    inboxWire.viewGet(knownRevision: knownRevision, ref: ref), ref: ref)
-                guard active else { return }
-                switch inboxWire.decodeViewGet(reply, ref: ref, knownRevision: knownRevision) {
-                case let .updated(view):
-                    try store.setInboxView(view, context: context)
-                    scheduleInboxViewPageLoad()
-                case .unchanged:
-                    scheduleInboxViewPageLoad()
-                case .unsupported:
-                    inboxViewUnsupportedForConnection = true
-                    try? store.setInboxView(nil, context: context)
-                case .unavailable:
-                    try? store.setInboxView(nil, context: context)
-                }
-                // Save only when the reply changed the held view; an unchanged
-                // or unsupported reply adds nothing to the cache.
-                if ((try? store.snapshot(context: context).inboxView) ?? nil) != heldView {
-                    try? await saveServerStateCache()
-                }
-                if inboxViewUnsupportedForConnection { break }
-            } catch {
-                try? store.setInboxView(nil, context: context)
-                break
-            }
-            let pending = pendingInboxViewRevision
-            pendingInboxViewRevision = nil
-            let currentRevision = (try? store.snapshot(context: context).inboxView?.revision) ?? nil
-            guard let pending, pending != currentRevision else {
-                break
-            }
-            noticeToResolve = pending
+    /// Each reconnect, foreground or push resync reads the view until a read
+    /// is answered on this connection. Sync never depends on its outcome.
+    private func readInboxSnapshotForSync() async {
+        guard await snapshotReader.needsInboxRead else { return }
+        if requestConnections.sharesStreamConnection {
+            // THIN FALLBACK (remove with SharedStreamConnection): one socket
+            // carries one exchange at a time, so the read is queued ahead of
+            // the conversation replay. A replay that later fails or kills the
+            // socket cannot strand it, and its outcome never stops Sync.
+            await readInboxSnapshot()
+        } else {
+            Task { [weak self] in await self?.readInboxSnapshot() }
         }
     }
 
@@ -3021,13 +3022,22 @@ public actor NativeRelayCore {
     }
 
     private func saveServerStateCache(cursorOverride: UInt64? = nil) async throws {
+        try await Self.saveServerStateCache(store: store, context: context, cache: serverStateCache,
+                                            cursorOverride: cursorOverride)
+    }
+
+    private static func saveServerStateCache(store: ClientRepository, context: ProfileContext,
+                                             cache: any ServerStateCaching,
+                                             cursorOverride: UInt64? = nil) async throws {
         let inbox = try store.serverCacheSnapshot(context: context)
         let conversations = try store.conversationSnapshot(context: context)
         let snapshot = ServerStateCacheSnapshot.make(identity: context.identity, from: inbox,
                                                       conversations: conversations,
                                                       cursorOverride: cursorOverride)
-        try await serverStateCache.save(snapshot)
+        try await cache.save(snapshot)
     }
+
+    static let subscribeConversationOperation = "subscribe_conversation"
 
     private func validate() throws {
         _ = try validatedRelayCursor()
