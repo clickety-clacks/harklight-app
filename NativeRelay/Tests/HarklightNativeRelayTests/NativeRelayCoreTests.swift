@@ -1783,11 +1783,16 @@ final class NativeRelayCoreTests: XCTestCase {
 
     /// The stream connection's inbox reads fail as soon as the replay starts.
     /// The view is read only on the request connection.
-    private final class ViewReadSession: Session, @unchecked Sendable {
+    private class ViewReadSession: Session, @unchecked Sendable {
         var viewFailure: (any Error)?
         var viewErrorReason: String?
         override func inboxRequest(_ request: Data, ref: String) async throws -> Data {
-            if try JSONValue.parse(request).uniqueValue(named: "type")?.stringValue?.rawValue == "view_get" {
+            let value = try JSONValue.parse(request)
+            if value.uniqueValue(named: "type")?.stringValue?.rawValue == "message_open" {
+                requests.append(request)
+                return Self.confirmedMessageOpen(value)
+            }
+            if value.uniqueValue(named: "type")?.stringValue?.rawValue == "view_get" {
                 if let viewFailure {
                     requests.append(request)
                     throw viewFailure
@@ -1799,6 +1804,95 @@ final class NativeRelayCoreTests: XCTestCase {
             }
             return try await super.inboxRequest(request, ref: ref)
         }
+
+        /// The server's confirmation of exactly the reported operation.
+        static func confirmedMessageOpen(_ request: JSONValue) -> Data {
+            func text(_ name: String) -> String { request.uniqueValue(named: name)?.stringValue?.rawValue ?? "" }
+            let revision = request.uniqueValue(named: "request_revision")?.integerValue ?? 0
+            return Data(#"{"v":1,"type":"ok","ref":"native-message-open","op_id":"\#(text("op_id"))","sender_id":"\#(text("sender_id"))","message_id":"\#(text("message_id"))","request_revision":\#(revision),"opened":true}"#.utf8)
+        }
+    }
+
+    /// A stream whose conversation replay stays open until released, as a
+    /// long catch-up does.
+    private final class StalledReplayConversationSession: ViewReadSession, AuthenticatedConversationSession,
+        @unchecked Sendable {
+        let replayEntered = AsyncSignal()
+        let releaseReplay = AsyncSignal()
+        func openConversation(_ request: Data, consume: @Sendable (Data) async throws -> Void) async throws {
+            replayEntered.signal()
+            await releaseReplay.wait()
+            throw POSIXError(.ECONNABORTED)
+        }
+        func acknowledgeConversation(_ request: Data) async throws {}
+    }
+
+    private func enqueueMarkSeen(_ messageID: String, store: ClientRepository,
+                                 context: ProfileContext) throws -> PendingMessageOpen {
+        try store.enqueueMessageOpen(RequestKey(accountScope: context.identity.personID,
+                                                senderID: ExactText("sender"), messageID: ExactText(messageID)),
+                                     requestRevision: 1, context: context)
+    }
+
+    /// Design section 8: with the stream cancelled or aborted, Mark Seen is
+    /// still sent and confirmed on a request connection, both a report left
+    /// from before and one made after the stream failed.
+    private func assertMarkSeenIsConfirmedWhileTheStreamFails(_ error: any Error) async throws {
+        let (context, store, _) = try setup()
+        let stream = FailingReplayConversationSession(context.identity)
+        stream.replayError = error
+        stream.snapshotHighWater = 1
+        stream.frames = [data(#"{"v":1,"type":"resynced","seq":1}"#)]
+        let requests = ViewReadSession(context.identity)
+        requests.inboxViewEntries = independentReadEntries()
+        let errors = RecordingErrorLog()
+        _ = try enqueueMarkSeen("left-from-before", store: store, context: context)
+        let core = try NativeRelayCore(store: store, context: context, session: stream,
+                                       requestConnections: SeparateRequestConnection(session: requests),
+                                       errorLog: errors)
+        do { _ = try await core.resyncAndDrainOutbox() } catch {}
+        XCTAssertEqual(stream.conversationOpenCount, 1)
+
+        _ = try enqueueMarkSeen("opened-after-failure", store: store, context: context)
+        _ = await core.sendPendingMessageOpens()
+
+        XCTAssertTrue(try store.snapshot(context: context).pendingMessageOpens.isEmpty,
+                      "Both Mark Seen reports were confirmed.")
+        XCTAssertFalse(try requestTypes(stream).contains("message_open"),
+                       "Mark Seen never uses the stream connection.")
+        XCTAssertEqual(try requestTypes(requests).filter { $0 == "message_open" }.count, 2)
+        XCTAssertEqual(errors.reported.map(\.concern), [.sync])
+        await core.deactivate()
+    }
+
+    func testMarkSeenIsConfirmedOnARequestConnectionWhileTheStreamIsCancelled() async throws {
+        try await assertMarkSeenIsConfirmedWhileTheStreamFails(CancellationError())
+    }
+
+    func testMarkSeenIsConfirmedOnARequestConnectionWhileTheStreamIsAborted() async throws {
+        try await assertMarkSeenIsConfirmedWhileTheStreamFails(POSIXError(.ECONNABORTED))
+    }
+
+    /// Mark Seen is not held until a conversation replay in progress ends,
+    /// even on the single shared connection of the fallback.
+    func testMarkSeenIsNotHeldBehindAConversationReplayInProgress() async throws {
+        let (context, store, _) = try setup()
+        let session = StalledReplayConversationSession(context.identity)
+        session.snapshotHighWater = 1
+        session.frames = [data(#"{"v":1,"type":"resynced","seq":1}"#)]
+        session.inboxViewEntries = independentReadEntries()
+        let core = try NativeRelayCore(store: store, context: context, session: session)
+        let drain = Task { try? await core.resyncAndDrainOutbox() }
+        await session.replayEntered.wait()
+
+        let operation = try enqueueMarkSeen("opened-during-replay", store: store, context: context)
+        let settled = await core.sendPendingMessageOpens()
+
+        XCTAssertEqual(settled, 1, "Mark Seen was sent and confirmed while the replay was still running.")
+        XCTAssertFalse(try store.snapshot(context: context).pendingMessageOpens.contains(operation))
+        session.releaseReplay.signal()
+        _ = await drain.value
+        await core.deactivate()
     }
 
     private func requestTypes(_ session: Session) throws -> [String] {
