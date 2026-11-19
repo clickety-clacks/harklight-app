@@ -1,7 +1,7 @@
 import Foundation
 
 // Resources of the Harklight client API v2 (docs/client-api-v2.md, accepted
-// edff7e9, with contract rulings round 2). Decoded from exact JSON: unknown
+// edff7e9, with contract rulings rounds 2-4). Decoded from exact JSON: unknown
 // members are ignored, and the sender's message content passes through
 // unchanged.
 
@@ -33,21 +33,24 @@ public struct APIAvailability: Equatable, Codable, Sendable {
     public let lastDetachedAtMs: UInt64?
 }
 
-/// An answer as recorded by the server, shown on every device of the person.
+/// The person-facing answer outcome, shown on every client of the person
+/// (round 4 item 3). `value` is present only for `default`.
 public struct APIAnswer: Equatable, Codable, Sendable {
-    public let choice: ExactText?
+    /// seen, reply, default or no_comment.
+    public let kind: String
+    public let text: ExactText?
     public let value: JSONValue?
-    public let comment: ExactText?
-    public let result: JSONValue?
 }
 
 public struct APITerminal: Equatable, Codable, Sendable {
     /// answered, cleared, expired, superseded or retracted.
     public let state: String
     public let atMs: UInt64
-    public let noComment: Bool
+    /// Answered by any client of this person, not only this device.
     public let byThisPerson: Bool
     public let answer: APIAnswer?
+
+    public var isNoComment: Bool { answer?.kind == "no_comment" }
 }
 
 public struct APIOriginResult: Equatable, Codable, Sendable {
@@ -81,6 +84,8 @@ public struct APIItem: Equatable, Codable, Sendable {
     public let terminal: APITerminal?
     public let result: APIOriginResult?
     public let rank: APIRank
+    /// When the item first reached the person; the new-messages area orders by it.
+    public let createdAtMs: UInt64?
 }
 
 public struct APIEntryDelivery: Equatable, Codable, Sendable {
@@ -94,11 +99,13 @@ public struct APIEntry: Equatable, Codable, Sendable {
     public let rev: UInt64
     /// Immutable creation order within the item; entries sort by it.
     public let position: UInt64
-    /// reply, answer, lifecycle, revision, availability or receipt.
+    /// reply, lifecycle (a retraction), revision or availability. Answers are
+    /// read from Item.terminal, receipts from `delivery`.
     public let kind: String
     /// person, origin or server.
     public let author: String
-    public let atMs: UInt64
+    /// Absent on entries from before the cut-over; order by `position`.
+    public let atMs: UInt64?
     public let requestRevision: UInt64
     public let text: ExactText?
     public let files: [APIFileRef]
@@ -108,7 +115,6 @@ public struct APIEntry: Equatable, Codable, Sendable {
     public let terminal: APITerminal?
     public let availability: APIAvailability?
     public let delivery: APIEntryDelivery?
-    public let answer: APIAnswer?
 }
 
 public struct APICounts: Equatable, Codable, Sendable {
@@ -218,10 +224,9 @@ extension APIAvailability {
 
 extension APIAnswer {
     fileprivate init(_ reader: Reader) throws {
-        choice = try reader.optionalString("choice")
+        kind = try reader.string("kind").rawValue
+        text = try reader.optionalString("text")
         value = reader.raw("value")
-        comment = try reader.optionalString("comment")
-        result = reader.raw("result")
     }
 }
 
@@ -229,7 +234,6 @@ extension APITerminal {
     fileprivate init(_ reader: Reader) throws {
         state = try reader.string("state").rawValue
         atMs = try reader.unsigned("at_ms")
-        noComment = try reader.optionalBool("no_comment") ?? false
         byThisPerson = try reader.optionalBool("by_this_person") ?? false
         answer = try reader.optionalObject("answer").map(APIAnswer.init)
     }
@@ -271,6 +275,7 @@ extension APIItem {
         self.rank = APIRank(key: try rank.string("key"), score: score,
                             dueAtMs: try rank.optionalUnsigned("due_at_ms"),
                             section: try rank.optionalString("section")?.rawValue)
+        createdAtMs = try reader.optionalUnsigned("created_at_ms")
         guard rev >= 1 else { throw ClientAPIModelError.invalid("item.rev") }
     }
 }
@@ -284,7 +289,7 @@ extension APIEntry {
         position = try reader.unsigned("position")
         kind = try reader.string("kind").rawValue
         author = try reader.string("author").rawValue
-        atMs = try reader.unsigned("at_ms")
+        atMs = try reader.optionalUnsigned("at_ms")
         requestRevision = try reader.unsigned("request_revision")
         text = try reader.optionalString("text")
         files = try APIFileRef.list(reader.array("files"), "entry.files")
@@ -295,7 +300,6 @@ extension APIEntry {
         delivery = try reader.optionalObject("delivery").map { delivery in
             APIEntryDelivery(delivered: try delivery.optionalBool("delivered"), acted: try delivery.optionalBool("acted"))
         }
-        answer = try reader.optionalObject("answer").map(APIAnswer.init)
         guard rev >= 1, position >= 1 else { throw ClientAPIModelError.invalid("entry.rev") }
     }
 }
@@ -359,5 +363,46 @@ public struct APIWriteResult: Equatable, Sendable {
         item = try reader.raw("item").map(APIItem.init(json:))
         entry = try reader.raw("entry").map(APIEntry.init(json:))
         settings = try reader.raw("settings").map(APISettings.init(json:))
+    }
+}
+
+/// `GET /v2/items/{item_id}/revisions/{n}`: `{rev, revision: {request_revision, message, files}}`.
+public struct APIRevision: Equatable, Sendable {
+    public let position: UInt64
+    public let requestRevision: UInt64
+    /// That revision's message, unchanged.
+    public let message: JSONValue
+    public let files: [APIFileRef]
+
+    public init(json: JSONValue) throws {
+        let reader = try Reader(json, "revision")
+        position = try reader.unsigned("rev")
+        let revision = try reader.object("revision")
+        requestRevision = try revision.unsigned("request_revision")
+        guard let message = revision.raw("message"), case .object = message else {
+            throw ClientAPIModelError.invalid("revision.message")
+        }
+        self.message = message
+        files = try APIFileRef.list(revision.array("files"), "revision.files")
+    }
+}
+
+/// `GET /v2/me`: the principal's facts. Members not used yet are kept raw.
+public struct APIMe: Equatable, Sendable {
+    /// active or paused.
+    public let accountState: String?
+    /// Server-controlled client features still behind a flag at 0.2.
+    public let features: [String: Bool]
+    public let body: JSONValue
+
+    public init(json: JSONValue) throws {
+        let reader = try Reader(json, "me")
+        accountState = try reader.optionalObject("account").flatMap { try $0.optionalString("state")?.rawValue }
+        var features: [String: Bool] = [:]
+        if let raw = reader.raw("features"), case let .object(members) = raw {
+            for member in members { if case let .bool(on) = member.value { features[member.key.rawValue] = on } }
+        }
+        self.features = features
+        body = json
     }
 }

@@ -97,11 +97,33 @@ final class ServerModelV2Tests: XCTestCase {
     }
 
     func testAnAnswerGivenOnAnotherDeviceIsHeldOnTheItem() throws {
-        let terminal = #"{"state":"answered","at_ms":9,"by_this_person":true,"answer":{"choice":"yes","value":true}}"#
-        let item = try APIItem(json: V2Fixture.json(V2Fixture.item("i", rev: 2, rankKey: "a", terminal: terminal)))
+        let terminal = #"{"state":"answered","at_ms":9,"by_this_person":true,"answer":{"kind":"default","text":"Yes","value":true}}"#
+        let item = try APIItem(json: V2Fixture.json(V2Fixture.item("i", rev: 2, rankKey: "a", terminal: terminal,
+                                                                    extra: #""created_at_ms":1793300000000"#)))
         XCTAssertEqual(item.terminal?.state, "answered")
-        XCTAssertEqual(item.terminal?.answer?.choice?.rawValue, "yes")
+        XCTAssertEqual(item.terminal?.answer?.kind, "default")
+        XCTAssertEqual(item.terminal?.answer?.text?.rawValue, "Yes")
         XCTAssertEqual(item.terminal?.answer?.value, .bool(true))
+        XCTAssertEqual(item.createdAtMs, 1_793_300_000_000)
+        let noComment = try APIItem(json: V2Fixture.json(V2Fixture.item("n", rev: 2, rankKey: "a",
+            terminal: #"{"state":"answered","at_ms":9,"by_this_person":false,"answer":{"kind":"no_comment"}}"#)))
+        XCTAssertTrue(noComment.terminal?.isNoComment == true)
+    }
+
+    func testAnEntryFromBeforeTheCutOverHasNoTimeAndStillOrders() throws {
+        let old = #"{"entry_id":"e","item_id":"i","rev":1,"position":1,"kind":"reply","author":"origin","request_revision":1,"files":[],"delivery":{"delivered":true}}"#
+        let entry = try APIEntry(json: V2Fixture.json(old))
+        XCTAssertNil(entry.atMs)
+        XCTAssertEqual(entry.delivery?.delivered, true, "Receipts arrive as delivery, not as entries.")
+    }
+
+    func testAnEarlierRevisionAndMeDecode() throws {
+        let revision = try APIRevision(json: V2Fixture.json(#"{"rev":12,"revision":{"request_revision":1,"message":{"title":"First","n":1.50},"files":[]}}"#))
+        XCTAssertEqual(revision.requestRevision, 1)
+        XCTAssertEqual(revision.message.jsonString, #"{"title":"First","n":1.50}"#)
+        let me = try APIMe(json: V2Fixture.json(#"{"account":{"state":"paused"},"features":{"progress_inbox":true,"x":"no"},"limits":{}}"#))
+        XCTAssertEqual(me.accountState, "paused")
+        XCTAssertEqual(me.features, ["progress_inbox": true], "Only boolean features are read.")
     }
 
     func testTheModelIsDurableAndAFailedSaveChangesNothing() throws {
