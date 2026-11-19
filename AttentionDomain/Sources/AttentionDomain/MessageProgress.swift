@@ -31,7 +31,9 @@ public struct ProgressSnapshot: Equatable, Sendable {
 
     public var legend: [String] {
         var seen = Set<ExactText>()
-        return visits.map(\.stage).filter { seen.insert(ExactText($0)).inserted }
+        return visits.map(\.stage)
+            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            .filter { seen.insert(ExactText($0)).inserted }
     }
 
     fileprivate init?(_ raw: JSONValue) {
@@ -84,9 +86,8 @@ private func progressNumber(_ raw: JSONValue?) -> Double? {
 }
 
 private func progressStage(_ raw: JSONValue?) -> String? {
-    guard let stage = raw?.stringValue?.rawValue,
-          !stage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
-    return stage
+    // A blank stage is a valid Progress message; the bar shows without a label.
+    raw?.stringValue?.rawValue
 }
 
 private func progressDate(_ raw: JSONValue?) -> Date? {
