@@ -197,7 +197,7 @@ final class NativeGuidedJoinStore {
             }
         }
         try invitation.validate(now: Date())
-        guard !deviceLabel.isEmpty, deviceLabel.utf8.count <= 256 else { throw NativeJoinError.refused }
+        guard !deviceLabel.isEmpty else { throw NativeJoinError.refused }
         // Fresh installations get a fresh key. An interrupted/expired request
         // for the same account retains its original identity; a removed key
         // must never silently become the next installation's identity.
