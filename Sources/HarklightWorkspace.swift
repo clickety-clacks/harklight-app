@@ -127,6 +127,22 @@ enum InboxPriorityDisplay: String, Equatable {
     }
 }
 
+/// Whether the workspace is in landscape and shows Chat inline beside the
+/// message (wide iPad, landscape) instead of in a sheet. Decided from the
+/// window, which keeps its size when the on-screen keyboard appears; the
+/// content size shrinks by the keyboard, so it is used only until the window
+/// has been measured.
+struct WorkspaceChatLayout: Equatable {
+    let landscape: Bool
+    let inlineChat: Bool
+
+    init(window: CGSize?, container: CGSize, isPad: Bool) {
+        let size = window.flatMap { $0.width > 0 && $0.height > 0 ? $0 : nil } ?? container
+        landscape = size.width > size.height
+        inlineChat = isPad && size.width >= 820 && landscape
+    }
+}
+
 /// Window bounds describe the available app window without shrinking when the
 /// keyboard appears. Read this view's window, never a global screen or window.
 struct WorkspaceWindowReader: UIViewRepresentable {
@@ -825,6 +841,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     @State private var replyChatRoute: ReplyChatRoute?
     @State private var dismissedNotificationSerial: UInt64?
     @State private var dismissedInlineChatRequests: Set<RequestKey> = []
+    @State private var windowSize: CGSize?
 
     private var rows: [InboxItem] {
         showsLocalExamples ? samples.inboxItems(appendingTo: requests) : requests.map { .request($0) }
@@ -1391,9 +1408,10 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
 
     var body: some View {
         GeometryReader { geometry in
-            let landscape = geometry.size.width > geometry.size.height
-            let wideChat = UIDevice.current.userInterfaceIdiom == .pad && geometry.size.width >= 820
-            let inlineChat = wideChat && landscape
+            let layout = WorkspaceChatLayout(window: windowSize, container: geometry.size,
+                                             isPad: UIDevice.current.userInterfaceIdiom == .pad)
+            let landscape = layout.landscape
+            let inlineChat = layout.inlineChat
             let tabs = TabView(selection: $rootTab) {
                 Tab(value: .inbox) {
                     inboxSplitView(for: .inbox, inlineChat: inlineChat,
@@ -1535,6 +1553,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                 UIDiagnostics.shared.record("inbox.appear selection=\(UIDiagnostics.describe(selection)) samples.selected=\(samples.selectedID ?? "nil")")
             }
             .uiDiagnostics("inbox-ui-diagnostics", diagnosticSummary(landscape: landscape))
+            .background(WorkspaceWindowReader { windowSize = $0 })
         }
         .sheet(isPresented: $settings) {
             settingsContent()
