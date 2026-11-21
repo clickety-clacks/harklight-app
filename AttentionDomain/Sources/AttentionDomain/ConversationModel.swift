@@ -468,6 +468,10 @@ public struct ConversationThread: Equatable, Codable, Sendable {
     /// own operation, queued in send order with its own id, while the composer
     /// stays free for the next one. Optional so saved state stays readable.
     public var queuedMessages: [ConversationDraft]?
+    /// Client API v2 (round 13): the item was sent without a session, so it
+    /// has no conversation and chat is not offered at all. Optional so
+    /// existing saved state stays readable.
+    public var hasNoConversation: Bool?
 
     mutating func recordAvailabilityUpdate(_ state: ConversationAvailability) {
         availability = state
@@ -501,6 +505,7 @@ public struct ConversationThread: Equatable, Codable, Sendable {
 
     /// Answering the request ends its answer flow, not its separate Chat.
     public var allowsDiscussion: Bool {
+        if hasNoConversation == true { return false }
         if chatNeverCloses == true { return true }
         guard !isRetracted else { return false }
         guard let terminal else { return true }
@@ -510,7 +515,8 @@ public struct ConversationThread: Equatable, Codable, Sendable {
     /// Whether the composer is offered: today, only while the request is open
     /// and discussion is allowed; under the v2 chat rules, always.
     public var isComposerOpen: Bool {
-        chatNeverCloses == true || (terminal == nil && allowsDiscussion)
+        guard hasNoConversation != true else { return false }
+        return chatNeverCloses == true || (terminal == nil && allowsDiscussion)
     }
 
     public var revisionNumbers: [UInt64] { Set(revisions.keys).union(redactedRevisions ?? []).sorted() }

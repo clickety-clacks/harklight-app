@@ -94,6 +94,13 @@ public enum ServerModelV2Projection {
         case "reply": return .reply(answer.text ?? ExactText(""))
         case "no_comment": return .noComment
         case "default": return .defaultAnswer(value: answer.value, text: answer.text)
+        case "choice":
+            guard let id = answer.id, let label = answer.label else { return nil }
+            return .choice(id: id, label: label)
+        case "result":
+            // Chosen by the screen, never by the value's shape; null is a value.
+            guard let value = answer.value else { return nil }
+            return .result(value)
         default: return nil
         }
     }
@@ -105,6 +112,8 @@ public enum ServerModelV2Projection {
                                         revision: item.requestRevision, payload: item.message)
         thread.terminal = terminalState(item.terminal)
         thread.chatNeverCloses = true
+        // Round 13: an item sent without a session has no conversation.
+        if item.chat.available == false { thread.hasNoConversation = true }
         if item.terminal?.state == "retracted" {
             thread.reportedRetractedAtMilliseconds = item.terminal?.atMs
         }
@@ -197,7 +206,8 @@ public enum ServerModelV2Projection {
     static func inboxView(_ ordered: [APIItem], keys: [ExactText: RequestKey], model: ServerModelV2) -> InboxView {
         let entries = ordered.compactMap { item -> InboxViewEntry? in
             guard let key = keys[item.itemID] else { return nil }
-            return InboxViewEntry(key: key, score: item.rank.score.flatMap { Double($0.lexeme) },
+            return InboxViewEntry(key: key, priority: Self.priority(item.rank.level),
+                                  score: item.rank.score.flatMap { Double($0.lexeme) },
                                   dueAtMilliseconds: item.rank.dueAtMs.map { Int($0) })
         }
         // Item rows and unread-reply rows share Rank.key's space.
