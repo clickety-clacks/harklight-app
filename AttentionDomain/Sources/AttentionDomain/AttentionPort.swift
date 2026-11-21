@@ -363,6 +363,9 @@ public struct PresentedRequest: Equatable, Sendable {
     public let supersedesMessageIDs: [ExactText]
     /// Locally received identities of accepted messages that replaced this one.
     public let supersededByMessageKeys: [RequestKey]
+    /// The sender's answer screen cannot be shown and the plain reply is
+    /// offered instead; the person is told so (client API v2, APP-09/10).
+    public let customAnswerScreenNotShown: Bool
 
     public var isResolved: Bool {
         lifecycleStatus != .open && lifecycleStatus != .pending
@@ -408,7 +411,8 @@ public struct PresentedRequest: Equatable, Sendable {
                 staleAnswerRevision: StaleAnswerRevision? = nil,
                 inboxStateIsCurrent: Bool = true,
                 supersedesMessageIDs: [ExactText] = [],
-                supersededByMessageKeys: [RequestKey] = []) {
+                supersededByMessageKeys: [RequestKey] = [],
+                customAnswerScreenNotShown: Bool = false) {
         self.key = key
         self.senderDisplayName = senderDisplayName
         self.requestRevision = requestRevision
@@ -450,6 +454,7 @@ public struct PresentedRequest: Equatable, Sendable {
         self.inboxStateIsCurrent = inboxStateIsCurrent
         self.supersedesMessageIDs = supersedesMessageIDs
         self.supersededByMessageKeys = supersededByMessageKeys
+        self.customAnswerScreenNotShown = customAnswerScreenNotShown
     }
 
     public var defaultAnswerActionID: ExactText? { defaultAnswerAction?.actionID }
@@ -1426,7 +1431,9 @@ public final class AttentionDomainPort: @unchecked Sendable {
                                 staleAnswerRevision: hasAccountTerminal ? nil : staleAnswerRevision,
                                 inboxStateIsCurrent: inboxStateIsCurrent,
                                 supersedesMessageIDs: supersedesMessageIDs,
-                                supersededByMessageKeys: supersededByMessageKeys)
+                                supersededByMessageKeys: supersededByMessageKeys,
+                                customAnswerScreenNotShown: request.customAnswerScreenNotShown(
+                                    deliveredFileNames: Set(deliveredFiles.map(\.name))))
     }
 
     private func submittedAnswer(for submission: Submission?,

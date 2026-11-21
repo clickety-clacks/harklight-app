@@ -3199,6 +3199,14 @@ private struct LiveRequestAnswerControls: View {
                 if canOfferNoComment { noCommentChoice }
             }
         case let .compatibility(actions):
+            if request.customAnswerScreenNotShown {
+                // Client API v2 (APP-09/10): a screen this app cannot show is
+                // replaced by the plain reply, and the person is told why.
+                Text("The sender's custom answer screen isn't shown. You can reply in text.")
+                    .font(.callout)
+                    .foregroundStyle(secondaryTextColor)
+                    .accessibilityIdentifier("custom-answer-screen-not-shown")
+            }
             LiveCompatibilityActions(request: request,
                                      actions: actions,
                                      store: store,
