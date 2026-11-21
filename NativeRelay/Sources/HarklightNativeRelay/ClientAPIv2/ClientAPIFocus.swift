@@ -54,7 +54,11 @@ public enum ClientAPIFocusWire {
     /// `PUT /v2/devices/me/focus {screen, item_id?, visible_entry_id?, ttl_s}`.
     /// Under v2 a report's message id is the item id and its visible event
     /// is an entry id; the sender is not sent.
+    /// `ttl_s` is an integer from 1 to 3600 (focus addendum); 120 is recommended.
+    public static let ttlRange = 1...3600
+
     public static func request(for report: FocusReport, ttlSeconds: Int) -> APIRequest {
+        let ttlSeconds = min(max(ttlSeconds, ttlRange.lowerBound), ttlRange.upperBound)
         var members = [JSONMember("screen", .string(ExactText(report.screen.rawValue)))]
         if let itemID = report.messageID { members.append(JSONMember("item_id", .string(ExactText(itemID)))) }
         if let entryID = report.visibleEventID {
@@ -100,7 +104,8 @@ public actor ClientAPIFocusChannel {
                 onShow: @escaping ShowHandler) {
         self.transport = transport
         self.errors = errors
-        self.ttlSeconds = ttlSeconds
+        self.ttlSeconds = min(max(ttlSeconds, ClientAPIFocusWire.ttlRange.lowerBound),
+                              ClientAPIFocusWire.ttlRange.upperBound)
         self.renewEvery = renewEvery
         self.sleep = sleep
         self.now = now
@@ -108,13 +113,41 @@ public actor ClientAPIFocusChannel {
     }
 
     /// Sends one report and, while it is an in-front screen, keeps it renewed.
+    /// Focus writes are serialized (focus addendum): one is in flight at a
+    /// time, and a report made meanwhile replaces any already waiting, so an
+    /// older write never lands after a newer one. A replaced report returns
+    /// the reply of the write that superseded it.
     @discardableResult
     public func report(_ report: FocusReport) async -> FocusReportReply {
         latest = report
         renewal?.cancel()
         renewal = nil
-        let reply = await send(report)
-        if Self.isInFront(report), latest == report { scheduleRenewal(of: report) }
+        let reply = await write(report)
+        if let latest, Self.isInFront(latest), renewal == nil { scheduleRenewal(of: latest) }
+        return reply
+    }
+
+    private var writing = false
+    private var waiting: FocusReport?
+    private var waiters: [CheckedContinuation<FocusReportReply, Never>] = []
+
+    private func write(_ report: FocusReport) async -> FocusReportReply {
+        guard !writing else {
+            waiting = report
+            return await withCheckedContinuation { waiters.append($0) }
+        }
+        writing = true
+        var next: FocusReport? = report
+        var reply = FocusReportReply.rejected
+        while let current = next {
+            reply = await send(current)
+            next = waiting
+            waiting = nil
+        }
+        writing = false
+        let done = waiters
+        waiters = []
+        done.forEach { $0.resume(returning: reply) }
         return reply
     }
 
@@ -163,12 +196,15 @@ public actor ClientAPIFocusChannel {
             while !Task.isCancelled {
                 do { try await sleep(interval) } catch { return }
                 guard let self, await self.isLatest(report) else { return }
-                _ = await self.send(report)
+                _ = await self.write(report)
             }
         }
     }
 
     private func isLatest(_ report: FocusReport) -> Bool { latest == report }
+
+    /// The report waiting behind the write in flight, if any (for tests).
+    var waitingReport: FocusReport? { waiting }
 
     private func deliver(_ show: ClientAPIShow) async {
         guard !deliveredShows.contains(show.showID) else { return }

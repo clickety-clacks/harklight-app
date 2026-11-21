@@ -19,9 +19,17 @@ private final class FocusTransport: ClientAPITransport, @unchecked Sendable {
     private var bodies: [String] = []
     private(set) var sent: [APIRequest] = []
     var failNext: APIError?
+    /// Holds the first write until released.
+    var holdFirst: AsyncGate?
     func respond(_ body: String) { lock.withLock { bodies.append(body) } }
     var sentBodies: [String] { lock.withLock { sent.map { String(decoding: $0.body ?? Data(), as: UTF8.self) } } }
     func send(_ request: APIRequest) async throws -> APIResponse {
+        let gate = lock.withLock { () -> AsyncGate? in defer { holdFirst = nil }; return holdFirst }
+        if let gate {
+            lock.withLock { sent.append(request) }
+            await gate.wait()
+            return APIResponse(status: 200, requestID: "r", body: Data(#"{"rev":1}"#.utf8))
+        }
         let (failure, body) = lock.withLock { () -> (APIError?, String) in
             sent.append(request)
             defer { failNext = nil }
@@ -215,5 +223,46 @@ final class ClientAPIFocusTests: XCTestCase {
         server.commit("item", "{}")
         await waitFor("the feed still applies changes") { model.applied.count == 1 }
         run.cancel()
+    }
+
+    /// Focus addendum: `ttl_s` is an integer from 1 to 3600.
+    func testTheTTLStaysWithinItsBounds() async throws {
+        func ttl(_ seconds: Int) -> String {
+            String(decoding: ClientAPIFocusWire.request(for: .inbox, ttlSeconds: seconds).body ?? Data(), as: UTF8.self)
+        }
+        XCTAssertEqual(ttl(0), #"{"screen":"inbox","ttl_s":1}"#)
+        XCTAssertEqual(ttl(120), #"{"screen":"inbox","ttl_s":120}"#)
+        XCTAssertEqual(ttl(5000), #"{"screen":"inbox","ttl_s":3600}"#)
+        let transport = FocusTransport()
+        let focus = ClientAPIFocusChannel(transport: transport, errors: RecordingErrorLogV2(), ttlSeconds: 0,
+                                          sleep: { _ in try await Task.sleep(for: .seconds(3600)) }, onShow: { _, _ in })
+        await focus.report(.inbox)
+        XCTAssertEqual(transport.sentBodies, [#"{"screen":"inbox","ttl_s":1}"#])
+    }
+
+    /// Focus addendum: one focus write in flight; the latest report replaces
+    /// any waiting one, so an older write never lands after a newer one.
+    func testRapidScreenChangesSendOneAtATimeAndTheLatestWins() async throws {
+        let transport = FocusTransport()
+        let gate = AsyncGate()
+        transport.holdFirst = gate
+        let focus = channel(transport)
+        let first = Task { await focus.report(.inbox) }
+        await waitFor("the first write is in flight") { transport.sent.count == 1 }
+
+        let older = FocusReport.message(senderID: "agent", messageID: "i1")
+        let newer = FocusReport.message(senderID: "agent", messageID: "i2")
+        let replaced = Task { await focus.report(older) }
+        await waitFor("the next one waits") { await focus.waitingReport == older }
+        let latest = Task { await focus.report(newer) }
+        await waitFor("the latest replaces it") { await focus.waitingReport == newer }
+        XCTAssertEqual(transport.sent.count, 1, "Nothing else is sent while a write is in flight.")
+
+        gate.release()
+        let replies = [await first.value, await replaced.value, await latest.value]
+        XCTAssertEqual(replies, [.accepted, .accepted, .accepted])
+        XCTAssertEqual(transport.sentBodies, [#"{"screen":"inbox","ttl_s":120}"#,
+                                              #"{"screen":"message","item_id":"i2","ttl_s":120}"#],
+                       "The replaced report is never sent.")
     }
 }
