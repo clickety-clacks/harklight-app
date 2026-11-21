@@ -91,10 +91,13 @@ final class NativeFocusPushCoordinatorTests: XCTestCase {
         }
         XCTAssertTrue(readResumed, "The first scroll after the touch resumes normal chat read handling.")
         let touched = try XCTUnwrap(store.conversationSnapshot(context: context).threads[key])
-        XCTAssertTrue(touched.hasUnreadAgentReply,
-                      "A visible read request cannot manufacture the server read position.")
-        XCTAssertEqual(touched.accountReadThroughConversationSequence, 0)
+        XCTAssertFalse(touched.hasUnreadAgentReply,
+                       "The staged read is projected optimistically after the person touches chat.")
+        XCTAssertEqual(touched.accountReadThroughConversationSequence, 3)
         XCTAssertEqual(try store.savedV2ReadPositions(context: context).first?.entryID, newest)
+        XCTAssertNil(model.snapshot.items[key.messageID]?.chat.readPosition,
+                     "The confirmed server read position remains unchanged until the write is accepted.")
+        XCTAssertEqual(model.heldCursor, 4, "Staging a read does not move the feed cursor.")
         coordinator.accountConnectionWillBeRemoved()
     }
 

@@ -47,9 +47,17 @@ final class V2PushPermissionTests: XCTestCase {
         XCTAssertNil(try enrollment.load()?.v2PushRegistration)
         lifecycle.installV2Connection(connection, context: context)
         lifecycle.sceneActivityChanged(isActive: true)
-        _ = await lifecycle.refreshAfterPushAddressStored()
+        let firstPass = Task { await lifecycle.refreshAfterPushAddressStored() }
+        let firstDeleteStarted = await transport.waitForFirstDelete()
+        XCTAssertTrue(firstDeleteStarted, "The denied first foreground must look up and remove the legacy binding.")
+        await transport.releaseFirstDelete()
         let savedRemoval = try XCTUnwrap(enrollment.load()?.v2PushRegistration?.permissionRemovalID)
+        let firstWrites = await transport.writes
+        let firstDeleteKey = firstWrites.first(where: { $0.method == .delete })?.idempotencyKey
+        XCTAssertEqual(firstDeleteKey, savedRemoval,
+                       "The removal key is durably saved before the request starts.")
         XCTAssertNil(connection.model.snapshot.routablePushBindingID)
+        _ = await firstPass.value
         _ = await lifecycle.refreshAfterPushAddressStored()
         let readCount = await transport.settingsReads
         let writes = await transport.writes
@@ -123,6 +131,7 @@ private actor V2PermissionTransport: ClientAPITransport {
     private var revision: Int
     private var environment: String?
     private var failFirstDelete = true
+    private var firstDeleteRelease: CheckedContinuation<Void, Never>?
 
     init(hasLegacyBinding: Bool = false) {
         revision = hasLegacyBinding ? 7 : 0
@@ -140,6 +149,7 @@ private actor V2PermissionTransport: ClientAPITransport {
             if request.method == .delete {
                 if failFirstDelete {
                     failFirstDelete = false
+                    await withCheckedContinuation { firstDeleteRelease = $0 }
                     throw URLError(.networkConnectionLost)
                 }
                 revision += 1
@@ -153,6 +163,19 @@ private actor V2PermissionTransport: ClientAPITransport {
         let push = environment.map { #"{"state":"ready","revision":\#(revision),"environment":"\#($0)","binding_id":"binding-\#(revision)"}"# }
             ?? #"{"state":"canceled","revision":\#(revision)}"#
         return reply(#"{"rev":\#(revision),"settings":{"rev":\#(revision),"priority_levels":[],"push":\#(push)}}"#)
+    }
+
+    func waitForFirstDelete() async -> Bool {
+        for _ in 0..<200 {
+            if writes.contains(where: { $0.method == .delete }) { return true }
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        return false
+    }
+
+    func releaseFirstDelete() {
+        firstDeleteRelease?.resume()
+        firstDeleteRelease = nil
     }
 
     private func reply(_ body: String) -> APIResponse {
