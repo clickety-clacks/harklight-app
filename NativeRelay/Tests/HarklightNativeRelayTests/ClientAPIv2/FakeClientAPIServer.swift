@@ -15,19 +15,37 @@ final class FakeClientAPIServer: ClientAPITransport, @unchecked Sendable {
 
     /// Requests in arrival order, with whether the outbox had persisted each
     /// key before it was sent (filled by `persistedKeys`).
-    private(set) var received: [APIRequest] = []
+    private var _received: [APIRequest] = []
+    var received: [APIRequest] { lock.withLock { _received } }
     var persistedKeys: (() -> Set<UUID>)?
-    private(set) var keysPersistedAtSend: [Bool] = []
+    private var _keysPersistedAtSend: [Bool] = []
+    var keysPersistedAtSend: [Bool] { lock.withLock { _keysPersistedAtSend } }
 
     /// Fails every feed open with this error (for example a cancelled or
     /// aborted connection).
-    var feedFailure: (any Error)?
+    private var _feedFailure: (any Error)?
+    var feedFailure: (any Error)? {
+        get { lock.withLock { _feedFailure } }
+        set { lock.withLock { _feedFailure = newValue } }
+    }
     /// Queued answers for writes, consumed in order; nil means accept.
-    var nextWriteFailures: [(any Error)?] = []
+    private var _nextWriteFailures: [(any Error)?] = []
+    var nextWriteFailures: [(any Error)?] {
+        get { lock.withLock { _nextWriteFailures } }
+        set { lock.withLock { _nextWriteFailures = newValue } }
+    }
     /// Item JSON served by GET /v2/inbox.
-    var inboxItems: [String] = []
+    private var _inboxItems: [String] = []
+    var inboxItems: [String] {
+        get { lock.withLock { _inboxItems } }
+        set { lock.withLock { _inboxItems = newValue } }
+    }
     /// Suspends a write to `path` until released.
-    var holdWrites: [String: AsyncGate] = [:]
+    private var _holdWrites: [String: AsyncGate] = [:]
+    var holdWrites: [String: AsyncGate] {
+        get { lock.withLock { _holdWrites } }
+        set { lock.withLock { _holdWrites = newValue } }
+    }
 
     var head: Rev { lock.withLock { log.last?.rev ?? retainedFrom } }
     var openFeedCount: Int { lock.withLock { feeds.count } }
@@ -87,16 +105,16 @@ final class FakeClientAPIServer: ClientAPITransport, @unchecked Sendable {
         try Task.checkCancellation()
         let persisted = request.idempotencyKey.map { persistedKeys?().contains($0) ?? true } ?? true
         lock.withLock {
-            received.append(request)
-            if request.method != .get { keysPersistedAtSend.append(persisted) }
+            _received.append(request)
+            if request.method != .get { _keysPersistedAtSend.append(persisted) }
         }
         if request.method == .get {
             // The inbox as a snapshot: the items the fake serves, at its head.
-            let items = lock.withLock { inboxItems.joined(separator: ",") }
+            let items = lock.withLock { _inboxItems.joined(separator: ",") }
             return APIResponse(status: 200, requestID: nextRequestID(),
                                body: Data(#"{"rev":\#(head),"items":[\#(items)],"counts":{"unresolved":0}}"#.utf8))
         }
-        if let gate = lock.withLock({ holdWrites[request.path] }) { await gate.wait() }
+        if let gate = lock.withLock({ _holdWrites[request.path] }) { await gate.wait() }
         let digest = (request.path + request.method.rawValue).data(using: .utf8)! + (request.body ?? Data())
         if let key = request.idempotencyKey, let prior = lock.withLock({ stored[key] }) {
             guard prior.digest == digest else {
@@ -105,7 +123,7 @@ final class FakeClientAPIServer: ClientAPITransport, @unchecked Sendable {
             return APIResponse(status: prior.response.status, requestID: nextRequestID(),
                                body: prior.response.body, replayed: true)
         }
-        let failure = lock.withLock { nextWriteFailures.isEmpty ? nil : nextWriteFailures.removeFirst() }
+        let failure = lock.withLock { _nextWriteFailures.isEmpty ? nil : _nextWriteFailures.removeFirst() }
         if let failure {
             // An unknown outcome may still have committed on the server.
             if let committed = failure as? CommittedThenLost {
@@ -126,7 +144,7 @@ final class FakeClientAPIServer: ClientAPITransport, @unchecked Sendable {
 
     func changeFeed(after: Rev) -> AsyncThrowingStream<FeedEvent, any Error> {
         AsyncThrowingStream { continuation in
-            if let feedFailure = lock.withLock({ self.feedFailure }) {
+            if let feedFailure = lock.withLock({ self._feedFailure }) {
                 continuation.finish(throwing: feedFailure)
                 return
             }
@@ -191,12 +209,19 @@ final class AsyncGate: @unchecked Sendable {
 final class RecordingSyncModel: SyncModelWriting, @unchecked Sendable {
     private let lock = NSLock()
     private var gate = RevGate()
-    private(set) var applied: [Rev] = []
-    private(set) var rebaselines = 0
-    private(set) var batches: [[Rev]] = []
+    private var _applied: [Rev] = []
+    var applied: [Rev] { lock.withLock { _applied } }
+    private var _rebaselines: Int = 0
+    var rebaselines: Int { lock.withLock { _rebaselines } }
+    private var _batches: [[Rev]] = []
+    var batches: [[Rev]] { lock.withLock { _batches } }
     var cursor = MemoryRevCursor()
     var snapshotRev: () -> Rev
-    var failApplyAt: Rev?
+    private var _failApplyAt: Rev?
+    var failApplyAt: Rev? {
+        get { lock.withLock { _failApplyAt } }
+        set { lock.withLock { _failApplyAt = newValue } }
+    }
     var onApply: ((FeedChange) -> Void)?
 
     init(snapshotRev: @escaping () -> Rev) { self.snapshotRev = snapshotRev }
@@ -212,8 +237,8 @@ final class RecordingSyncModel: SyncModelWriting, @unchecked Sendable {
     func apply(_ changes: [FeedChange], cursor rev: Rev) async throws {
         for change in changes { onApply?(change) }
         let admitted = try lock.withLock { () -> [Rev] in
-            if let failApplyAt, changes.contains(where: { $0.rev == failApplyAt }) {
-                self.failApplyAt = nil
+            if let failApplyAt = _failApplyAt, changes.contains(where: { $0.rev == failApplyAt }) {
+                self._failApplyAt = nil
                 throw CocoaError(.fileWriteUnknown)
             }
             return changes.filter { gate.admit("log", rev: $0.rev) }.map(\.rev)
@@ -222,14 +247,14 @@ final class RecordingSyncModel: SyncModelWriting, @unchecked Sendable {
         // together: a test that sees a change applied also sees its cursor.
         try cursor.save(max((try cursor.load()) ?? 0, rev))
         lock.withLock {
-            batches.append(changes.map(\.rev))
-            applied += admitted
+            _batches.append(changes.map(\.rev))
+            _applied += admitted
         }
     }
 
     func rebaseline() async throws -> Rev {
         let rev = lock.withLock { () -> Rev in
-            rebaselines += 1
+            _rebaselines += 1
             let rev = snapshotRev()
             _ = gate.admit("log", rev: rev)
             return rev
@@ -243,10 +268,11 @@ final class RecordingSyncModel: SyncModelWriting, @unchecked Sendable {
 final class MemoryRevCursor: @unchecked Sendable {
     private let lock = NSLock()
     private var value: Rev?
-    private(set) var saves: [Rev] = []
+    private var _saves: [Rev] = []
+    var saves: [Rev] { lock.withLock { _saves } }
     init(_ value: Rev? = nil) { self.value = value }
     func load() throws -> Rev? { lock.withLock { value } }
-    func save(_ rev: Rev) throws { lock.withLock { value = rev; saves.append(rev) } }
+    func save(_ rev: Rev) throws { lock.withLock { value = rev; _saves.append(rev) } }
 }
 
 final class MemoryOutboxPersistence: OutboxPersisting, @unchecked Sendable {
@@ -265,22 +291,26 @@ final class MemoryOutboxPersistence: OutboxPersisting, @unchecked Sendable {
 
 final class RecordingOutcomes: OutboxOutcomeHandling, @unchecked Sendable {
     private let lock = NSLock()
-    private(set) var accepted: [(UUID, APIResponse)] = []
-    private(set) var rejected: [(UUID, APIError)] = []
+    private var _accepted: [(UUID, APIResponse)] = []
+    var accepted: [(UUID, APIResponse)] { lock.withLock { _accepted } }
+    private var _rejected: [(UUID, APIError)] = []
+    var rejected: [(UUID, APIError)] { lock.withLock { _rejected } }
     func accepted(_ entry: OutboxEntry, response: APIResponse) async {
-        lock.withLock { accepted.append((entry.idempotencyKey, response)) }
+        lock.withLock { _accepted.append((entry.idempotencyKey, response)) }
     }
     func rejected(_ entry: OutboxEntry, error: APIError) async {
-        lock.withLock { rejected.append((entry.idempotencyKey, error)) }
+        lock.withLock { _rejected.append((entry.idempotencyKey, error)) }
     }
 }
 
 final class RecordingErrorLogV2: ErrorLogging, @unchecked Sendable {
     private let lock = NSLock()
-    private(set) var reports: [ErrorLogReport] = []
-    private(set) var resolutions: [String] = []
-    func report(_ report: ErrorLogReport) { lock.withLock { reports.append(report) } }
+    private var _reports: [ErrorLogReport] = []
+    var reports: [ErrorLogReport] { lock.withLock { _reports } }
+    private var _resolutions: [String] = []
+    var resolutions: [String] { lock.withLock { _resolutions } }
+    func report(_ report: ErrorLogReport) { lock.withLock { _reports.append(report) } }
     func resolve(concern: ErrorLogConcern, operation: String, resolvedBy: String?) {
-        lock.withLock { resolutions.append("\(concern.rawValue).\(operation)") }
+        lock.withLock { _resolutions.append("\(concern.rawValue).\(operation)") }
     }
 }
