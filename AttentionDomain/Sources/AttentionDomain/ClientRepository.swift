@@ -675,7 +675,8 @@ public final class ClientRepository: @unchecked Sendable {
                                    descriptorFingerprint: descriptorFingerprint,
                                    contentFingerprint: contentFingerprint,
                                    requestRevision: selector.requestRevision,
-                                   submittedAt: Date())
+                                   submittedAt: Date(),
+                                   answerUISchema: request.answerDescription?.uniqueValue(named: "schema")?.stringValue)
 
         var next = state
         if persistAnswerDraft {

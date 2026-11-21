@@ -154,6 +154,9 @@ public struct Submission: Equatable, Codable, Sendable {
     /// Nil preserves old receipts without inventing their send time.
     public let submittedAt: Date?
     public let requestRevision: UInt64?
+    /// The schema of this answer's bound revision. It stays available after
+    /// another revision changes the message's current answer screen.
+    public let answerUISchema: ExactText?
     public let requestKey: RequestKey
     public let answer: JSONValue
     /// Missing values decode existing schema-2 answer receipts unchanged.
@@ -187,9 +190,11 @@ public struct Submission: Equatable, Codable, Sendable {
                 contentFingerprint: String,
                 disposition: IntentDisposition = .pending,
                 requestRevision: UInt64? = nil,
-                submittedAt: Date? = nil) {
+                submittedAt: Date? = nil,
+                answerUISchema: ExactText? = nil) {
         self.submittedAt = submittedAt
         self.requestRevision = requestRevision
+        self.answerUISchema = answerUISchema
         self.requestKey = requestKey
         self.answer = answer
         self.answerKind = answerKind

@@ -58,7 +58,8 @@ public enum ClientAPIWrites {
     }
 
     /// `POST /v2/items/{item_id}/answer` for an answer the person submitted.
-    /// `answerUI` is the request's `answer_ui` for the submission's revision.
+    /// New submissions hold the schema of their bound revision. For older
+    /// saves, supply the same revision's `answer_ui` when it is held.
     ///
     /// - No comment sends only `request_revision`.
     /// - A value action, including an FYI's Seen (contract round 10), sends
@@ -69,7 +70,7 @@ public enum ClientAPIWrites {
     ///   result as `result`, whatever JSON it is, `null` included, and also
     ///   when the screen has no inputs (round 16). The screen's schema
     ///   decides, never the inputs or the value's shape.
-    public static func answer(_ submission: Submission, answerUI: JSONValue?) throws -> ClientAPIWrite {
+    public static func answer(_ submission: Submission, answerUI: JSONValue? = nil) throws -> ClientAPIWrite {
         guard let revision = submission.requestRevision, revision >= 1 else {
             throw BuildError.missingRequestRevision
         }
@@ -92,7 +93,8 @@ public enum ClientAPIWrites {
                 break
             }
         }
-        let senderScreen = answerUI?.uniqueValue(named: "schema")?.stringValue?.rawValue == "attention-client.ui/1"
+        let schema = submission.answerUISchema ?? answerUI?.uniqueValue(named: "schema")?.stringValue
+        let senderScreen = schema?.rawValue == "attention-client.ui/1"
         let senderInputs = inputs.allSatisfy {
             switch $0 {
             case .responseValue, .responseText, .text, .point: return true
