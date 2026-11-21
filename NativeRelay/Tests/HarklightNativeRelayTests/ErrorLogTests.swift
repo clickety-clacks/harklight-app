@@ -616,6 +616,19 @@ final class ErrorLogTests: XCTestCase {
         XCTAssertNil(ErrorLogCorrelation(resourceID: "has space").resourceID, "Unsafe ids are dropped.")
     }
 
+    func testIdsSetAfterInitAreStillCheckedWhenReported() throws {
+        let store = makeStore(clock: Clock(Date(timeIntervalSince1970: 1_000_000)))
+        var correlation = ErrorLogCorrelation()
+        correlation.requestID = "a@b.invalid"
+        correlation.resourceID = "has space"
+        store.report(ErrorLogReport(concern: .sync, connectionRole: .stream, operation: "apply_change",
+                                    phase: "item", reason: .app("decode_failed"), retryable: false,
+                                    correlation: correlation))
+        let record = try XCTUnwrap(store.records.first)
+        XCTAssertNil(record.correlation.requestID)
+        XCTAssertNil(record.correlation.resourceID)
+    }
+
     func testUnsafeRequestIDAndImpossibleStatusAreDropped() {
         XCTAssertNil(ErrorLogCorrelation(requestID: "a@b.invalid").requestID)
         XCTAssertNil(ErrorLogCorrelation(requestID: "id#frag").requestID)

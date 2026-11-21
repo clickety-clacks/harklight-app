@@ -215,6 +215,14 @@ final class ChatRulesTests: XCTestCase {
             XCTAssertTrue(thread.isComposerOpen, "Composer open for \(terminal ?? "open")")
             XCTAssertTrue(thread.allowsDiscussion)
         }
+        // No comment is an answered outcome with its own state.
+        let store = ServerModelV2Store(fileURL: nil)
+        try store.apply(kind: "item", rev: 1, data: V2Fixture.json(V2Fixture.item("n", rev: 1, rankKey: "a",
+            terminal: #"{"state":"answered","at_ms":5,"answer":{"kind":"no_comment"}}"#)))
+        let noComment = try XCTUnwrap(ServerModelV2Projection.cachedState(store.snapshot, identity: identity)
+            .conversations.values.first)
+        XCTAssertEqual(noComment.terminal, .noComment)
+        XCTAssertTrue(noComment.isComposerOpen)
     }
 
     func testTodaysRulesStillCloseChatWithoutTheV2Rules() throws {
@@ -228,4 +236,53 @@ final class ChatRulesTests: XCTestCase {
         open.chatNeverCloses = nil
         XCTAssertTrue(open.isComposerOpen)
     }
+}
+
+/// Review follow-ups on #377/#380 and contract round 9.
+final class V2ProjectionFollowUpTests: XCTestCase {
+    private let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                                           personID: ExactText("person-A"), deviceID: ExactText("installation-A"))
+
+    func testTheEffectiveThreadReachesTheInboxViewAndFollowsAMemberChange() throws {
+        let store = ServerModelV2Store(fileURL: nil)
+        for (id, rev, key) in [("a", 1, "a1"), ("b", 2, "a2")] {
+            try store.apply(kind: "item", rev: UInt64(rev),
+                            data: V2Fixture.json(V2Fixture.item(id, rev: rev, rankKey: key, extra: #""thread":"release""#)))
+        }
+        var entries = try XCTUnwrap(ServerModelV2Projection.cachedState(store.snapshot, identity: identity).inboxView?.entries)
+        XCTAssertEqual(entries.map(\.thread), [ExactText("release"), ExactText("release")],
+                       "Adjacent items sharing (sender, thread) feed today's thread row.")
+        try store.apply(kind: "item", rev: 3, data: V2Fixture.json(V2Fixture.item("b", rev: 3, rankKey: "a2")))
+        entries = try XCTUnwrap(ServerModelV2Projection.cachedState(store.snapshot, identity: identity).inboxView?.entries)
+        XCTAssertEqual(entries.map(\.thread), [ExactText("release"), nil], "A member change updates the row.")
+    }
+
+    func testAnActedOnEntryCountsAsDelivered() throws {
+        let store = ServerModelV2Store(fileURL: nil)
+        try store.apply(kind: "item", rev: 1, data: V2Fixture.json(V2Fixture.item("i", rev: 1, rankKey: "a")))
+        try store.open("i")
+        let entry = #"{"entry_id":"p","item_id":"i","rev":2,"position":1,"kind":"reply","author":"person","request_revision":1,"text":"hi","delivery":{"acted":true}}"#
+        try store.apply(kind: "entry", rev: 2, data: V2Fixture.json(entry))
+        let thread = try XCTUnwrap(ServerModelV2Projection.cachedState(store.snapshot, identity: identity).conversations.values.first)
+        XCTAssertEqual(thread.facts[ExactText("p")]?.delivered, true)
+    }
+
+    func testASkippedChangeIsRecordedWithItsItemAndPosition() async throws {
+        let store = ServerModelV2Store(fileURL: nil)
+        try store.rebaseline(items: [], counts: APICounts(unresolved: 0), position: 0)
+        let errors = RecordingErrorLogV2()
+        let writer = ServerModelSyncWriter(store: store, transport: InboxPagesTransportStub(), errors: errors)
+        let bad = FeedChange(rev: 9, kind: .other("sticker"), data: Data(#"{"item_id":"itm_7"}"#.utf8))
+        try await writer.apply([bad], cursor: 9)
+        XCTAssertEqual(errors.reports.first?.correlation.resourceID, "itm_7")
+        XCTAssertEqual(errors.reports.first?.correlation.rev, 9)
+    }
+}
+
+private final class InboxPagesTransportStub: ClientAPITransport, @unchecked Sendable {
+    func send(_ request: APIRequest) async throws -> APIResponse {
+        throw APIError(status: 404, token: .notFound, retryable: false, requestID: nil)
+    }
+    func changeFeed(after: Rev) -> AsyncThrowingStream<FeedEvent, any Error> { AsyncThrowingStream { $0.finish() } }
+    func changeBatch(after: Rev) async throws -> FeedBatch { FeedBatch(changes: [], rev: after, more: false) }
 }

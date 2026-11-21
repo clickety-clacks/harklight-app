@@ -54,9 +54,13 @@ public final class ServerModelSyncWriter: SyncModelWriting, @unchecked Sendable 
         report(change, reason: "decode_failed", retryable: false)
     }
 
+    /// Records the skipped change with the item it is about and its log
+    /// position, so it can be traced.
     private func report(_ change: ServerModelV2Store.Change, reason: String, retryable: Bool) {
+        let itemID = (try? JSONValue.parse(change.data))?.uniqueValue(named: "item_id")?.stringValue?.rawValue
         errors.report(ErrorLogReport(concern: .sync, connectionRole: .stream, operation: "apply_change",
-            phase: change.kind, reason: .app(reason), initiator: .unknown, retryable: retryable))
+            phase: change.kind, reason: .app(reason), initiator: .unknown, retryable: retryable,
+            correlation: ErrorLogCorrelation(resourceID: itemID, rev: change.rev)))
     }
 
     /// Reads every inbox page. The cursor is the first page's position: later
@@ -82,7 +86,8 @@ public final class ServerModelSyncWriter: SyncModelWriting, @unchecked Sendable 
             for resource in decoded.unreadable {
                 // Reported and skipped; its last-known copy, if any, stays.
                 errors.report(ErrorLogReport(concern: .sync, connectionRole: .request, operation: "rebaseline",
-                    phase: "item", reason: .app("decode_failed"), initiator: .unknown, retryable: false))
+                    phase: "item", reason: .app("decode_failed"), initiator: .unknown, retryable: false,
+                    correlation: ErrorLogCorrelation(resourceID: resource.id?.rawValue, rev: decoded.position)))
                 if let id = resource.id { unreadable.insert(id) }
             }
             page = decoded.nextPage?.rawValue

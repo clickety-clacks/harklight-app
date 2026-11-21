@@ -922,7 +922,10 @@ private struct ConversationComposer: View {
         }
         .onChange(of: draft.disposition) { _, _ in
             textSession.textSaveTask?.cancel()
-            guard thread?.terminal == nil else {
+            // A closed chat keeps its text where it is; an open one (including
+            // a v2 chat after any outcome) puts a refused send's text back
+            // into the composer, so the person's text is never lost.
+            guard thread?.isComposerOpen ?? true else {
                 _ = persistStagedText()
                 return
             }
