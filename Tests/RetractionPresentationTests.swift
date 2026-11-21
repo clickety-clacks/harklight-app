@@ -21,6 +21,40 @@ final class RetractionPresentationTests: XCTestCase {
     }
 
 
+    func testPersistedV2RetractionLeavesTheInboxButKeepsHistoryAfterRelaunch() throws {
+        let context = profile()
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let location = directory.appendingPathComponent("account-model.json")
+        let model = ServerModelV2Store(fileURL: location)
+        let item = #"{"item_id":"retracted","sender":"agent-app","rev":1,"request_revision":1,"message":{"title":"Retracted question"},"files":[],"seen":false,"chat":{"available":true,"started":false},"availability":{"state":"not_listening"},"rank":{"key":"a","section":"current"},"terminal":{"state":"retracted","at_ms":\#(Self.retractedAt)}}"#
+        try model.apply([ServerModelV2Store.Change(rev: 1, kind: "item", data: Data(item.utf8))], cursor: 1)
+        let key = ServerModelV2Projection.key(for: ExactText("retracted"), sender: ExactText("agent-app"),
+                                              identity: context.identity)
+        let timestamp = Date(timeIntervalSince1970: Self.retractedAtSeconds)
+        let expiry = try XCTUnwrap(LivePresentationStore.retractionExpiryDate(for: timestamp))
+
+        func open(_ model: ServerModelV2Store) throws -> LivePresentationStore {
+            let repository = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+            try repository.restoreCachedServerState(
+                ServerModelV2Projection.cachedState(model.snapshot, identity: context.identity), context: context)
+            return try LivePresentationStore(store: repository, context: context)
+        }
+
+        let first = try open(model)
+        first.refreshRetractionVisibility(at: expiry.addingTimeInterval(-1))
+        XCTAssertTrue(first.inboxRows.contains { $0.key == key })
+        first.refreshRetractionVisibility(at: expiry)
+        XCTAssertFalse(first.inboxRows.contains { $0.key == key })
+
+        let relaunched = try open(ServerModelV2Store(fileURL: location))
+        relaunched.refreshRetractionVisibility(at: expiry)
+        XCTAssertFalse(relaunched.inboxRows.contains { $0.key == key })
+        XCTAssertTrue(relaunched.expiredRetractionSearchRows.contains { $0.key == key })
+        XCTAssertTrue(relaunched.conversation(for: key)?.isRetracted == true)
+        XCTAssertEqual(relaunched.retractionDate(key), timestamp)
+    }
+
     func testDisconnectedRetractionDoesNotPresentLocalAttemptAsServerAnswer() throws {
         let context = profile()
         let domain = try ClientRepository(context: context,

@@ -71,8 +71,11 @@ final class InboxFreeOrderTests: XCTestCase {
                 openAtConversationSequence: (item["open_at_conversation_seq"] as? Int).flatMap(UInt64.init(exactly:)),
                 unseenCount: item["unseen_count"] as? Int, freeSection: placement)
         }
-        return InboxView(revision: ExactText(revision), entries: [], listItems: references,
-                         freeOrderVersion: version as? Int)
+        // These fixtures stand in for a complete projection. If a reference
+        // was dropped, the partial list must lose its ordering authority.
+        let complete = references?.count == items?.count
+        return InboxView(revision: ExactText(revision), entries: [], listItems: complete ? references : nil,
+                         freeOrderVersion: complete ? version as? Int : nil)
     }
 
     private func supported(_ view: InboxView) -> Bool {

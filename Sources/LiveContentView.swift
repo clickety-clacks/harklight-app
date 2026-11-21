@@ -912,6 +912,16 @@ struct LiveInboxSettings: View {
                         LabeledContent("Server", value: record.serverDisplayName ?? record.host)
                     }
                 }
+                if !store.isReadOnly, (try? store.recoveredPreviousProtocolText().isEmpty) == false {
+                    HarklightFormSection("Saved text") {
+                        NavigationLink("Unsent from the previous version") {
+                            PreviousDeviceUnsentTextView(title: "Unsent from the previous version",
+                                explanation: "You can copy this saved text and use it in a new message. Some earlier sends may already have reached the server.") {
+                                    try store.recoveredPreviousProtocolText()
+                                }
+                        }
+                    }
+                }
                 if let launch {
                     let otherArchives = launch.availableDisconnectedAccounts
                         .filter { $0.archiveID != archiveDeparture?.archiveID }

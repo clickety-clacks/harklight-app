@@ -397,6 +397,372 @@ final class NativeGuidedTLSTests: XCTestCase {
         let restored = NativeClientDiagnosticJournal(fileURL: url)
         XCTAssertEqual(restored.events.map(\.id), [earlier.id, later.id])
     }
+
+    func testReadOnlyArchiveKeepsDiscussionAndDraftButBlocksConversationMutationAndNetworkFetch() async throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("archive-authority"),
+            personID: ExactText("archive-person"), deviceID: ExactText("archive-device"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let storage = try ConversationFileStorage(identity: identity)
+        defer { try? storage.removeAccountFiles() }
+        let source = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let bytes = Data("saved discussion file".utf8)
+        try bytes.write(to: source)
+        defer { try? FileManager.default.removeItem(at: source) }
+        let localFile = try storage.retain(source)
+        let remoteFile = ConversationFile(id: ExactText("not-downloaded"), name: ExactText("remote.txt"),
+            byteCount: 6, sha256: ExactText(String(repeating: "a", count: 64)),
+            content: .uploaded(ExactText(UUID().uuidString.lowercased())))
+
+        let persistence = MemoryPendingActionPersistence()
+        let domain = try ClientRepository(context: context, persistence: persistence,
+            conversationFileReferences: storage)
+        let key = RequestKey(accountScope: identity.personID, senderID: ExactText("sender"),
+                             messageID: ExactText("archived-request"))
+        let binding = ConversationBinding(request: key, revision: 1)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let modelURL = directory.appendingPathComponent("account-model.json")
+        let model = ServerModelV2Store(fileURL: modelURL)
+        let item = #"{"item_id":"archived-request","sender":"sender","rev":1,"request_revision":1,"message":{"title":"Retained request"},"files":[],"seen":false,"chat":{"available":true,"started":false},"availability":{"state":"not_listening"},"rank":{"key":"a","section":"current"}}"#
+        try model.apply([ServerModelV2Store.Change(rev: 1, kind: "item", data: Data(item.utf8))], cursor: 1)
+        let entries = #"{"rev":1,"entries":[],"older":false}"#
+        try model.apply(APIEntriesPage(json: JSONValue.parse(Data(entries.utf8))), of: key.messageID)
+        let entry = #"{"entry_id":"retained-turn","item_id":"archived-request","rev":2,"position":1,"kind":"reply","author":"person","request_revision":1,"text":"Earlier discussion wording","files":[]}"#
+        try model.apply([ServerModelV2Store.Change(rev: 2, kind: "entry", data: Data(entry.utf8))], cursor: 2)
+        let reopened = ServerModelV2Store(fileURL: modelURL)
+        try domain.restoreCachedServerState(ServerModelV2Projection.cachedState(reopened.snapshot, identity: identity),
+                                           context: context)
+        let savedDraft = ConversationDraft(binding: binding, text: ExactText("Keep this discussion draft"),
+                                           files: [localFile])
+        try domain.saveConversationDraft(savedDraft, context: context)
+        let before = try XCTUnwrap(domain.conversationSnapshot(context: context).threads[key])
+        let persistedBefore = try XCTUnwrap(persistence.load(identity: identity))
+
+        let archive = try LivePresentationStore(disconnectedStore: domain, context: context)
+        XCTAssertTrue(archive.isReadOnly)
+        XCTAssertFalse(archive.isLocalExample, "A real account archive is not a fictional sample")
+        XCTAssertEqual(archive.conversation(for: key)?.turns.first(where: { $0.id == ExactText("retained-turn") })?.text,
+                       ExactText("Earlier discussion wording"))
+        XCTAssertEqual(archive.conversationDraft(for: key, revision: 1).text, savedDraft.text)
+        let cachedURL = try await archive.prepareConversationPreview(localFile)
+        XCTAssertEqual(cachedURL, try storage.fileURL(for: localFile),
+                       "An already retained file stays locally openable")
+        do {
+            _ = try await archive.prepareConversationPreview(remoteFile)
+            XCTFail("A read-only archive cannot fetch a file absent from its local cache")
+        } catch {}
+
+        archive.navigateMessage(from: key, to: nil)
+        archive.updateConversation(for: key, revision: 1, text: "Must remain unchanged")
+        archive.updateConversation(for: key, revision: 1, files: [])
+        archive.addLocalAttachment("Fictional file", for: key, revision: 1)
+        archive.sendDiscussion(for: key, revision: 1)
+
+        let after = try XCTUnwrap(domain.conversationSnapshot(context: context).threads[key])
+        XCTAssertEqual(after, before, "Archive navigation and blocked controls do not change draft, turns, or cleanup state")
+        XCTAssertTrue(after.uploadCleanups?.isEmpty ?? true, "Browsing an archive does not create upload cleanup")
+        XCTAssertTrue(try domain.snapshot(context: context).outbox.isEmpty)
+        XCTAssertTrue(try domain.snapshot(context: context).intents.isEmpty)
+        XCTAssertEqual(try XCTUnwrap(persistence.load(identity: identity)), persistedBefore)
+    }
+
+    func testLaterDisconnectsKeepEveryEarlierConfirmedAccountArchiveDiscoverable() async throws {
+        let service = "Harklight.departure-archive-test." + UUID().uuidString
+        let transport = ArchiveRemovalTransport()
+        let join = NativeGuidedJoinStore(namespace: service, transport: transport)
+        let enrollment = NativeEnrollmentStore(service: service)
+        let tlsFixture = try LocalEnrollmentTLS(expectedDevice: nil)
+        defer {
+            tlsFixture.close()
+            SecItemDelete([kSecClass as String: kSecClassGenericPassword,
+                           kSecAttrService as String: service] as CFDictionary)
+        }
+
+        func makeRecord(_ label: String, _ person: String) throws -> (String, NativeEnrollmentRecord) {
+            let namespace = service + "." + label
+            let identity = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
+            let record = NativeEnrollmentRecord(host: "archive.example.test",
+                enrollmentPort: 18_444,
+                relayPort: 18_443,
+                trustedRootDER: tlsFixture.rootDER, identityLabel: identity.label, deviceLabel: label,
+                deviceID: identity.deviceID, approvalCode: "ABCDEF2345",
+                statusSecret: String(repeating: "b", count: 64), expiresAt: 2_000,
+                statusExpiresAt: 3_000, personID: person, serverDisplayName: "Server",
+                accountDisplayName: label, notificationExplanationSeen: true,
+                foregroundRelayConfirmed: true)
+            return (namespace, record)
+        }
+
+        let identities = try [makeRecord("Account A", "person-a"),
+                              makeRecord("Account B", "person-b"),
+                              makeRecord("Account C", "person-c")]
+        transport.peopleByDevice = Dictionary(uniqueKeysWithValues: identities.compactMap { item in
+            item.1.personID.map { (item.1.deviceID, $0) }
+        })
+        defer {
+            for (namespace, record) in identities {
+                SecItemDelete([kSecClass as String: kSecClassCertificate,
+                               kSecAttrLabel as String: record.identityLabel] as CFDictionary)
+                SecItemDelete([kSecClass as String: kSecClassKey,
+                               kSecAttrApplicationTag as String: Data(namespace.utf8)] as CFDictionary)
+            }
+        }
+
+        let first = identities[0].1
+        try enrollment.retainApprovedGuided(first, expectedPersonID: "person-a", expectedDeviceID: first.deviceID)
+        try join.prepareAccountDeparture(first)
+        try await join.removeCurrentAccount(first)
+        try enrollment.retainApprovedGuided(identities[1].1, expectedPersonID: "person-b",
+                                             expectedDeviceID: identities[1].1.deviceID)
+        try join.prepareAccountDeparture(identities[1].1)
+        XCTAssertEqual(try join.archivedDepartures().map(\.record.deviceID), [first.deviceID])
+
+        try await join.removeCurrentAccount(identities[1].1)
+        try enrollment.retainApprovedGuided(identities[2].1, expectedPersonID: "person-c",
+                                             expectedDeviceID: identities[2].1.deviceID)
+        try join.prepareAccountDeparture(identities[2].1)
+        let reopened = NativeGuidedJoinStore(namespace: service, transport: transport)
+        let archives = try reopened.archivedDepartures()
+        XCTAssertEqual(archives.map(\.record.deviceID), [first.deviceID, identities[1].1.deviceID])
+        XCTAssertEqual(archives.compactMap(\.record.personID), ["person-a", "person-b"])
+        XCTAssertTrue(archives.allSatisfy { $0.removed && $0.replacement == nil })
+    }
+
+    func testReplacementRefreshesArchiveCatalogAndRestoredCurrentAccountCanReturnFromArchive() async throws {
+        let service = "Harklight.replacement-archive-navigation-test." + UUID().uuidString
+        let transport = ArchiveRemovalTransport()
+        let join = NativeGuidedJoinStore(namespace: service, transport: transport)
+        let enrollment = NativeEnrollmentStore(service: service)
+        let tlsFixture = try LocalEnrollmentTLS(expectedDevice: nil)
+        defer {
+            tlsFixture.close()
+            SecItemDelete([kSecClass as String: kSecClassGenericPassword,
+                           kSecAttrService as String: service] as CFDictionary)
+        }
+
+        func makeRecord(_ label: String, _ person: String) throws -> NativeEnrollmentRecord {
+            let namespace = service + "." + label
+            let identity = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
+            let record = NativeEnrollmentRecord(host: "archive.example.test",
+                enrollmentPort: 18_444,
+                relayPort: 18_443,
+                trustedRootDER: tlsFixture.rootDER, identityLabel: identity.label, deviceLabel: label,
+                deviceID: identity.deviceID, approvalCode: "ABCDEF2345",
+                statusSecret: String(repeating: "c", count: 64), expiresAt: 2_000,
+                statusExpiresAt: 3_000, personID: person, serverDisplayName: "Server",
+                accountDisplayName: label, notificationExplanationSeen: true,
+                foregroundRelayConfirmed: true)
+            return record
+        }
+
+        let original = try makeRecord("Original", "person-original")
+        let replacement = try makeRecord("Replacement", "person-replacement")
+        let originalNamespace = service + ".Original"
+        let replacementNamespace = service + ".Replacement"
+        defer {
+            for (record, namespace) in [(original, originalNamespace), (replacement, replacementNamespace)] {
+                SecItemDelete([kSecClass as String: kSecClassCertificate,
+                               kSecAttrLabel as String: record.identityLabel] as CFDictionary)
+                SecItemDelete([kSecClass as String: kSecClassKey,
+                               kSecAttrApplicationTag as String: Data(namespace.utf8)] as CFDictionary)
+            }
+        }
+        transport.peopleByDevice = [original.deviceID: "person-original"]
+        try enrollment.retainApprovedGuided(original, expectedPersonID: "person-original",
+                                             expectedDeviceID: original.deviceID)
+
+        func presentation(for record: NativeEnrollmentRecord) throws -> LivePresentationStore {
+            let context = ProfileContext(identity: ProfileIdentity(
+                trustedRelayAuthority: ExactText(record.profileAuthority),
+                personID: ExactText(record.personID!), deviceID: ExactText(record.deviceID)),
+                transportMode: .relay)
+            let domain = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+            return try LivePresentationStore(store: domain, context: context)
+        }
+
+        let invitationRoot = "-----BEGIN CERTIFICATE-----\n" +
+            tlsFixture.rootDER.base64EncodedString(options: [.lineLength64Characters, .endLineWithLineFeed]) +
+            "-----END CERTIFICATE-----\n"
+        let invitation = NativeJoinInvitation(v: 1, personID: "person-replacement", serverName: "localhost",
+            enrollmentURL: URL(string: "https://localhost:18444/enroll")!,
+            relayURL: URL(string: "wss://localhost:18443/relay")!, caPEM: invitationRoot,
+            caSHA256: fixtureRootSHA256(tlsFixture.rootDER),
+            inviteToken: String(repeating: "d", count: 64),
+            expiresAt: Int64(Date().timeIntervalSince1970 * 1_000) + 60_000,
+            personName: "Replacement", inviterName: "Owner")
+        let encodedInvitation = try JSONEncoder().encode(invitation)
+        let fragment = encodedInvitation.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+        let invitationURL = try XCTUnwrap(URL(string: "harklight://join#\(fragment)"))
+
+        let originalPresentation = try presentation(for: original)
+        let app = NativeAppLaunch(arguments: ["Harklight"], enrollmentStore: enrollment,
+            joinStore: join, initialState: .live(originalPresentation), initialEnrollmentRecord: original)
+        await app.receiveInvitation(invitationURL)
+        XCTAssertEqual(app.guidedJoin.screen, .existingAccount)
+        app.guidedJoin.considerReplacement()
+        await app.guidedJoin.confirmReplacement()
+        XCTAssertEqual(app.guidedJoin.screen, .confirmation)
+        XCTAssertNil(app.activeEnrollmentRecord)
+        XCTAssertEqual(app.archivedAccountDepartures.map(\.record.deviceID), [original.deviceID],
+                       "The confirmed replacement callback refreshes the catalog in the same process")
+
+        // Model the next approved enrollment after replacement without connecting
+        // a relay. Its archive catalog comes from the persisted join store.
+        try join.dismissConfirmedDeparture()
+        try enrollment.retainApprovedGuided(replacement, expectedPersonID: "person-replacement",
+                                             expectedDeviceID: replacement.deviceID)
+        let reopenedJoin = NativeGuidedJoinStore(namespace: service, transport: transport)
+        let currentPresentation = try presentation(for: replacement)
+        let restored = NativeAppLaunch(arguments: ["Harklight"], enrollmentStore: enrollment,
+            joinStore: reopenedJoin, initialState: .live(currentPresentation),
+            initialEnrollmentRecord: replacement)
+        restored.guidedJoin.connectApproved = { _ in false }
+        await restored.restoreInstallation()
+
+        XCTAssertEqual(restored.activeEnrollmentRecord, replacement)
+        XCTAssertFalse(restored.guidedJoin.isShowing)
+        XCTAssertEqual(restored.archivedAccountDepartures.map(\.record.deviceID), [original.deviceID],
+                       "The confirmed archive remains discoverable after restoration with a current account")
+        let archived = try XCTUnwrap(restored.archivedAccountDepartures.first)
+        restored.showArchivedAccount(archived)
+        XCTAssertEqual(restored.selectedArchivedAccount?.record.deviceID, original.deviceID)
+        XCTAssertTrue(restored.selectedArchivedPresentation?.isReadOnly == true)
+        XCTAssertTrue(restored.inboxPresentation === currentPresentation)
+
+        restored.showCurrentAccount()
+        XCTAssertNil(restored.selectedArchivedAccount)
+        XCTAssertNil(restored.selectedArchivedPresentation)
+        XCTAssertTrue(restored.inboxPresentation === currentPresentation,
+                      "Returning from the archive reveals the still-enrolled account")
+    }
+
+    func testReceivedInvitationContinuesAutomaticApprovalPolling() async throws {
+        let namespace = "Harklight.received-invitation-approval-poll." + UUID().uuidString
+        let certificateURL = try XCTUnwrap(Bundle(for: NativeGuidedTLSTests.self)
+            .url(forResource: "guided-local-tls", withExtension: "pem"))
+        let caPEM = try String(contentsOf: certificateURL, encoding: .utf8)
+        let caDER = try XCTUnwrap(NativeEnrollmentSettings.certificateDER(from: caPEM))
+        let caSHA256 = SHA256.hash(data: caDER).map { String(format: "%02x", $0) }.joined()
+        let payload: [String: Any] = [
+            "v": 1,
+            "person_id": "invited-person",
+            "server_name": "relay.example.test",
+            "enrollment_url": "https://relay.example.test:18444/enroll",
+            "relay_url": "wss://relay.example.test:18443/relay",
+            "ca_pem": caPEM,
+            "ca_sha256": caSHA256,
+            "invite_token": String(repeating: "1", count: 64),
+            "expires_at": Int64(Date().timeIntervalSince1970 * 1000) + 1_800_000
+        ]
+        let invitation = try NativeJoinInvitation.decodePayload(JSONSerialization.data(withJSONObject: payload))
+        let invitationData = try JSONEncoder().encode(invitation)
+        let encodedInvitation = invitationData.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+        let invitationURL = try XCTUnwrap(URL(string: "harklight://join#\(encodedInvitation)"))
+
+        let transport = InvitationApprovalPollingTransport()
+        let store = NativeGuidedJoinStore(namespace: namespace, transport: transport)
+        transport.store = store
+        defer {
+            if let attempt = try? store.loadAttempt() {
+                SecItemDelete([kSecClass as String: kSecClassCertificate,
+                               kSecAttrLabel as String: attempt.identityLabel] as CFDictionary)
+                let keyTag = String(attempt.identityLabel.dropLast(".certificate".count))
+                SecItemDelete([kSecClass as String: kSecClassKey,
+                               kSecAttrApplicationTag as String: Data(keyTag.utf8)] as CFDictionary)
+            }
+            SecItemDelete([kSecClass as String: kSecClassGenericPassword,
+                           kSecAttrService as String: namespace] as CFDictionary)
+        }
+
+        let flow = NativeGuidedJoinCoordinator(store: store, deviceName: "Test device")
+        var connectedRecord: NativeEnrollmentRecord?
+        flow.connectApproved = { record in
+            connectedRecord = record
+            return true
+        }
+
+        await flow.receive(invitationURL)
+        XCTAssertEqual(flow.screen, .confirmation,
+                       "Receiving a valid link reaches the ordinary, deliberate Join confirmation.")
+        await flow.join()
+        XCTAssertEqual(flow.screen, .pending)
+        let originalAttempt = try XCTUnwrap(store.loadAttempt())
+
+        XCTAssertTrue(flow.shouldAutomaticallyRetry())
+        let didPoll = await flow.retryAutomaticallyIfNeeded()
+
+        XCTAssertTrue(didPoll)
+        XCTAssertEqual(transport.joinSubmissionCount, 1,
+                       "Approval polling must not create a second Join request.")
+        XCTAssertEqual(transport.approvalCheckCount, 1,
+                       "The actual automatic helper must check the pending request after invitation receipt.")
+        XCTAssertEqual(flow.screen, .connected,
+                       "The ordinary invitation flow observes and completes owner approval.")
+        XCTAssertEqual(flow.attempt?.id, originalAttempt.id)
+        XCTAssertEqual(flow.attempt?.deviceID, originalAttempt.deviceID)
+        XCTAssertEqual(connectedRecord?.personID, invitation.personID)
+        XCTAssertEqual(connectedRecord?.deviceID, originalAttempt.deviceID)
+    }
+}
+
+private func fixtureRootSHA256(_ rootDER: Data) -> String {
+    SHA256.hash(data: rootDER).map { String(format: "%02x", $0) }.joined()
+}
+
+@MainActor
+private final class InvitationApprovalPollingTransport: NativeJoinTransport {
+    weak var store: NativeGuidedJoinStore?
+    private(set) var joinSubmissionCount = 0
+    private(set) var approvalCheckCount = 0
+
+    func request(_ url: URL, method: String, body: Data?, rootDER: Data) async throws -> NativeJoinResponse {
+        switch (url.path, method) {
+        case ("/enroll", "GET"):
+            return try reply(["state": "reachable"])
+        case ("/enroll", "POST"):
+            joinSubmissionCount += 1
+            let deadline = Int64(Date().timeIntervalSince1970 * 1000) + 600_000
+            return try reply(["state": "pending", "approval_code": "ABCDEF2345",
+                              "expires_at": deadline, "status_expires_at": deadline + 86_400_000])
+        case ("/enroll/status", "POST"):
+            approvalCheckCount += 1
+            guard let attempt = try store?.loadAttempt() else { throw NativeJoinError.unavailable }
+            let fields: [String: Any] = ["state": "approved", "person_id": attempt.invitation.personID,
+                                         "device_id": attempt.deviceID]
+            return try reply(fields)
+        default:
+            throw NativeJoinError.unavailable
+        }
+    }
+
+    private func reply(_ fields: [String: Any]) throws -> NativeJoinResponse {
+        NativeJoinResponse(statusCode: 200, data: try JSONSerialization.data(withJSONObject: fields))
+    }
+}
+
+@MainActor
+private final class ArchiveRemovalTransport: NativeJoinTransport {
+    var peopleByDevice: [String: String] = [:]
+    var onRemove: (() async throws -> Void)?
+
+    func request(_ url: URL, method: String, body: Data?, rootDER: Data) async throws -> NativeJoinResponse {
+        NativeJoinResponse(statusCode: 200, data: Data("{\"state\":\"reachable\"}".utf8))
+    }
+
+    func remove(_ url: URL, body: Data, rootDER: Data, identity: SecIdentity) async throws -> NativeJoinResponse {
+        try await onRemove?()
+        let fields = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: String])
+        let device = fields["expected_device_id"] ?? ""
+        let payload: [String: Any] = ["state": "removed", "person_id": peopleByDevice[device] ?? "",
+                                      "device_id": device, "enrollment_revision": 2]
+        return NativeJoinResponse(statusCode: 200, data: try JSONSerialization.data(withJSONObject: payload))
+    }
 }
 
 private final class LocalEnrollmentTLS: @unchecked Sendable {

@@ -193,7 +193,7 @@
           "id": "protocol-0-2-compatibility",
           "symbol": "arrow.triangle.2.circlepath",
           "title": "Harklight protocol 0.2",
-          "detail": "This release uses protocol 0.2 with Harklight Server 0.2.0, Harklight App 0.2.0, Harklight Web 0.2.0, and Harklight Agent 0.2.0. Update the Server and connected clients together."
+          "detail": "This release uses protocol 0.2 with Harklight Server 0.2.0, Harklight App 0.2.0, Harklight Web 0.2.0, and Harklight Agent 0.2.0. Protocol 0.1 clients are unsupported. Update the Server and connected clients together."
         },
         {
           "id": "ipad-list-search",

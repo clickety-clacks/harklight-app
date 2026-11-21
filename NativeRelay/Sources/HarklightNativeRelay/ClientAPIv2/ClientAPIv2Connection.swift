@@ -134,7 +134,8 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
             errors: errors, startsPaused: foregroundOnlyWrites, canSend: { entry in
                 access.state == .available &&
                     (entry.operation != "priority_levels" || relay.connection?.priorityLevelsEditingEnabled == true)
-            }, waitBeforeRetry: outboxWaitBeforeRetry)
+            }, excludingSavedKeys: try repository.heldPreviousProtocolOperations(context: context),
+            waitBeforeRetry: outboxWaitBeforeRetry)
         self.sync = ChangeFeedSync(transport: transport, model: writer, errors: errors,
                                    waitBeforeRetry: waitBeforeRetry, onLiveState: { state in
                                        if state == .accountPaused { access.pause() }
@@ -922,12 +923,8 @@ extension ClientAPIv2Connection {
 
     public func sendSavedConversationReads() async {
         do {
-            let snapshot = try repository.conversationSnapshot(context: context)
             for pending in try repository.savedV2ReadPositions(context: context) {
-                let entryID = pending.entryID ?? snapshot.threads[pending.request]?.turns.first {
-                    $0.conversationSequence == pending.readThroughConversationSequence
-                }?.id
-                guard let entryID else { continue }
+                guard let entryID = pending.entryID else { continue }
                 let write = ClientAPIWrites.readPosition(itemID: pending.request.messageID, entryID: entryID)
                 await handOffItemAction(write.operation, operationID: pending.operationID) {
                     try await outbox.submit(target: write.target, operation: write.operation, write: write.write,

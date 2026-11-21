@@ -872,7 +872,10 @@ final class HarklightTests: XCTestCase {
     }
 
     @MainActor
-    func testSuppliedUnsupportedAnswerFormatOffersNoSend() throws {
+    func testUnknownV2AnswerFormatOffersPlainReplyAndExplainsTheFallback() throws {
+        let savedRules = AnswerScreenRules.current
+        AnswerScreenRules.current = AnswerScreenRules(limits: .builtIn, degradesUnshowableScreens: true)
+        defer { AnswerScreenRules.current = savedRules }
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
                                        personID: ExactText("person-A"),
                                        deviceID: ExactText("device-A"))
@@ -887,11 +890,12 @@ final class HarklightTests: XCTestCase {
                             context: context)
         let visible = try LivePresentationStore(store: store, context: context)
         let request = try XCTUnwrap(visible.presentation.requests.first)
-        guard case .unsupported = request.projection else {
-            return XCTFail("An explicitly supplied unknown answer format must be unsupported.")
+        guard case let .compatibility(actions) = request.projection else {
+            return XCTFail("The v2 client should offer plain reply for an unknown custom screen.")
         }
-        XCTAssertFalse(LiveRequestDetail(request: request, store: visible).canAnswer,
-                       "An unsupported sender format must not offer Send.")
+        XCTAssertEqual(actions.map(\.id), [ExactText("reply")])
+        XCTAssertTrue(request.customAnswerScreenNotShown)
+        XCTAssertTrue(LiveRequestDetail(request: request, store: visible).canAnswer)
     }
 
 
@@ -1153,10 +1157,10 @@ final class HarklightTests: XCTestCase {
                     XCTAssertEqual(resultKinds(acceptedDocument.result),
                                    Set(["literal", "input", "array", "object"]))
 
-                    guard case .sender = RequestInterface.recognize(document, deliveredFileNames: names) else {
+                    guard case .sender = RequestInterface.recognize(document, deliveredFileNames: names, rules: .today) else {
                         return XCTFail("A delivered picture document should be recognized as sender UI.")
                     }
-                    guard case .unsupported(.unfamiliar) = RequestInterface.recognize(document) else {
+                    guard case .unsupported(.unfamiliar) = RequestInterface.recognize(document, rules: .today) else {
                         return XCTFail("A picture document without its delivered file names must remain unsupported.")
                     }
                     let payload = JSONValue.object([JSONMember("answer_ui", document)])
@@ -1164,10 +1168,10 @@ final class HarklightTests: XCTestCase {
                                                                 senderID: ExactText("agent"),
                                                                 messageID: ExactText("picture")),
                                                 originalPayload: payload)
-                    guard case .sender = request.interface(deliveredFileNames: names) else {
+                    guard case .sender = request.interface(deliveredFileNames: names, rules: .today) else {
                         return XCTFail("Stored request recognition must use its delivered file names.")
                     }
-                    guard case .unsupported(.unfamiliar) = request.interface else {
+                    guard case .unsupported(.unfamiliar) = request.interface(deliveredFileNames: [], rules: .today) else {
                         return XCTFail("Stored request recognition must not invent missing delivered files.")
                     }
                 }

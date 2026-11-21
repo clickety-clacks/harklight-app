@@ -767,7 +767,6 @@ enum ConversationDraftPresentationText {
         case "payload_too_large": "An attachment is too large for this server. Your message and files are saved."
         case "attachment_unavailable": "A saved attachment could not be read. Edit the message to remove or add it again. Your text is saved."
         case "stale_revision": "This request changed before the message was sent. Your message is saved."
-        case "previous_transport_unconfirmed": "Delivery from the previous version is unconfirmed. Your text and files are saved."
         default: "Message not sent. Your text and files are saved."
         }
     }

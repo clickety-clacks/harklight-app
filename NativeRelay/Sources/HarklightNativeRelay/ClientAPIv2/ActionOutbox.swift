@@ -124,6 +124,7 @@ public actor ActionOutbox {
     public init(persistence: any OutboxPersisting, transport: any ClientAPITransport,
                 outcomes: any OutboxOutcomeHandling, errors: any ErrorLogging,
                 startsPaused: Bool = false, canSend: @escaping @Sendable (OutboxEntry) -> Bool = { _ in true },
+                excludingSavedKeys: Set<UUID> = [],
                 waitBeforeRetry: @escaping @Sendable (_ attempt: Int, _ retryAfter: TimeInterval?) async throws -> Void
                     = ActionOutbox.backoff) throws {
         self.persistence = persistence
@@ -133,7 +134,10 @@ public actor ActionOutbox {
         self.waitBeforeRetry = waitBeforeRetry
         self.canSend = canSend
         sendingPaused = startsPaused
-        entries = try persistence.load()
+        let saved = try persistence.load()
+        let admitted = saved.filter { !excludingSavedKeys.contains($0.id) }
+        if admitted.count != saved.count { try persistence.save(admitted) }
+        entries = admitted
     }
 
     public static let backoff: @Sendable (Int, TimeInterval?) async throws -> Void = { attempt, retryAfter in

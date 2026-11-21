@@ -444,8 +444,7 @@ private struct UpgradeConversationFixture: Encodable {
     let chatReadPositions = "discarded server read positions"
 }
 
-/// Saved Server state that cannot be presented is rebuilt by the app's own
-/// activation and live-observation handlers, keeping the person's queue.
+/// Projection updates and queue recovery stay visible in the live app.
 @MainActor
 final class SavedStateRecoveryPresentationTests: XCTestCase {
     private func waitUntil(_ condition: () -> Bool, _ message: String) async throws {
@@ -455,41 +454,37 @@ final class SavedStateRecoveryPresentationTests: XCTestCase {
         XCTAssertTrue(condition(), message)
     }
 
-    private func unorderedCache(_ key: RequestKey, payload: JSONValue,
-                                identity: ProfileIdentity) -> CachedAttentionServerState {
-        // A restored request that has lost its inbox order cannot be presented.
-        CachedAttentionServerState(identity: identity,
-            requests: [key: StoredRequest(key: key, originalPayload: payload)], remoteStates: [:],
-            cursor: 1, conversationCursor: 0, conversations: [:], inboxView: nil, currentRequestKeys: [key])
-    }
-
-
-    func testLiveObserverRecoversFromUnpresentableStateAndKeepsUpdating() async throws {
+    func testLiveObserverAdoptsSuccessiveV2ProjectionsWithoutDiscardingDrafts() async throws {
         let context = ProfileContext(identity: ProfileIdentity(
             trustedRelayAuthority: ExactText("relay.example"),
             personID: ExactText("observer-" + UUID().uuidString),
             deviceID: ExactText("reader")), transportMode: .relay)
         let domain = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
-        let key = RequestKey(accountScope: context.identity.personID,
-            senderID: ExactText("sender"), messageID: ExactText("message"))
-        let laterKey = RequestKey(accountScope: context.identity.personID,
-            senderID: ExactText("sender"), messageID: ExactText("later-message"))
-        let payload = try JSONValue.parse(Data(#"{"title":"Question"}"#.utf8))
-        _ = try domain.apply(RelayEvent(sequence: 1,
-            body: .delivery(StoredRequest(key: key, originalPayload: payload), .message)), context: context)
+        let serverModel = ServerModelV2Store(fileURL: nil)
+        let key = ServerModelV2Projection.key(for: ExactText("message"), sender: ExactText("sender"),
+                                              identity: context.identity)
+        let laterKey = ServerModelV2Projection.key(for: ExactText("later-message"), sender: ExactText("sender"),
+                                                   identity: context.identity)
+
+        func publish(_ id: ExactText, revision: UInt64) throws {
+            let item = #"{"item_id":"\#(id.rawValue)","sender":"sender","rev":\#(revision),"request_revision":1,"message":{"title":"Question"},"files":[],"seen":false,"chat":{"available":true,"started":false},"rank":{"key":"\#(revision)","section":"current"}}"#
+            try serverModel.apply([.init(rev: revision, kind: "item", data: Data(item.utf8))], cursor: revision)
+            try domain.restoreCachedServerState(
+                ServerModelV2Projection.cachedState(serverModel.snapshot, identity: context.identity), context: context)
+        }
+
+        try publish(key.messageID, revision: 1)
+        let binding = ConversationBinding(request: key, revision: 1)
+        try domain.saveConversationDraft(ConversationDraft(binding: binding, text: ExactText("Keep this draft")),
+                                         context: context)
         let model = try await LivePresentationStore.makeForActivation(store: domain, context: context).presentation
         model.startObserving()
         defer { model.stopObserving() }
 
-        try domain.restoreCachedServerState(unorderedCache(key, payload: payload, identity: context.identity),
-                                            context: context)
-        try await waitUntil({ (try? domain.snapshot(context: context).requests.isEmpty) == true },
-                            "The observer discards the saved state it cannot present.")
-
-        _ = try domain.apply(RelayEvent(sequence: 1,
-            body: .delivery(StoredRequest(key: laterKey, originalPayload: payload), .message)), context: context)
+        try publish(laterKey.messageID, revision: 2)
         try await waitUntil({ model.request(for: laterKey) != nil },
-                            "Later updates still reach the view without a relaunch.")
+                            "A connected item update reaches the visible inbox without another launch.")
+        XCTAssertEqual(model.conversationDraft(for: key, revision: 1).text, ExactText("Keep this draft"))
         XCTAssertNil(model.observationError)
     }
 

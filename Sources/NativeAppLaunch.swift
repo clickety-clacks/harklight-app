@@ -887,7 +887,7 @@ final class NativeAppLaunch {
             let fileStorage = try ConversationFileStorage(identity: context.identity)
             let store = try ClientRepository(context: context, persistence: persistence,
                                                  conversationFileReferences: fileStorage)
-            try store.recoverLegacyDiscussionDrafts(context: context)
+            try store.migratePendingItemActionsToClientAPI(context: context)
             return (store, fileStorage)
         }.value
         guard activationGeneration == generation else { return }
@@ -1385,10 +1385,6 @@ final class LivePresentationStore {
 
     func conversationError(for key: RequestKey, revision: UInt64) -> String? {
         if let conversationError { return conversationError }
-        if case let .rejected(reason)? = conversationThreads[key]?.drafts[revision]?.disposition,
-           reason.rawValue == "previous_transport_unconfirmed" {
-            return ConversationDraftPresentationText.rejectionMessage(reason)
-        }
         let binding = ConversationBinding(request: key, revision: revision)
         guard let notice = discussionSubmissionNotices[binding], notice.context == profileContext else { return nil }
         return notice.text
@@ -3507,6 +3503,10 @@ final class LivePresentationStore {
         for bufferKey in Array(pendingDrafts.keys) {
             flushPendingDraft(for: bufferKey.request, requestRevision: bufferKey.revision)
         }
+    }
+
+    func recoveredPreviousProtocolText() throws -> [ExactText] {
+        try attentionStore.recoveredPreviousProtocolText(context: profileContext)
     }
 
     func prepareRevokedTextRecovery() -> (all: [ExactText], staged: [ExactText]) {

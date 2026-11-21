@@ -266,6 +266,7 @@ public final class ClientRepository: @unchecked Sendable {
             state.priorityLevels = queue.priorityLevelsDraft?.restoredState
             state.pendingConversations = queue.conversations
             state.pendingReadPositions = queue.readPositions
+            state.previousProtocolInput = queue.previousProtocolInput
             if state.intentByRequest != queue.activeOperations {
                 recoveries.append(PendingActionsRecovery(kind: .partlyRecovered,
                     keptOperations: state.intentByRequest.count,
@@ -285,6 +286,7 @@ public final class ClientRepository: @unchecked Sendable {
             state.priorityLevels = salvaged.priorityLevelsDraft?.restoredState
             state.pendingConversations = salvaged.conversations.values.mapValues(\.actions)
             state.pendingReadPositions = salvaged.readPositions.values
+            state.previousProtocolInput = salvaged.previousProtocolInput
             let unattributed = state.intents.count - state.intentByRequest.count
             recoveries.append(PendingActionsRecovery(kind: .partlyRecovered,
                 keptOperations: state.intentByRequest.count,
@@ -3197,30 +3199,58 @@ public final class ClientRepository: @unchecked Sendable {
         return state.pendingConversations.values.flatMap { $0.queuedMessages ?? [] }
     }
 
-    /// Release a previous-protocol send into the composer without replaying it.
-    /// Already accepted receipts and v2 queued messages keep their identities.
-    public func recoverLegacyDiscussionDrafts(context suppliedContext: ProfileContext) throws {
+    /// Separate unversioned item targets from the live queue before publishing
+    /// any v2 items. The client contract does not map legacy message IDs to
+    /// item IDs. A matching ID, sender or revision is not proof of identity.
+    public func migratePendingItemActionsToClientAPI(context suppliedContext: ProfileContext) throws {
         writerLock.lock()
         defer { writerLock.unlock() }
         lock.lock()
         defer { lock.unlock() }
         try validate(suppliedContext)
+        guard state.previousProtocolInput == nil else { return }
         var next = state
-        var changed = false
-        for (key, var pending) in next.pendingConversations {
-            for (revision, draft) in pending.drafts {
-                switch draft.disposition {
-                case .submitting, .outcomeUnknown:
-                    pending.drafts[revision] = ConversationDraft(binding: draft.binding, text: draft.text,
-                        files: draft.files, disposition: .rejected(ExactText("previous_transport_unconfirmed")))
-                    changed = true
-                case .saved, .rejected, .acceptedPendingReplay:
-                    continue
-                }
-            }
-            next.pendingConversations[key] = pending
+        next.previousProtocolInput = PreviousProtocolInput(
+            answers: state.intents, answerDrafts: state.drafts, messageOpens: state.pendingMessageOpens ?? [],
+            readPositions: state.pendingReadPositions, conversations: state.pendingConversations.mapValues { pending in
+                var held = pending
+                held.queuedMessages = nil
+                return held
+            })
+        next.intents = [:]
+        next.intentByRequest = [:]
+        next.outboxOrder = []
+        next.drafts = [:]
+        next.pendingMessageOpens = nil
+        next.pendingReadPositions = [:]
+        next.pendingConversations = state.pendingConversations.compactMapValues { pending in
+            // Only the v2 submission path created this separate queue.
+            guard let queued = pending.queuedMessages, !queued.isEmpty else { return nil }
+            var current = PendingConversationActions(drafts: [:], answerDrafts: nil,
+                                                     uploadGroups: nil, uploadCleanups: nil)
+            current.queuedMessages = queued
+            return current
         }
-        if changed { try commit(next) }
+        try commit(next)
+        acceptedAwaitingTerminalReplay.removeAll()
+    }
+
+    public func recoveredPreviousProtocolText(context suppliedContext: ProfileContext) throws -> [ExactText] {
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        return state.previousProtocolInput?.unsentText ?? []
+    }
+
+    public func heldPreviousProtocolOperations(context suppliedContext: ProfileContext) throws -> Set<UUID> {
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard let previous = state.previousProtocolInput else { return [] }
+        return Set(previous.answers.values.map(\.operationID)
+            + previous.messageOpens.map(\.operationID)
+            + previous.readPositions.values.map(\.operationID)
+            + previous.conversations.values.flatMap { $0.drafts.values.compactMap(\.operationID) })
     }
 
     /// A read-only view of old-account text, even when no server projection
@@ -3229,16 +3259,10 @@ public final class ClientRepository: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         try validate(suppliedContext)
-        var text = state.drafts.values.flatMap(\.textContents)
-        for pending in state.pendingConversations.values {
-            text.append(contentsOf: pending.retainedUnsentText?.values.map { $0 } ?? [])
-            text.append(contentsOf: pending.answerDrafts?.values.flatMap(\.textContents) ?? [])
-            for draft in Array(pending.drafts.values) + (pending.queuedMessages ?? []) {
-                if case .acceptedPendingReplay = draft.disposition { continue }
-                text.append(draft.text)
-            }
-        }
-        return Set(text.filter { !$0.rawValue.isEmpty }).sorted { $0.rawValue < $1.rawValue }
+        let text = state.drafts.values.flatMap(\.textContents)
+            + state.pendingConversations.values.flatMap(\.unsentText)
+            + (state.previousProtocolInput?.unsentText ?? [])
+        return uniqueUnsentText(text)
     }
 
     public func conversationSnapshot(context suppliedContext: ProfileContext) throws -> ConversationSnapshot {
@@ -4903,6 +4927,7 @@ private struct ClientSessionState {
     var priorityLevels: PriorityLevelsStoreState?
     var pendingConversations: [RequestKey: PendingConversationActions] = [:]
     var pendingReadPositions: [RequestKey: PendingConversationReadPosition] = [:]
+    var previousProtocolInput: PreviousProtocolInput?
     var requests: [RequestKey: StoredRequest] {
         get { server.requests }
         set { server.requests = newValue }
@@ -5246,6 +5271,7 @@ private struct SalvagedPendingActions: Decodable {
     let conversations: SalvagedDictionary<RequestKey, SalvagedConversationActions>
     let readPositions: SalvagedDictionary<RequestKey, PendingConversationReadPosition>
     let priorityLevelsDraft: PersistedPriorityLevelsDraft?
+    let previousProtocolInput: PreviousProtocolInput?
     let lostSections: [String]
 
     var droppedEntries: Int {
@@ -5256,7 +5282,7 @@ private struct SalvagedPendingActions: Decodable {
 
     private enum CodingKeys: String, CodingKey {
         case version, profileIdentity, operations, activeOperations, cancelledOperations,
-             answerDrafts, messageOpens, conversations, readPositions, priorityLevelsDraft
+             answerDrafts, messageOpens, conversations, readPositions, priorityLevelsDraft, previousProtocolInput
     }
 
     init(from decoder: Decoder) throws {
@@ -5279,6 +5305,7 @@ private struct SalvagedPendingActions: Decodable {
         readPositions = section(.readPositions, SalvagedDictionary())
         priorityLevelsDraft = container.contains(.priorityLevelsDraft)
             ? section(.priorityLevelsDraft, Optional<PersistedPriorityLevelsDraft>.none) : nil
+        previousProtocolInput = section(.previousProtocolInput, Optional<PreviousProtocolInput>.none)
         lostSections = lost
     }
 }
@@ -5323,6 +5350,7 @@ private struct PersistedPendingActions: Codable {
     let conversations: [RequestKey: PendingConversationActions]
     let readPositions: [RequestKey: PendingConversationReadPosition]
     let priorityLevelsDraft: PersistedPriorityLevelsDraft?
+    let previousProtocolInput: PreviousProtocolInput?
 
     init(state: ClientSessionState) {
         version = 1
@@ -5343,6 +5371,7 @@ private struct PersistedPendingActions: Codable {
         conversations = state.pendingConversations
         readPositions = state.pendingReadPositions
         priorityLevelsDraft = state.priorityLevels.map(PersistedPriorityLevelsDraft.init)
+        previousProtocolInput = state.previousProtocolInput
     }
 }
 
@@ -5357,6 +5386,16 @@ private struct PendingConversationActions: Codable {
     /// Client API v2 chat messages (APP-07), each with its own operation id,
     /// kept here so they survive a projection restore and a relaunch.
     var queuedMessages: [ConversationDraft]?
+
+    var unsentText: [ExactText] {
+        var text = retainedUnsentText?.values.map { $0 } ?? []
+        text += answerDrafts?.values.flatMap(\.textContents) ?? []
+        for draft in Array(drafts.values) + (queuedMessages ?? []) {
+            if case .acceptedPendingReplay = draft.disposition { continue }
+            text.append(draft.text)
+        }
+        return text
+    }
 
     init(thread: ConversationThread) {
         drafts = thread.drafts
@@ -5373,6 +5412,34 @@ private struct PendingConversationActions: Codable {
         self.uploadGroups = uploadGroups
         self.uploadCleanups = uploadCleanups
     }
+}
+
+/// Durable, account-scoped storage that never participates in projection
+/// joins or send recovery. The originals remain available for recovery.
+private struct PreviousProtocolInput: Codable {
+    let answers: [UUID: Submission]
+    let answerDrafts: [RequestKey: RequestDraft]
+    let messageOpens: [PendingMessageOpen]
+    let readPositions: [RequestKey: PendingConversationReadPosition]
+    let conversations: [RequestKey: PendingConversationActions]
+
+    var unsentText: [ExactText] {
+        let typedAnswers = answers.values.flatMap { answer -> [ExactText] in
+            if case .accepted = answer.disposition { return [] }
+            return answer.typedInputs.compactMap {
+                switch $0 {
+                case let .responseText(_, _, text), let .text(_, text), let .compatibilityText(_, text): text
+                default: nil
+                }
+            }
+        }
+        return uniqueUnsentText(answerDrafts.values.flatMap(\.textContents)
+            + conversations.values.flatMap(\.unsentText) + typedAnswers)
+    }
+}
+
+private func uniqueUnsentText(_ values: [ExactText]) -> [ExactText] {
+    Set(values.filter { !$0.rawValue.isEmpty }).sorted { $0.rawValue < $1.rawValue }
 }
 
 private extension ProfileIdentity {
