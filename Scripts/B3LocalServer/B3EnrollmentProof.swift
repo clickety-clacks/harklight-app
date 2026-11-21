@@ -14,33 +14,28 @@ final class B3EnrollmentProof: XCTestCase {
         app.launch()
         try signal("ready", at: signals)
 
-        // The controller uses simctl openurl while this app is frontmost.
-        // XCTest accepts the system confirmation without requiring Device Hub.
+        // The controller delivers the private fixture link to the test runner.
+        // XCTest opens the URL directly instead of passing it through a CLI argument.
+        let invitation = signals.appendingPathComponent("invitation-url")
+        let inviteDeadline = Date().addingTimeInterval(25)
+        var link: String?
+        while Date() < inviteDeadline {
+            if let text = try? String(contentsOf: invitation, encoding: .utf8), !text.isEmpty {
+                link = text
+                break
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+        }
+        guard let link, let url = URL(string: link) else {
+            return XCTFail("The fixture owner did not provide a usable invitation.")
+        }
+        try FileManager.default.removeItem(at: invitation)
+        app.open(url)
         let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
         let open = springboard.alerts.buttons["Open"].firstMatch
-        if open.waitForExistence(timeout: 12) { open.tap() }
-        let join = app.buttons["Join"]
-        let useAnotherInvitation = app.buttons["Use another invitation"]
-        if useAnotherInvitation.waitForExistence(timeout: 8) {
-            useAnotherInvitation.tap()
-            let field = app.secureTextFields["Full invitation"]
-            tapVisible(field, in: app)
-            field.press(forDuration: 1)
-            let paste = app.menuItems["Paste"]
-            if paste.waitForExistence(timeout: 4) {
-                paste.tap()
-            } else {
-                tapVisible(app.buttons["Paste"], in: app, timeout: 4)
-            }
-            let allowPaste = app.alerts.buttons["Allow Paste"].firstMatch
-            if allowPaste.waitForExistence(timeout: 2) { allowPaste.tap() }
-            tapVisible(app.buttons["Check invitation"], in: app)
-            try signal("pasted-invite", at: signals)
-        }
-        tapVisible(join, in: app, timeout: 20)
-        if !FileManager.default.fileExists(atPath: signals.appendingPathComponent("pasted-invite").path) {
-            try signal("native-link-confirmed", at: signals)
-        }
+        if open.waitForExistence(timeout: 3) { open.tap() }
+        tapVisible(app.buttons["Join"], in: app, timeout: 18)
+        try signal("direct-link-confirmed", at: signals)
         let approval = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "Approval code ")).firstMatch
         XCTAssertTrue(approval.waitForExistence(timeout: 20), "The join should reach owner approval.")
         let code = String(approval.label.dropFirst("Approval code ".count))
@@ -49,7 +44,7 @@ final class B3EnrollmentProof: XCTestCase {
         }
         try signal("approval", text: code, at: signals)
         let approved = signals.appendingPathComponent("approved")
-        let approvalDeadline = Date().addingTimeInterval(25)
+        let approvalDeadline = Date().addingTimeInterval(45)
         while !FileManager.default.fileExists(atPath: approved.path), Date() < approvalDeadline {
             RunLoop.current.run(until: Date().addingTimeInterval(0.2))
         }

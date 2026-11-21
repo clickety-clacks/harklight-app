@@ -26,7 +26,7 @@ cleanup() {
     fi
     if [[ -n $test_pid ]]; then kill "$test_pid" 2>/dev/null || true; wait "$test_pid" 2>/dev/null || true; fi
     if [[ -n $signals ]]; then
-        for signal in native-link-confirmed pasted-invite enrolled cold-restored offline-removal-kept-account confirmed-removal-kept-unsent-text; do
+        for signal in direct-link-confirmed enrolled cold-restored offline-removal-kept-account confirmed-removal-kept-unsent-text; do
             if [[ -f "$signals/$signal" ]]; then
                 printf 'B3 observed %s\n' "$signal"
             fi
@@ -37,6 +37,17 @@ cleanup() {
         diagnostic="$data/Library/Application Support/Harklight/native-client-diagnostics-v1.json"
         if [[ -n $data && -f $diagnostic ]]; then
             python3 "$scripts/enrollment-diagnostics.py" "$diagnostic" || true
+        fi
+        observed="$data/Library/Application Support/b3-invitation-handoff.json"
+        if [[ -n $data && -f $observed && -f "$work/sent-fragment.json" ]]; then
+            python3 "$scripts/compare-invitation-fragments.py" compare "$work/sent-fragment.json" "$observed" || true
+        fi
+        rejection="$data/Library/Application Support/b3-invitation-reject-field.txt"
+        if [[ -n $data && -f $rejection ]]; then
+            field=$(cat "$rejection")
+            if [[ $field =~ ^[a-z0-9_]{1,42}$ ]]; then
+                printf 'B3 invitation parser rejected field %s\n' "$field"
+            fi
         fi
         xcrun simctl shutdown "$device" >/dev/null 2>&1 || true
         xcrun simctl delete "$device" >/dev/null 2>&1 || status=1
@@ -67,6 +78,7 @@ phase='build app and XCUITest'
 mkdir "$work/app"
 git -C "$app" archive HEAD | tar -xf - -C "$work/app"
 python3 "$scripts/stage-proof.py" "$work/app" "$scripts/B3EnrollmentProof.swift"
+python3 "$scripts/instrument-invitation.py" "$work/app"
 cd "$work/app"
 ./Scripts/prepare-test-tls.sh
 xcodegen generate
@@ -105,10 +117,16 @@ done
 
 phase='open real owner invitation'
 bash "$scripts/fixture.sh" invite "$work" > "$work/invite.log" 2>&1
-invite=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["join_url"])' "$work/invitation.json")
-printf '%s' "$invite" | xcrun simctl pbcopy "$device" >/dev/null 2>&1
-xcrun simctl openurl "$device" "$invite" >/dev/null 2>&1
-unset invite
+python3 "$scripts/compare-invitation-fragments.py" original "$work/invitation.json" "$work/sent-fragment.json"
+python3 - "$work/invitation.json" "$signals/invitation-url" <<'INVITATION'
+import json, os, sys
+
+with open(sys.argv[1], encoding="utf-8") as source:
+    link = json.load(source)["join_url"]
+with open(sys.argv[2] + ".pending", "x", encoding="utf-8") as output:
+    output.write(link)
+os.replace(sys.argv[2] + ".pending", sys.argv[2])
+INVITATION
 rm "$work/invitation.json"
 
 phase='approve displayed device code'
