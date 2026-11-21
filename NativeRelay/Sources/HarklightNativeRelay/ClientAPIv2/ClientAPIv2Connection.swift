@@ -30,6 +30,7 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
     public let presentation: ServerModelV2Presentation
     public let outbox: ActionOutbox
     public let sync: ChangeFeedSync
+    public let files: ClientAPIFiles
     private let transport: any ClientAPITransport
     private let foregroundOnlyWrites: Bool
     private let modelWriter: ServerModelSyncWriter
@@ -66,6 +67,7 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
         self.model = model
         self.presentation = ServerModelV2Presentation(savedMe: savedMe)
         self.transport = transport
+        self.files = ClientAPIFiles(transport: transport)
         self.foregroundOnlyWrites = foregroundOnlyWrites
         self.repository = repository
         self.context = context

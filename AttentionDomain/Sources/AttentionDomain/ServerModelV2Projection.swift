@@ -172,7 +172,7 @@ public enum ServerModelV2Projection {
 
     static func file(_ file: APIFileRef) -> ConversationFile {
         ConversationFile(id: file.fileID.value, name: file.name, byteCount: file.size,
-                         sha256: ExactText(file.sha256), content: .uploaded(file.fileID.value))
+                         sha256: ExactText(file.sha256), content: .v2Download(file.fileID))
     }
 
     // MARK: Inbox view

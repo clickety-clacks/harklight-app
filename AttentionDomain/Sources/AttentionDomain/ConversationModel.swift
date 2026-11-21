@@ -66,6 +66,7 @@ public struct ConversationFile: Equatable, Codable, Identifiable, Sendable {
     public enum Content: Equatable, Codable, Sendable {
         case inline(Data)
         case uploaded(ExactText)
+        case v2Download(FileDownloadID)
         /// Account-owned local copy retained while upload or submission is unconfirmed.
         case localFile(ExactText)
     }

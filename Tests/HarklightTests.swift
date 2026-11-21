@@ -10,6 +10,7 @@ private final class V2ScenePushTransport: ClientAPITransport, @unchecked Sendabl
     private var batches = 0
     private var entryReads = 0
     private var focusScreens: [String] = []
+    private var fileReads: [String] = []
     private var showReads = 0
     private let holdShowLookup: AsyncStream<Void>?
 
@@ -20,6 +21,7 @@ private final class V2ScenePushTransport: ClientAPITransport, @unchecked Sendabl
     var showLookupCount: Int { lock.withLock { showReads } }
 
     var reportedFocusScreens: [String] { lock.withLock { focusScreens } }
+    var requestedFiles: [String] { lock.withLock { fileReads } }
 
     var counts: (opened: Int, closed: Int, batches: Int, entryReads: Int) {
         lock.withLock { (opened, closed, batches, entryReads) }
@@ -46,6 +48,9 @@ private final class V2ScenePushTransport: ClientAPITransport, @unchecked Sendabl
         case "/v2/items/item/entries":
             lock.withLock { entryReads += 1 }
             body = #"{"rev":2,"entries":[],"older":false}"#
+        case "/v2/files/download%2F1":
+            lock.withLock { fileReads.append(request.path) }
+            return APIResponse(status: 200, requestID: "test", body: Data("abc".utf8))
         default:
             body = #"{"rev":0,"items":[],"counts":{"unresolved":0}}"#
         }
@@ -70,6 +75,44 @@ private final class V2ScenePushTransport: ClientAPITransport, @unchecked Sendabl
 }
 
 final class HarklightTests: XCTestCase {
+    @MainActor
+    func testV2PreviewDownloadsTheProjectedFileRefAndVerifiesItsBytes() async throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                                       personID: ExactText("person"), deviceID: ExactText("device"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let transport = V2ScenePushTransport()
+        let store = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        let connection = try ClientAPIv2Connection(transport: transport, repository: store, context: context,
+                                                    directory: nil, errors: NoopErrorLog())
+        let lifecycle = NativeRelayLifecycle(clientAPIV2Enabled: true)
+        lifecycle.installV2Connection(connection, context: context)
+        let item = Data(#"{"item_id":"item","rev":1,"sender":"sender","request_revision":1,"message":{"title":"Attachment"},"files":[],"seen":false,"rank":{"key":"a","section":"current"},"chat":{"available":true,"started":true}}"#.utf8)
+        let entry = Data(#"{"entry_id":"entry","item_id":"item","rev":2,"position":1,"kind":"reply","author":"origin","request_revision":1,"files":[{"file_id":"download/1","name":"file.txt","size":3,"sha256":"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"}]}"#.utf8)
+        try connection.model.apply([.init(rev: 1, kind: "item", data: item),
+                                    .init(rev: 2, kind: "entry", data: entry)], cursor: 2)
+        let projection = ServerModelV2Projection.cachedState(connection.model.snapshot, identity: identity)
+        let key = RequestKey(accountScope: identity.personID, senderID: ExactText("sender"), messageID: ExactText("item"))
+        let attachment = try XCTUnwrap(projection.conversations[key]?.turns.first?.files.first)
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let destination = folder.appendingPathComponent("valid.txt")
+        try await lifecycle.fetchConversationFile(attachment, to: destination, expected: context)
+        XCTAssertEqual(try Data(contentsOf: destination), Data("abc".utf8))
+        XCTAssertEqual(transport.requestedFiles, ["/v2/files/download%2F1"])
+
+        let bad = ConversationFile(id: attachment.id, name: attachment.name, byteCount: 4,
+            sha256: attachment.sha256, content: attachment.content)
+        let mismatch = folder.appendingPathComponent("invalid.txt")
+        do {
+            try await lifecycle.fetchConversationFile(bad, to: mismatch, expected: context)
+            XCTFail("A response with the wrong byte count cannot be previewed.")
+        } catch ConversationError.fileMismatch {
+            XCTAssertFalse(FileManager.default.fileExists(atPath: mismatch.path))
+        }
+        await lifecycle.deactivate()
+    }
+
     @MainActor
     func testV2PushWakeRequiresTheActiveAccountAndTheReleaseGate() async throws {
         let server = String(repeating: "a", count: 32)

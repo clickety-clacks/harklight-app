@@ -2068,7 +2068,20 @@ final class NativeRelayLifecycle {
     }
 
     func fetchConversationFile(_ file: ConversationFile, to destination: URL, expected: ProfileContext) async throws {
-        guard context == expected, let configuration else { throw NativeRelayCoreError.inactive }
+        guard context == expected else { throw NativeRelayCoreError.inactive }
+        if case let .v2Download(id) = file.content {
+            guard let connection = v2Connection else { throw NativeRelayCoreError.inactive }
+            let bytes = try await connection.files.download(id)
+            try Task.checkCancellation()
+            guard context == expected, v2Connection === connection else { throw NativeRelayCoreError.inactive }
+            let digest = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+            guard UInt64(bytes.count) == file.byteCount, ExactText(digest) == file.sha256 else {
+                throw ConversationError.fileMismatch
+            }
+            try bytes.write(to: destination, options: .atomic)
+            return
+        }
+        guard let configuration else { throw NativeRelayCoreError.inactive }
         let token = UUID()
         defer { fileTransports.removeValue(forKey: token) }
         // The file origin comes from the live conversation catch-up. Opening a
