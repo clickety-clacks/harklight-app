@@ -3731,6 +3731,61 @@ public final class ClientRepository: @unchecked Sendable {
 
     /// Freeze a durable operation before transport. Local examples may edit drafts,
     /// but cannot enter this submission path or acquire a delivery operation.
+    /// Client API v2 (APP-07): freezes the composer's text and files into a
+    /// queued message with a newly minted operation id, saved before anything
+    /// is sent, and empties the composer so the person can write the next
+    /// message at once. Only threads under the v2 chat rules queue messages.
+    @discardableResult
+    public func queueChatMessage(_ binding: ConversationBinding,
+                                 context suppliedContext: ProfileContext) throws -> ConversationDraft {
+        writerLock.lock()
+        defer { writerLock.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        var next = state
+        guard var conversation = next.conversation, var thread = conversation.threads[binding.request],
+              let draft = thread.drafts[binding.revision] else { throw ConversationError.missingRequest }
+        guard thread.chatNeverCloses == true else { throw ConversationError.closed }
+        guard !draft.text.rawValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !draft.files.isEmpty else {
+            throw ConversationError.emptyDraft
+        }
+        let operation = UUID()
+        var message = ConversationDraft(binding: binding, text: draft.text, files: draft.files)
+        message.operationID = operation
+        message.disposition = .submitting(operation)
+        message.submittedAt = Date()
+        thread.queuedMessages = (thread.queuedMessages ?? []) + [message]
+        thread.drafts[binding.revision] = ConversationDraft(binding: binding)
+        conversation.threads[binding.request] = thread
+        next.conversation = conversation
+        try commit(next)
+        return message
+    }
+
+    /// Records one queued message's outcome. An accepted message stays shown
+    /// as pending until its entry arrives; a refused one keeps its text.
+    public func recordQueuedChatMessage(_ operation: UUID, in request: RequestKey,
+                                        disposition: ConversationDraft.Disposition,
+                                        context suppliedContext: ProfileContext) throws {
+        writerLock.lock()
+        defer { writerLock.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        var next = state
+        guard var conversation = next.conversation, var thread = conversation.threads[request],
+              var queue = thread.queuedMessages,
+              let index = queue.firstIndex(where: { $0.operationID == operation }) else {
+            throw ConversationError.missingRequest
+        }
+        queue[index].disposition = disposition
+        thread.queuedMessages = queue
+        conversation.threads[request] = thread
+        next.conversation = conversation
+        try commit(next)
+    }
+
     public func prepareDiscussion(_ binding: ConversationBinding, context suppliedContext: ProfileContext) throws -> UUID {
         writerLock.lock()
         defer { writerLock.unlock() }

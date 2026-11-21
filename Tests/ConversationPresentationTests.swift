@@ -1933,3 +1933,32 @@ extension ConversationPresentationTests {
         XCTAssertTrue(presentation.updateConversation(for: key, revision: 1, text: "Still here", files: []))
     }
 }
+
+extension ConversationPresentationTests {
+    /// APP-07 through the presentation store: several messages in flight at
+    /// once, each its own pending row, with the composer enabled throughout.
+    func testV2ChatKeepsTheComposerEnabledWithManyMessagesInFlight() throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+            personID: ExactText("person"), deviceID: ExactText("device"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let domain = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        let item = #"{"item_id":"v2","rev":1,"sender":"agent-app","request_revision":1,"message":{"title":"Q"},"files":[],"seen":false,"chat":{"started":true},"rank":{"key":"a","section":"current"}}"#
+        var model = ServerModelV2()
+        _ = model.putForTesting(try APIItem(json: JSONValue.parse(Data(item.utf8))))
+        try domain.restoreCachedServerState(ServerModelV2Projection.cachedState(model, identity: identity),
+                                            context: context)
+        let presentation = try LivePresentationStore(store: domain, context: context)
+        let key = RequestKey(accountScope: identity.personID, senderID: ExactText("agent-app"),
+                             messageID: ExactText("v2"))
+        let binding = ConversationBinding(request: key, revision: 1)
+        for text in ["one", "two", "three"] {
+            XCTAssertTrue(presentation.updateConversation(for: key, revision: 1, text: text, files: []))
+            try domain.queueChatMessage(binding, context: context)
+            try presentation.refreshFromDurableStore()
+            XCTAssertTrue(presentation.canEditDiscussionDraft(for: key), "The composer never freezes.")
+            XCTAssertFalse(presentation.isSendingDiscussion(for: key, revision: 1))
+        }
+        let thread = try XCTUnwrap(presentation.conversation(for: key))
+        XCTAssertEqual(ConversationPendingSubmission.rows(in: thread).map(\.text.rawValue), ["one", "two", "three"])
+    }
+}

@@ -612,7 +612,9 @@ struct ConversationPendingSubmission: Identifiable, Equatable {
     static func rows(in thread: ConversationThread) -> [Self] {
         let replayedOperations = Set(thread.turns.compactMap(\.operationID))
         let replayedTurns = Set(thread.turns.map(\.id))
-        return thread.drafts.values.compactMap { draft -> Self? in
+        let queued = thread.queuedMessages ?? []
+        return (thread.drafts.values.sorted { $0.binding.revision < $1.binding.revision } + queued)
+            .compactMap { draft -> Self? in
             let operation: UUID
             switch draft.disposition {
             case .saved: return nil
@@ -627,7 +629,7 @@ struct ConversationPendingSubmission: Identifiable, Equatable {
             guard !replayedOperations.contains(operation) else { return nil }
             return Self(id: operation, revision: draft.binding.revision, text: draft.text,
                         files: draft.files, disposition: draft.disposition)
-        }.sorted { $0.revision < $1.revision }
+        }
     }
 }
 

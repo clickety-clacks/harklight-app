@@ -1419,6 +1419,9 @@ final class LivePresentationStore {
         return conversationAvailability.message(for: profileContext)
     }
     private var sendingDiscussionBindings: Set<ConversationBinding> = []
+    /// Client API v2: receives each queued chat message for the outbox. Set by
+    /// the v2 lifecycle; nil under the current protocol.
+    @ObservationIgnored var chatMessageQueued: ((ConversationDraft) -> Void)?
 
     func isSendingDiscussion(for key: RequestKey, revision: UInt64) -> Bool {
         sendingDiscussionBindings.contains(ConversationBinding(request: key, revision: revision))
@@ -2366,6 +2369,18 @@ final class LivePresentationStore {
                 return
             }
             let binding = ConversationBinding(request: key, revision: revision)
+            if thread.chatNeverCloses == true {
+                // Client API v2 (APP-07): each message is its own operation.
+                // It is saved with its id, the composer empties and stays
+                // enabled, and the message is handed to the outbox; nothing
+                // waits for an earlier message to finish.
+                let message = try attentionStore.queueChatMessage(binding, context: profileContext)
+                if conversationEditErrorBinding == binding { conversationError = nil }
+                try refreshFromDurableStore()
+                onQueued?()
+                chatMessageQueued?(message)
+                return
+            }
             if permitsDelivery {
                 guard !sendingDiscussionBindings.contains(binding), let files = conversationFiles else { return }
                 let context = profileContext
