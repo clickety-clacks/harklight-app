@@ -110,6 +110,9 @@ public struct APIItem: Equatable, Codable, Sendable {
     /// Today's per-person arrival counter; the new-messages area orders by it.
     /// Absent for items from before free order, which are earlier messages.
     public let arrival: UInt64?
+    /// Today's effective group thread (contract round 9): adjacent items
+    /// sharing (sender, thread) form one thread row.
+    public let thread: ExactText?
 }
 
 public struct APIEntryDelivery: Equatable, Codable, Sendable {
@@ -324,6 +327,7 @@ extension APIItem {
                             group: try rank.optionalString("group")?.rawValue)
         createdAtMs = try reader.optionalUnsigned("created_at_ms")
         arrival = try reader.optionalUnsigned("arrival")
+        thread = try reader.optionalString("thread")
         guard rev >= 1 else { throw ClientAPIModelError.invalid("item.rev") }
     }
 }

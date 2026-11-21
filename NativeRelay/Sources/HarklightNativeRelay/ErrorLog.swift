@@ -435,8 +435,14 @@ public final class ErrorLogStore: ErrorLogging, @unchecked Sendable {
         let phase = ErrorLogRedactor.operationToken(report.phase)
         let domain = ErrorLogRedactor.domainToken(report.reason.domain)
         let code = ErrorLogRedactor.reasonCode(domain: domain, code: report.reason.code)
-        let operationID = report.correlation.clientOperationID
-        let resourceID = report.correlation.resourceID.flatMap(ErrorLogRedactor.safeID)
+        // Correlation fields are public and may have been set after init, so
+        // the safe-id rules are applied again here, before anything is kept.
+        var correlation = report.correlation
+        correlation.serverConnectionID = correlation.serverConnectionID.flatMap(ErrorLogRedactor.safeID)
+        correlation.requestID = correlation.requestID.flatMap(ErrorLogRedactor.safeID)
+        correlation.resourceID = correlation.resourceID.flatMap(ErrorLogRedactor.safeID)
+        let operationID = correlation.clientOperationID
+        let resourceID = correlation.resourceID
         // Repeats of the same (concern, operation, domain, code, client
         // operation, resource) coalesce into the newest unresolved record. A
         // failure after a resolution is a new record.
@@ -453,14 +459,14 @@ public final class ErrorLogStore: ErrorLogging, @unchecked Sendable {
             stored[index].initiator = report.initiator
             stored[index].retryable = report.retryable
             stored[index].httpStatus = report.httpStatus ?? stored[index].httpStatus
-            if !report.correlation.isEmpty { stored[index].correlation = report.correlation }
+            if !correlation.isEmpty { stored[index].correlation = correlation }
         } else {
             stored.append(ErrorLogRecord(
                 id: UUID(), occurredAt: at, lastAt: at, count: 1, build: build,
                 concern: report.concern, connectionRole: report.connectionRole,
                 operation: operation, phase: phase, domain: domain, code: code,
                 initiator: report.initiator, retryable: report.retryable,
-                correlation: report.correlation, httpStatus: report.httpStatus,
+                correlation: correlation, httpStatus: report.httpStatus,
                 resolvedAt: nil, resolvedBy: nil))
         }
         applyRetention()

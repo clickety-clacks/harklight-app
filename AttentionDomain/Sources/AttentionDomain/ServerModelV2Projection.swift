@@ -128,7 +128,8 @@ public enum ServerModelV2Projection {
             thread.turns.append(turn)
             if let delivery = entry.delivery {
                 var facts = ConversationTurnFacts(acceptedAtMilliseconds: entry.atMs)
-                facts.delivered = delivery.delivered ?? false
+                // An acted-on reply was delivered, even if only 'acted' is sent.
+                facts.delivered = delivery.delivered ?? (delivery.acted == true)
                 thread.facts[entry.entryID] = facts
             }
         }
@@ -157,7 +158,7 @@ public enum ServerModelV2Projection {
         case "listening": .listening
         case "not_listening": .notListening(lastDetachedAt: availability.lastDetachedAtMs.map { ExactText(String($0)) })
         case "gone": .gone
-        default: .unsupported(reason: ExactText(""))
+        default: .unsupported(reason: ExactText(availability.state))
         }
     }
 
@@ -198,6 +199,7 @@ public enum ServerModelV2Projection {
         let entries = ordered.compactMap { item -> InboxViewEntry? in
             guard let key = keys[item.itemID] else { return nil }
             return InboxViewEntry(key: key, score: item.rank.score.flatMap { Double($0.lexeme) },
+                                  thread: item.thread,
                                   dueAtMilliseconds: item.rank.dueAtMs.map { Int($0) })
         }
         // Item rows and unread-reply rows share Rank.key's space.
