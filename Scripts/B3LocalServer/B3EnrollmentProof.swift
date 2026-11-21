@@ -20,7 +20,27 @@ final class B3EnrollmentProof: XCTestCase {
         let open = springboard.alerts.buttons["Open"].firstMatch
         if open.waitForExistence(timeout: 12) { open.tap() }
         let join = app.buttons["Join"]
-        tapVisible(join, in: app, timeout: 18)
+        let useAnotherInvitation = app.buttons["Use another invitation"]
+        if useAnotherInvitation.waitForExistence(timeout: 8) {
+            useAnotherInvitation.tap()
+            let field = app.secureTextFields["Full invitation"]
+            tapVisible(field, in: app)
+            field.press(forDuration: 1)
+            let paste = app.menuItems["Paste"]
+            if paste.waitForExistence(timeout: 4) {
+                paste.tap()
+            } else {
+                tapVisible(app.buttons["Paste"], in: app, timeout: 4)
+            }
+            let allowPaste = app.alerts.buttons["Allow Paste"].firstMatch
+            if allowPaste.waitForExistence(timeout: 2) { allowPaste.tap() }
+            tapVisible(app.buttons["Check invitation"], in: app)
+            try signal("pasted-invite", at: signals)
+        }
+        tapVisible(join, in: app, timeout: 20)
+        if !FileManager.default.fileExists(atPath: signals.appendingPathComponent("pasted-invite").path) {
+            try signal("native-link-confirmed", at: signals)
+        }
         let approval = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "Approval code ")).firstMatch
         XCTAssertTrue(approval.waitForExistence(timeout: 20), "The join should reach owner approval.")
         let code = String(approval.label.dropFirst("Approval code ".count))
@@ -37,6 +57,11 @@ final class B3EnrollmentProof: XCTestCase {
         let check = app.buttons["Check again"]
         if check.isHittable { check.tap() }
         let row = firstRequest(in: app)
+        let continueAfterApproval = app.buttons["Continue"]
+        if continueAfterApproval.waitForExistence(timeout: 25), continueAfterApproval.isHittable {
+            continueAfterApproval.tap()
+            tapVisible(app.buttons["Not now"], in: app)
+        }
         XCTAssertTrue(row.waitForExistence(timeout: 30), "The approved identity should load a seeded inbox row.")
         let rowID = row.identifier
         XCTAssertTrue(rowID.hasPrefix("request-row-"))

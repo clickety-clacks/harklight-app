@@ -10,6 +10,7 @@ device=''
 server_pid=''
 test_pid=''
 phase='prepare'
+signals=''
 
 cleanup() {
     status=$?
@@ -24,7 +25,19 @@ cleanup() {
         fi
     fi
     if [[ -n $test_pid ]]; then kill "$test_pid" 2>/dev/null || true; wait "$test_pid" 2>/dev/null || true; fi
+    if [[ -n $signals ]]; then
+        for signal in native-link-confirmed pasted-invite enrolled cold-restored offline-removal-kept-account confirmed-removal-kept-unsent-text; do
+            if [[ -f "$signals/$signal" ]]; then
+                printf 'B3 observed %s\n' "$signal"
+            fi
+        done
+    fi
     if [[ -n $device ]]; then
+        data=$(xcrun simctl get_app_container "$device" co.clicketyclacks.Harklight data 2>/dev/null || true)
+        diagnostic="$data/Library/Application Support/Harklight/native-client-diagnostics-v1.json"
+        if [[ -n $data && -f $diagnostic ]]; then
+            python3 "$scripts/enrollment-diagnostics.py" "$diagnostic" || true
+        fi
         xcrun simctl shutdown "$device" >/dev/null 2>&1 || true
         xcrun simctl delete "$device" >/dev/null 2>&1 || status=1
     fi
@@ -79,7 +92,6 @@ xcrun xcodebuild -xctestrun "$xctestrun" -destination "id=$device" -jobs 2 \
 test_pid=$!
 
 runner=com.example.attentionclient.duo-prototype.uitests.xctrunner
-signals=''
 for ((i=0; i<150; i++)); do
     kill -0 "$test_pid" 2>/dev/null || break
     data=$(xcrun simctl get_app_container "$device" "$runner" data 2>/dev/null || true)
@@ -94,19 +106,27 @@ done
 phase='open real owner invitation'
 bash "$scripts/fixture.sh" invite "$work" > "$work/invite.log" 2>&1
 invite=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["join_url"])' "$work/invitation.json")
+printf '%s' "$invite" | xcrun simctl pbcopy "$device" >/dev/null 2>&1
 xcrun simctl openurl "$device" "$invite" >/dev/null 2>&1
 unset invite
 rm "$work/invitation.json"
 
 phase='approve displayed device code'
+code=''
 for ((i=0; i<45; i++)); do
-    [[ ! -s "$signals/approval" ]] || break
+    if code=$(cat "$signals/approval" 2>/dev/null) && [[ -n $code ]]; then
+        break
+    fi
     kill -0 "$test_pid" 2>/dev/null || break
     sleep 1
 done
-[[ -s "$signals/approval" ]]
-bash "$scripts/fixture.sh" approve "$work" "$(cat "$signals/approval")" > "$work/approval.log" 2>&1
-rm "$signals/approval"
+if [[ -z $code ]]; then
+    printf '%s\n' 'The UI test did not provide an approval code.'
+    exit 65
+fi
+bash "$scripts/fixture.sh" approve "$work" "$code" > "$work/approval.log" 2>&1
+unset code
+rm -f "$signals/approval"
 touch "$signals/approved"
 
 phase='verify cold relaunch and offline sign-out'
