@@ -2068,6 +2068,7 @@ final class LivePresentationStore {
     }
     func isRetracted(_ key: RequestKey) -> Bool {
         if conversationThreads[key]?.isRetracted == true { return true }
+        if request(for: key)?.ownAnswerWasRefusedByRetraction == true { return true }
         if let outcome = request(for: key)?.intentReceipt?.relayOutcome,
            case .refusedByRetraction = outcome { return true }
         return false

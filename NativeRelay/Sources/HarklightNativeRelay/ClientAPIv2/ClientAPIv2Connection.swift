@@ -915,7 +915,11 @@ extension ClientAPIv2Connection {
         case .notFound:
             try repository.recordAnswerRefusedClosed(intent, operationID: operationID, requestNotFound: true,
                                                      context: context)
-        case .alreadyAnswered, .alreadyClosed, .alreadyRetracted:
+        case .alreadyAnswered, .alreadyRetracted:
+            let terminal: V2AnswerTerminalRefusal = error.token == .alreadyAnswered ? .alreadyAnswered : .alreadyRetracted
+            try repository.recordAnswerRefusedClosed(intent, operationID: operationID, v2Terminal: terminal,
+                                                      context: context)
+        case .alreadyClosed:
             try repository.recordAnswerRefusedClosed(intent, operationID: operationID, context: context)
         case .staleRequest:
             if let saved = try repository.lookupIntent(intent, context: context), let revision = saved.requestRevision {

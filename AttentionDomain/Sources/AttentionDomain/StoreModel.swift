@@ -149,6 +149,19 @@ public enum IntentDisposition: Equatable, Codable, Sendable {
     case repairRequired
 }
 
+public enum V2AnswerTerminalRefusal: String, Codable, Sendable {
+    case alreadyAnswered
+    case alreadyRetracted
+
+    var terminal: TerminalState { self == .alreadyAnswered ? .answered : .cleared }
+    var evidence: String {
+        switch self {
+        case .alreadyAnswered: "This request was already answered."
+        case .alreadyRetracted: "The sender retracted this message."
+        }
+    }
+}
+
 public struct Submission: Equatable, Codable, Sendable {
     /// Local durable preparation time, for presentation ordering only.
     /// Nil preserves old receipts without inventing their send time.
@@ -170,6 +183,7 @@ public struct Submission: Equatable, Codable, Sendable {
     public let descriptorFingerprint: String
     public let contentFingerprint: String
     public var disposition: IntentDisposition
+    public internal(set) var v2TerminalRefusal: V2AnswerTerminalRefusal? = nil
 
     public var isNoComment: Bool { answerKind == .noComment }
 

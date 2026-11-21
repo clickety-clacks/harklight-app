@@ -1259,6 +1259,7 @@ public final class ClientRepository: @unchecked Sendable {
     public func recordAnswerRefusedClosed(_ intentID: UUID,
                                           operationID: UUID,
                                           requestNotFound: Bool = false,
+                                          v2Terminal: V2AnswerTerminalRefusal? = nil,
                                           context suppliedContext: ProfileContext) throws {
         writerLock.lock()
         defer { writerLock.unlock() }
@@ -1272,9 +1273,11 @@ public final class ClientRepository: @unchecked Sendable {
         }
         switch intent.disposition {
         case .pending, .lost: intent.disposition = requestNotFound ? .refusedNotFound : .refusedClosed
-        case .refusedClosed, .refusedNotFound: return
+        case .refusedClosed, .refusedNotFound:
+            guard let v2Terminal, intent.v2TerminalRefusal != v2Terminal else { return }
         default: throw AttentionStoreError.intentConflict
         }
+        intent.v2TerminalRefusal = v2Terminal
         var next = state
         next.intents[intentID] = intent
         next.outboxOrder.removeAll { $0 == intentID }
