@@ -141,9 +141,25 @@ struct ReplyItemLedger: Codable, Equatable, Sendable {
     private(set) var baselineEstablishedAccounts: Set<ExactText> = []
     private(set) var knownReplyIDs: Set<ReplyItemIdentity> = []
     private(set) var entriesByParent: [RequestKey: ReplyItemEntry] = [:]
+    /// The protocol each account's baseline was taken under. Optional so saved
+    /// ledgers stay readable; absent means today's protocol.
+    private(set) var baselineProtocolByAccount: [ExactText: String]? = nil
 
     var entries: [ReplyItemEntry] {
         entriesByParent.values.sorted(by: Self.isNewer)
+    }
+
+    /// Starts this account's reply baseline over when it moves to another
+    /// protocol (the client API v2 switch changes every reply id). Replies held
+    /// at the next reconcile become the baseline. Idempotent per protocol.
+    mutating func resetBaseline(for account: ExactText, protocolID: String) {
+        guard (baselineProtocolByAccount?[account] ?? "v1") != protocolID else { return }
+        baselineEstablishedAccounts.remove(account)
+        knownReplyIDs = knownReplyIDs.filter { $0.parent.accountScope != account }
+        entriesByParent = entriesByParent.filter { $0.key.accountScope != account }
+        var protocols = baselineProtocolByAccount ?? [:]
+        protocols[account] = protocolID
+        baselineProtocolByAccount = protocols
     }
 
     var nextExpiry: Date? {
@@ -342,6 +358,13 @@ final class ReplyItemAreaStore {
         ledger = prepared.ledger
         if ledger != previousLedger { persist() }
         reconciliationGeneration &+= 1
+    }
+
+    /// See `ReplyItemLedger.resetBaseline(for:protocolID:)`.
+    func resetBaseline(for account: ExactText, protocolID: String) {
+        let previousLedger = ledger
+        ledger.resetBaseline(for: account, protocolID: protocolID)
+        if ledger != previousLedger { persist() }
     }
 
     nonisolated static func prepareReconciliation(
