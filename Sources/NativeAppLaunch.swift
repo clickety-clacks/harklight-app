@@ -809,13 +809,14 @@ final class NativeAppLaunch {
         await NativeRelayLifecycle.shared.deactivate()
         guard activationGeneration == generation else { return }
         let context = installation.context
+        let usesV2 = NativeRelayLifecycle.shared.clientAPIV2Enabled
         let (store, fileStorage, serverStateCache) = try await Task.detached(priority: .userInitiated) {
             let persistence = try FilePendingActionPersistence.applicationSupport()
             let fileStorage = try ConversationFileStorage(identity: context.identity)
             let store = try ClientRepository(context: context, persistence: persistence,
                                                  conversationFileReferences: fileStorage)
             let cache: FileServerStateCache
-            if let persistent = try? FileServerStateCache.applicationCache(for: context.identity) {
+            if !usesV2, let persistent = try? FileServerStateCache.applicationCache(for: context.identity) {
                 cache = persistent
             } else {
                 cache = FileServerStateCache(identity: context.identity)

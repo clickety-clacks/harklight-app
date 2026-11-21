@@ -146,6 +146,7 @@ struct HarklightApp: App {
             }
             .onOpenURL { url in Task { await launch.receiveInvitation(url) } }
             .task(id: scenePhase) {
+                NativeRelayLifecycle.shared.sceneActivityChanged(isActive: scenePhase == .active)
                 launch.guidedJoin.invalidateApprovalObservation()
                 guard scenePhase == .active else { return }
                 var isActivationRefresh = true
@@ -153,7 +154,7 @@ struct HarklightApp: App {
                     if isActivationRefresh {
                         await launch.refreshForForegroundActivation()
                         isActivationRefresh = false
-                    } else {
+                    } else if !NativeRelayLifecycle.shared.usesClientAPIV2 {
                         await launch.refreshLive()
                     }
                     await launch.guidedJoin.retryAutomaticallyIfNeeded()
