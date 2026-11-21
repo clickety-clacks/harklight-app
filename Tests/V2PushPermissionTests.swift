@@ -35,7 +35,7 @@ final class V2PushPermissionTests: XCTestCase {
                                        personID: ExactText("person"), deviceID: ExactText("device"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
         let repository = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
-        let transport = V2PermissionTransport(hasLegacyBinding: true)
+        let transport = V2PermissionTransport(hasLegacyBinding: true, holdFirstDelete: true)
         let connection = try ClientAPIv2Connection(transport: transport, repository: repository, context: context,
                                                     directory: nil, errors: NoopErrorLog(), foregroundOnlyWrites: true)
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -131,10 +131,12 @@ private actor V2PermissionTransport: ClientAPITransport {
     private var revision: Int
     private var environment: String?
     private var failFirstDelete = true
+    private let holdFirstDelete: Bool
     private var firstDeleteRelease: CheckedContinuation<Void, Never>?
 
-    init(hasLegacyBinding: Bool = false) {
+    init(hasLegacyBinding: Bool = false, holdFirstDelete: Bool = false) {
         revision = hasLegacyBinding ? 7 : 0
+        self.holdFirstDelete = holdFirstDelete
         environment = hasLegacyBinding ? "sandbox" : nil
     }
 
@@ -149,7 +151,9 @@ private actor V2PermissionTransport: ClientAPITransport {
             if request.method == .delete {
                 if failFirstDelete {
                     failFirstDelete = false
-                    await withCheckedContinuation { firstDeleteRelease = $0 }
+                    if holdFirstDelete {
+                        await withCheckedContinuation { firstDeleteRelease = $0 }
+                    }
                     throw URLError(.networkConnectionLost)
                 }
                 revision += 1
