@@ -675,7 +675,8 @@ public final class ClientRepository: @unchecked Sendable {
                                    descriptorFingerprint: descriptorFingerprint,
                                    contentFingerprint: contentFingerprint,
                                    requestRevision: selector.requestRevision,
-                                   submittedAt: Date())
+                                   submittedAt: Date(),
+                                   answerUISchema: request.answerDescription?.uniqueValue(named: "schema")?.stringValue)
 
         var next = state
         if persistAnswerDraft {
@@ -1258,6 +1259,7 @@ public final class ClientRepository: @unchecked Sendable {
     public func recordAnswerRefusedClosed(_ intentID: UUID,
                                           operationID: UUID,
                                           requestNotFound: Bool = false,
+                                          v2Terminal: V2AnswerTerminalRefusal? = nil,
                                           context suppliedContext: ProfileContext) throws {
         writerLock.lock()
         defer { writerLock.unlock() }
@@ -1271,9 +1273,11 @@ public final class ClientRepository: @unchecked Sendable {
         }
         switch intent.disposition {
         case .pending, .lost: intent.disposition = requestNotFound ? .refusedNotFound : .refusedClosed
-        case .refusedClosed, .refusedNotFound: return
+        case .refusedClosed, .refusedNotFound:
+            guard let v2Terminal, intent.v2TerminalRefusal != v2Terminal else { return }
         default: throw AttentionStoreError.intentConflict
         }
+        intent.v2TerminalRefusal = v2Terminal
         var next = state
         next.intents[intentID] = intent
         next.outboxOrder.removeAll { $0 == intentID }
@@ -3228,6 +3232,41 @@ public final class ClientRepository: @unchecked Sendable {
             pendingChatReadPositions: pending, events: conversation.events)
     }
 
+    /// The durable queue is present before any conversation projection is read.
+    public func savedV2ReadPositions(context suppliedContext: ProfileContext) throws -> [PendingConversationReadPosition] {
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        return Array(state.pendingReadPositions.values)
+    }
+
+    public func settleV2ReadPosition(_ operationID: UUID, accepted: Bool,
+                                     context suppliedContext: ProfileContext) throws {
+        writerLock.lock()
+        defer { writerLock.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        guard let pending = state.pendingReadPositions.values.first(where: { $0.operationID == operationID }) else {
+            return
+        }
+        var next = state
+        if var conversation = next.conversation {
+            if accepted {
+                let held = conversation.chatReadPositions?[pending.request] ?? 0
+                try conversation.acceptReadPosition(pending, serverPosition: max(held, pending.readThroughConversationSequence))
+            } else {
+                conversation.retireReadPosition(pending)
+            }
+            next.conversation = conversation
+        } else {
+            // The accepted resource will hydrate through the model when the
+            // baseline is ready. Its saved operation is already settled.
+            next.pendingReadPositions.removeValue(forKey: pending.request)
+        }
+        try commit(next)
+    }
+
     /// Re-validates an already-accounted redacted revision without applying or
     /// persisting it. Replay may ignore it only when the normal profile/request
     /// checks pass and the exact redacted-revision guard still rejects it.
@@ -3671,7 +3710,7 @@ public final class ClientRepository: @unchecked Sendable {
             pending = nil
         } else {
             pending = conversation.prepareReadPosition(for: request, operationID: UUID(),
-                position: turn.conversationSequence ?? 0)
+                position: turn.conversationSequence ?? 0, entryID: turn.id)
         }
         if conversation == (state.conversation ?? ConversationState()) {
             return ConversationReadUpdate(pendingPosition: pending,

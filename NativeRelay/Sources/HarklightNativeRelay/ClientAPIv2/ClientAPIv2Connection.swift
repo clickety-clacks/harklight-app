@@ -109,6 +109,7 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
             if entry.operation == "priority_levels" {
                 await relay.connection?.rejectPriorityLevels(entry, error: error)
             }
+            await relay.connection?.settleItemAction(entry, rejection: error)
             await onRejected(entry, error)
         }, onAcceptedResult: { entry, result in
             if let responseEntry = result.entry {
@@ -119,6 +120,7 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
             if entry.operation == "priority_levels" {
                 await relay.connection?.confirmPriorityLevels(entry, settings: result.settings)
             }
+            await relay.connection?.settleItemAction(entry, result: result)
         }), publish: { relay.connection?.publishModel() })
         self.outbox = try ActionOutbox(persistence: persistence, transport: transport, outcomes: outcomes,
             errors: errors, startsPaused: foregroundOnlyWrites, canSend: { entry in
@@ -422,6 +424,7 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
                 await self.retryOnReplySignals(cleanup) { await self.discardAbandonedReplyUploads() }
             }
             for await _ in signals {
+                await self.recoverSavedItemActions()
                 do {
                     let queued = try repository.queuedChatMessages(context: context)
                     for item in Set(queued.map { $0.binding.request.messageID }) {
@@ -733,6 +736,10 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
 
     public func resolveShowItem(itemID: ExactText) async throws -> APIItem? {
         if let held = model.snapshot.items[itemID] { return held }
+        return try await fetchCurrentItem(itemID)
+    }
+
+    private func fetchCurrentItem(_ itemID: ExactText) async throws -> APIItem? {
         let generation = model.syncPosition.generation
         let path = "/v2/items/" + ServerModelSyncWriter.pathSegment(itemID)
         let response = try await transport.send(.get(path))
@@ -782,6 +789,162 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
         }
         onPublished()
         signalAcceptedReplyCheck()
+    }
+}
+
+extension ClientAPIv2Connection {
+    /// These records have already committed in the repository. Their saved
+    /// IDs become the idempotency keys of the corresponding v2 writes.
+    public func sendSavedContentOpens() async {
+        do {
+            for pending in try repository.snapshot(context: context).pendingMessageOpens {
+                let write = ClientAPIWrites.seen(itemID: pending.requestKey.messageID)
+                await handOffItemAction(write.operation, operationID: pending.id) {
+                    try await outbox.submit(target: write.target, operation: write.operation, write: write.write,
+                                            idempotencyKey: pending.id, retryRefused: false) { [repository, context] in
+                        try repository.snapshot(context: context).pendingMessageOpens.contains { $0.id == pending.id }
+                    }
+                }
+            }
+        } catch { reportItemAction(error, operation: "mark_seen", phase: "recover") }
+    }
+
+    public func sendSavedConversationReads() async {
+        do {
+            let snapshot = try repository.conversationSnapshot(context: context)
+            for pending in try repository.savedV2ReadPositions(context: context) {
+                let entryID = pending.entryID ?? snapshot.threads[pending.request]?.turns.first {
+                    $0.conversationSequence == pending.readThroughConversationSequence
+                }?.id
+                guard let entryID else { continue }
+                let write = ClientAPIWrites.readPosition(itemID: pending.request.messageID, entryID: entryID)
+                await handOffItemAction(write.operation, operationID: pending.operationID) {
+                    try await outbox.submit(target: write.target, operation: write.operation, write: write.write,
+                                            idempotencyKey: pending.operationID, retryRefused: false) { [repository, context] in
+                        try repository.savedV2ReadPositions(context: context).contains {
+                            $0.operationID == pending.operationID
+                        }
+                    }
+                }
+            }
+        } catch { reportItemAction(error, operation: "read_position", phase: "recover") }
+    }
+
+    public func sendSavedAnswer(_ intentID: UUID) async throws {
+        let saved = try repository.queueOriginalOperationForUserTap(intentID, context: context)
+        try await handOffAnswer(saved, retryRefused: true)
+    }
+
+    private func recoverSavedItemActions() async {
+        await sendSavedContentOpens()
+        await sendSavedConversationReads()
+        do {
+            for saved in try repository.inboxOperationInventory(context: context) where Self.canHandOffAnswer(saved) {
+                await handOffItemAction("answer", operationID: saved.operationID) {
+                    try await handOffAnswer(saved, retryRefused: false)
+                }
+            }
+        } catch { reportItemAction(error, operation: "answer", phase: "recover") }
+    }
+
+    private static func canHandOffAnswer(_ saved: Submission) -> Bool {
+        switch saved.disposition {
+        case .pending, .lost: return true
+        default: return false
+        }
+    }
+
+    private func handOffAnswer(_ saved: Submission, retryRefused: Bool) async throws {
+        let write: ClientAPIWrite
+        do {
+            write = try ClientAPIWrites.answer(saved)
+        } catch ClientAPIWrites.BuildError.unsupportedAnswer where saved.answerUISchema == nil {
+            guard let revision = saved.requestRevision else { throw ClientAPIWrites.BuildError.missingRequestRevision }
+            let itemID = saved.requestKey.messageID
+            if let held = model.snapshot.items[itemID], held.requestRevision == revision {
+                write = try ClientAPIWrites.answer(saved, answerUI: held.message.uniqueValue(named: "answer_ui"))
+            } else {
+                let item = ClientAPIWrites.component(itemID)
+                let response = try await transport.send(.get("/v2/items/\(item)/revisions/\(revision)"))
+                let document = try APIRevision(json: JSONValue.parse(response.body))
+                guard document.requestRevision == revision else { throw ClientAPIWrites.BuildError.missingRequestRevision }
+                write = try ClientAPIWrites.answer(saved, answerUI: document.message.uniqueValue(named: "answer_ui"))
+            }
+        }
+        try Task.checkCancellation()
+        try await outbox.submit(target: write.target, operation: write.operation, write: write.write,
+                                idempotencyKey: saved.operationID, retryRefused: retryRefused,
+                                answerIntentID: saved.intentID) { [repository, context] in
+            guard let current = try repository.lookupIntent(saved.intentID, context: context),
+                  current.operationID == saved.operationID else { return false }
+            return Self.canHandOffAnswer(current)
+        }
+    }
+
+    private func handOffItemAction<T>(_ operation: String, operationID: UUID, _ work: () async throws -> T) async {
+        guard !Task.isCancelled else { return }
+        do { _ = try await work() }
+        catch is CancellationError {}
+        catch { reportItemAction(error, operation: operation, phase: "handoff", operationID: operationID) }
+    }
+
+    private func settleItemAction(_ entry: OutboxEntry, result: APIWriteResult? = nil, rejection: APIError? = nil) async {
+        do {
+            switch entry.operation {
+            case "mark_seen":
+                _ = try repository.retireMessageOpen(entry.id, context: context)
+            case "read_position":
+                try repository.settleV2ReadPosition(entry.id, accepted: rejection == nil, context: context)
+            case "answer":
+                guard let intent = entry.answerIntentID else { return }
+                if let result {
+                    try repository.recordAcceptedOperation(intent, operationID: entry.id,
+                                                           terminalSequence: result.position, context: context)
+                } else if let rejection {
+                    try await recordAnswerRejection(rejection, intent: intent, operationID: entry.id)
+                }
+            default: return
+            }
+        } catch {
+            reportItemAction(error, operation: entry.operation, phase: "settle", operationID: entry.id)
+        }
+    }
+
+    private func recordAnswerRejection(_ error: APIError, intent: UUID, operationID: UUID) async throws {
+        switch error.token {
+        case .notFound:
+            try repository.recordAnswerRefusedClosed(intent, operationID: operationID, requestNotFound: true,
+                                                     context: context)
+        case .alreadyAnswered, .alreadyRetracted:
+            let terminal: V2AnswerTerminalRefusal = error.token == .alreadyAnswered ? .alreadyAnswered : .alreadyRetracted
+            try repository.recordAnswerRefusedClosed(intent, operationID: operationID, v2Terminal: terminal,
+                                                      context: context)
+        case .alreadyClosed:
+            try repository.recordAnswerRefusedClosed(intent, operationID: operationID, context: context)
+        case .staleRequest:
+            if let saved = try repository.lookupIntent(intent, context: context), let revision = saved.requestRevision {
+                let itemID = saved.requestKey.messageID
+                var current = model.snapshot.items[itemID]?.requestRevision
+                if current ?? 0 <= revision {
+                    current = try? await fetchCurrentItem(itemID)?.requestRevision
+                }
+                if let current, current > revision {
+                    try repository.recordAnswerStaleRevision(intent, operationID: operationID, currentRevision: current,
+                                                              context: context)
+                    return
+                }
+            }
+            try repository.recordAnswerNotDelivered(intent, operationID: operationID, context: context)
+        default:
+            try repository.recordAnswerNotDelivered(intent, operationID: operationID, context: context)
+        }
+    }
+
+    private func reportItemAction(_ error: any Error, operation: String, phase: String, operationID: UUID? = nil) {
+        let api = error as? APIError
+        errors.report(ErrorLogReport(concern: .actions, connectionRole: .request, operation: operation,
+            phase: phase, reason: .api(error), initiator: .forFailure(error), retryable: api?.isPermanent != true,
+            correlation: .request(api?.requestID, operationID: operationID), httpStatus: api?.status))
     }
 }
 

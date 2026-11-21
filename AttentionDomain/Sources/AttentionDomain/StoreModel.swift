@@ -149,11 +149,27 @@ public enum IntentDisposition: Equatable, Codable, Sendable {
     case repairRequired
 }
 
+public enum V2AnswerTerminalRefusal: String, Codable, Sendable {
+    case alreadyAnswered
+    case alreadyRetracted
+
+    var terminal: TerminalState { self == .alreadyAnswered ? .answered : .cleared }
+    var evidence: String {
+        switch self {
+        case .alreadyAnswered: "This request was already answered."
+        case .alreadyRetracted: "The sender retracted this message."
+        }
+    }
+}
+
 public struct Submission: Equatable, Codable, Sendable {
     /// Local durable preparation time, for presentation ordering only.
     /// Nil preserves old receipts without inventing their send time.
     public let submittedAt: Date?
     public let requestRevision: UInt64?
+    /// The schema of this answer's bound revision. It stays available after
+    /// another revision changes the message's current answer screen.
+    public let answerUISchema: ExactText?
     public let requestKey: RequestKey
     public let answer: JSONValue
     /// Missing values decode existing schema-2 answer receipts unchanged.
@@ -167,6 +183,7 @@ public struct Submission: Equatable, Codable, Sendable {
     public let descriptorFingerprint: String
     public let contentFingerprint: String
     public var disposition: IntentDisposition
+    public internal(set) var v2TerminalRefusal: V2AnswerTerminalRefusal? = nil
 
     public var isNoComment: Bool { answerKind == .noComment }
 
@@ -187,9 +204,11 @@ public struct Submission: Equatable, Codable, Sendable {
                 contentFingerprint: String,
                 disposition: IntentDisposition = .pending,
                 requestRevision: UInt64? = nil,
-                submittedAt: Date? = nil) {
+                submittedAt: Date? = nil,
+                answerUISchema: ExactText? = nil) {
         self.submittedAt = submittedAt
         self.requestRevision = requestRevision
+        self.answerUISchema = answerUISchema
         self.requestKey = requestKey
         self.answer = answer
         self.answerKind = answerKind

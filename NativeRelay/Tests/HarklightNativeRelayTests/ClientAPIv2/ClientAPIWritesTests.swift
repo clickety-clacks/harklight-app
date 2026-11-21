@@ -88,7 +88,9 @@ final class ClientAPIWritesTests: XCTestCase {
     /// button with a literal result) is answerable, through the same port a tap uses.
     func testAUI1ScreenWithNoInputsIsAnsweredWithItsLiteralResultEvenNull() throws {
         let submission = try submit(message: #"{"title":"Confirm","answer_ui":\#(uiScreen)}"#, inputs: [])
-        let write = try ClientAPIWrites.answer(submission, answerUI: try json(uiScreen))
+        let reopened = try JSONDecoder().decode(Submission.self, from: JSONEncoder().encode(submission))
+        XCTAssertEqual(reopened.answerUISchema?.rawValue, "attention-client.ui/1")
+        let write = try ClientAPIWrites.answer(reopened)
         XCTAssertEqual(body(write), #"{"request_revision":1,"result":null}"#,
                        "A null result is present: a structured answer whose value is null.")
     }

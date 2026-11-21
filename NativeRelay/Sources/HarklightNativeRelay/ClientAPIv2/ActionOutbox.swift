@@ -38,8 +38,19 @@ public struct OutboxEntry: Codable, Equatable, Sendable, Identifiable {
     /// Set when the server refused the write. The write stays in the outbox,
     /// shown as failed, until the app discards it; it is never dropped silently.
     public internal(set) var failure: OutboxFailure? = nil
+    /// The repository's stable answer intent, distinct from the HTTP key.
+    public internal(set) var answerIntentID: UUID? = nil
 
     public var id: UUID { idempotencyKey }
+
+    /// Seen and read-position reports are independently monotonic facts. A
+    /// slow reply must not hold either report for the same item.
+    var sendingLane: String {
+        switch operation {
+        case "mark_seen", "read_position": "\(operation):\(target)"
+        default: target
+        }
+    }
 
     /// The item an `item:<id>` target is about, for the Error Log.
     var resourceID: String? {
@@ -146,7 +157,8 @@ public actor ActionOutbox {
     /// the app already saved one (for example a queued chat message).
     public func submit(target: String, operation: String, write: FrozenWrite,
                        idempotencyKey: UUID = UUID(), now: Date = Date(),
-                       retryRefused: Bool = true) async throws -> OutboxEntry {
+                       retryRefused: Bool = true, answerIntentID: UUID? = nil,
+                       stillPending: @Sendable () throws -> Bool = { true }) async throws -> OutboxEntry {
         if let existing = entries.first(where: { $0.idempotencyKey == idempotencyKey }) {
             // Handing a pending write over again queues it once. Handing over
             // a refused one is the person's Retry: the server stores only
@@ -158,28 +170,29 @@ public actor ActionOutbox {
             next[index].outsideContractFailures = nil
             try persistence.save(next)
             entries = next
-            startSending(existing.target)
+            startSending(existing.sendingLane)
             return next[index]
         }
+        guard try stillPending() else { throw CancellationError() }
         let entry = OutboxEntry(idempotencyKey: idempotencyKey, target: target, operation: operation, write: write,
-                                createdAt: now, outcomeUnknown: false, attempts: 0)
+                                createdAt: now, outcomeUnknown: false, attempts: 0, answerIntentID: answerIntentID)
         var next = entries
         next.append(entry)
         try persistence.save(next)
         entries = next
-        startSending(entry.target)
+        startSending(entry.sendingLane)
         return entry
     }
 
     /// Sends everything queued, each target in order and targets in parallel,
     /// and returns once every target has stopped (empty or waiting to retry).
     public func flush() async {
-        let tasks = Set(pending.map(\.target)).compactMap { startSending($0) }
+        let tasks = Set(pending.map(\.sendingLane)).compactMap { startSending($0) }
         for task in tasks { await task.value }
     }
 
     func wake(operation: String) {
-        for target in Set(pending.filter { $0.operation == operation }.map(\.target)) {
+        for target in Set(pending.filter { $0.operation == operation }.map(\.sendingLane)) {
             startSending(target)
         }
     }
@@ -238,7 +251,7 @@ public actor ActionOutbox {
         repeat {
             resendRequested.remove(target)
             while !sendingPaused, !Task.isCancelled,
-                  let entry = entries.first(where: { $0.target == target && $0.failure == nil }) {
+                  let entry = entries.first(where: { $0.sendingLane == target && $0.failure == nil }) {
                 guard canSend(entry) else { return }
                 guard await sendOne(entry).continueDraining else { return }
             }
@@ -287,7 +300,7 @@ public actor ActionOutbox {
             // Unknown outcome or retry later: keep the operation and its key.
             markOutcomeUnknown(entry.idempotencyKey, transportFailure: !(error is APIError))
             report(entry, phase: "send", error: error, initiator: .forFailure(error), retryable: true)
-            scheduleRetry(entry.target, attempt: entries.first { $0.id == entry.id }?.attempts ?? 1,
+            scheduleRetry(entry.sendingLane, attempt: entries.first { $0.id == entry.id }?.attempts ?? 1,
                           retryAfter: (error as? APIError)?.retryAfter)
             return (false, .failure(error))
         }

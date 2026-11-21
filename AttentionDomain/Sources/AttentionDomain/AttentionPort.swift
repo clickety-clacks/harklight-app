@@ -1215,7 +1215,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
                          draft: RequestDraft,
                          deliveredFiles: [ConversationFile],
                          session: RequestSession?,
-                         remote: RemoteRequestState?,
+                         remote authoritativeRemote: RemoteRequestState?,
                          submission: Submission?,
                          failedSubmission: Submission? = nil,
                          selector: BoundDocumentSelector?,
@@ -1232,6 +1232,13 @@ public final class AttentionDomainPort: @unchecked Sendable {
                          inboxReplyPriorities: [UInt64: InboxMessagePriority] = [:],
                          inboxReplyScores: [UInt64: Double] = [:],
                          onUnprojectableScene: () -> Void = {}) throws -> PresentedRequest {
+        let refusal = submission?.v2TerminalRefusal
+        var remote = authoritativeRemote
+        if let refusal, remote?.state == nil {
+            var confirmed = remote ?? RemoteRequestState()
+            confirmed.state = refusal.terminal
+            remote = confirmed
+        }
         let status: AppLifecycleStatus
         let receiptFacts: ReceiptPresentationFacts?
         switch session?.lifecycle {
@@ -1258,9 +1265,9 @@ public final class AttentionDomainPort: @unchecked Sendable {
                 let evidenceLabel = terminal == .noComment
                     ? "The sender recorded your No comment answer."
                     : "Relay lifecycle evidence is recorded; original operation outcome is shown separately."
-                receiptFacts = ReceiptPresentationFacts(evidenceLabel: evidenceLabel,
-                                                        ownOutcome: hasAcceptedIntent ? .accepted : .unconfirmed,
-                                                        originalOperationUncertainty: !hasAcceptedIntent)
+                receiptFacts = ReceiptPresentationFacts(evidenceLabel: refusal?.evidence ?? evidenceLabel,
+                    ownOutcome: refusal != nil ? .refused : (hasAcceptedIntent ? .accepted : .unconfirmed),
+                    originalOperationUncertainty: refusal == nil && !hasAcceptedIntent)
             } else if let submission {
                 let definitivelyUnavailable = submission.disposition == .refusedClosed ||
                     submission.disposition == .refusedNotFound
@@ -1287,11 +1294,9 @@ public final class AttentionDomainPort: @unchecked Sendable {
 
         let projection: AdmittedRequestProjection
         let hasAccountTerminal = remote?.state != nil
-        let ownAnswerWasRefusedByRetraction: Bool
+        var ownAnswerWasRefusedByRetraction = refusal == .alreadyRetracted
         if let submission, case .refusedByRetraction = submission.disposition {
             ownAnswerWasRefusedByRetraction = true
-        } else {
-            ownAnswerWasRefusedByRetraction = false
         }
         let interface = request.interface(deliveredFileNames: Set(deliveredFiles.map(\.name)))
         switch interface {
@@ -1399,7 +1404,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
                                 failedAnswer: submittedAnswer(for: failedSubmission, interface: interface),
                                 ownAnswerWasRefusedByRetraction: ownAnswerWasRefusedByRetraction,
                                 lifecycleStatus: status,
-                                receiptFacts: hasAccountTerminal ? nil : receiptFacts,
+                                receiptFacts: hasAccountTerminal && refusal == nil ? nil : receiptFacts,
                                 intentReceipt: hasAccountTerminal ? nil : submission.map { receipt($0, context: context) },
                                 projection: projection,
                                 informationalSeenStatus: informationalSeenStatus(for: request,

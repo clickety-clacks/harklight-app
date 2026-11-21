@@ -164,6 +164,146 @@ private actor HeldMeTransport: ClientAPITransport {
     }
 }
 
+final class SavedV2ItemActionTests: XCTestCase {
+    func testAnOlderVisibleEntryCannotReplaceAHigherPendingReadAcrossRelaunch() async throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+            personID: ExactText("person"), deviceID: ExactText("device"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let persistence = FilePendingActionPersistence(directoryURL: directory)
+        let first = try ClientRepository(context: context, persistence: persistence)
+        let model = ServerModelV2Store(fileURL: nil)
+        let item = try APIItem(json: V2Fixture.json(V2Fixture.item("i", rev: 1, rankKey: "a")))
+        try model.rebaseline(items: [item], counts: APICounts(unresolved: 1), position: 1)
+        try model.open("i")
+        try model.apply(kind: "entry", rev: 2,
+                        data: V2Fixture.json(V2Fixture.entry("at-four", item: "i", rev: 2, position: 4)))
+        try model.apply(kind: "entry", rev: 3,
+                        data: V2Fixture.json(V2Fixture.entry("at-nine", item: "i", rev: 3, position: 9)))
+        try first.restoreCachedServerState(ServerModelV2Projection.cachedState(model.snapshot, identity: identity),
+                                           context: context)
+        let key = ServerModelV2Projection.key(for: item.itemID, sender: item.sender, identity: identity)
+        let higher = try XCTUnwrap(first.markConversationRead(key, through: ExactText("at-nine"), context: context))
+        let olderCallback = try first.markConversationRead(key, through: ExactText("at-four"), context: context)
+        XCTAssertEqual(olderCallback, higher)
+        XCTAssertEqual(higher.readThroughConversationSequence, 9)
+
+        let reopened = try ClientRepository(context: context, persistence: persistence)
+        XCTAssertEqual(try reopened.savedV2ReadPositions(context: context), [higher])
+        let server = FakeClientAPIServer()
+        let connection = try ClientAPIv2Connection(transport: server, repository: reopened, context: context,
+            directory: nil, errors: RecordingErrorLogV2())
+        await connection.sendSavedConversationReads()
+        await eventually("position nine settles under its original key") {
+            (try? reopened.savedV2ReadPositions(context: context).isEmpty) == true
+        }
+        let sent = try XCTUnwrap(server.received.first)
+        XCTAssertEqual(server.received.count, 1)
+        XCTAssertEqual(sent.idempotencyKey, higher.operationID)
+        XCTAssertEqual(sent.path, "/v2/items/i/read-position")
+        XCTAssertEqual(String(decoding: sent.body ?? Data(), as: UTF8.self), #"{"entry_id":"at-nine"}"#)
+    }
+
+    func testTerminalAnswerRefusalsCloseTheRowWithoutAFeedUpdate() async throws {
+        let scenarios: [(APIErrorToken, AppLifecycleStatus, String)] = [
+            (.alreadyRetracted, .cleared, "The sender retracted this message."),
+            (.alreadyAnswered, .answered, "This request was already answered.")
+        ]
+        for (token, status, evidence) in scenarios {
+            let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                personID: ExactText("person"), deviceID: ExactText("device"))
+            let context = ProfileContext(identity: identity, transportMode: .relay)
+            let repository = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+            let server = FakeClientAPIServer()
+            server.nextWriteFailures = [APIError(status: 409, token: token, retryable: false, requestID: "closed")]
+            let connection = try ClientAPIv2Connection(transport: server, repository: repository, context: context,
+                directory: nil, errors: RecordingErrorLogV2())
+            let message = #"{"title":"Question","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"ok","label":"OK","kind":"value","value":true}]}}"#
+            let item = try APIItem(json: V2Fixture.json(V2Fixture.item("i", rev: 1, rankKey: "a", message: message)))
+            try connection.model.rebaseline(items: [item], counts: APICounts(unresolved: 1), position: 1)
+            let cached = ServerModelV2Projection.cachedState(connection.model.snapshot, identity: identity)
+            try repository.restoreCachedServerState(cached, context: context)
+            let key = ServerModelV2Projection.key(for: item.itemID, sender: item.sender, identity: identity)
+            let port = AttentionDomainPort(store: repository)
+            let selector = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first?.selector)
+            let receipt = try port.submit(SubmitIntent(context: port.context, selector: selector, intentID: UUID(),
+                inputs: [.compatibilityValue(action: ExactText("ok"))]))
+            try await connection.sendSavedAnswer(receipt.intentID)
+            await eventually("the refusal projects a terminal row") {
+                (try? port.inspect(context: port.context, request: key).requests.first?.lifecycleStatus) == status
+            }
+            try repository.restoreCachedServerState(cached, context: context)
+            let shown = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first)
+            XCTAssertEqual(shown.lifecycleStatus, status)
+            XCTAssertEqual(shown.receiptFacts?.evidenceLabel, evidence)
+            XCTAssertEqual(shown.receiptFacts?.ownOutcome, .refused)
+            XCTAssertEqual(shown.ownAnswerWasRefusedByRetraction, token == .alreadyRetracted)
+            XCTAssertEqual(connection.model.heldCursor, 1)
+            XCTAssertEqual(server.received.map(\.path), ["/v2/items/i/answer"])
+        }
+    }
+
+    func testForegroundRecoversSavedSeenReadAndAnswerAndSettlesTheirKeys() async throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                                       personID: ExactText("person"), deviceID: ExactText("device"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let persistence = MemoryPendingActionPersistence()
+        let first = try ClientRepository(context: context, persistence: persistence)
+        let model = ServerModelV2Store(fileURL: nil)
+        let message = #"{"title":"Question","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"ok","label":"OK","kind":"value","value":true}]}}"#
+        let item = V2Fixture.item("i", rev: 1, rankKey: "a", message: message)
+        try model.apply(kind: "item", rev: 1, data: V2Fixture.json(item))
+        try model.open("i")
+        try model.apply(kind: "entry", rev: 2,
+                        data: V2Fixture.json(V2Fixture.entry("entry-first", item: "i", rev: 2, position: 4)))
+        try first.restoreCachedServerState(ServerModelV2Projection.cachedState(model.snapshot, identity: identity),
+                                           context: context)
+        let key = RequestKey(accountScope: identity.personID, senderID: ExactText("agent-app"), messageID: ExactText("i"))
+        let seen = try first.enqueueMessageOpen(key, requestRevision: 1, context: context)
+        let read = try XCTUnwrap(first.markConversationRead(key, through: ExactText("entry-first"), context: context))
+        let port = AttentionDomainPort(store: first)
+        let selector = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first?.selector)
+        let receipt = try port.submit(SubmitIntent(context: port.context, selector: selector, intentID: UUID(),
+            inputs: [.compatibilityValue(action: ExactText("ok"))]))
+        let answer = try XCTUnwrap(first.lookupIntent(receipt.intentID, context: context))
+
+        let reopened = try ClientRepository(context: context, persistence: persistence)
+        XCTAssertEqual(try reopened.savedV2ReadPositions(context: context).first?.entryID,
+                       ExactText("entry-first"))
+        let server = FakeClientAPIServer()
+        server.inboxItems = [V2Fixture.item("i", rev: 3, rankKey: "a")
+            .replacingOccurrences(of: #""request_revision":1"#, with: #""request_revision":2"#)]
+        server.meBody = #"{"account":{"state":"active"},"features":{},"limits":{}}"#
+        let connection = try ClientAPIv2Connection(transport: server, repository: reopened, context: context,
+            directory: nil, errors: RecordingErrorLogV2(), foregroundOnlyWrites: true)
+        let run = Task { await connection.runForeground() }
+        defer { run.cancel() }
+        let keys = [seen.operationID, read.operationID, answer.operationID]
+        await eventually("each operation settles in the repository") {
+            guard let live = try? reopened.lookupIntent(answer.intentID, context: context),
+                  case .accepted = live.disposition else { return false }
+            return (try? reopened.snapshot(context: context).pendingMessageOpens.isEmpty) == true &&
+                (try? reopened.savedV2ReadPositions(context: context).isEmpty) == true
+        }
+        let writes = server.received.filter { $0.idempotencyKey != nil }
+        XCTAssertEqual(writes.count, keys.count)
+        XCTAssertEqual(Set(writes.compactMap(\.idempotencyKey)), Set(keys))
+        let expected = [
+            (seen.operationID, "/v2/items/i/seen", "{}"),
+            (read.operationID, "/v2/items/i/read-position", #"{"entry_id":"entry-first"}"#),
+            (answer.operationID, "/v2/items/i/answer", #"{"request_revision":1,"choice":"ok"}"#)
+        ]
+        for (key, path, body) in expected {
+            let write = try XCTUnwrap(writes.first { $0.idempotencyKey == key })
+            XCTAssertEqual(write.path, path)
+            XCTAssertEqual(String(decoding: write.body ?? Data(), as: UTF8.self), body)
+        }
+        run.cancel()
+        await run.value
+    }
+}
+
 final class ServerSentEventParserTests: XCTestCase {
     private func events(_ lines: [String]) -> [ServerSentEvent] {
         var parser = ServerSentEventParser()
@@ -403,6 +543,28 @@ final class ActionOutboxTests: XCTestCase {
     }
 
     private let seen = FrozenWrite(method: .post, path: "/v2/items/a/seen", body: Data("{}".utf8))
+
+    func testSameItemSeenAndReadPositionProceedWhileAReplyIsHeld() async throws {
+        let server = FakeClientAPIServer()
+        let held = AsyncGate()
+        defer { held.release() }
+        let item = ExactText("a")
+        let reply = ClientAPIWrites.reply(itemID: item, text: ExactText("Held"))
+        server.holdWrites[reply.write.path] = held
+        let outcomes = RecordingOutcomes()
+        let box = try outbox(server, MemoryOutboxPersistence(), outcomes)
+        let waiting = try await box.submit(target: reply.target, operation: reply.operation, write: reply.write)
+        await eventually("the reply is in flight") { server.received.contains { $0.idempotencyKey == waiting.id } }
+        let seen = ClientAPIWrites.seen(itemID: item)
+        let read = ClientAPIWrites.readPosition(itemID: item, entryID: ExactText("first"))
+        let seenEntry = try await box.submit(target: seen.target, operation: seen.operation, write: seen.write)
+        let readEntry = try await box.submit(target: read.target, operation: read.operation, write: read.write)
+        await eventually("both independent reports are accepted while the reply is still held") {
+            Set(outcomes.accepted.map(\.0)) == [seenEntry.id, readEntry.id]
+        }
+        held.release()
+        await eventually("the held reply finishes last") { outcomes.accepted.last?.0 == waiting.id }
+    }
 
     func testTheKeyIsPersistedBeforeTheFirstSendAndTheResponseIsApplied() async throws {
         let server = FakeClientAPIServer()
