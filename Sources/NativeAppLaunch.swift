@@ -809,13 +809,14 @@ final class NativeAppLaunch {
         await NativeRelayLifecycle.shared.deactivate()
         guard activationGeneration == generation else { return }
         let context = installation.context
+        let usesV2 = NativeRelayLifecycle.shared.clientAPIV2Enabled
         let (store, fileStorage, serverStateCache) = try await Task.detached(priority: .userInitiated) {
             let persistence = try FilePendingActionPersistence.applicationSupport()
             let fileStorage = try ConversationFileStorage(identity: context.identity)
             let store = try ClientRepository(context: context, persistence: persistence,
                                                  conversationFileReferences: fileStorage)
             let cache: FileServerStateCache
-            if let persistent = try? FileServerStateCache.applicationCache(for: context.identity) {
+            if !usesV2, let persistent = try? FileServerStateCache.applicationCache(for: context.identity) {
                 cache = persistent
             } else {
                 cache = FileServerStateCache(identity: context.identity)
@@ -869,6 +870,11 @@ final class NativeAppLaunch {
                   case let .live(current) = self.state, current === presentation,
                   self.foregroundConnectProgress?.outcome != .confirmed else { return }
             self.clearForegroundConnectionDetails()
+        }
+        if usesV2 {
+            presentation.chatMessageQueued = { message in
+                Task { await NativeRelayLifecycle.shared.sendV2QueuedReply(message, expected: context) }
+            }
         }
         presentation.startObserving()
         state = .live(presentation)
@@ -1059,7 +1065,11 @@ final class NativeAppLaunch {
 
     func openForegroundChatIndicator(id: UUID) async {
         guard let indicator = notificationRouter.consumeForegroundChatIndicator(id: id) else { return }
-        notificationRouter.receive(indicator.payload, opened: true)
+        if NativeRelayLifecycle.shared.clientAPIV2Enabled {
+            notificationRouter.pendingV2Tap = indicator.payload
+        } else {
+            notificationRouter.receive(indicator.payload, opened: true)
+        }
         await handleNotification()
     }
 
@@ -1070,7 +1080,13 @@ final class NativeAppLaunch {
     }
 
     func handleNotification() async {
-        guard didFinishRestoring, let intent = notificationRouter.intent,
+        guard didFinishRestoring else { return }
+        if NativeRelayLifecycle.shared.clientAPIV2Enabled, let payload = notificationRouter.pendingV2Tap {
+            notificationRouter.pendingV2Tap = nil
+            guard let locator = await NativeRelayLifecycle.shared.v2LocatorForPush(payload) else { return }
+            notificationRouter.receive(locator: locator)
+        }
+        guard let intent = notificationRouter.intent,
               handledNotificationSerial != intent.serial else { return }
         handledNotificationSerial = intent.serial
         pendingMessageDeepLink = nil
@@ -2288,6 +2304,11 @@ final class LivePresentationStore {
         return conversationThreads[key]?.uploadGroups?[operation]?.cleanupID != nil
     }
 
+    func loadDiscussionOnOpen(_ key: RequestKey) async -> Bool {
+        guard permitsDelivery else { return true }
+        return await NativeRelayLifecycle.shared.loadV2EntriesOnOpen(key, expected: profileContext)
+    }
+
     func refreshDiscussionHistory() async {
         guard permitsDelivery else { return }
         let result = await NativeRelayLifecycle.shared.refreshResultFromTrustedRelay()
@@ -2350,6 +2371,10 @@ final class LivePresentationStore {
         catch { diagnose(.localStore, .projectionRefresh, .failed, error: error, request: key) }
     }
 
+    var allowsDiscussionAttachments: Bool {
+        isLocalExample || !NativeRelayLifecycle.shared.clientAPIV2Enabled
+    }
+
     func sendDiscussion(for key: RequestKey, revision: UInt64,
                         onQueued: (() -> Void)? = nil,
                         onResult: ((Bool) -> Void)? = nil) {
@@ -2370,6 +2395,10 @@ final class LivePresentationStore {
             }
             let binding = ConversationBinding(request: key, revision: revision)
             if thread.chatNeverCloses == true {
+                guard thread.drafts[revision]?.files.isEmpty != false else {
+                    conversationError = "Remove the attachments to send this message. Your draft is saved."
+                    return
+                }
                 // Client API v2 (APP-07): each message is its own operation.
                 // It is saved with its id, the composer empties and stays
                 // enabled, and the message is handed to the outbox; nothing

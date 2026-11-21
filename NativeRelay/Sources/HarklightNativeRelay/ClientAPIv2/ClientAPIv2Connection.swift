@@ -31,6 +31,8 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
     public let outbox: ActionOutbox
     public let sync: ChangeFeedSync
     private let transport: any ClientAPITransport
+    private let foregroundOnlyWrites: Bool
+    private let modelWriter: ServerModelSyncWriter
     private let repository: ClientRepository
     private let context: ProfileContext
     private let errors: any ErrorLogging
@@ -42,7 +44,7 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
     /// `directory` holds the model, outbox and last `/v2/me` for this
     /// account; nil keeps everything in memory (tests and previews).
     public init(transport: any ClientAPITransport, repository: ClientRepository, context: ProfileContext,
-                directory: URL?, errors: any ErrorLogging,
+                directory: URL?, errors: any ErrorLogging, foregroundOnlyWrites: Bool = false,
                 waitBeforeRetry: @escaping @Sendable (Int) async throws -> Void = ChangeFeedSync.backoff,
                 outboxWaitBeforeRetry: @escaping @Sendable (Int, TimeInterval?) async throws -> Void = ActionOutbox.backoff,
                 meWaitBeforeRetry: @escaping @Sendable (Int) async throws -> Void = ChangeFeedSync.backoff,
@@ -59,6 +61,7 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
         self.model = model
         self.presentation = ServerModelV2Presentation(savedMe: savedMe)
         self.transport = transport
+        self.foregroundOnlyWrites = foregroundOnlyWrites
         self.repository = repository
         self.context = context
         self.errors = errors
@@ -68,17 +71,25 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
             FileOutboxPersistence(url: $0.appendingPathComponent("outbox-v2.json"))
         } ?? MemoryOutbox()
         let relay = PublishRelay()
-        let writer = PublishingSyncWriter(inner: ServerModelSyncWriter(store: model, transport: transport,
-                                                                       errors: errors),
-                                          publish: { relay.connection?.publishModel() })
-        let outcomes = PublishingOutcomes(inner: ServerModelOutboxOutcomes(store: model, onRejected: onRejected),
-                                          publish: { relay.connection?.publishModel() })
+        let modelWriter = ServerModelSyncWriter(store: model, transport: transport, errors: errors)
+        self.modelWriter = modelWriter
+        let writer = PublishingSyncWriter(inner: modelWriter, publish: { relay.connection?.publishModel() })
+        let outcomes = PublishingOutcomes(inner: ServerModelOutboxOutcomes(store: model, onRejected: { entry, error in
+            relay.connection?.recordReply(entry, disposition: .rejected(ExactText(error.token.rawValue)))
+            await onRejected(entry, error)
+        }, onAcceptedResult: { entry, result in
+            if let responseEntry = result.entry {
+                await relay.connection?.reconcileAcceptedReply(entry, responseEntry: responseEntry)
+            }
+        }), publish: { relay.connection?.publishModel() })
         self.outbox = try ActionOutbox(persistence: persistence, transport: transport, outcomes: outcomes,
-                                       errors: errors, waitBeforeRetry: outboxWaitBeforeRetry)
+                                       errors: errors, startsPaused: foregroundOnlyWrites, waitBeforeRetry: outboxWaitBeforeRetry)
         self.sync = ChangeFeedSync(transport: transport, model: writer, errors: errors,
                                    waitBeforeRetry: waitBeforeRetry, onLiveState: { state in
                                        // Each time the feed is live again, send what the outbox holds.
-                                       if state == .live { relay.connection?.sendSavedWrites() }
+                                       if state == .live, !foregroundOnlyWrites {
+                                           relay.connection?.sendSavedWrites()
+                                       }
                                        onLiveState(state)
                                    })
         relay.connection = self
@@ -127,7 +138,6 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
     /// Sends every saved write that is still pending, once, under its saved
     /// key; refused ones stay failed until the person retries.
     func sendSavedWrites() {
-        let outbox = self.outbox
         Task { await outbox.flush() }
     }
 
@@ -135,16 +145,22 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
     /// follows the change feed until cancelled or stopped by the server.
     public func runForeground() async {
         publishModel()
-        sendSavedWrites()
-        // `/v2/me` is retried alongside the feed until it is read.
-        let me = Task { await readMeUntilRead() }
-        await sync.runForeground()
-        me.cancel()
+        await outbox.resumeSending()
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask { await self.readMeUntilRead() }
+            group.addTask {
+                await self.recoverQueuedReplies()
+                await self.outbox.flush()
+            }
+            await sync.runForeground()
+            group.cancelAll()
+            if foregroundOnlyWrites { await outbox.pauseSending() }
+        }
     }
 
     /// Push or background refresh: applies every batch from the cursor.
     public func catchUp() async throws {
-        sendSavedWrites()
+        if !foregroundOnlyWrites { sendSavedWrites() }
         try await sync.catchUp()
     }
 
@@ -156,6 +172,72 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
         if let persisted = model.persistedCursor(), persisted >= revision { return false }
         try await catchUp()
         return model.heldCursor != before
+    }
+
+    private func reconcileAcceptedReply(_ entry: OutboxEntry, responseEntry: APIEntry) async {
+        guard entry.operation == "reply" else { return }
+        recordReply(entry, disposition: .acceptedPendingReplay(operation: entry.id, turn: responseEntry.entryID))
+        let snapshot = model.snapshot
+        guard snapshot.items[responseEntry.itemID] != nil,
+              snapshot.entries[responseEntry.itemID]?[responseEntry.entryID] == nil else { return }
+        // The receipt is valid even when its resource projection was fenced.
+        // Fetch fresh entries in the current generation to settle the overlay.
+        try? await modelWriter.loadEntries(of: responseEntry.itemID)
+    }
+
+    private func recordReply(_ entry: OutboxEntry, disposition: ConversationDraft.Disposition) {
+        guard entry.operation == "reply" else { return }
+        do {
+            guard let message = try repository.queuedChatMessages(context: context)
+                .first(where: { $0.operationID == entry.id }) else { return }
+            try repository.recordQueuedChatMessage(entry.id, in: message.binding.request,
+                                                   disposition: disposition, context: context)
+        } catch {
+            errors.report(ErrorLogReport(concern: .actions, connectionRole: .request,
+                operation: "reply", phase: "overlay", reason: .from(error: error),
+                initiator: .unknown, retryable: true))
+        }
+    }
+
+    private func recoverQueuedReplies() async {
+        do {
+            let messages = try repository.queuedChatMessages(context: context)
+                .sorted { ($0.submittedAt ?? .distantPast) < ($1.submittedAt ?? .distantPast) }
+            for message in messages {
+                try Task.checkCancellation()
+                guard message.files.isEmpty else { continue }
+                switch message.disposition {
+                case .submitting, .outcomeUnknown:
+                    try await submitQueuedReply(message, retryRefused: false)
+                case .saved, .acceptedPendingReplay, .rejected:
+                    continue
+                }
+            }
+        } catch is CancellationError {
+            return
+        } catch {
+            errors.report(ErrorLogReport(concern: .actions, connectionRole: .request,
+                operation: "reply", phase: "restore", reason: .from(error: error),
+                initiator: .unknown, retryable: true))
+        }
+    }
+
+    public enum QueuedReplyError: Error { case attachmentsUnavailable }
+
+    public func submitQueuedReply(_ message: ConversationDraft, retryRefused: Bool = true) async throws {
+        guard let operation = message.operationID,
+              message.binding.request.accountScope == context.identity.personID else { return }
+        guard message.files.isEmpty else { throw QueuedReplyError.attachmentsUnavailable }
+        let reply = ClientAPIWrites.reply(itemID: message.binding.request.messageID, text: message.text)
+        try await outbox.submit(target: reply.target, operation: reply.operation, write: reply.write,
+                                idempotencyKey: operation, retryRefused: retryRefused)
+    }
+
+    public func loadEntriesIfNeeded(itemID: ExactText) async throws {
+        guard model.snapshot.items[itemID] != nil,
+              !model.snapshot.loadedEntryItems.contains(itemID) else { return }
+        try await modelWriter.loadEntries(of: itemID)
+        publishModel()
     }
 
     /// Publishes the model into the repository when it holds a full

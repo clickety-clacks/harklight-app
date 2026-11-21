@@ -932,6 +932,14 @@ final class NativeRelayLifecycle {
     private var core: NativeRelayCore? {
         didSet { conversationAvailability.reset() }
     }
+    // client_api_v2 is a release gate. B4 removes it with the relay.
+    let clientAPIV2Enabled: Bool
+    private var v2Connection: ClientAPIv2Connection?
+    private var v2ForegroundTask: Task<Void, Never>?
+    private var sceneIsActive = false
+
+    var usesClientAPIV2: Bool { v2Connection != nil }
+
     private var transport: URLSessionInstallationSession?
     private var context: ProfileContext?
     private let snapshotState = NativeRelaySnapshotState()
@@ -983,7 +991,42 @@ final class NativeRelayLifecycle {
     }
     private let enrollment = NativeEnrollmentStore()
 
-    init() {}
+    init(clientAPIV2Enabled: Bool = false) {
+        self.clientAPIV2Enabled = clientAPIV2Enabled
+    }
+
+    func sceneActivityChanged(isActive: Bool) {
+        guard clientAPIV2Enabled else { return }
+        sceneIsActive = isActive
+        if isActive {
+            startV2Foreground()
+        } else {
+            v2ForegroundTask?.cancel()
+        }
+    }
+
+    private func startV2Foreground() {
+        guard sceneIsActive, let connection = v2Connection, v2ForegroundTask == nil else { return }
+        v2ForegroundTask = Task { [weak self] in
+            await connection.runForeground()
+            guard let self, self.v2Connection === connection else { return }
+            self.v2ForegroundTask = nil
+            // A foreground transition may arrive before the cancelled feed exits.
+            if Task.isCancelled { self.startV2Foreground() }
+        }
+    }
+
+    private static func v2Directory(for identity: ProfileIdentity) throws -> URL {
+        let root = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask,
+                                               appropriateFor: nil, create: true)
+        let key = [identity.trustedRelayAuthority.rawValue, identity.personID.rawValue, identity.deviceID.rawValue]
+            .joined(separator: "\u{0}")
+        let digest = SHA256.hash(data: Data(key.utf8)).map { String(format: "%02x", $0) }.joined()
+        return root.appendingPathComponent("ClientAPIv2", isDirectory: true)
+            .appendingPathComponent(digest, isDirectory: true)
+    }
+
+
 
     private func observeNetworkPath(generation: UUID) {
         pathMonitor?.cancel()
@@ -1114,6 +1157,11 @@ final class NativeRelayLifecycle {
                   diagnostics: NativeClientDiagnosticJournal? = nil,
                   serverStateCache: (any ServerStateCaching)? = nil,
                   awaitingFirstConnection: Bool = false) async throws {
+        if clientAPIV2Enabled {
+            try activateV2(store: store, context: context, relayURL: relayURL,
+                           clientIdentity: clientIdentity, trustedRootDER: trustedRootDER)
+            return
+        }
         let generation = UUID()
         let transportAttemptID = UUID()
         self.diagnosticJournal = diagnostics
@@ -1204,6 +1252,99 @@ final class NativeRelayLifecycle {
         resumeSavedDiscussions()
     }
 
+    private func activateV2(store: ClientRepository, context: ProfileContext, relayURL: URL,
+                            clientIdentity: SecIdentity, trustedRootDER: Data) throws {
+        guard let baseURL = ClientAPIv2Endpoint.baseURL(fromRelayURL: relayURL) else {
+            throw InstallationTransportError.invalidEndpoint
+        }
+        let transport = try HTTPSClientAPITransport(baseURL: baseURL,
+            clientIdentity: TrustedKeychainIdentity(clientIdentity), trustedRootDER: trustedRootDER)
+        let attempt = UUID()
+        let connection = try ClientAPIv2Connection(transport: transport, repository: store, context: context,
+            directory: Self.v2Directory(for: context.identity), errors: errorLog, foregroundOnlyWrites: true,
+            onLiveState: { [weak self] state in
+                guard state == .live else { return }
+                Task { @MainActor [weak self] in
+                    guard let self, self.activeTransportAttemptID == attempt else { return }
+                    self.confirmedRelayContext = context
+                }
+            })
+        installV2Connection(connection, context: context, attempt: attempt)
+    }
+
+    func installV2Connection(_ connection: ClientAPIv2Connection, context: ProfileContext, attempt: UUID = UUID()) {
+        guard clientAPIV2Enabled, v2Connection == nil else { return }
+        self.context = context
+        activeTransportAttemptID = attempt
+        v2Connection = connection
+        startV2Foreground()
+    }
+
+    func sendV2QueuedReply(_ message: ConversationDraft, expected: ProfileContext) async {
+        guard let connection = v2Connection, context == expected else { return }
+        do {
+            try await connection.submitQueuedReply(message)
+        } catch {
+            errorLog.report(ErrorLogReport(concern: .actions, connectionRole: .request,
+                operation: "reply", phase: "queue", reason: .from(error: error),
+                initiator: .unknown, retryable: true))
+        }
+    }
+
+    @discardableResult
+    func loadV2EntriesOnOpen(_ key: RequestKey, expected: ProfileContext) async -> Bool {
+        guard let connection = v2Connection, context == expected,
+              key.accountScope == expected.identity.personID else { return true }
+        do {
+            try await connection.loadEntriesIfNeeded(itemID: key.messageID)
+            return true
+        } catch is CancellationError {
+            return false
+        } catch {
+            let reason: ErrorLogReason = error is ServerModelV2Store.SupersededGeneration
+                ? .app("snapshot_superseded") : .from(error: error)
+            errorLog.report(ErrorLogReport(concern: .snapshot, connectionRole: .request,
+                operation: "load_entries", phase: "read", reason: reason,
+                initiator: .unknown, retryable: true))
+            return false
+        }
+    }
+
+    func refreshV2ForPush(_ payload: JSONValue, enrollment: NativeEnrollmentRecord) async -> Bool {
+        guard clientAPIV2Enabled, let connection = v2Connection, let context,
+              let revision = NativeV2PushWake.revision(payload, enrollment: enrollment,
+                                                       identity: context.identity) else { return false }
+        do {
+            let changed = try await connection.catchUp(forPushRevision: revision)
+            return v2Connection === connection && changed
+        } catch {
+            // Sync records transport failures with its Request-Id.
+            return false
+        }
+    }
+
+    func v2LocatorForPush(_ payload: JSONValue) async -> NativeNotificationLocator? {
+        guard clientAPIV2Enabled, let connection = v2Connection, let context,
+              let record = try? enrollment.load(),
+              NativeV2PushWake.revision(payload, enrollment: record, identity: context.identity) != nil,
+              let server = record.serverID,
+              let locator = payload.uniqueValue(named: "attention")?.uniqueValue(named: "locator"),
+              let itemID = locator.uniqueValue(named: "item_id")?.stringValue,
+              let binding = locator.uniqueValue(named: "binding_id")?.stringValue else { return nil }
+        _ = await refreshV2ForPush(payload, enrollment: record)
+        guard v2Connection === connection, let item = connection.model.snapshot.items[itemID] else { return nil }
+        let request = ServerModelV2Projection.key(for: itemID, sender: item.sender, identity: context.identity)
+        return NativeNotificationLocator(v2Request: request, bindingID: binding,
+            deviceID: context.identity.deviceID, serverID: server,
+            target: locator.uniqueValue(named: "target")?.stringValue?.rawValue)
+    }
+
+    func refreshForRemotePush(_ payload: JSONValue?) async -> Bool {
+        if !clientAPIV2Enabled { return await refreshFromTrustedRelay() }
+        guard let payload, let record = try? enrollment.load() else { return false }
+        return await refreshV2ForPush(payload, enrollment: record)
+    }
+
     private func stopMutationFlights() async {
         for flight in answerFlights.values { flight.task.cancel() }
         for flight in discussionFlights.values { flight.task.cancel() }
@@ -1231,6 +1372,10 @@ final class NativeRelayLifecycle {
     }
 
     func deactivate() async {
+        let v2Task = v2ForegroundTask
+        v2ForegroundTask = nil
+        v2Connection = nil
+        v2Task?.cancel()
         featureFlags.reset()
         pathMonitor?.cancel()
         pathMonitor = nil
@@ -1266,6 +1411,7 @@ final class NativeRelayLifecycle {
         diagnosticJournal = nil
         if let priorCore { await priorCore.deactivate() }
         if let priorTransport { await priorTransport.close() }
+        await v2Task?.value
     }
 
     /// APNs data is a wake hint only. The payload cannot choose account,
@@ -1279,6 +1425,19 @@ final class NativeRelayLifecycle {
     }
 
     func refreshResultFromTrustedRelay(checkBlockedPush: Bool = false) async -> NativeRelayRefreshResult {
+        if let connection = v2Connection, let context {
+            let attempt = activeTransportAttemptID
+            do {
+                try await connection.catchUp()
+                guard v2Connection === connection else { return .unavailable }
+                confirmedRelayContext = context
+                return NativeRelayRefreshResult(relayConfirmed: true, pushRegistration: .notAttempted,
+                    confirmedContext: context, confirmedTransportAttemptID: attempt)
+            } catch {
+                guard v2Connection === connection else { return .unavailable }
+                return .failed(error: error)
+            }
+        }
         if checkBlockedPush {
             return await refreshFlights.afterCurrent { [weak self] in
                 guard let self else { return .unavailable }

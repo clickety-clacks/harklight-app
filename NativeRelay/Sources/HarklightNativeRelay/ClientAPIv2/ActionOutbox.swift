@@ -83,7 +83,8 @@ public actor ActionOutbox {
     private let errors: any ErrorLogging
     private let waitBeforeRetry: @Sendable (_ attempt: Int, _ retryAfter: TimeInterval?) async throws -> Void
     private var entries: [OutboxEntry]
-    private var sendingTargets: Set<String> = []
+    private var sendingTasks: [String: Task<Void, Never>] = [:]
+    private var sendingPaused: Bool
     private var resendRequested: Set<String> = []
     private var retryTasks: [String: (id: UUID, task: Task<Void, Never>)] = [:]
     /// Set when the server refused this device's authentication or the account
@@ -93,13 +94,14 @@ public actor ActionOutbox {
 
     public init(persistence: any OutboxPersisting, transport: any ClientAPITransport,
                 outcomes: any OutboxOutcomeHandling, errors: any ErrorLogging,
-                waitBeforeRetry: @escaping @Sendable (_ attempt: Int, _ retryAfter: TimeInterval?) async throws -> Void
+                startsPaused: Bool = false, waitBeforeRetry: @escaping @Sendable (_ attempt: Int, _ retryAfter: TimeInterval?) async throws -> Void
                     = ActionOutbox.backoff) throws {
         self.persistence = persistence
         self.transport = transport
         self.outcomes = outcomes
         self.errors = errors
         self.waitBeforeRetry = waitBeforeRetry
+        sendingPaused = startsPaused
         entries = try persistence.load()
     }
 
@@ -134,12 +136,13 @@ public actor ActionOutbox {
     /// `idempotencyKey` is the operation id minted when the person acted, when
     /// the app already saved one (for example a queued chat message).
     public func submit(target: String, operation: String, write: FrozenWrite,
-                       idempotencyKey: UUID = UUID(), now: Date = Date()) async throws -> OutboxEntry {
+                       idempotencyKey: UUID = UUID(), now: Date = Date(),
+                       retryRefused: Bool = true) async throws -> OutboxEntry {
         if let existing = entries.first(where: { $0.idempotencyKey == idempotencyKey }) {
             // Handing a pending write over again queues it once. Handing over
             // a refused one is the person's Retry: the server stores only
             // successes, so the same key is evaluated again.
-            guard existing.failure != nil else { return existing }
+            guard retryRefused, existing.failure != nil else { return existing }
             var next = entries
             guard let index = next.firstIndex(where: { $0.id == existing.id }) else { return existing }
             next[index].failure = nil
@@ -162,12 +165,21 @@ public actor ActionOutbox {
     /// Sends everything queued, each target in order and targets in parallel,
     /// and returns once every target has stopped (empty or waiting to retry).
     public func flush() async {
-        let targets = Set(pending.map(\.target))
-        await withTaskGroup(of: Void.self) { group in
-            for target in targets {
-                group.addTask { await self.send(target) }
-            }
-        }
+        let tasks = Set(pending.map(\.target)).compactMap { startSending($0) }
+        for task in tasks { await task.value }
+    }
+
+    public func resumeSending() {
+        sendingPaused = false
+    }
+
+    public func pauseSending() async {
+        sendingPaused = true
+        for retry in retryTasks.values { retry.task.cancel() }
+        retryTasks.removeAll()
+        let tasks = Array(sendingTasks.values)
+        for task in tasks { task.cancel() }
+        for task in tasks { await task.value }
     }
 
     /// Clears the refusal after the device is enrolled again.
@@ -176,24 +188,29 @@ public actor ActionOutbox {
         await flush()
     }
 
-    private func startSending(_ target: String) {
-        Task { await self.send(target) }
+    @discardableResult
+    private func startSending(_ target: String) -> Task<Void, Never>? {
+        guard !sendingPaused, !unauthorized else { return nil }
+        guard sendingTasks[target] == nil else {
+            resendRequested.insert(target)
+            return nil
+        }
+        let task = Task { await self.send(target) }
+        sendingTasks[target] = task
+        return task
     }
 
     private func send(_ target: String) async {
-        guard !unauthorized else { return }
-        guard sendingTargets.insert(target).inserted else {
-            resendRequested.insert(target)
-            return
-        }
-        defer { sendingTargets.remove(target) }
+        defer { sendingTasks[target] = nil }
+        guard !sendingPaused, !unauthorized, !Task.isCancelled else { return }
         // A retry waiting for its time is replaced by this send. A retry that
         // is itself calling send removed its own entry first, so it is never
         // cancelled here.
         retryTasks.removeValue(forKey: target)?.task.cancel()
         repeat {
             resendRequested.remove(target)
-            while let entry = entries.first(where: { $0.target == target && $0.failure == nil }) {
+            while !sendingPaused, !Task.isCancelled,
+                  let entry = entries.first(where: { $0.target == target && $0.failure == nil }) {
                 guard await sendOne(entry) else { return }
             }
         } while resendRequested.contains(target)
@@ -233,6 +250,9 @@ public actor ActionOutbox {
             report(entry, phase: "send", error: error, initiator: .unknown, retryable: false)
             await outcomes.rejected(entry, error: error)
             return true
+        } catch where Task.isCancelled {
+            markOutcomeUnknown(entry.idempotencyKey, transportFailure: true)
+            return false
         } catch {
             // Unknown outcome or retry later: keep the operation and its key.
             markOutcomeUnknown(entry.idempotencyKey, transportFailure: !(error is APIError))
@@ -244,13 +264,14 @@ public actor ActionOutbox {
     }
 
     private func scheduleRetry(_ target: String, attempt: Int, retryAfter: TimeInterval?) {
+        guard !sendingPaused else { return }
         retryTasks[target]?.task.cancel()
         let wait = waitBeforeRetry
         let id = UUID()
         let task = Task {
             do { try await wait(attempt, retryAfter) } catch { return }
             guard await self.takeRetry(target, id: id) else { return }
-            await self.send(target)
+            self.startSending(target)
         }
         retryTasks[target] = (id, task)
     }

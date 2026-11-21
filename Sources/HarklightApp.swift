@@ -144,8 +144,14 @@ struct HarklightApp: App {
             .onChange(of: launch.notificationRouter.intent?.serial) { _, _ in
                 Task { await launch.handleNotification() }
             }
+            .onChange(of: launch.notificationRouter.pendingV2Tap) { _, payload in
+                if payload != nil { Task { await launch.handleNotification() } }
+            }
             .onOpenURL { url in Task { await launch.receiveInvitation(url) } }
             .task(id: scenePhase) {
+                if NativeRelayLifecycle.shared.clientAPIV2Enabled {
+                    NativeRelayLifecycle.shared.sceneActivityChanged(isActive: scenePhase == .active)
+                }
                 launch.guidedJoin.invalidateApprovalObservation()
                 guard scenePhase == .active else { return }
                 var isActivationRefresh = true
@@ -153,7 +159,7 @@ struct HarklightApp: App {
                     if isActivationRefresh {
                         await launch.refreshForForegroundActivation()
                         isActivationRefresh = false
-                    } else {
+                    } else if !NativeRelayLifecycle.shared.usesClientAPIV2 {
                         await launch.refreshLive()
                     }
                     await launch.guidedJoin.retryAutomaticallyIfNeeded()

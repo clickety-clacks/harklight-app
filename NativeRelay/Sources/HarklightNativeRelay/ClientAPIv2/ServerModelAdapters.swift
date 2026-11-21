@@ -148,13 +148,16 @@ public final class ServerModelSyncWriter: SyncModelWriting, @unchecked Sendable 
 public final class ServerModelOutboxOutcomes: OutboxOutcomeHandling, @unchecked Sendable {
     private let store: ServerModelV2Store
     private let onRejected: @Sendable (OutboxEntry, APIError) async -> Void
+    private let onAcceptedResult: @Sendable (OutboxEntry, APIWriteResult) async -> Void
     private let onUnreadableResponse: @Sendable (OutboxEntry, any Error) -> Void
 
     public init(store: ServerModelV2Store,
                 onRejected: @escaping @Sendable (OutboxEntry, APIError) async -> Void,
+                onAcceptedResult: @escaping @Sendable (OutboxEntry, APIWriteResult) async -> Void = { _, _ in },
                 onUnreadableResponse: @escaping @Sendable (OutboxEntry, any Error) -> Void = { _, _ in }) {
         self.store = store
         self.onRejected = onRejected
+        self.onAcceptedResult = onAcceptedResult
         self.onUnreadableResponse = onUnreadableResponse
     }
 
@@ -164,10 +167,14 @@ public final class ServerModelOutboxOutcomes: OutboxOutcomeHandling, @unchecked 
         // A file upload answers FileCreated, not a WriteResult.
         guard !response.body.isEmpty, entry.write.path != "/v2/files" else { return }
         do {
-            try store.apply(APIWriteResult(json: JSONValue.parse(response.body)), generation: generation)
-        } catch is ServerModelV2Store.SupersededGeneration {
-            // The server accepted the operation. Only its old projection is discarded.
-            return
+            let result = try APIWriteResult(json: JSONValue.parse(response.body))
+            do {
+                try store.apply(result, generation: generation)
+            } catch is ServerModelV2Store.SupersededGeneration {
+                // The receipt settles the durable intent independently of the
+                // old resource projection, which still cannot enter the model.
+            }
+            await onAcceptedResult(entry, result)
         } catch {
             // The write took effect; the feed delivers its resources anyway.
             onUnreadableResponse(entry, error)

@@ -3173,6 +3173,14 @@ public final class ClientRepository: @unchecked Sendable {
         return state.pendingConversations[request]?.retainedUnsentText ?? [:]
     }
 
+    /// Durable queued replies are available before the server hydrates threads.
+    public func queuedChatMessages(context suppliedContext: ProfileContext) throws -> [ConversationDraft] {
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        return state.pendingConversations.values.flatMap { $0.queuedMessages ?? [] }
+    }
+
     public func conversationSnapshot(context suppliedContext: ProfileContext) throws -> ConversationSnapshot {
         lock.lock()
         defer { lock.unlock() }
@@ -3782,15 +3790,13 @@ public final class ClientRepository: @unchecked Sendable {
         defer { lock.unlock() }
         try validate(suppliedContext)
         var next = state
-        guard var conversation = next.conversation, var thread = conversation.threads[request],
-              var queue = thread.queuedMessages,
+        try validate(request, in: context.identity)
+        guard var queue = next.pendingConversations[request]?.queuedMessages,
               let index = queue.firstIndex(where: { $0.operationID == operation }) else {
             throw ConversationError.missingRequest
         }
         queue[index].disposition = disposition
-        thread.queuedMessages = queue
-        conversation.threads[request] = thread
-        next.conversation = conversation
+        next.pendingConversations[request]?.queuedMessages = queue
         try commit(next)
     }
 

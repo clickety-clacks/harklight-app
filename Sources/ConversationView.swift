@@ -5,6 +5,42 @@ import SwiftUI
 import UniformTypeIdentifiers
 import QuickLook
 
+private struct V2DiscussionOnOpen: ViewModifier {
+    let store: LivePresentationStore
+    let key: RequestKey
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var retry = 0
+    @State private var loadFailed = false
+
+    private struct Load: Equatable {
+        let key: RequestKey
+        let retry: Int
+        let isActive: Bool
+    }
+
+    func body(content: Content) -> some View {
+        if NativeRelayLifecycle.shared.clientAPIV2Enabled, !store.isLocalExample, !store.isReadOnly {
+            VStack(spacing: 0) {
+                if loadFailed {
+                    HStack {
+                        Text("Couldn’t load this conversation.")
+                        Button("Retry") { retry += 1 }
+                    }
+                }
+                content
+            }
+            .task(id: Load(key: key, retry: retry, isActive: scenePhase == .active)) {
+                guard scenePhase == .active else { return }
+                loadFailed = false
+                let loaded = await store.loadDiscussionOnOpen(key)
+                if !Task.isCancelled { loadFailed = !loaded }
+            }
+        } else {
+            content
+        }
+    }
+}
+
 enum ConversationPanelEmptyState: Equatable {
     case noChat
     case historyPending
@@ -248,6 +284,7 @@ struct ConversationPanel: View {
             }
         }
         .simultaneousGesture(chatDismissGesture)
+        .modifier(V2DiscussionOnOpen(store: store, key: key))
         .onAppear {
             if scenePhase == .active { NativeNotificationRouter.shared.conversationBecameVisible(key) }
             reportEmptyChatFocusIfNeeded()
@@ -870,25 +907,27 @@ private struct ConversationComposer: View {
         }
         // Each regular glass button adds 7 points around its label, for a 44-point target.
         HStack(alignment: .bottom, spacing: 10) {
-            Button {
-                guard persistStagedText() else { return }
-                if store.isLocalExample { attachmentChoices = true } else { pickingFiles = true }
-            } label: {
-                Image(systemName: "plus")
-                    .foregroundStyle(.hkText)
-                    .frame(width: 30, height: 30)
-                    .contentShape(Circle())
-            }
-                .buttonStyle(.glass).buttonBorderShape(.circle).controlSize(.regular)
-                .accessibilityLabel(store.isLocalExample ? "Add sample attachment" : "Add attachment")
-                .accessibilityIdentifier("sample-chat-add-attachment")
-                .disabled(frozen || !allowsDraftEditing)
-                .confirmationDialog("Add a local example", isPresented: $attachmentChoices, titleVisibility: .visible) {
-                    Button("Sample photo") { addExample("Photo") }
-                    Button("Sample file") { addExample("Document") }
-                    Button("Sample camera image") { addExample("Camera") }
-                    Button("Cancel", role: .cancel) {}
+            if store.allowsDiscussionAttachments {
+                Button {
+                    guard persistStagedText() else { return }
+                    if store.isLocalExample { attachmentChoices = true } else { pickingFiles = true }
+                } label: {
+                    Image(systemName: "plus")
+                        .foregroundStyle(.hkText)
+                        .frame(width: 30, height: 30)
+                        .contentShape(Circle())
                 }
+                    .buttonStyle(.glass).buttonBorderShape(.circle).controlSize(.regular)
+                    .accessibilityLabel(store.isLocalExample ? "Add sample attachment" : "Add attachment")
+                    .accessibilityIdentifier("sample-chat-add-attachment")
+                    .disabled(frozen || !allowsDraftEditing)
+                    .confirmationDialog("Add a local example", isPresented: $attachmentChoices, titleVisibility: .visible) {
+                        Button("Sample photo") { addExample("Photo") }
+                        Button("Sample file") { addExample("Document") }
+                        Button("Sample camera image") { addExample("Camera") }
+                        Button("Cancel", role: .cancel) {}
+                    }
+            }
             VStack(alignment: .leading, spacing: 8) {
                 ConversationComposerTextInput(session: textSession,
                     isEnabled: !frozen && allowsDraftEditing,
