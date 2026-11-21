@@ -132,6 +132,26 @@ final class ServerModelV2ProjectionTests: XCTestCase {
         XCTAssertLessThan(order("old"), order("new-1"), "An item from before free order never counts as new.")
     }
 
+    /// #378 review M-7: a discarded model restarts its local numbers, but the
+    /// new-messages order comes from the server's arrival, so a message that
+    /// arrives after the discard is still above the remembered high-water mark.
+    func testANewMessageAfterTheModelIsDiscardedStillCountsAsNew() throws {
+        let before = try store([V2Fixture.item("a", rev: 1, rankKey: "a", extra: #""arrival":4"#),
+                                V2Fixture.item("b", rev: 2, rankKey: "b", extra: #""arrival":5"#)])
+        let highWater = ServerModelV2Projection.cachedState(before.snapshot, identity: identity)
+            .requests.values.compactMap(\.acceptanceOrder).max() ?? 0
+
+        let discarded = ServerModelV2Store(fileURL: nil)
+        try discarded.rebaseline(items: [
+            APIItem(json: V2Fixture.json(V2Fixture.item("a", rev: 1, rankKey: "a", extra: #""arrival":4"#))),
+            APIItem(json: V2Fixture.json(V2Fixture.item("b", rev: 2, rankKey: "b", extra: #""arrival":5"#)))
+        ], counts: APICounts(unresolved: 2), position: 2)
+        try discarded.apply(kind: "item", rev: 3, data: V2Fixture.json(V2Fixture.item("c", rev: 3, rankKey: "c", extra: #""arrival":6"#)))
+        let after = ServerModelV2Projection.cachedState(discarded.snapshot, identity: identity)
+        XCTAssertEqual(after.requests[key("b")]?.acceptanceOrder, highWater, "Existing items keep their order.")
+        XCTAssertGreaterThan(after.requests[key("c")]?.acceptanceOrder ?? 0, highWater)
+    }
+
     func testReplyPrioritiesReachTheInboxViewForReplyRowsAndNew() throws {
         let chat = #"{"started":true,"read_position":"r1","last_origin_reply":"r2","unread_replies":1,"reply_group":"earlier_chat_replies","reply_rank_key":"a5","reply_priority":{"level":"high","score":0.8}}"#
         let store = try store([V2Fixture.item("i", rev: 1, rankKey: "a", chat: chat)])
