@@ -213,6 +213,8 @@ public struct FeedBatch: Equatable, Sendable {
 /// any number may be in flight. Implementations throw `APIError` for a non-2xx
 /// answer and the system error for a transport failure.
 public protocol ClientAPITransport: Sendable {
+    /// Ends this connection's transport and cancels its outstanding requests.
+    func close()
     func send(_ request: APIRequest) async throws -> APIResponse
     /// A successful response body is written to destination; the return value carries its headers.
     func download(_ request: APIRequest, to destination: URL) async throws -> APIResponse
@@ -225,6 +227,8 @@ public protocol ClientAPITransport: Sendable {
 }
 
 public extension ClientAPITransport {
+    func close() {}
+
     func download(_ request: APIRequest, to destination: URL) async throws -> APIResponse {
         throw URLError(.unsupportedURL)
     }

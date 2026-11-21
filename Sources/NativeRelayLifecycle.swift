@@ -945,7 +945,7 @@ final class NativeRelayLifecycle {
     private var v2ForegroundTask: Task<Void, Never>?
     private var v2PushRegistrationTask: Task<Bool, Never>?
     private var v2PushRegistrationRequested = false
-    private var v2PushRemovalTask: Task<Void, Never>?
+    private var v2DepartureTask: Task<Void, Never>?
     private var v2PushRetryTask: Task<Void, Never>?
     private var v2PushRetryAttempt = 0
     private let v2NotificationPermission: NativeNotificationPermission
@@ -1040,7 +1040,7 @@ final class NativeRelayLifecycle {
     }
 
     private func startV2Foreground() {
-        guard sceneIsActive, let connection = v2Connection, connection.access.state == .available,
+        guard sceneIsActive, v2DepartureTask == nil, let connection = v2Connection, connection.access.state == .available,
               v2ForegroundTask == nil else { return }
         v2ForegroundTask = Task { [weak self] in
             await connection.runForeground()
@@ -1051,7 +1051,7 @@ final class NativeRelayLifecycle {
         }
     }
 
-    private static func v2Directory(for identity: ProfileIdentity) throws -> URL {
+    static func v2Directory(for identity: ProfileIdentity) throws -> URL {
         let root = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask,
                                                appropriateFor: nil, create: true)
         let key = [identity.trustedRelayAuthority.rawValue, identity.personID.rawValue, identity.deviceID.rawValue]
@@ -1059,6 +1059,18 @@ final class NativeRelayLifecycle {
         let digest = SHA256.hash(data: Data(key.utf8)).map { String(format: "%02x", $0) }.joined()
         return root.appendingPathComponent("ClientAPIv2", isDirectory: true)
             .appendingPathComponent(digest, isDirectory: true)
+    }
+
+    static func clearV2Storage(for record: NativeEnrollmentRecord) throws {
+        guard let person = record.personID else { throw NativeEnrollmentError.invalidIdentity }
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText(record.profileAuthority),
+                                       personID: ExactText(person), deviceID: ExactText(record.deviceID))
+        let directory = try v2Directory(for: identity)
+        do {
+            try FileManager.default.removeItem(at: directory)
+        } catch let error as CocoaError where error.code == .fileNoSuchFile {
+            // A confirmed departure is also finished on relaunch.
+        }
     }
 
 
@@ -1298,7 +1310,8 @@ final class NativeRelayLifecycle {
         let attempt = UUID()
         let access = ClientAPIAccess(transport: transport) { [weak self] _ in
             Task { @MainActor [weak self] in
-                guard let self, self.activeTransportAttemptID == attempt, let state = self.v2AccountAccess else {
+                guard let self, self.activeTransportAttemptID == attempt, self.v2DepartureTask == nil,
+                      let state = self.v2AccountAccess else {
                     return
                 }
                 if state == .available {
@@ -1518,7 +1531,7 @@ final class NativeRelayLifecycle {
 
     @discardableResult
     private func requestV2PushRegistration() -> Task<Bool, Never>? {
-        guard sceneIsActive, v2PushRemovalTask == nil, let connection = v2Connection,
+        guard sceneIsActive, v2DepartureTask == nil, let connection = v2Connection,
               connection.access.state == .available, let context else { return nil }
         v2PushRegistrationRequested = true
         v2PushRetryTask?.cancel()
@@ -1641,7 +1654,7 @@ final class NativeRelayLifecycle {
     }
 
     private func scheduleV2PushRetry(connection: ClientAPIv2Connection) {
-        guard sceneIsActive, v2PushRetryTask == nil, v2PushRemovalTask == nil else { return }
+        guard sceneIsActive, v2PushRetryTask == nil, v2DepartureTask == nil else { return }
         v2PushRetryAttempt = min(v2PushRetryAttempt + 1, 6)
         let attempt = v2PushRetryAttempt
         v2PushRetryTask = Task { [weak self] in
@@ -1652,52 +1665,37 @@ final class NativeRelayLifecycle {
         }
     }
 
-    private func removeV2PushBeforeDeparture(for record: NativeEnrollmentRecord,
-                                             enrollment: NativeEnrollmentStore) async {
+    func prepareV2SignOut(for record: NativeEnrollmentRecord) async {
         guard let connection = v2Connection, let context, record.matchesNotificationIdentity(context.identity) else {
             return
         }
-        if let removal = v2PushRemovalTask {
-            await removal.value
-            return
-        }
-        let task = Task { [weak self] in
-            guard let self, self.v2Connection === connection else { return }
-            defer {
-                if self.v2Connection === connection { self.v2PushRemovalTask = nil }
-            }
-            do {
-                guard let key = try enrollment.updateV2PushRegistration(for: record, { $0.prepareRemoval() }) else {
-                    return
-                }
-                let registration = self.v2PushRegistrationTask
+        let task: Task<Void, Never>
+        if let existing = v2DepartureTask {
+            task = existing
+        } else {
+            let focus = v2FocusChannel
+            task = Task { [weak self] in
+                guard let self, self.v2Connection === connection else { return }
+                self.v2ForegroundTask?.cancel()
+                self.v2PushRegistrationTask?.cancel()
                 self.cancelV2PushRetry()
-                self.v2PushRegistrationRequested = false
-                registration?.cancel()
-                _ = await registration?.value
-                try Task.checkCancellation()
-                let status = try await connection.push.remove(idempotencyKey: key)
-                try enrollment.updateV2PushRegistration(for: record) {
-                    $0.confirmRemoval(key, serverRevision: status.revision)
-                }
-            } catch {
-                if !Task.isCancelled, self.v2Connection === connection { self.recordPushRegistrationFailure(error) }
+                await self.v2FocusReporter.accountConnectionWillBeRemoved(sendSignedOut: false)
+                await focus?.reportSignedOutBeforeClosing()
+                connection.access.close()
             }
+            v2DepartureTask = task
         }
-        v2PushRemovalTask = task
         await task.value
     }
 
-    func keepV2PushAccount(_ record: NativeEnrollmentRecord, enrollment: NativeEnrollmentStore) async throws {
-        await v2PushRemovalTask?.value
-        try enrollment.updateV2PushRegistration(for: record) { $0.keepAccount() }
-        requestV2PushRegistration()
+    func isPreparingV2SignOut(for expected: ProfileContext) -> Bool {
+        context == expected && v2DepartureTask != nil
     }
 
     func removePushBeforeDeparture(for record: NativeEnrollmentRecord,
                                    enrollment: NativeEnrollmentStore) async {
         if clientAPIV2Enabled {
-            await removeV2PushBeforeDeparture(for: record, enrollment: enrollment)
+            await prepareV2SignOut(for: record)
             return
         }
         guard featureFlags.isEnabled(.serverMatchedPushRouting) else { return }
@@ -1716,13 +1714,14 @@ final class NativeRelayLifecycle {
     func deactivate() async {
         let v2Task = v2ForegroundTask
         let pushRegistration = v2PushRegistrationTask
-        let pushRemoval = v2PushRemovalTask
+        let priorV2 = v2Connection
+        priorV2?.access.close()
+        priorV2?.model.seal()
         cancelV2PushRetry()
         v2PushRegistrationTask = nil
         v2PushRegistrationRequested = false
-        v2PushRemovalTask = nil
+        v2DepartureTask = nil
         pushRegistration?.cancel()
-        pushRemoval?.cancel()
         let focus = v2FocusChannel
         v2FocusChannel = nil
         v2ShowLookup?.cancel()
@@ -1745,9 +1744,9 @@ final class NativeRelayLifecycle {
         refreshFlights.reset()
         let priorCore = core
         let priorTransport = transport
-        if let focus {
-            await v2FocusReporter.accountConnectionWillBeRemoved()
-            await focus.stop()
+        if clientAPIV2Enabled {
+            await v2FocusReporter.accountConnectionWillBeRemoved(sendSignedOut: false)
+            await focus?.stop()
         } else {
             await NativeFocusReporter.shared.accountConnectionWillBeRemoved()
         }
@@ -1772,9 +1771,9 @@ final class NativeRelayLifecycle {
         diagnosticJournal = nil
         if let priorCore { await priorCore.deactivate() }
         if let priorTransport { await priorTransport.close() }
+        await priorV2?.outbox.close()
         await v2Task?.value
         _ = await pushRegistration?.value
-        await pushRemoval?.value
     }
 
     /// APNs data is a wake hint only. The payload cannot choose account,

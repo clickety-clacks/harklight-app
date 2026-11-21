@@ -956,7 +956,7 @@ struct LiveInboxSettings: View {
                                           systemImage: "lock")
                                 }
                                 .accessibilityHint("Open this account’s saved messages and discussion read-only")
-                                if departure.record.v2Revoked == true {
+                                if departure.hasV2TextRecovery {
                                     NavigationLink("Unsent from your previous device") {
                                         PreviousDeviceUnsentTextView { try launch.recoveredUnsentText(for: departure) }
                                     }
@@ -966,6 +966,13 @@ struct LiveInboxSettings: View {
                     }
                 }
                 if store.isReadOnly {
+                    if let launch, let archiveDeparture, archiveDeparture.hasV2TextRecovery {
+                        HarklightFormSection("Saved text") {
+                            NavigationLink("View unsent text") {
+                                PreviousDeviceUnsentTextView { try launch.recoveredUnsentText(for: archiveDeparture) }
+                            }
+                        }
+                    }
                     HarklightFormSection("Connection") {
                         if let archiveDeparture {
                             Label("Disconnected · Read-only", systemImage: "lock")

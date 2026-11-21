@@ -387,6 +387,7 @@ public final class ErrorLogStore: ErrorLogging, @unchecked Sendable {
     /// True while the file on disk has not been read into `stored`.
     private var fileNeedsReading = false
     private var writeScheduled = false
+    private var closed = false
     private var lastWriteStarted = Date.distantPast
 
     public init(fileURL: URL?, build: ErrorLogBuild, writeDelay: TimeInterval = 0.3,
@@ -427,10 +428,18 @@ public final class ErrorLogStore: ErrorLogging, @unchecked Sendable {
         writeQueue.sync { self.performWrite() }
     }
 
+    /// Flushes the last records and stops stale requests from reopening this
+    /// profile's log after its files have been removed.
+    public func close() {
+        lock.withLock { closed = true }
+        flush()
+    }
+
     // MARK: ErrorLogging
 
     public func report(_ report: ErrorLogReport) {
         lock.lock()
+        guard !closed else { lock.unlock(); return }
         let at = report.occurredAt ?? now()
         let operation = ErrorLogRedactor.operationToken(report.operation)
         let phase = ErrorLogRedactor.operationToken(report.phase)
@@ -475,6 +484,7 @@ public final class ErrorLogStore: ErrorLogging, @unchecked Sendable {
         let token = ErrorLogRedactor.operationToken(operation)
         let by = resolvedBy.flatMap { ErrorLogRedactor.simpleID($0) ?? ErrorLogRedactor.identifier($0) } ?? "success"
         lock.lock()
+        guard !closed else { lock.unlock(); return }
         let at = now()
         var changed = false
         for index in stored.indices where !stored[index].isResolved &&

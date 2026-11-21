@@ -103,6 +103,7 @@ public actor ActionOutbox {
     private var entries: [OutboxEntry]
     private var sendingTasks: [String: Task<Void, Never>] = [:]
     private var sendingPaused: Bool
+    private var closed = false
     private var resendRequested: Set<String> = []
     private var retryTasks: [String: (id: UUID, task: Task<Void, Never>)] = [:]
     /// Set when the server refused this device's authentication or the account
@@ -138,6 +139,7 @@ public actor ActionOutbox {
 
     /// Removes a failed write once the app has shown or replaced it.
     public func discardFailed(_ key: UUID) {
+        guard !closed else { return }
         guard let discarded = entries.first(where: { $0.id == key && $0.failure != nil }) else { return }
         remove(key)
         resolveIfNoFailedWrite(discarded.operation, resolvedBy: "discarded")
@@ -159,6 +161,7 @@ public actor ActionOutbox {
                        idempotencyKey: UUID = UUID(), now: Date = Date(),
                        retryRefused: Bool = true, answerIntentID: UUID? = nil,
                        stillPending: @Sendable () throws -> Bool = { true }) async throws -> OutboxEntry {
+        guard !closed else { throw CancellationError() }
         if let existing = entries.first(where: { $0.idempotencyKey == idempotencyKey }) {
             // Handing a pending write over again queues it once. Handing over
             // a refused one is the person's Retry: the server stores only
@@ -198,7 +201,13 @@ public actor ActionOutbox {
     }
 
     public func resumeSending() {
+        guard !closed else { return }
         sendingPaused = false
+    }
+
+    public func close() async {
+        closed = true
+        await pauseSending()
     }
 
     public func pauseSending() async {

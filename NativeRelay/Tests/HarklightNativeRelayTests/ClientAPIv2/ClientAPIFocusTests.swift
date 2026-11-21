@@ -92,6 +92,36 @@ private final class ShowLog: @unchecked Sendable {
 
 /// Contract round 11 r4: focus and held shows, transport only.
 final class ClientAPIFocusTests: XCTestCase {
+    func testSignOutReportsFocusBeforeClosingTheAccessGate() async throws {
+        let transport = FocusTransport()
+        let access = ClientAPIAccess(transport: transport)
+        let focus = ClientAPIFocusChannel(transport: access, errors: RecordingErrorLogV2()) { _, _ in }
+        await focus.reportSignedOutBeforeClosing()
+        access.close()
+        XCTAssertEqual(transport.acceptedBodies.count, 1)
+        let body = try V2Fixture.json(XCTUnwrap(transport.acceptedBodies.first))
+        XCTAssertEqual(body.uniqueValue(named: "screen")?.stringValue?.rawValue, "signed_out")
+        do {
+            _ = try await access.send(.get("/v2/me"))
+            XCTFail("A retained reference must not send after local sign-out.")
+        } catch is CancellationError {}
+        XCTAssertEqual(transport.sentBodies.count, 1)
+    }
+
+    func testHeldFocusCannotBlockSignOut() async {
+        let transport = FocusTransport()
+        let held = AsyncGate()
+        transport.holdFirst = held
+        defer { held.release() }
+        let focus = ClientAPIFocusChannel(transport: transport, errors: RecordingErrorLogV2()) { _, _ in }
+        await focus.enqueue(.inbox)
+        await waitFor("the older focus is held") { transport.sentBodies.count == 1 }
+        await focus.reportSignedOutBeforeClosing(timeout: .milliseconds(20))
+        // The caller already returned while the fake still holds the network.
+        XCTAssertEqual(transport.sentBodies.count, 1)
+        XCTAssertTrue(transport.acceptedBodies.isEmpty)
+    }
+
     private let showJSON = #"{"show_id":"s1","device_id":"d1","item_id":"i1","target":"chat","held_ms":1500}"#
 
     private func channel(_ transport: FocusTransport, ticks: ManualTicks = ManualTicks(),

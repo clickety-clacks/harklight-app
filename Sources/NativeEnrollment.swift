@@ -94,6 +94,15 @@ struct NativeEnrollmentRecord: Codable, Equatable {
         return accountDisplayName
     }
     var profileAuthority: String { localProfileAuthority ?? host }
+
+    func removalArchiveRecord() -> Self {
+        Self(host: host, enrollmentPort: enrollmentPort, relayPort: relayPort,
+             trustedRootDER: trustedRootDER, identityLabel: identityLabel,
+             deviceLabel: deviceLabel, deviceID: deviceID, approvalCode: "", statusSecret: "",
+             expiresAt: nil, statusExpiresAt: nil, personID: personID, v2Revoked: v2Revoked,
+             serverDisplayName: serverDisplayName, accountDisplayName: accountDisplayName,
+             localProfileAuthority: localProfileAuthority)
+    }
 }
 
 /// Account identifiers are opaque wire bytes, including across Unicode forms.
@@ -430,6 +439,23 @@ struct NativeEnrollmentStore {
         let status = SecItemDelete([kSecClass as String: kSecClassGenericPassword,
                                    kSecAttrService as String: service,
                                    kSecAttrAccount as String: Self.account] as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else {
+            throw NativeEnrollmentError.identityStorage
+        }
+    }
+
+    func retireDeviceIdentity(_ record: NativeEnrollmentRecord) throws {
+        if let namespace = guidedIdentityNamespace(for: record.identityLabel) {
+            try NativeInstallationIdentityStore(namespace: namespace).retire()
+            return
+        }
+        guard identity(label: record.identityLabel) != nil else { return }
+        _ = try material(from: record)
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassIdentity,
+            kSecAttrLabel as String: record.identityLabel
+        ]
+        let status = SecItemDelete(query as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else {
             throw NativeEnrollmentError.identityStorage
         }

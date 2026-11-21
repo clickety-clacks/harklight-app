@@ -164,11 +164,11 @@ final class NativeFocusReporter {
         unsupportedTransportID = transportID
     }
 
-    func accountConnectionWillBeRemoved() async {
+    func accountConnectionWillBeRemoved(sendSignedOut: Bool = true) async {
         cancelPendingReport()
         pendingReportRestoreFocus = nil
         NativePushedViewCoordinator.shared.accountConnectionWillBeRemoved()
-        if let transportID = reportTransportID,
+        if sendSignedOut, let transportID = reportTransportID,
            readyTransportID == transportID,
            unsupportedTransportID != transportID,
            let delivery = enqueue(.signedOut, transportID: transportID) {
