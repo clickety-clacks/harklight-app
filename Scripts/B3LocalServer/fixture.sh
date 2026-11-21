@@ -18,6 +18,9 @@ fi
 
 if [[ $action == start ]]; then
     source "$state/server.env"
+    export ATTENTION_SERVER_DASHBOARD_PORT=18447 ATTENTION_SERVER_DASHBOARD_BIND=127.0.0.1
+    export ATTENTION_SERVER_DASHBOARD_OWNER_PERSON="$(cat "$state/person-id")"
+    export ATTENTION_SERVER_DASHBOARD_SKILL_PATH="$work/server/skills/core.md"
     exec "$release/bin/attention_server" start
 fi
 
@@ -56,7 +59,7 @@ PY
         python3 -c 'import json,sys; assert json.load(open(sys.argv[1]))["message"]["item_id"]' "$work/seed-response.json"
         ;;
     invite)
-        "$cli" owner invite "${owner[@]}" --output "$work/invitation.json"
+        "$cli" owner invite "${owner[@]}" --output "${3:-$work/invitation.json}"
         ;;
     approve)
         code=$3

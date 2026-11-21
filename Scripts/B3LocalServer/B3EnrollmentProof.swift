@@ -14,28 +14,17 @@ final class B3EnrollmentProof: XCTestCase {
         app.launch()
         try signal("ready", at: signals)
 
-        // The controller delivers the private fixture link to the test runner.
-        // XCTest opens the URL directly instead of passing it through a CLI argument.
-        let invitation = signals.appendingPathComponent("invitation-url")
-        let inviteDeadline = Date().addingTimeInterval(25)
-        var link: String?
-        while Date() < inviteDeadline {
-            if let text = try? String(contentsOf: invitation, encoding: .utf8), !text.isEmpty {
-                link = text
-                break
-            }
-            RunLoop.current.run(until: Date().addingTimeInterval(0.2))
-        }
-        guard let link, let url = URL(string: link) else {
-            return XCTFail("The fixture owner did not provide a usable invitation.")
-        }
+        let invitation = signals.appendingPathComponent("invitation-control.json")
+        let control = try waitForControl(invitation)
         try FileManager.default.removeItem(at: invitation)
-        app.open(url)
-        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
-        let open = springboard.alerts.buttons["Open"].firstMatch
-        if open.waitForExistence(timeout: 3) { open.tap() }
-        tapVisible(app.buttons["Join"], in: app, timeout: 18)
-        try signal("direct-link-confirmed", at: signals)
+        try openInvitation(control, in: app, signals: signals)
+        if control.route != "paste" {
+            let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+            let open = springboard.alerts.buttons["Open"].firstMatch
+            if open.waitForExistence(timeout: 5) { open.tap() }
+        }
+        tapVisible(app.buttons["Join"], in: app, timeout: 25)
+        try signal("invite-confirmed", at: signals)
         let approval = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "Approval code ")).firstMatch
         XCTAssertTrue(approval.waitForExistence(timeout: 20), "The join should reach owner approval.")
         let code = String(approval.label.dropFirst("Approval code ".count))
@@ -43,21 +32,31 @@ final class B3EnrollmentProof: XCTestCase {
             return XCTFail("The approval text did not have the expected shape.")
         }
         try signal("approval", text: code, at: signals)
+        try signal("request-pending", at: signals)
         let approved = signals.appendingPathComponent("approved")
         let approvalDeadline = Date().addingTimeInterval(45)
         while !FileManager.default.fileExists(atPath: approved.path), Date() < approvalDeadline {
             RunLoop.current.run(until: Date().addingTimeInterval(0.2))
         }
         XCTAssertTrue(FileManager.default.fileExists(atPath: approved.path), "The fixture owner should acknowledge approval.")
-        let check = app.buttons["Check again"]
-        if check.isHittable { check.tap() }
+        try signal("owner-approved", at: signals)
         let row = firstRequest(in: app)
         let continueAfterApproval = app.buttons["Continue"]
-        if continueAfterApproval.waitForExistence(timeout: 25), continueAfterApproval.isHittable {
-            continueAfterApproval.tap()
-            tapVisible(app.buttons["Not now"], in: app)
+        let check = app.buttons["Check again"]
+        let connectionDeadline = Date().addingTimeInterval(45)
+        var nextStatusCheck = Date.distantPast
+        while !row.exists, Date() < connectionDeadline {
+            if continueAfterApproval.isHittable {
+                try signal("connected", at: signals)
+                continueAfterApproval.tap()
+                tapVisible(app.buttons["Not now"], in: app)
+            } else if Date() >= nextStatusCheck, check.isHittable {
+                check.tap()
+                nextStatusCheck = Date().addingTimeInterval(5)
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.25))
         }
-        XCTAssertTrue(row.waitForExistence(timeout: 30), "The approved identity should load a seeded inbox row.")
+        XCTAssertTrue(row.exists, "The approved identity should load a seeded inbox row.")
         let rowID = row.identifier
         XCTAssertTrue(rowID.hasPrefix("request-row-"))
         openSettings(app)
@@ -118,6 +117,53 @@ final class B3EnrollmentProof: XCTestCase {
         XCTAssertTrue(app.staticTexts[queued].waitForExistence(timeout: 8))
         XCTAssertTrue(app.staticTexts[draft].waitForExistence(timeout: 8))
         try signal("confirmed-removal-kept-unsent-text", at: signals)
+    }
+
+    private struct InvitationControl: Decodable {
+        let route: String
+        let link: URL?
+    }
+
+    private func waitForControl(_ file: URL) throws -> InvitationControl {
+        let deadline = Date().addingTimeInterval(40)
+        while Date() < deadline {
+            if let data = try? Data(contentsOf: file) {
+                return try JSONDecoder().decode(InvitationControl.self, from: data)
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+        }
+        throw CocoaError(.fileReadNoSuchFile)
+    }
+
+    private func openInvitation(_ control: InvitationControl, in app: XCUIApplication, signals: URL) throws {
+        switch control.route {
+        case "bridge":
+            let safari = XCUIApplication(bundleIdentifier: "com.apple.mobilesafari")
+            guard let url = control.link else { throw CocoaError(.fileReadCorruptFile) }
+            safari.open(url)
+            let bridge = safari.descendants(matching: .any)["Open in Harklight"].firstMatch
+            XCTAssertTrue(bridge.waitForExistence(timeout: 35), "The dashboard should resolve the short invitation.")
+            try signal("bridge-resolved", at: signals)
+            tapVisible(bridge, in: safari)
+        case "paste":
+            let field = app.secureTextFields["Full invitation"]
+            tapVisible(field, in: app)
+            field.press(forDuration: 1)
+            let menuPaste = app.menuItems["Paste"]
+            if menuPaste.waitForExistence(timeout: 4) {
+                menuPaste.tap()
+            } else {
+                tapVisible(app.buttons["Paste"], in: app, timeout: 4)
+            }
+            let allowPaste = app.alerts.buttons["Allow Paste"].firstMatch
+            if allowPaste.waitForExistence(timeout: 2) { allowPaste.tap() }
+            tapVisible(app.buttons["Check invitation"], in: app)
+        case "native":
+            guard let url = control.link else { throw CocoaError(.fileReadCorruptFile) }
+            app.open(url)
+        default:
+            throw CocoaError(.fileReadCorruptFile)
+        }
     }
 
     private func firstRequest(in app: XCUIApplication) -> XCUIElement {

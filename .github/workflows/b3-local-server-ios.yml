@@ -14,7 +14,7 @@ concurrency:
 jobs:
   enrollment:
     runs-on: xcode-27
-    timeout-minutes: 40
+    timeout-minutes: 65
     steps:
       - uses: actions/checkout@v7
         with:
