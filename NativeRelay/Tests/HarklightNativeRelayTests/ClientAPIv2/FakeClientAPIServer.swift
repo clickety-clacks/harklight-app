@@ -57,6 +57,11 @@ final class FakeClientAPIServer: ClientAPITransport, @unchecked Sendable {
         lock.withLock { feeds.values.map(\.continuation) }.forEach { $0.yield(.heartbeat) }
     }
 
+    /// Writes an ephemeral `event: show` to every open feed; never logged.
+    func show(_ json: String) {
+        lock.withLock { feeds.values.map(\.continuation) }.forEach { $0.yield(.show(Data(json.utf8))) }
+    }
+
     func closeFeeds(reason: String) {
         let open = lock.withLock { () -> [AsyncThrowingStream<FeedEvent, any Error>.Continuation] in
             defer { feeds.removeAll() }

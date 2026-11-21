@@ -175,6 +175,9 @@ public enum FeedEvent: Equatable, Sendable {
     case heartbeat
     /// Sent before a server-initiated end.
     case closing(reason: String)
+    /// A held show for this device (round 11 r4): ephemeral, no `id`, never
+    /// a log change and never moves the cursor. Carries the show's JSON.
+    case show(Data)
 }
 
 /// One batch of the feed, for catch-up without holding a stream.
