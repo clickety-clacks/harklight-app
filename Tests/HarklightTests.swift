@@ -10,6 +10,14 @@ private final class V2ScenePushTransport: ClientAPITransport, @unchecked Sendabl
     private var batches = 0
     private var entryReads = 0
     private var focusScreens: [String] = []
+    private var showReads = 0
+    private let holdShowLookup: AsyncStream<Void>?
+
+    init(holdShowLookup: AsyncStream<Void>? = nil) {
+        self.holdShowLookup = holdShowLookup
+    }
+
+    var showLookupCount: Int { lock.withLock { showReads } }
 
     var reportedFocusScreens: [String] { lock.withLock { focusScreens } }
 
@@ -30,6 +38,11 @@ private final class V2ScenePushTransport: ClientAPITransport, @unchecked Sendabl
             body = #"{"account":{"state":"active"},"features":{},"limits":{}}"#
         case "/v2/items/later":
             throw URLError(.networkConnectionLost)
+        case "/v2/items/newest":
+            lock.withLock { showReads += 1 }
+            if let holdShowLookup { for await _ in holdShowLookup {} }
+            try Task.checkCancellation()
+            body = #"{"rev":2,"item":{"item_id":"newest","rev":2,"sender":"sender","request_revision":1,"message":{"title":"Newest"},"files":[],"seen":false,"rank":{"key":"b","section":"current"},"chat":{"available":true,"started":true}}}"#
         case "/v2/items/item/entries":
             lock.withLock { entryReads += 1 }
             body = #"{"rev":2,"entries":[],"older":false}"#
@@ -120,6 +133,50 @@ final class HarklightTests: XCTestCase {
         await lifecycle.loadV2EntriesOnOpen(key, expected: context)
         XCTAssertEqual(transport.counts.entryReads, 2)
         XCTAssertTrue(connection.model.snapshot.loadedEntryItems.contains(key.messageID))
+        await lifecycle.deactivate()
+    }
+
+    @MainActor
+    func testNewV2ShowSupersedesADeferredShowBeforeItsLookupCompletes() async throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                                       personID: ExactText("person"), deviceID: ExactText("device"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let repository = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        let (lookup, gate) = AsyncStream<Void>.makeStream()
+        defer { gate.finish() }
+        let transport = V2ScenePushTransport(holdShowLookup: lookup)
+        let connection = try ClientAPIv2Connection(transport: transport, repository: repository,
+            context: context, directory: nil, errors: NoopErrorLog())
+        let coordinator = NativePushedViewCoordinator()
+        let lifecycle = NativeRelayLifecycle(clientAPIV2Enabled: true, v2ShowCoordinator: coordinator)
+        let attempt = UUID()
+        lifecycle.installV2Connection(connection, context: context, attempt: attempt)
+        try connection.model.apply([.init(rev: 1, kind: "item", data: Data(#"{"item_id":"older","rev":1,"sender":"sender","request_revision":1,"message":{"title":"Older"},"files":[],"seen":false,"rank":{"key":"a","section":"current"},"chat":{"available":true,"started":true}}"#.utf8))], cursor: 1)
+        var navigations: [String] = []
+        coordinator.setApplyHandler { navigations.append($0.messageID) }
+        // The first show is deferred because the scene is not active.
+        lifecycle.receiveV2Show(ClientAPIShow(showID: "one", deviceID: "device", itemID: "older",
+            target: .chat, heldMilliseconds: 0), receivedAt: Date(), attempt: attempt)
+        lifecycle.receiveV2Show(ClientAPIShow(showID: "two", deviceID: "device", itemID: "newest",
+            target: .message, heldMilliseconds: 0), receivedAt: Date(), attempt: attempt)
+
+        let lookupDeadline = ContinuousClock.now + .seconds(2)
+        while transport.showLookupCount == 0, ContinuousClock.now < lookupDeadline {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertEqual(transport.showLookupCount, 1)
+        coordinator.scenePhaseChanged(.active)
+        await Task.yield()
+        XCTAssertTrue(navigations.isEmpty, "The older show must stay superseded during lookup.")
+
+        gate.finish()
+        let navigationDeadline = ContinuousClock.now + .seconds(2)
+        while navigations.isEmpty, ContinuousClock.now < navigationDeadline {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertEqual(navigations, ["newest"])
+        XCTAssertEqual(connection.model.heldCursor, 1)
+        XCTAssertEqual(connection.model.snapshot.items[ExactText("newest")]?.seen, false)
         await lifecycle.deactivate()
     }
 

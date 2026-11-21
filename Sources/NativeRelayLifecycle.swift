@@ -1321,6 +1321,7 @@ final class NativeRelayLifecycle {
         guard activeTransportAttemptID == attempt, let connection = v2Connection,
               context?.identity.deviceID.rawValue == show.deviceID else { return }
         v2ShowLookup?.cancel()
+        v2ShowCoordinator.supersedePendingShow()
         pendingV2Show = (show, receivedAt)
         if connection.model.snapshot.items[ExactText(show.itemID)] != nil {
             deliverV2ShowIfHydrated(attempt: attempt)

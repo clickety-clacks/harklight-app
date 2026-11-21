@@ -59,6 +59,13 @@ final class NativePushedViewCoordinator {
         receive(frame)
     }
 
+    /// Called when a newer authenticated show arrives, before its item read.
+    /// A navigation that already began cannot be taken back.
+    func supersedePendingShow() {
+        pendingShow = nil
+        cancelApplyTask()
+    }
+
     func receive(_ frame: ViewShowFrame, elapsedSinceReceipt: TimeInterval = 0) {
         let arrival = uptime() - elapsedSinceReceipt -
             TimeInterval(frame.heldMilliseconds ?? 0) / 1_000
@@ -218,10 +225,14 @@ final class NativePushedViewCoordinator {
             return
         }
 
-        self.pendingShow = nil
-        passivePair = NativePushedViewPair(senderID: pendingShow.frame.senderID,
-                                           messageID: pendingShow.frame.messageID)
-        Task { @MainActor in await applyHandler(pendingShow.frame) }
+        applyTask = Task { @MainActor [weak self] in
+            guard let self, !Task.isCancelled, self.sceneIsActive else { return }
+            self.applyTask = nil
+            self.pendingShow = nil
+            self.passivePair = NativePushedViewPair(senderID: pendingShow.frame.senderID,
+                                                   messageID: pendingShow.frame.messageID)
+            await applyHandler(pendingShow.frame)
+        }
     }
 
     private func cancelApplyTask() {
