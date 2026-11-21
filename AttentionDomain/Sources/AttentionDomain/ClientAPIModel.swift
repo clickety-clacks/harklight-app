@@ -91,8 +91,8 @@ public struct APIRank: Equatable, Codable, Sendable {
     /// common or earlier_messages, for current items in free order; common
     /// has no heading.
     public let group: String?
-    /// now, high, normal or low (round 15): the urgency the marks are drawn
-    /// from in every order. Always present for current items.
+    /// now, high, normal or low (round 15). Always present for current items.
+    /// Used for the mark when there is no score.
     public var level: String? = nil
 }
 

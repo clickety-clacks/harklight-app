@@ -413,6 +413,8 @@ public struct InboxViewListItem: Equatable, Codable, Sendable {
     public let score: Double?
     public let scoreKind: InboxViewScoreKind?
     public let freeSection: InboxFreeSection?
+    /// The v2 reply row's level, used as a fallback when it has no score.
+    public let priority: InboxMessagePriority?
 
     public init(kind: InboxViewListItemKind,
                 key: RequestKey,
@@ -421,8 +423,10 @@ public struct InboxViewListItem: Equatable, Codable, Sendable {
                 unseenCount: Int? = nil,
                 score: Double? = nil,
                 scoreKind: InboxViewScoreKind? = nil,
-                freeSection: InboxFreeSection? = nil) {
+                freeSection: InboxFreeSection? = nil,
+                priority: InboxMessagePriority? = nil) {
         self.kind = kind
+        self.priority = priority
         self.key = key
         self.conversationSequence = conversationSequence
         self.openAtConversationSequence = openAtConversationSequence

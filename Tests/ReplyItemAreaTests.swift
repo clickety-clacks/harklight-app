@@ -397,6 +397,31 @@ final class ReplyItemAreaTests: XCTestCase {
                      "The local reply receipt field is limited to origin replies.")
     }
 
+    func testItemAndReplyMarksUseTheLevelOnlyWithoutAScore() {
+        let key = RequestKey(accountScope: ExactText("account"), senderID: ExactText("sender"),
+                             messageID: ExactText("item"))
+        let entry = ReplyItemEntry(parent: key, unseenReplies: [
+            ReplyItemUnseenReply(turnID: ExactText("reply"), conversationSequence: 7, text: "Update")
+        ], receivedAt: baselineDate)
+        let cases: [(score: Double?, level: InboxMessagePriority?, mark: InboxPriorityDisplay?)] = [
+            (0.95, nil, .urgent),
+            (nil, .high, .high),
+            (0.95, .normal, .urgent),
+            (0.50, .now, nil),
+            (nil, nil, nil)
+        ]
+        for (score, level, mark) in cases {
+            let row = InboxViewListItem(kind: .reply, key: key, conversationSequence: 7,
+                                        openAtConversationSequence: 7, unseenCount: 1,
+                                        score: score, scoreKind: .current, priority: level)
+            let description = "score \(String(describing: score)), level \(String(describing: level))"
+            XCTAssertEqual(InboxPriorityDisplay.forEntry(score: score, priority: level), mark, description)
+            XCTAssertEqual(ReplyItemPriorityProjection.display(for: row, perReplyPriorities: [:]), mark, description)
+            XCTAssertEqual(ReplyItemPriorityProjection.display(for: entry, perReplyScores: [:],
+                perReplyPriorities: [:], serverListItems: [row]), mark, description)
+        }
+    }
+
     @MainActor
     func testNewReplyPriorityFlowsFromServerViewThroughLiveInboxRow() throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),

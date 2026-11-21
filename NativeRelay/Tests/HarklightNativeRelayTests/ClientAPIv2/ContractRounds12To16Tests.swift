@@ -81,7 +81,7 @@ final class ContractRounds12To16Tests: XCTestCase {
         XCTAssertTrue(done.isComposerOpen, "APP-06 is unchanged for items with a conversation.")
     }
 
-    /// Round 15: the urgency marks come from `Rank.level`.
+    /// Round 15: `Rank.level` supplies the mark when the item has no score.
     func testTheInboxPriorityComesFromRankLevel() throws {
         let cached = try projected([
             V2Fixture.item("n", rev: 1, rankKey: "a").replacingOccurrences(of: #""section":"current"}"#,
@@ -95,7 +95,7 @@ final class ContractRounds12To16Tests: XCTestCase {
         })
         XCTAssertEqual(priorities["n"], .some(.now))
         XCTAssertEqual(priorities["h"], .some(.high))
-        XCTAssertEqual(priorities["x"], .some(nil), "Without a level, no mark.")
+        XCTAssertEqual(priorities["x"], .some(nil), "The score can still draw a mark when there is no level.")
     }
 
     /// Round 15: a value action's answer shows which option was chosen.
