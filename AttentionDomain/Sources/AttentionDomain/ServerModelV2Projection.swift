@@ -7,8 +7,10 @@ import Foundation
 ///
 /// - An item is keyed by its opaque `item_id` (in `RequestKey.messageID`); the
 ///   sender is display data.
-/// - Arrival order (`acceptanceOrder`) is the model's durable, never-reused
-///   arrival number, so the new-messages area keeps working after removals.
+/// - Arrival order (`acceptanceOrder`) is the server's `Item.arrival`, placed
+///   above every local number, so the new-messages area orders exactly as
+///   today. Items without one (from before free order, drawn as earlier
+///   messages) keep the model's durable local number and never count as new.
 /// - The inbox view follows `Rank.key` byte-wise, with today's sections from
 ///   `Rank.section`/`Rank.group` and unread-reply rows from `Chat.reply_group`
 ///   and `Chat.reply_rank_key`.
@@ -27,9 +29,17 @@ public enum ServerModelV2Projection {
 
         var requests: [RequestKey: StoredRequest] = [:]
         for item in ordered {
-            guard let key = keys[item.itemID], let arrival = model.arrivalOrder[item.itemID] else { continue }
+            guard let key = keys[item.itemID] else { continue }
+            let order: UInt64
+            if let arrival = item.arrival {
+                order = serverArrivalBase + arrival
+            } else if let local = model.arrivalOrder[item.itemID] {
+                order = local
+            } else {
+                continue
+            }
             requests[key] = StoredRequest(key: key, originalPayload: item.message)
-                .assigningAcceptanceOrder(arrival)
+                .assigningAcceptanceOrder(order)
         }
 
         var remoteStates: [RequestKey: RemoteRequestState] = [:]
@@ -53,6 +63,13 @@ public enum ServerModelV2Projection {
             inboxView: inboxView(ordered, keys: keys, model: model),
             currentRequestKeys: Set(keys.values),
             chatReadPositions: readPositions)
+    }
+
+    /// Server arrival numbers sit above every local one.
+    static let serverArrivalBase: UInt64 = 1 << 40
+
+    static func priority(_ level: String?) -> InboxMessagePriority? {
+        level.flatMap(InboxMessagePriority.init(rawValue:))
     }
 
     // MARK: Terminal and answer
@@ -171,6 +188,8 @@ public enum ServerModelV2Projection {
         return (Array(replyKey.rawValue.utf8),
                 InboxViewListItem(kind: .reply, key: key, conversationSequence: quote.position,
                                   openAtConversationSequence: open.position, unseenCount: unread,
+                                  score: item.chat.replyPriority?.score.flatMap { Double($0.lexeme) },
+                                  scoreKind: unread > 0 ? .current : .historical,
                                   freeSection: InboxFreeSection(state: state, group: replyGroup)))
     }
 
@@ -195,8 +214,18 @@ public enum ServerModelV2Projection {
             }
         }
         let listItems = rows.sorted { $0.sortKey.lexicographicallyPrecedes($1.sortKey) }.map(\.item)
+        // Each held agent reply's own priority, for the reply rows and New.
+        let replies = ordered.flatMap { item -> [InboxViewReply] in
+            guard let key = keys[item.itemID] else { return [] }
+            return model.orderedEntries(of: item.itemID).compactMap { entry in
+                guard entry.kind == "reply", entry.author == "origin", let priority = entry.priority else { return nil }
+                return InboxViewReply(key: key, conversationSequence: entry.position,
+                                      priority: Self.priority(priority.level),
+                                      score: priority.score.flatMap { Double($0.lexeme) })
+            }
+        }
         let freeOrder = ordered.contains { $0.rank.group != nil } || listItems.contains { $0.kind == .reply }
-        return InboxView(revision: ExactText("v2"), entries: entries, listItems: listItems,
+        return InboxView(revision: ExactText("v2"), entries: entries, replies: replies, listItems: listItems,
                          freeOrderVersion: freeOrder ? 1 : nil)
     }
 }

@@ -31,6 +31,18 @@ public struct APIChat: Equatable, Codable, Sendable {
     public let replyGroup: String?
     /// Where that reply row sorts, in `Rank.key`'s space.
     public let replyRankKey: ExactText?
+    /// The reply row's priority: the highest level among its unseen replies,
+    /// with the row's score and due time (contract round 7).
+    public let replyPriority: APIPriority?
+}
+
+/// A priority as the server's view gives it: a level, with an optional score
+/// and due time.
+public struct APIPriority: Equatable, Codable, Sendable {
+    /// now, high, normal or low.
+    public let level: String?
+    public let score: JSONNumber?
+    public let dueAtMs: UInt64?
 }
 
 public struct APIAvailability: Equatable, Codable, Sendable {
@@ -93,8 +105,11 @@ public struct APIItem: Equatable, Codable, Sendable {
     public let terminal: APITerminal?
     public let result: APIOriginResult?
     public let rank: APIRank
-    /// When the item first reached the person; the new-messages area orders by it.
+    /// When the item was accepted; display only (contract round 8).
     public let createdAtMs: UInt64?
+    /// Today's per-person arrival counter; the new-messages area orders by it.
+    /// Absent for items from before free order, which are earlier messages.
+    public let arrival: UInt64?
 }
 
 public struct APIEntryDelivery: Equatable, Codable, Sendable {
@@ -126,6 +141,8 @@ public struct APIEntry: Equatable, Codable, Sendable {
     public let delivery: APIEntryDelivery?
     /// For a `result` entry: the origin's result fact (contract round 7).
     public let result: APIOriginResult?
+    /// For an agent reply: its priority from the server's view (round 7).
+    public let priority: APIPriority?
 }
 
 public struct APICounts: Equatable, Codable, Sendable {
@@ -228,6 +245,19 @@ extension APIFileRef {
     }
 }
 
+extension APIPriority {
+    fileprivate init(_ reader: Reader) throws {
+        level = try reader.optionalString("level")?.rawValue
+        if let raw = reader.raw("score") {
+            guard case let .number(number) = raw else { throw ClientAPIModelError.invalid("priority.score") }
+            score = number
+        } else {
+            score = nil
+        }
+        dueAtMs = try reader.optionalUnsigned("due_at_ms")
+    }
+}
+
 extension APIAvailability {
     fileprivate init(_ reader: Reader) throws {
         state = try reader.string("state").rawValue
@@ -272,7 +302,8 @@ extension APIItem {
                             lastOriginReply: try chat.optionalString("last_origin_reply"),
                             unreadReplies: try chat.optionalUnsigned("unread_replies").map { Int($0) },
                             replyGroup: try chat.optionalString("reply_group")?.rawValue,
-                            replyRankKey: try chat.optionalString("reply_rank_key"))
+                            replyRankKey: try chat.optionalString("reply_rank_key"),
+                            replyPriority: try chat.optionalObject("reply_priority").map(APIPriority.init))
         availability = try reader.optionalObject("availability").map(APIAvailability.init)
         terminal = try reader.optionalObject("terminal").map(APITerminal.init)
         result = try reader.optionalObject("result").map { result in
@@ -292,6 +323,7 @@ extension APIItem {
                             section: try rank.optionalString("section")?.rawValue,
                             group: try rank.optionalString("group")?.rawValue)
         createdAtMs = try reader.optionalUnsigned("created_at_ms")
+        arrival = try reader.optionalUnsigned("arrival")
         guard rev >= 1 else { throw ClientAPIModelError.invalid("item.rev") }
     }
 }
@@ -320,6 +352,7 @@ extension APIEntry {
             APIOriginResult(status: try result.string("status"), resultRef: try result.optionalString("result_ref"),
                             revision: try result.unsigned("revision"))
         }
+        priority = try reader.optionalObject("priority").map(APIPriority.init)
         guard rev >= 1, position >= 1 else { throw ClientAPIModelError.invalid("entry.rev") }
     }
 }

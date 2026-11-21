@@ -120,6 +120,34 @@ final class ServerModelV2ProjectionTests: XCTestCase {
                              "Above the remembered high-water mark, so New messages admits it.")
     }
 
+    func testTheServerArrivalOrdersNewMessagesAboveItemsFromBeforeFreeOrder() throws {
+        let store = try store([
+            V2Fixture.item("new-2", rev: 1, rankKey: "a", extra: #""arrival":7"#),
+            V2Fixture.item("old", rev: 2, rankKey: "b"),
+            V2Fixture.item("new-1", rev: 3, rankKey: "c", extra: #""arrival":5"#)
+        ])
+        let cached = ServerModelV2Projection.cachedState(store.snapshot, identity: identity)
+        let order = { (id: String) in cached.requests[self.key(id)]?.acceptanceOrder ?? 0 }
+        XCTAssertLessThan(order("new-1"), order("new-2"), "Ordered by the server's arrival, not by when it was held.")
+        XCTAssertLessThan(order("old"), order("new-1"), "An item from before free order never counts as new.")
+    }
+
+    func testReplyPrioritiesReachTheInboxViewForReplyRowsAndNew() throws {
+        let chat = #"{"started":true,"read_position":"r1","last_origin_reply":"r2","unread_replies":1,"reply_group":"earlier_chat_replies","reply_rank_key":"a5","reply_priority":{"level":"high","score":0.8}}"#
+        let store = try store([V2Fixture.item("i", rev: 1, rankKey: "a", chat: chat)])
+        for (id, rev, position, level) in [("r1", 2, 1, "low"), ("r2", 3, 2, "high")] {
+            let entry = V2Fixture.entry(id, item: "i", rev: rev, position: position)
+                .replacingOccurrences(of: #""files":[]}"#, with: #""files":[],"priority":{"level":"\#(level)","score":0.5}}"#)
+            try store.apply(kind: "entry", rev: UInt64(rev), data: V2Fixture.json(entry))
+        }
+        let view = try XCTUnwrap(ServerModelV2Projection.cachedState(store.snapshot, identity: identity).inboxView)
+        XCTAssertEqual(view.replies?.map(\.conversationSequence), [1, 2])
+        XCTAssertEqual(view.replies?.map(\.priority), [.low, .high])
+        let row = try XCTUnwrap(view.listItems?.first { $0.kind == .reply })
+        XCTAssertEqual(row.score, 0.8)
+        XCTAssertEqual(row.scoreKind, .current)
+    }
+
     func testResultEntriesBecomeResultStatusTurns() throws {
         let store = try store([V2Fixture.item("i", rev: 1, rankKey: "a")])
         try store.open("i")
