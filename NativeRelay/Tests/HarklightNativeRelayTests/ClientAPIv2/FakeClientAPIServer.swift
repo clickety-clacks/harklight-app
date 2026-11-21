@@ -47,6 +47,10 @@ final class FakeClientAPIServer: ClientAPITransport, @unchecked Sendable {
         set { lock.withLock { _holdWrites = newValue } }
     }
 
+    var holdInbox: AsyncGate?
+    var meBody: String?
+    var replyEntry: (@Sendable (Rev) -> String)?
+
     var head: Rev { lock.withLock { log.last?.rev ?? retainedFrom } }
     var openFeedCount: Int { lock.withLock { feeds.count } }
 
@@ -114,6 +118,10 @@ final class FakeClientAPIServer: ClientAPITransport, @unchecked Sendable {
             if request.method != .get { _keysPersistedAtSend.append(persisted) }
         }
         if request.method == .get {
+            if request.path == "/v2/me", let meBody {
+                return APIResponse(status: 200, requestID: nextRequestID(), body: Data(meBody.utf8))
+            }
+            if request.path == "/v2/inbox", let holdInbox { await holdInbox.wait() }
             // The inbox as a snapshot: the items the fake serves, at its head.
             let items = lock.withLock { _inboxItems.joined(separator: ",") }
             return APIResponse(status: 200, requestID: nextRequestID(),
@@ -141,8 +149,16 @@ final class FakeClientAPIServer: ClientAPITransport, @unchecked Sendable {
     }
 
     private func applyWrite(_ request: APIRequest, digest: Data) -> APIResponse {
-        let rev = commit("item", #"{"path":"\#(request.path)"}"#)
-        let response = APIResponse(status: 200, requestID: nextRequestID(), body: Data(#"{"rev":\#(rev)}"#.utf8))
+        let body: String
+        if request.path.hasSuffix("/replies"), let replyEntry {
+            let entry = replyEntry(head + 1)
+            let rev = commit("entry", entry)
+            body = #"{"rev":\#(rev),"entry":\#(entry)}"#
+        } else {
+            let rev = commit("item", #"{"path":"\#(request.path)"}"#)
+            body = #"{"rev":\#(rev)}"#
+        }
+        let response = APIResponse(status: 200, requestID: nextRequestID(), body: Data(body.utf8))
         if let key = request.idempotencyKey { lock.withLock { stored[key] = (digest, response) } }
         return response
     }

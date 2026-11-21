@@ -77,7 +77,7 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
         let outcomes = PublishingOutcomes(inner: ServerModelOutboxOutcomes(store: model, onRejected: { entry, error in
             relay.connection?.recordReply(entry, disposition: .rejected(ExactText(error.token.rawValue)))
             await onRejected(entry, error)
-        }, onApplied: { entry, result in
+        }, onAcceptedResult: { entry, result in
             if let turn = result.entry?.entryID {
                 relay.connection?.recordReply(entry, disposition: .acceptedPendingReplay(operation: entry.id, turn: turn))
             }
@@ -177,11 +177,10 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
     private func recordReply(_ entry: OutboxEntry, disposition: ConversationDraft.Disposition) {
         guard entry.operation == "reply" else { return }
         do {
-            let threads = try repository.conversationSnapshot(context: context).threads
-            guard let pair = threads.first(where: { _, thread in
-                thread.queuedMessages?.contains { $0.operationID == entry.id } == true
-            }) else { return }
-            try repository.recordQueuedChatMessage(entry.id, in: pair.key, disposition: disposition, context: context)
+            guard let message = try repository.queuedChatMessages(context: context)
+                .first(where: { $0.operationID == entry.id }) else { return }
+            try repository.recordQueuedChatMessage(entry.id, in: message.binding.request,
+                                                   disposition: disposition, context: context)
         } catch {
             errors.report(ErrorLogReport(concern: .actions, connectionRole: .request,
                 operation: "reply", phase: "overlay", reason: .from(error: error),
@@ -191,8 +190,7 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
 
     private func recoverQueuedReplies() async {
         do {
-            let threads = try repository.conversationSnapshot(context: context).threads
-            let messages = threads.values.flatMap { $0.queuedMessages ?? [] }
+            let messages = try repository.queuedChatMessages(context: context)
                 .sorted { ($0.submittedAt ?? .distantPast) < ($1.submittedAt ?? .distantPast) }
             for message in messages {
                 try Task.checkCancellation()

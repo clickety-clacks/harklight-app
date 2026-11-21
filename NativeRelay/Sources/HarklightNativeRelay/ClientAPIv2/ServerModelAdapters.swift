@@ -148,16 +148,16 @@ public final class ServerModelSyncWriter: SyncModelWriting, @unchecked Sendable 
 public final class ServerModelOutboxOutcomes: OutboxOutcomeHandling, @unchecked Sendable {
     private let store: ServerModelV2Store
     private let onRejected: @Sendable (OutboxEntry, APIError) async -> Void
-    private let onApplied: @Sendable (OutboxEntry, APIWriteResult) -> Void
+    private let onAcceptedResult: @Sendable (OutboxEntry, APIWriteResult) -> Void
     private let onUnreadableResponse: @Sendable (OutboxEntry, any Error) -> Void
 
     public init(store: ServerModelV2Store,
                 onRejected: @escaping @Sendable (OutboxEntry, APIError) async -> Void,
-                onApplied: @escaping @Sendable (OutboxEntry, APIWriteResult) -> Void = { _, _ in },
+                onAcceptedResult: @escaping @Sendable (OutboxEntry, APIWriteResult) -> Void = { _, _ in },
                 onUnreadableResponse: @escaping @Sendable (OutboxEntry, any Error) -> Void = { _, _ in }) {
         self.store = store
         self.onRejected = onRejected
-        self.onApplied = onApplied
+        self.onAcceptedResult = onAcceptedResult
         self.onUnreadableResponse = onUnreadableResponse
     }
 
@@ -168,11 +168,13 @@ public final class ServerModelOutboxOutcomes: OutboxOutcomeHandling, @unchecked 
         guard !response.body.isEmpty, entry.write.path != "/v2/files" else { return }
         do {
             let result = try APIWriteResult(json: JSONValue.parse(response.body))
-            try store.apply(result, generation: generation)
-            onApplied(entry, result)
-        } catch is ServerModelV2Store.SupersededGeneration {
-            // The server accepted the operation. Only its old projection is discarded.
-            return
+            do {
+                try store.apply(result, generation: generation)
+            } catch is ServerModelV2Store.SupersededGeneration {
+                // The receipt settles the durable intent independently of the
+                // old resource projection, which still cannot enter the model.
+            }
+            onAcceptedResult(entry, result)
         } catch {
             // The write took effect; the feed delivers its resources anyway.
             onUnreadableResponse(entry, error)

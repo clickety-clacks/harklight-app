@@ -9,9 +9,10 @@ final class ChatMessageQueueTests: XCTestCase {
     private let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
                                            personID: ExactText("person-A"), deviceID: ExactText("installation-A"))
 
-    private func repository(v2: Bool) throws -> (ClientRepository, ProfileContext, ConversationBinding) {
+    private func repository(v2: Bool, persistence: MemoryPendingActionPersistence = MemoryPendingActionPersistence())
+        throws -> (ClientRepository, ProfileContext, ConversationBinding) {
         let context = ProfileContext(identity: identity, transportMode: .relay)
-        let repository = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        let repository = try ClientRepository(context: context, persistence: persistence)
         let store = ServerModelV2Store(fileURL: nil)
         try store.apply(kind: "item", rev: 1, data: V2Fixture.json(V2Fixture.item("i", rev: 1, rankKey: "a")))
         var cached = ServerModelV2Projection.cachedState(store.snapshot, identity: identity)
@@ -48,18 +49,44 @@ final class ChatMessageQueueTests: XCTestCase {
         XCTAssertEqual(thread.queuedMessages?.compactMap(\.operationID), ids, "Saved before anything is sent.")
     }
 
-    func testAReplySavedBeforeOutboxHandoffIsRecoveredUnderItsSavedKey() async throws {
-        let (repository, context, binding) = try repository(v2: true)
-        try type("saved before handoff", repository, binding, context)
-        let message = try repository.queueChatMessage(binding, context: context)
+    func testAReplySavedBeforeOutboxHandoffSurvivesWarmRelaunch() async throws {
+        try await assertReplyRecovery(cold: false)
+    }
+
+    func testAReplySavedBeforeOutboxHandoffSurvivesColdRelaunchWithDelayedBaseline() async throws {
+        try await assertReplyRecovery(cold: true)
+    }
+
+    private func assertReplyRecovery(cold: Bool) async throws {
+        let persistence = MemoryPendingActionPersistence()
+        let (first, context, binding) = try repository(v2: true, persistence: persistence)
+        try type("saved before handoff", first, binding, context)
+        let message = try first.queueChatMessage(binding, context: context)
         let operation = try XCTUnwrap(message.operationID)
+        let reopened: ClientRepository
+        if cold {
+            reopened = try ClientRepository(context: context, persistence: persistence)
+            XCTAssertTrue(try reopened.conversationSnapshot(context: context).threads.isEmpty)
+        } else {
+            reopened = try repository(v2: true, persistence: persistence).0
+        }
+        XCTAssertEqual(try reopened.queuedChatMessages(context: context).map(\.operationID), [operation])
+
         let server = FakeClientAPIServer()
-        let connection = try ClientAPIv2Connection(transport: server, repository: repository,
+        let inboxGate = AsyncGate()
+        let writeGate = AsyncGate()
+        if cold { server.holdInbox = inboxGate }
+        server.holdWrites = ["/v2/items/i/replies": writeGate]
+        server.inboxItems = [V2Fixture.item("i", rev: 1, rankKey: "a")]
+        server.meBody = #"{"account":{"state":"active"},"features":{},"limits":{}}"#
+        server.replyEntry = { rev in
+            #"{"entry_id":"accepted","item_id":"i","rev":\#(rev),"position":1,"kind":"reply","author":"person","request_revision":1,"text":"saved before handoff","files":[]}"#
+        }
+        let connection = try ClientAPIv2Connection(transport: server, repository: reopened,
             context: context, directory: nil, errors: RecordingErrorLogV2())
-        let initial = await connection.outbox.pending
-        XCTAssertTrue(initial.isEmpty)
         let foreground = Task { await connection.runForeground() }
-        defer { foreground.cancel() }
+        defer { inboxGate.release(); writeGate.release(); foreground.cancel() }
+
         let deadline = ContinuousClock.now + .seconds(2)
         while !server.received.contains(where: { $0.idempotencyKey == operation }),
               ContinuousClock.now < deadline {
@@ -69,6 +96,24 @@ final class ChatMessageQueueTests: XCTestCase {
         XCTAssertEqual(sent.count, 1)
         XCTAssertEqual(sent.first?.path, "/v2/items/i/replies")
         XCTAssertEqual(sent.first?.body, Data(#"{"text":"saved before handoff"}"#.utf8))
+        if cold { XCTAssertNil(connection.model.heldCursor, "The POST started before the inbox was unlocked.") }
+
+        inboxGate.release()
+        let feedDeadline = ContinuousClock.now + .seconds(2)
+        while server.openFeedCount == 0, ContinuousClock.now < feedDeadline {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertEqual(server.openFeedCount, 1)
+        writeGate.release()
+        let overlayDeadline = ContinuousClock.now + .seconds(2)
+        while !(try reopened.queuedChatMessages(context: context)).isEmpty,
+              ContinuousClock.now < overlayDeadline {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertTrue(try reopened.queuedChatMessages(context: context).isEmpty)
+        let accepted = try reopened.conversationSnapshot(context: context).threads[binding.request]
+        XCTAssertTrue(accepted?.turns.contains { $0.id == ExactText("accepted") } == true)
+        XCTAssertEqual(server.received.filter { $0.idempotencyKey == operation }.count, 1)
     }
 
     func testForegroundOnlyWritesStopRetryingInTheBackgroundAndResumeByKey() async throws {
