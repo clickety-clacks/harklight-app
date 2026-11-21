@@ -20,7 +20,7 @@ public struct APIFileRef: Equatable, Codable, Sendable {
 
 public struct APIChat: Equatable, Codable, Sendable {
     /// Informational only; it gates nothing (chat is never closed by rule).
-    public let available: Bool
+    public let available: Bool?
     public let started: Bool
     public let readPosition: ExactText?
     public let lastOriginReply: ExactText?
@@ -124,6 +124,8 @@ public struct APIEntry: Equatable, Codable, Sendable {
     public let terminal: APITerminal?
     public let availability: APIAvailability?
     public let delivery: APIEntryDelivery?
+    /// For a `result` entry: the origin's result fact (contract round 7).
+    public let result: APIOriginResult?
 }
 
 public struct APICounts: Equatable, Codable, Sendable {
@@ -265,7 +267,7 @@ extension APIItem {
         seen = try reader.bool("seen")
         recipientAs = try reader.optionalString("as")?.rawValue
         let chat = try reader.object("chat")
-        self.chat = APIChat(available: try chat.bool("available"), started: try chat.bool("started"),
+        self.chat = APIChat(available: try chat.optionalBool("available"), started: try chat.bool("started"),
                             readPosition: try chat.optionalString("read_position"),
                             lastOriginReply: try chat.optionalString("last_origin_reply"),
                             unreadReplies: try chat.optionalUnsigned("unread_replies").map { Int($0) },
@@ -313,6 +315,10 @@ extension APIEntry {
         availability = try reader.optionalObject("availability").map(APIAvailability.init)
         delivery = try reader.optionalObject("delivery").map { delivery in
             APIEntryDelivery(delivered: try delivery.optionalBool("delivered"), acted: try delivery.optionalBool("acted"))
+        }
+        result = try reader.optionalObject("result").map { result in
+            APIOriginResult(status: try result.string("status"), resultRef: try result.optionalString("result_ref"),
+                            revision: try result.unsigned("revision"))
         }
         guard rev >= 1, position >= 1 else { throw ClientAPIModelError.invalid("entry.rev") }
     }

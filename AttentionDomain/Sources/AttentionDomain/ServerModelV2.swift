@@ -14,8 +14,23 @@ public struct ServerModelV2: Equatable, Codable, Sendable {
     /// Items whose entries were read (the person opened them). Feed entries
     /// of other items are not kept; opening an item reads its entries.
     public internal(set) var loadedEntryItems: Set<ExactText> = []
+    /// Each item's arrival number, assigned once when the item is first held
+    /// and never reused, so the new-messages area can compare it with a
+    /// remembered high-water mark even after other items are removed.
+    public internal(set) var arrivalOrder: [ExactText: UInt64] = [:]
+    public internal(set) var lastArrival: UInt64 = 0
 
     public init() {}
+
+    /// Items with agent chat replies whose newest reply is not held yet: the
+    /// app reads their entries so reply rows can show the reply.
+    public var itemsNeedingEntries: [ExactText] {
+        orderedItems.compactMap { item in
+            guard item.chat.replyGroup != nil, let last = item.chat.lastOriginReply,
+                  entries[item.itemID]?[last] == nil else { return nil }
+            return item.itemID
+        }
+    }
 
     /// The inbox in the server's order: `rank.key` ascending, byte-wise.
     public var orderedItems: [APIItem] {
@@ -54,6 +69,10 @@ public struct ServerModelV2: Equatable, Codable, Sendable {
     mutating func put(_ item: APIItem) -> Bool {
         guard gate.admit(Self.itemKey(item.itemID), rev: item.rev) else { return false }
         items[item.itemID] = item
+        if arrivalOrder[item.itemID] == nil {
+            lastArrival += 1
+            arrivalOrder[item.itemID] = lastArrival
+        }
         return true
     }
 
@@ -72,8 +91,11 @@ public struct ServerModelV2: Equatable, Codable, Sendable {
         // Entries of a removed item are not kept, nor feed entries of an item
         // whose entries were never read.
         guard !gate.isRemoved(Self.itemKey(entry.itemID)) else { return false }
-        if fromFeed, !loadedEntryItems.contains(entry.itemID) { return false }
-        loadedEntryItems.insert(entry.itemID)
+        // Items with agent chat replies keep their feed entries so their reply
+        // rows can show the reply; other unopened items wait for the read on
+        // open. Only a full entries page marks an item loaded.
+        if fromFeed, !loadedEntryItems.contains(entry.itemID),
+           items[entry.itemID]?.chat.replyGroup == nil { return false }
         guard gate.admit(Self.entryKey(entry.entryID), rev: entry.rev) else { return false }
         entries[entry.itemID, default: [:]][entry.entryID] = entry
         return true
@@ -108,7 +130,10 @@ public struct ServerModelV2: Equatable, Codable, Sendable {
         for (_, byID) in entries { for entryID in byID.keys { forgetEntry(entryID) } }
         entries = [:]
         loadedEntryItems = []
-        for item in fresh { put(item) }
+        // New items get arrival numbers in the order they first reached the person.
+        for item in fresh.sorted(by: { ($0.createdAtMs ?? 0, $0.itemID.rawValue) < ($1.createdAtMs ?? 0, $1.itemID.rawValue) }) {
+            put(item)
+        }
         gate.forget("counts")
         put(counts, rev: position)
         gate.pruneTombstones(now: now)
@@ -128,7 +153,8 @@ extension RevGate {
 /// is discarded with its cursor, so Sync takes a fresh snapshot rather than
 /// resuming over a model it no longer holds.
 public final class ServerModelV2Store: @unchecked Sendable {
-    public static let formatVersion = 1
+    /// 2: arrival order. An older file is discarded with its cursor.
+    public static let formatVersion = 2
 
     private struct Stored: Codable {
         let version: Int

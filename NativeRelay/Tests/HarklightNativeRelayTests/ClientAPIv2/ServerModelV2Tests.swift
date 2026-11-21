@@ -387,3 +387,35 @@ final class UnreadableRebaselineOnceTests: XCTestCase {
         XCTAssertEqual(store.heldCursor, 1, "After a successful rebaseline a recurrence is skipped.")
     }
 }
+
+/// #377 review B-3/B-4 and round 7, at the model level.
+final class ServerModelV2ArrivalAndReplyTests: XCTestCase {
+    func testArrivalNumbersAreNeverReusedAfterARemoval() throws {
+        let store = ServerModelV2Store(fileURL: nil)
+        try store.apply(kind: "item", rev: 1, data: V2Fixture.json(V2Fixture.item("a", rev: 1, rankKey: "a")))
+        try store.apply(kind: "item", rev: 2, data: V2Fixture.json(V2Fixture.item("b", rev: 2, rankKey: "b")))
+        try store.apply(kind: "item_removed", rev: 3, data: V2Fixture.json(#"{"item_id":"a"}"#))
+        try store.apply(kind: "item", rev: 4, data: V2Fixture.json(V2Fixture.item("c", rev: 4, rankKey: "c")))
+        XCTAssertEqual(store.snapshot.arrivalOrder[ExactText("b")], 2)
+        XCTAssertEqual(store.snapshot.arrivalOrder[ExactText("c")], 3, "A new message gets a number never used before.")
+    }
+
+    func testItemsWithAgentRepliesKeepFeedEntriesWithoutBeingMarkedLoaded() throws {
+        let store = ServerModelV2Store(fileURL: nil)
+        let chat = #"{"started":true,"last_origin_reply":"r1","unread_replies":1,"reply_group":"earlier_chat_replies","reply_rank_key":"a5"}"#
+        try store.apply(kind: "item", rev: 1, data: V2Fixture.json(V2Fixture.item("i", rev: 1, rankKey: "a", chat: chat)))
+        XCTAssertEqual(store.snapshot.itemsNeedingEntries, [ExactText("i")], "The reply row needs the reply.")
+        try store.apply(kind: "entry", rev: 2, data: V2Fixture.json(V2Fixture.entry("r1", item: "i", rev: 2, position: 4)))
+        XCTAssertEqual(store.snapshot.orderedEntries(of: ExactText("i")).map(\.entryID.rawValue), ["r1"])
+        XCTAssertFalse(store.snapshot.loadedEntryItems.contains(ExactText("i")),
+                       "Not complete: opening the item still reads its whole chat.")
+        XCTAssertTrue(store.snapshot.itemsNeedingEntries.isEmpty)
+    }
+
+    func testChatWithoutAvailableAndAResultEntryDecode() throws {
+        let item = try APIItem(json: V2Fixture.json(V2Fixture.item("i", rev: 1, rankKey: "a", chat: #"{"started":false}"#)))
+        XCTAssertNil(item.chat.available, "available is optional in the contract.")
+        let entry = try APIEntry(json: V2Fixture.json(#"{"entry_id":"r","item_id":"i","rev":2,"position":3,"kind":"result","author":"origin","request_revision":1,"result":{"status":"done","revision":1}}"#))
+        XCTAssertEqual(entry.result?.status.rawValue, "done")
+    }
+}
