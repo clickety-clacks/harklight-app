@@ -36,6 +36,7 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
     private let errors: any ErrorLogging
     private let meURL: URL?
     private let onPublished: @Sendable () -> Void
+    private let meWaitBeforeRetry: @Sendable (Int) async throws -> Void
     private let lock = NSLock()
 
     /// `directory` holds the model, outbox and last `/v2/me` for this
@@ -44,6 +45,7 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
                 directory: URL?, errors: any ErrorLogging,
                 waitBeforeRetry: @escaping @Sendable (Int) async throws -> Void = ChangeFeedSync.backoff,
                 outboxWaitBeforeRetry: @escaping @Sendable (Int, TimeInterval?) async throws -> Void = ActionOutbox.backoff,
+                meWaitBeforeRetry: @escaping @Sendable (Int) async throws -> Void = ChangeFeedSync.backoff,
                 onLiveState: @escaping @Sendable (ChangeFeedSync.LiveState) -> Void = { _ in },
                 onRejected: @escaping @Sendable (OutboxEntry, APIError) async -> Void = { _, _ in },
                 onPublished: @escaping @Sendable () -> Void = {}) throws {
@@ -61,6 +63,7 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
         self.context = context
         self.errors = errors
         self.onPublished = onPublished
+        self.meWaitBeforeRetry = meWaitBeforeRetry
         let persistence: any OutboxPersisting = directory.map {
             FileOutboxPersistence(url: $0.appendingPathComponent("outbox-v2.json"))
         } ?? MemoryOutbox()
@@ -73,7 +76,11 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
         self.outbox = try ActionOutbox(persistence: persistence, transport: transport, outcomes: outcomes,
                                        errors: errors, waitBeforeRetry: outboxWaitBeforeRetry)
         self.sync = ChangeFeedSync(transport: transport, model: writer, errors: errors,
-                                   waitBeforeRetry: waitBeforeRetry, onLiveState: onLiveState)
+                                   waitBeforeRetry: waitBeforeRetry, onLiveState: { state in
+                                       // Each time the feed is live again, send what the outbox holds.
+                                       if state == .live { relay.connection?.sendSavedWrites() }
+                                       onLiveState(state)
+                                   })
         relay.connection = self
     }
 
@@ -83,27 +90,58 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
     public func refreshMe() async throws -> APIMe {
         let response = try await transport.send(.get("/v2/me"))
         let me = try APIMe(json: JSONValue.parse(response.body))
-        if let meURL { try? response.body.write(to: meURL, options: .atomic) }
+        if let meURL {
+            do { try response.body.write(to: meURL, options: .atomic) } catch {
+                errors.report(ErrorLogReport(concern: .snapshot, connectionRole: .request, operation: "me",
+                    phase: "save", reason: .from(error: error), initiator: .unknown, retryable: true))
+            }
+        }
         presentation.apply(me)
+        errors.resolve(concern: .snapshot, operation: "me")
         publishModel()
         return me
+    }
+
+    /// Reads `/v2/me` until it succeeds, waiting longer after each failure:
+    /// until it is read on a first run nothing can be published.
+    func readMeUntilRead() async {
+        var attempt = 0
+        while !Task.isCancelled {
+            do {
+                try await refreshMe()
+                return
+            } catch {
+                errors.report(ErrorLogReport(concern: .snapshot, connectionRole: .request, operation: "me",
+                    phase: "read", reason: .api(error), initiator: .forFailure(error),
+                    retryable: !((error as? APIError)?.isPermanent ?? false),
+                    correlation: .request((error as? APIError)?.requestID), httpStatus: (error as? APIError)?.status))
+                attempt += 1
+                do { try await meWaitBeforeRetry(attempt) } catch { return }
+            }
+        }
+    }
+
+    /// Sends every saved write that is still pending, once, under its saved
+    /// key; refused ones stay failed until the person retries.
+    func sendSavedWrites() {
+        let outbox = self.outbox
+        Task { await outbox.flush() }
     }
 
     /// Foreground: shows the saved model at once, reads `/v2/me`, then
     /// follows the change feed until cancelled or stopped by the server.
     public func runForeground() async {
         publishModel()
-        do { try await refreshMe() } catch {
-            errors.report(ErrorLogReport(concern: .snapshot, connectionRole: .request, operation: "me",
-                phase: "read", reason: .api(error), initiator: .forFailure(error),
-                retryable: !((error as? APIError)?.isPermanent ?? false),
-                correlation: .request((error as? APIError)?.requestID), httpStatus: (error as? APIError)?.status))
-        }
+        sendSavedWrites()
+        // `/v2/me` is retried alongside the feed until it is read.
+        let me = Task { await readMeUntilRead() }
         await sync.runForeground()
+        me.cancel()
     }
 
     /// Push or background refresh: applies every batch from the cursor.
     public func catchUp() async throws {
+        sendSavedWrites()
         try await sync.catchUp()
     }
 
@@ -117,11 +155,25 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
                 try repository.restoreCachedServerState(cached, context: context)
             } catch {
                 errors.report(ErrorLogReport(concern: .snapshot, connectionRole: .request, operation: "publish",
-                    phase: "restore", reason: .app("restore_failed"), initiator: .unknown, retryable: true))
+                    phase: "restore", reason: Self.restoreFailure(error), initiator: .unknown, retryable: true))
                 return
             }
         }
         onPublished()
+    }
+}
+
+extension ClientAPIv2Connection {
+    /// The cause of a failed publish, by the error's case name only (never
+    /// its message): for example `restore_wrong_account`.
+    static func restoreFailure(_ error: any Error) -> ErrorLogReason {
+        guard error is AttentionStoreError else { return .from(error: error) }
+        let name = String(describing: error).prefix { $0.isLetter || $0.isNumber }
+        let snake = name.reduce(into: "") { result, character in
+            if character.isUppercase, !result.isEmpty { result.append("_") }
+            result.append(contentsOf: character.lowercased())
+        }
+        return .app("restore_" + snake)
     }
 }
 
