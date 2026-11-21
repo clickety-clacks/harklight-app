@@ -1927,8 +1927,15 @@ final class NativeRelayCoreTests: XCTestCase {
 
         requests.inboxViewRevision = "view-after-stream-failure"
         let outcome = await core.readInboxSnapshot(noticedRevision: ExactText("view-after-stream-failure"))
-        XCTAssertEqual(outcome, .updated(revision: ExactText("view-after-stream-failure")),
-                       "A read issued after the stream failed still succeeds.")
+        // The connection's first read is started without waiting, so it may be
+        // the one that fetches the new view; either way a read after the
+        // stream failed brings the new view in. Asserting the stored view,
+        // not which read fetched it, keeps this regression test deterministic.
+        XCTAssertTrue([.updated(revision: ExactText("view-after-stream-failure")),
+                       .unchanged(revision: ExactText("view-after-stream-failure"))].contains(outcome),
+                      "A read issued after the stream failed still succeeds.")
+        XCTAssertEqual(try store.snapshot(context: context).inboxView?.revision,
+                       ExactText("view-after-stream-failure"))
         XCTAssertEqual(try store.snapshot(context: context).inboxView?.entries.map { $0.key.messageID.rawValue },
                        ["viewed"])
         XCTAssertTrue(try requestTypes(requests).allSatisfy { $0 == "view_get" })
