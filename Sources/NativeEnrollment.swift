@@ -71,6 +71,7 @@ struct NativeEnrollmentRecord: Codable, Equatable {
     var personID: String?
     var pushBinding: NativePushBinding? = nil
     var pushRegistrationRevisionFloor: UInt64? = nil
+    var v2PushRegistration: ClientAPIPushRegistrationState? = nil
     var serverDisplayName: String? = nil
     var serverID: String? = nil
     var accountDisplayName: String? = nil
@@ -405,6 +406,23 @@ struct NativeEnrollmentStore {
         guard status == errSecSuccess || status == errSecItemNotFound else {
             throw NativeEnrollmentError.identityStorage
         }
+    }
+
+    /// Check and update the protected record in one main-actor operation.
+    @MainActor func updateV2PushRegistration<T>(
+        for expected: NativeEnrollmentRecord, _ update: (inout ClientAPIPushRegistrationState) throws -> T
+    ) throws -> T {
+        guard var record = try load(), record.sameNotificationProfile(as: expected) else {
+            throw NativeJoinError.superseded
+        }
+        let prior = record.v2PushRegistration ?? ClientAPIPushRegistrationState()
+        var next = prior
+        let result = try update(&next)
+        if next != prior {
+            record.v2PushRegistration = next
+            try save(record)
+        }
+        return result
     }
 
     /// Persist the exact registration operation before sending it. Repeated

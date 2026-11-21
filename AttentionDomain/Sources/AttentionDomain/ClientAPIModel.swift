@@ -196,7 +196,7 @@ public struct APISettings: Equatable, Codable, Sendable {
     public let body: JSONValue
 }
 
-public enum APIPushEnvironment: String, Equatable, Sendable {
+public enum APIPushEnvironment: String, Codable, Sendable {
     case production
     case sandbox
 }

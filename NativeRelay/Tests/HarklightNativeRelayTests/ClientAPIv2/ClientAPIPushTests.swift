@@ -4,6 +4,47 @@ import Foundation
 import XCTest
 
 final class ClientAPIPushTests: XCTestCase {
+    func testSavedRegistrationReplaysAndOnlyARefusalReplacesItsKeyAndRevision() throws {
+        let token = ExactText(String(repeating: "a", count: 64))
+        var state = ClientAPIPushRegistrationState()
+        let original = try XCTUnwrap(state.prepareRegistration(token: token, environment: .sandbox))
+        state = try JSONDecoder().decode(ClientAPIPushRegistrationState.self, from: JSONEncoder().encode(state))
+        XCTAssertEqual(try state.prepareRegistration(token: token, environment: .sandbox), original)
+
+        let corrected = try XCTUnwrap(state.replaceStaleRegistration(original, serverRevision: 12))
+        XCTAssertEqual(corrected.revision, 13)
+        XCTAssertNotEqual(corrected.operationID, original.operationID)
+        XCTAssertEqual(corrected.token, token)
+        XCTAssertEqual(corrected.environment, .sandbox)
+        state.confirmRegistration(original)
+        XCTAssertEqual(try state.prepareRegistration(token: token, environment: .sandbox), corrected)
+        state.confirmRegistration(corrected)
+        XCTAssertNil(try state.prepareRegistration(token: token, environment: .sandbox))
+        let production = try XCTUnwrap(state.prepareRegistration(token: token, environment: .production))
+        XCTAssertEqual(production.revision, 14)
+    }
+
+    func testSavedRemovalBlocksRegistrationUntilTheAccountIsKept() throws {
+        let token = ExactText(String(repeating: "a", count: 64))
+        var state = ClientAPIPushRegistrationState()
+        let original = try XCTUnwrap(state.prepareRegistration(token: token, environment: .production))
+        let removal = try XCTUnwrap(state.prepareRemoval())
+        state = try JSONDecoder().decode(ClientAPIPushRegistrationState.self, from: JSONEncoder().encode(state))
+        XCTAssertEqual(state.prepareRemoval(), removal)
+        XCTAssertNil(try state.prepareRegistration(token: token, environment: .production))
+        XCTAssertNil(try state.replaceStaleRegistration(original, serverRevision: 12))
+        state.confirmRemoval(UUID(), serverRevision: 100)
+        XCTAssertEqual(state.prepareRemoval(), removal)
+        state.confirmRemoval(removal, serverRevision: 12)
+        XCTAssertNil(state.prepareRemoval())
+        XCTAssertNil(try state.prepareRegistration(token: token, environment: .production))
+
+        state.keepAccount()
+        let replacement = try XCTUnwrap(state.prepareRegistration(token: token, environment: .production))
+        XCTAssertEqual(replacement.revision, 13)
+        XCTAssertNotEqual(replacement.operationID, original.operationID)
+    }
+
     func testStaleRegistrationKeepsItsRefusalAndRemovalReturnsTheUpdatedSettings() async throws {
         let transport = PushSettingsTransport()
         let push = ClientAPIPush(transport: transport)
