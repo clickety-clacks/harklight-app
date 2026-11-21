@@ -29,6 +29,33 @@ private final class EntriesPagesTransport: ClientAPITransport, @unchecked Sendab
     func changeBatch(after: Rev) async throws -> FeedBatch { FeedBatch(changes: [], rev: after, more: false) }
 }
 
+private struct DelayedResourceResponses: ClientAPITransport {
+    let entriesStarted: AsyncGate
+    let writeStarted: AsyncGate
+    let release: AsyncGate
+    let entries: String
+    let write: String
+
+    func send(_ request: APIRequest) async throws -> APIResponse {
+        let body: String
+        switch request.path {
+        case "/v2/items/a/entries":
+            entriesStarted.release()
+            body = entries
+        case "/v2/items/a/seen":
+            writeStarted.release()
+            body = write
+        default:
+            throw APIError(status: 404, token: .notFound, retryable: false, requestID: "r")
+        }
+        await release.wait()
+        return APIResponse(status: 200, requestID: "r", body: Data(body.utf8))
+    }
+
+    func changeFeed(after: Rev) -> AsyncThrowingStream<FeedEvent, any Error> { AsyncThrowingStream { $0.finish() } }
+    func changeBatch(after: Rev) async throws -> FeedBatch { FeedBatch(changes: [], rev: after, more: false) }
+}
+
 /// Review L-16: an opened item's entries are read page by page, and an entry
 /// that cannot be read is reported with its id rather than dropped silently.
 final class ServerModelV2EntriesLoadTests: XCTestCase {
@@ -44,6 +71,51 @@ final class ServerModelV2EntriesLoadTests: XCTestCase {
         transport.pages = pages
         let errors = RecordingErrorLogV2()
         return (store, transport, errors, ServerModelSyncWriter(store: store, transport: transport, errors: errors))
+    }
+
+    func testResetDiscardsDelayedEntriesAndAcceptedWriteResources() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("model.json")
+        let store = ServerModelV2Store(fileURL: file)
+        let before = try APIItem(json: V2Fixture.json(V2Fixture.item("a", rev: 10, rankKey: "a")))
+        try store.rebaseline(items: [before], counts: APICounts(unresolved: 1), position: 10)
+        let old = V2Fixture.item("a", rev: 11, rankKey: "a")
+            .replacingOccurrences(of: #""seen":false"#, with: #""seen":true"#)
+        let transport = DelayedResourceResponses(entriesStarted: AsyncGate(), writeStarted: AsyncGate(),
+            release: AsyncGate(), entries: #"{"rev":11,"entries":[\#(entry("old", 11))],"older":false}"#,
+            write: #"{"rev":11,"item":\#(old)}"#)
+        let errors = RecordingErrorLogV2()
+        let writer = ServerModelSyncWriter(store: store, transport: transport, errors: errors)
+        let outcomes = ServerModelOutboxOutcomes(store: store, onRejected: { _, _ in
+            XCTFail("The completed operation was accepted.")
+        }, onUnreadableResponse: { _, _ in
+            XCTFail("An obsolete response is not a failed projection.")
+        })
+        let outbox = try ActionOutbox(persistence: MemoryOutboxPersistence(), transport: transport,
+                                      outcomes: outcomes, errors: errors)
+        let reading = Task { try await writer.loadEntries(of: ExactText("a")) }
+        defer { transport.release.release() }
+        try await outbox.submit(target: "a", operation: "mark_seen",
+                                write: FrozenWrite(method: .post, path: "/v2/items/a/seen", body: Data("{}".utf8)))
+        await transport.entriesStarted.wait()
+        await transport.writeStarted.wait()
+
+        let after = try APIItem(json: V2Fixture.json(V2Fixture.item("a", rev: 1, rankKey: "a")))
+        try store.rebaseline(items: [after], counts: APICounts(unresolved: 1), position: 1)
+        transport.release.release()
+        do {
+            try await reading.value
+            XCTFail("The delayed entry page belongs to the previous generation.")
+        } catch is ServerModelV2Store.SupersededGeneration {}
+        await waitUntil("the accepted write leaves the queue") { await outbox.pending.isEmpty }
+
+        let saved = ServerModelV2Store(fileURL: file)
+        XCTAssertEqual(saved.heldCursor, 1)
+        XCTAssertEqual(saved.snapshot.items[ExactText("a")]?.rev, 1)
+        XCTAssertEqual(saved.snapshot.items[ExactText("a")]?.seen, false)
+        XCTAssertTrue(saved.snapshot.orderedEntries(of: ExactText("a")).isEmpty)
+        XCTAssertFalse(saved.snapshot.loadedEntryItems.contains(ExactText("a")))
     }
 
     func testEveryPageIsReadNewestFirstAndTheItemIsThenLoaded() async throws {

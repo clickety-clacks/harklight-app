@@ -308,8 +308,9 @@ public final class ServerModelV2Store: @unchecked Sendable {
     /// Every page read for an item, in one save. The item counts as loaded
     /// only when the pages reach its oldest entry (`complete`) and none of
     /// them held an unreadable entry.
-    public func apply(_ pages: [APIEntriesPage], of itemID: ExactText, complete: Bool) throws {
-        try mutate { model in
+    public func apply(_ pages: [APIEntriesPage], of itemID: ExactText, complete: Bool,
+                      generation: UInt64? = nil) throws {
+        try mutate(generation: generation) { model in
             model.loadedEntryItems.insert(itemID)
             for page in pages { for entry in page.entries { model.put(entry) } }
             if !complete || pages.contains(where: { !$0.unreadable.isEmpty }) {
@@ -318,8 +319,8 @@ public final class ServerModelV2Store: @unchecked Sendable {
         }
     }
 
-    public func apply(_ result: APIWriteResult) throws {
-        try mutate { model in
+    public func apply(_ result: APIWriteResult, generation: UInt64? = nil) throws {
+        try mutate(generation: generation) { model in
             if let item = result.item { model.put(item) }
             if let entry = result.entry { model.put(entry) }
             if let settings = result.settings { model.put(settings) }

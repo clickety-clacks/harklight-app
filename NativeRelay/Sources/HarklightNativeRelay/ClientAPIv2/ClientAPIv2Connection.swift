@@ -223,8 +223,10 @@ private final class PublishingOutcomes: OutboxOutcomeHandling, @unchecked Sendab
         self.inner = inner
         self.publish = publish
     }
-    func accepted(_ entry: OutboxEntry, response: APIResponse) async {
-        await inner.accepted(entry, response: response)
+    var modelGeneration: UInt64 { inner.modelGeneration }
+
+    func accepted(_ entry: OutboxEntry, response: APIResponse, generation: UInt64) async {
+        await inner.accepted(entry, response: response, generation: generation)
         publish()
     }
     func rejected(_ entry: OutboxEntry, error: APIError) async {

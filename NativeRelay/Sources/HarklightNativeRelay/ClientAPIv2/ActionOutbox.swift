@@ -65,9 +65,11 @@ public protocol OutboxPersisting: Sendable {
 /// What the app does with an operation's outcome. Both calls run before the
 /// operation leaves the outbox.
 public protocol OutboxOutcomeHandling: Sendable {
+    /// The model generation at the start of this HTTP attempt.
+    var modelGeneration: UInt64 { get }
     /// Applies the write's response (the changed resources at their new `rev`)
     /// through the version gate. A replayed response counts as the original.
-    func accepted(_ entry: OutboxEntry, response: APIResponse) async
+    func accepted(_ entry: OutboxEntry, response: APIResponse, generation: UInt64) async
     /// A definitive refusal, shown on the item the person acted on.
     func rejected(_ entry: OutboxEntry, error: APIError) async
 }
@@ -201,8 +203,9 @@ public actor ActionOutbox {
     private func sendOne(_ entry: OutboxEntry) async -> Bool {
         noteAttempt(entry.idempotencyKey)
         do {
+            let generation = outcomes.modelGeneration
             let response = try await transport.send(entry.request)
-            await outcomes.accepted(entry, response: response)
+            await outcomes.accepted(entry, response: response, generation: generation)
             remove(entry.idempotencyKey)
             resolveIfNoFailedWrite(entry.operation)
             return true
