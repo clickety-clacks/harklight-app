@@ -22,11 +22,12 @@ cleanup() {
         printf 'B3 route=%s failed during %s (exit %s)\n' "$route" "$phase" "$status" >&2
         if [[ -f "$route_dir/xctest.log" ]]; then
             grep -E 'Test Case.*B3EnrollmentProof.*(started|passed|failed)|\*\* TEST (SUCCEEDED|FAILED) \*\*' "$route_dir/xctest.log" || true
+            grep -Eo 'B3EnrollmentProof\.swift:[0-9]+' "$route_dir/xctest.log" | sort -u || true
         fi
     fi
     if [[ -n $test_pid ]]; then kill "$test_pid" 2>/dev/null || true; wait "$test_pid" 2>/dev/null || true; fi
     if [[ -n $signals ]]; then
-        for signal in bridge-resolved invite-confirmed request-pending owner-approved connected enrolled cold-restored offline-removal-kept-account confirmed-removal-kept-unsent-text; do
+        for signal in bridge-resolved bridge-tapped system-open-confirmed handoff-foreground invite-confirmed request-pending owner-approved connected notification-choice seeded-inbox enrolled cold-restored offline-removal-kept-account confirmed-removal-kept-unsent-text; do
             if [[ -f "$signals/$signal" ]]; then
                 printf 'B3 observed route=%s %s\n' "$route" "$signal"
             fi
@@ -96,7 +97,7 @@ rm "$route_dir/invitation.json"
 
 phase='approve displayed device code'
 code=''
-for ((i=0; i<45; i++)); do
+for ((i=0; i<120; i++)); do
     if code=$(cat "$signals/approval" 2>/dev/null) && [[ -n $code ]]; then
         break
     fi

@@ -19,9 +19,7 @@ final class B3EnrollmentProof: XCTestCase {
         try FileManager.default.removeItem(at: invitation)
         try openInvitation(control, in: app, signals: signals)
         if control.route != "paste" {
-            let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
-            let open = springboard.alerts.buttons["Open"].firstMatch
-            if open.waitForExistence(timeout: 5) { open.tap() }
+            try confirmForegroundHandoff(control.route, app: app, signals: signals)
         }
         tapVisible(app.buttons["Join"], in: app, timeout: 25)
         try signal("invite-confirmed", at: signals)
@@ -50,6 +48,7 @@ final class B3EnrollmentProof: XCTestCase {
                 try signal("connected", at: signals)
                 continueAfterApproval.tap()
                 tapVisible(app.scrollViews.buttons["Not now"], in: app)
+                try signal("notification-choice", at: signals)
             } else if Date() >= nextStatusCheck, check.isHittable {
                 check.tap()
                 nextStatusCheck = Date().addingTimeInterval(5)
@@ -59,6 +58,7 @@ final class B3EnrollmentProof: XCTestCase {
         XCTAssertTrue(row.exists, "The approved identity should load a seeded inbox row.")
         let rowID = row.identifier
         XCTAssertTrue(rowID.hasPrefix("request-row-"))
+        try signal("seeded-inbox", at: signals)
         openSettings(app)
         XCTAssertTrue(app.staticTexts["This phone is registered to this account."].exists)
         try signal("enrolled", at: signals)
@@ -145,6 +145,7 @@ final class B3EnrollmentProof: XCTestCase {
             XCTAssertTrue(bridge.waitForExistence(timeout: 35), "The dashboard should resolve the short invitation.")
             try signal("bridge-resolved", at: signals)
             tapVisible(bridge, in: safari)
+            try signal("bridge-tapped", at: signals)
         case "paste":
             let field = app.secureTextFields["Full invitation"]
             tapVisible(field, in: app)
@@ -164,6 +165,26 @@ final class B3EnrollmentProof: XCTestCase {
         default:
             throw CocoaError(.fileReadCorruptFile)
         }
+    }
+
+    private func confirmForegroundHandoff(_ route: String, app: XCUIApplication, signals: URL) throws {
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        let safari = XCUIApplication(bundleIdentifier: "com.apple.mobilesafari")
+        let systemOpen = springboard.alerts.buttons["Open"].firstMatch
+        let safariOpen = safari.alerts.buttons["Open"].firstMatch
+        let deadline = Date().addingTimeInterval(20)
+        while app.state != .runningForeground, Date() < deadline {
+            if systemOpen.isHittable {
+                systemOpen.tap()
+                try signal("system-open-confirmed", at: signals)
+            } else if route == "bridge", safariOpen.isHittable {
+                safariOpen.tap()
+                try signal("system-open-confirmed", at: signals)
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.25))
+        }
+        XCTAssertEqual(app.state, .runningForeground, "Harklight should become the foreground app after Open.")
+        try signal("handoff-foreground", at: signals)
     }
 
     private func firstRequest(in app: XCUIApplication) -> XCUIElement {
