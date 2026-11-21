@@ -220,12 +220,15 @@ public actor ActionOutbox {
             // A contract refusal is definitive at once. A 4xx outside the
             // contract (no contract body) is retried a few times, then given
             // up, so it cannot block that item's later writes forever. Either
-            // way the write stays visible as failed.
-            await outcomes.rejected(entry, error: error)
+            // way the write stays visible as failed. The failure and its Error
+            // Log record exist before the app is told, so a refusal the person
+            // sees always has its record, and a Retry handed over at once
+            // finds the write already failed.
             update(entry.idempotencyKey) {
                 $0.failure = OutboxFailure(status: error.status, token: error.token.rawValue)
             }
             report(entry, phase: "send", error: error, initiator: .unknown, retryable: false)
+            await outcomes.rejected(entry, error: error)
             return true
         } catch {
             // Unknown outcome or retry later: keep the operation and its key.

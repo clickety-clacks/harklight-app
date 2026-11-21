@@ -137,6 +137,9 @@ final class OutboxFailedWriteVisibilityTests: XCTestCase {
 
         try await box.submit(target: "item:b", operation: "answer", write: write("b"))
         await waitUntil("accepted") { outcomes.accepted.count == 1 }
+        // Accepted, then removed from the outbox and (if allowed) resolved, in
+        // one step: once it has left, any resolution has happened.
+        await waitUntil("removed") { await box.pending.isEmpty }
         XCTAssertTrue(errors.resolutions.isEmpty,
                       "Another answer succeeding does not resolve a refusal whose write is still held.")
 
