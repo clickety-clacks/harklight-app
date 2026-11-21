@@ -3,6 +3,30 @@ import XCTest
 @testable import Harklight
 
 final class DevelopmentAPNsAddressStoreTests: XCTestCase {
+    @MainActor
+    func testV2CallbackDiscardsTheLegacyCopyAndStoresOnlyInKeychain() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let legacy = DevelopmentAPNsAddressStore(directory: directory)
+        let enrollment = NativeEnrollmentStore(service: "push-token-test-" + UUID().uuidString)
+        defer {
+            try? enrollment.clearV2APNsToken()
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let token = Data(repeating: 0x2a, count: 32)
+        try DevelopmentPushRegistration.persistToken(token, usesV2: true, legacyStore: legacy,
+                                                     enrollment: enrollment)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
+        XCTAssertEqual(try enrollment.v2APNsAddress(), String(repeating: "2a", count: 32))
+
+        try DevelopmentPushRegistration.persistToken(Data(repeating: 0x1b, count: 32), usesV2: false,
+                                                     legacyStore: legacy, enrollment: enrollment)
+        XCTAssertEqual(try legacy.load(), String(repeating: "1b", count: 32))
+        try DevelopmentPushRegistration.persistToken(token, usesV2: true, legacyStore: legacy,
+                                                     enrollment: enrollment)
+        XCTAssertNil(try legacy.load())
+        XCTAssertEqual(try enrollment.v2APNsAddress(), String(repeating: "2a", count: 32))
+    }
+
     func testProtectedAddressStoreRejectsEmptyAndClearsStaleAddress() throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)

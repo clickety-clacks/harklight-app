@@ -917,6 +917,9 @@ final class NativeAppLaunch {
             try enrollment.markNotificationExplanationSeen(for: record.deviceID)
             let allowed = try await notifications.choose(enabled) { self.activationGeneration == epoch }
             guard activationGeneration == epoch else { return }
+            if NativeRelayLifecycle.shared.clientAPIV2Enabled {
+                Task { await NativeRelayLifecycle.shared.refreshAfterPushAddressStored() }
+            }
             if allowed {
                 presentation.notificationWarning = nil
                 diagnostics.record(area: .notifications, phase: .pushRegistration, transition: .completed)

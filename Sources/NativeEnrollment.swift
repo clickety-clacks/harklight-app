@@ -141,6 +141,7 @@ struct NativeEnrollmentStore {
     private let featureFlags: RemoteFeatureFlags?
     private static let account = "current-installation"
     private static let preparedAccount = "unconfirmed-installation"
+    private static let v2APNsAccount = "client-api-v2-apns-token"
 
     init(service: String = "co.clicketyclacks.Harklight.native-enrollment",
          featureFlags: RemoteFeatureFlags? = nil) {
@@ -153,10 +154,14 @@ struct NativeEnrollmentStore {
     }
 
     func load() throws -> NativeEnrollmentRecord? {
+        try loadData(account: Self.account).map { try JSONDecoder().decode(NativeEnrollmentRecord.self, from: $0) }
+    }
+
+    private func loadData(account: String) throws -> Data? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
-            kSecAttrAccount as String: Self.account,
+            kSecAttrAccount as String: account,
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne
         ]
@@ -166,7 +171,28 @@ struct NativeEnrollmentStore {
         guard status == errSecSuccess, let data = result as? Data else {
             throw NativeEnrollmentError.identityStorage
         }
-        return try JSONDecoder().decode(NativeEnrollmentRecord.self, from: data)
+        return data
+    }
+
+    func v2APNsAddress() throws -> String? {
+        try loadData(account: Self.v2APNsAccount)?.map { String(format: "%02x", $0) }.joined()
+    }
+
+    func storeV2APNsToken(_ token: Data) throws {
+        guard !token.isEmpty else {
+            try clearV2APNsToken()
+            throw DevelopmentAPNsAddressStore.AddressError.emptyToken
+        }
+        try saveData(token, account: Self.v2APNsAccount)
+    }
+
+    func clearV2APNsToken() throws {
+        let status = SecItemDelete([kSecClass as String: kSecClassGenericPassword,
+                                   kSecAttrService as String: service,
+                                   kSecAttrAccount as String: Self.v2APNsAccount] as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else {
+            throw NativeEnrollmentError.identityStorage
+        }
     }
 
     /// Reads only durable enrollment material so launch can distinguish an

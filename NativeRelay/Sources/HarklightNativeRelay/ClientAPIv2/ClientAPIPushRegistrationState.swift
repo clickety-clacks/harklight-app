@@ -14,13 +14,14 @@ public struct ClientAPIPushRegistrationState: Codable, Equatable, Sendable {
 
     public private(set) var registration: Registration?
     public private(set) var removalID: UUID?
+    public private(set) var permissionRemovalID: UUID?
     public private(set) var removalAccepted = false
     private var revisionFloor: UInt64 = 0
 
     public init() {}
 
     public mutating func prepareRegistration(token: ExactText, environment: APIPushEnvironment) throws -> Registration? {
-        guard removalID == nil else { return nil }
+        guard removalID == nil, permissionRemovalID == nil else { return nil }
         if let registration, registration.token == token, registration.environment == environment {
             return registration.accepted ? nil : registration
         }
@@ -31,20 +32,39 @@ public struct ClientAPIPushRegistrationState: Codable, Equatable, Sendable {
     /// changing the revision and idempotency key of this registration.
     public mutating func replaceStaleRegistration(_ refused: Registration,
                                                   serverRevision: UInt64) throws -> Registration? {
-        guard removalID == nil, registration == refused, !refused.accepted else { return nil }
+        guard removalID == nil, permissionRemovalID == nil, registration == refused, !refused.accepted else { return nil }
         return try replaceRegistration(token: refused.token, environment: refused.environment, after: serverRevision)
     }
 
     public mutating func confirmRegistration(_ completed: Registration) {
-        guard removalID == nil, registration == completed else { return }
+        guard removalID == nil, permissionRemovalID == nil, registration == completed else { return }
         registration?.accepted = true
     }
 
     public mutating func prepareRemoval() -> UUID? {
         guard !removalAccepted else { return nil }
-        let id = removalID ?? UUID()
+        let id = removalID ?? permissionRemovalID ?? UUID()
+        permissionRemovalID = nil
         removalID = id
         return id
+    }
+
+    public mutating func preparePermissionRemoval(hasBinding: Bool) -> UUID? {
+        guard removalID == nil else { return nil }
+        if let permissionRemovalID { return permissionRemovalID }
+        // A saved PUT with an unknown outcome may have applied even if its
+        // binding never reached the local model.
+        guard hasBinding || registration != nil else { return nil }
+        let id = UUID()
+        permissionRemovalID = id
+        registration = nil
+        return id
+    }
+
+    public mutating func confirmPermissionRemoval(_ completed: UUID, serverRevision: UInt64) {
+        guard permissionRemovalID == completed else { return }
+        permissionRemovalID = nil
+        revisionFloor = max(revisionFloor, serverRevision)
     }
 
     public mutating func confirmRemoval(_ completed: UUID, serverRevision: UInt64) {

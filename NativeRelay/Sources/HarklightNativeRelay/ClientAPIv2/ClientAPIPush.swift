@@ -45,7 +45,7 @@ public struct ClientAPIPush: Sendable {
     @MainActor
     public func reconcileRegistration(
         _ saved: ClientAPIPushRegistrationState.Registration,
-        replaceStale: (UInt64) throws -> ClientAPIPushRegistrationState.Registration?
+        replaceStale: @MainActor (UInt64) async throws -> ClientAPIPushRegistrationState.Registration?
     ) async throws -> ClientAPIPushRegistrationState.Registration? {
         func send(_ intent: ClientAPIPushRegistrationState.Registration) async throws {
             _ = try await register(token: intent.token, environment: intent.environment,
@@ -56,7 +56,7 @@ public struct ClientAPIPush: Sendable {
             return saved
         } catch let error as APIError where error.status == 412 && error.token == .preconditionFailed {
             let current = try await status()
-            guard let replacement = try replaceStale(current.revision) else { return nil }
+            guard let replacement = try await replaceStale(current.revision) else { return nil }
             try await send(replacement)
             return replacement
         }
@@ -77,6 +77,12 @@ public struct ClientAPIPush: Sendable {
         try Task.checkCancellation()
         let response = try APIWriteResult(json: JSONValue.parse(reply.body))
         guard let status = response.settings?.push else { throw ClientAPIModelError.invalid("settings.push") }
+        if reply.replayed, request.idempotencyKey != nil {
+            // A receipt confirms this operation, but its binding may already
+            // have been replaced or removed. Use current settings for routing.
+            _ = try await self.status()
+            return status
+        }
         if let model {
             try model.apply(response, generation: generation)
             onSettingsChanged()

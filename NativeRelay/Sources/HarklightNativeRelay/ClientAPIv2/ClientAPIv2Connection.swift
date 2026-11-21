@@ -275,7 +275,7 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
         let held = model.snapshot
         guard let principal = held.pushPrincipal,
               let device = principal.deviceID,
-              let binding = held.settings?.push?.bindingID,
+              let binding = held.routablePushBindingID,
               !binding.rawValue.isEmpty,
               principal.personID == context.identity.personID, device == context.identity.deviceID,
               attention.uniqueValue(named: "server")?.stringValue == principal.serverID,

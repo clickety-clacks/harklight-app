@@ -11,6 +11,12 @@ public struct ServerModelV2: Equatable, Codable, Sendable {
     public internal(set) var counts: APICounts?
     public internal(set) var settings: APISettings?
     public internal(set) var pushPrincipal: APIPushPrincipal?
+    /// A local permission decision masks the binding even if the server has
+    /// not acknowledged removal or the feed repeats its last settings.
+    public internal(set) var pushRoutingDisabled: Bool?
+    public var routablePushBindingID: ExactText? {
+        pushRoutingDisabled == true ? nil : settings?.push?.bindingID
+    }
     public internal(set) var gate = RevGate()
     /// Items whose entries were read (the person opened them). Feed entries
     /// of other items are not kept; opening an item reads its entries.
@@ -253,6 +259,10 @@ public final class ServerModelV2Store: @unchecked Sendable {
 
     public func savePushPrincipal(_ principal: APIPushPrincipal?) throws {
         try mutate { $0.pushPrincipal = principal }
+    }
+
+    public func setPushRoutingEnabled(_ enabled: Bool) throws {
+        try mutate { $0.pushRoutingDisabled = enabled ? nil : true }
     }
 
     /// Applies feed changes and records `cursor`, in one save. A change that

@@ -162,7 +162,9 @@ final class HarklightTests: XCTestCase {
         XCTAssertEqual(transport.counts.batches, 0)
         XCTAssertEqual(transport.counts.opened, 0)
 
-        let on = NativeRelayLifecycle(clientAPIV2Enabled: true)
+        let on = NativeRelayLifecycle(clientAPIV2Enabled: true,
+            v2NotificationPermission: NativeNotificationPermission(status: { .authorized },
+                                                                   request: { true }, register: {}))
         on.installV2Connection(connection, context: context)
         let otherAccount = await on.refreshV2ForPush(try payload(person: "other"))
         let otherServer = await on.refreshV2ForPush(try payload(person: "person", serverID: String(repeating: "b", count: 32)))

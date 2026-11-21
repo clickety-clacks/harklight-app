@@ -36,9 +36,9 @@ final class ClientAPIPushTests: XCTestCase {
         state.confirmRegistration(replacement)
         XCTAssertNil(try state.prepareRegistration(token: token, environment: .sandbox))
         let requests = await transport.requests
-        XCTAssertEqual(requests.map(\.method), [.put, .get, .put, .put])
+        XCTAssertEqual(requests.map(\.method), [.put, .get, .put, .put, .get])
         XCTAssertEqual(requests.map(\.idempotencyKey),
-                       [original.operationID, nil, replacement.operationID, replacement.operationID])
+                       [original.operationID, nil, replacement.operationID, replacement.operationID, nil])
         XCTAssertEqual(requests[2].body, requests[3].body)
         XCTAssertTrue(errors.reports.contains {
             $0.operation == "register_push" && $0.correlation.requestID == "stale-push" &&
@@ -85,6 +85,22 @@ final class ClientAPIPushTests: XCTestCase {
         let replacement = try XCTUnwrap(state.prepareRegistration(token: token, environment: .production))
         XCTAssertEqual(replacement.revision, 13)
         XCTAssertNotEqual(replacement.operationID, original.operationID)
+    }
+
+    func testPermissionRemovalRetiresAnUnknownPUTAndReplaysTheSameDELETE() throws {
+        let token = ExactText(String(repeating: "a", count: 64))
+        var state = ClientAPIPushRegistrationState()
+        let registration = try XCTUnwrap(state.prepareRegistration(token: token, environment: .production))
+        let removal = try XCTUnwrap(state.preparePermissionRemoval(hasBinding: false))
+        state = try JSONDecoder().decode(ClientAPIPushRegistrationState.self, from: JSONEncoder().encode(state))
+        XCTAssertEqual(state.preparePermissionRemoval(hasBinding: false), removal)
+        XCTAssertNil(try state.prepareRegistration(token: token, environment: .production))
+        XCTAssertNil(try state.replaceStaleRegistration(registration, serverRevision: 11))
+        state.confirmPermissionRemoval(removal, serverRevision: 10)
+        XCTAssertNil(state.preparePermissionRemoval(hasBinding: false))
+        let replacement = try XCTUnwrap(state.prepareRegistration(token: token, environment: .production))
+        XCTAssertEqual(replacement.revision, 11)
+        XCTAssertNotEqual(replacement.operationID, registration.operationID)
     }
 
     func testStaleRegistrationKeepsItsRefusalAndRemovalReturnsTheUpdatedSettings() async throws {
@@ -172,6 +188,13 @@ final class ClientAPIPushTests: XCTestCase {
         _ = try await reopened.catchUp(forPush: payload(binding: old, revision: 3))
         let covered = await transport.batches
         XCTAssertTrue(covered.isEmpty)
+        try reopened.model.setPushRoutingEnabled(false)
+        _ = try await reopened.catchUp(forPush: payload(binding: old))
+        let blocked = await transport.batches
+        XCTAssertTrue(blocked.isEmpty)
+        XCTAssertNil(reopened.model.snapshot.routablePushBindingID)
+        let persisted = ServerModelV2Store(fileURL: directory.appendingPathComponent("server-model-v2.json"))
+        XCTAssertNil(persisted.snapshot.routablePushBindingID)
         _ = try await reopened.push.remove(idempotencyKey: UUID())
         _ = try await reopened.catchUp(forPush: payload(binding: old))
         let afterDelete = await transport.batches
@@ -182,12 +205,14 @@ final class ClientAPIPushTests: XCTestCase {
             environment: .sandbox, revision: 6, idempotencyKey: UUID())
         let binding = try XCTUnwrap(new.bindingID)
         XCTAssertNotEqual(binding, old)
+        XCTAssertNil(reopened.model.snapshot.routablePushBindingID)
+        try reopened.model.setPushRoutingEnabled(true)
         _ = try await reopened.catchUp(forPush: payload(binding: old))
         _ = try await reopened.catchUp(forPush: payload(binding: binding))
         let from = await transport.batches
         XCTAssertEqual(from, [3])
         XCTAssertEqual(reopened.model.persistedCursor(), 3, "Push revision is never taken as the cursor.")
-        XCTAssertEqual(errors.reports.filter { $0.operation == "push_wake" }.count, 6)
+        XCTAssertEqual(errors.reports.filter { $0.operation == "push_wake" }.count, 7)
     }
 
     private func payload(server: String = "server", person: String = "person", device: String = "device",
@@ -214,7 +239,7 @@ private actor PushSettingsTransport: ClientAPITransport {
     private(set) var batches: [Rev] = []
     private var revision = 4
     private var environment: String? = "production"
-    private var receipts: Set<UUID> = []
+    private var receipts: [UUID: Data] = [:]
     private var loseRegistrationResponse = false
 
     func loseNextSuccessfulRegistrationResponse() {
@@ -223,14 +248,15 @@ private actor PushSettingsTransport: ClientAPITransport {
 
     func send(_ request: APIRequest) async throws -> APIResponse {
         requests.append(request)
+        if let key = request.idempotencyKey, let original = receipts[key] {
+            return APIResponse(status: 200, requestID: "push-replay", body: original, replayed: true)
+        }
         switch (request.method, request.path) {
         case (.get, "/v2/me"):
             let body = #"{"account":{"state":"active"},"features":{},"limits":{},"server":{"id":"server"},"principal":{"person_id":"person","device_id":"device"}}"#
             return APIResponse(status: 200, requestID: "me", body: Data(body.utf8))
         case (.get, "/v2/settings"): break
         case (.put, "/v2/devices/me/push"):
-            let key = try XCTUnwrap(request.idempotencyKey)
-            guard !receipts.contains(key) else { break }
             let body = try JSONValue.parse(XCTUnwrap(request.body))
             let upcoming = try XCTUnwrap(body.uniqueValue(named: "revision")?.integerValue)
             guard upcoming > revision else {
@@ -238,11 +264,6 @@ private actor PushSettingsTransport: ClientAPITransport {
             }
             revision = upcoming
             environment = try XCTUnwrap(body.uniqueValue(named: "environment")?.stringValue?.rawValue)
-            receipts.insert(key)
-            if loseRegistrationResponse {
-                loseRegistrationResponse = false
-                throw URLError(.networkConnectionLost)
-            }
         case (.delete, "/v2/devices/me/push"):
             revision += 1
             environment = nil
@@ -252,7 +273,13 @@ private actor PushSettingsTransport: ClientAPITransport {
         let push = environment.map { #"{"state":"ready","revision":\#(revision),"environment":"\#($0)","binding_id":"binding-\#(revision)"}"# }
             ?? #"{"state":"canceled","revision":\#(revision)}"#
         let body = #"{"rev":\#(revision),"settings":{"rev":\#(revision),"priority_levels":[],"push":\#(push)}}"#
-        return APIResponse(status: 200, requestID: "push", body: Data(body.utf8))
+        let bytes = Data(body.utf8)
+        if let key = request.idempotencyKey { receipts[key] = bytes }
+        if request.method == .put, loseRegistrationResponse {
+            loseRegistrationResponse = false
+            throw URLError(.networkConnectionLost)
+        }
+        return APIResponse(status: 200, requestID: "push", body: bytes)
     }
 
     nonisolated func changeFeed(after: Rev) -> AsyncThrowingStream<FeedEvent, any Error> {
