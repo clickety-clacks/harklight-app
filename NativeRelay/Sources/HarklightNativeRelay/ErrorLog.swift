@@ -737,17 +737,19 @@ public enum ErrorLogDisplay {
                                  now: Date) -> ErrorLogContextStatus? {
         switch surface {
         case .inbox:
-            return inContext(records: records.filter { $0.operation != ErrorLogOperation.readEntries },
-                             concern: .snapshot, now: now)
+            return inContext(records: records.filter { !isThreadRead($0) }, concern: .snapshot, now: now)
         case .thread:
-            return inContext(records: records, concern: .snapshot,
-                             operation: ErrorLogOperation.readEntries, now: now)
+            return inContext(records: records.filter(isThreadRead), concern: .snapshot, now: now)
         case .liveIndicator:
             return inContext(records: records, concern: .sync, now: now)
         case let .item(clientOperationID):
             return inContext(records: records, concern: .actions,
                              clientOperationID: clientOperationID, now: now)
         }
+    }
+
+    private static func isThreadRead(_ record: ErrorLogRecord) -> Bool {
+        record.operation == "load_entries" || record.operation == ErrorLogOperation.readEntries
     }
 
     /// What a surface of `concern` should show. Pass `operation` or

@@ -166,7 +166,7 @@ struct HarklightApp: App {
                         await launch.refreshForForegroundActivation()
                         isActivationRefresh = false
                     } else if !NativeRelayLifecycle.shared.usesClientAPIV2 ||
-                                NativeRelayLifecycle.shared.v2AccountAccess == .paused {
+                                NativeRelayLifecycle.shared.shouldPollV2PausedAccount {
                         await launch.refreshLive()
                     }
                     await launch.guidedJoin.retryAutomaticallyIfNeeded()

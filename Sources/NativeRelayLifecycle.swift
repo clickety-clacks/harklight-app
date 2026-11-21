@@ -953,6 +953,9 @@ final class NativeRelayLifecycle {
     private let v2LegacyAddressStore: @MainActor () throws -> DevelopmentAPNsAddressStore
     var onV2AccountAccessChanged: ((ClientAPIAccessState, ProfileContext) -> Void)?
     var v2AccountAccess: ClientAPIAccessState? { v2Connection?.access.state }
+    var shouldPollV2PausedAccount: Bool {
+        v2Connection?.access.state == .paused && v2Connection?.canPollMe == true
+    }
     private var sceneIsActive = false
 
     var usesClientAPIV2: Bool { v2Connection != nil }
@@ -1483,20 +1486,6 @@ final class NativeRelayLifecycle {
         } catch is CancellationError {
             return false
         } catch {
-            let api = error as? APIError
-            let isInternalError = api?.token == .internalError
-            let reason: ErrorLogReason = if isInternalError {
-                .serverReason(APIErrorToken.internalError.rawValue)
-            } else if error is ServerModelV2Store.SupersededGeneration {
-                .app("snapshot_superseded")
-            } else {
-                .from(error: error)
-            }
-            errorLog.report(ErrorLogReport(concern: .snapshot, connectionRole: .request,
-                operation: "load_entries", phase: "read", reason: reason,
-                initiator: isInternalError ? .serverClosed : .unknown, retryable: !isInternalError,
-                correlation: ErrorLogCorrelation(requestID: api?.requestID, resourceID: key.messageID.rawValue),
-                httpStatus: api?.status))
             return false
         }
     }
@@ -1830,7 +1819,9 @@ final class NativeRelayLifecycle {
         if let connection = v2Connection, let context {
             let attempt = activeTransportAttemptID
             do {
-                if connection.access.state == .paused { try await connection.refreshMe() }
+                if connection.access.state == .paused {
+                    try await connection.refreshMe(userInitiated: checkBlockedPush)
+                }
                 guard v2Connection === connection, connection.access.state == .available else { return .unavailable }
                 try await connection.catchUp()
                 guard v2Connection === connection else { return .unavailable }
@@ -1876,7 +1867,7 @@ final class NativeRelayLifecycle {
     func refreshPriorityLevels(expected: ProfileContext) async {
         if let connection = v2Connection {
             guard context == expected, sceneIsActive, priorityLevelsFeatureEnabled else { return }
-            await connection.refreshPriorityLevels()
+            await connection.refreshPriorityLevels(userInitiated: true)
             return
         }
         guard featureFlags.isEnabled(.priorityLevelEditing),

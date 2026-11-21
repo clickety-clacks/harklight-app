@@ -87,6 +87,12 @@ public protocol OutboxOutcomeHandling: Sendable {
     func accepted(_ entry: OutboxEntry, response: APIResponse, generation: UInt64) async
     /// A definitive refusal, shown on the item the person acted on.
     func rejected(_ entry: OutboxEntry, error: APIError) async
+    /// The outcome is ambiguous and the saved write is waiting for deliberate retry.
+    func pausedForInternalError(_ entry: OutboxEntry)
+}
+
+public extension OutboxOutcomeHandling {
+    func pausedForInternalError(_ entry: OutboxEntry) {}
 }
 
 private struct ProtectedWriteOutcome: OutboxOutcomeHandling {
@@ -303,6 +309,7 @@ public actor ActionOutbox {
                 $0.outcomeUnknown = true
             }
             report(entry, phase: "send", error: error, initiator: .serverClosed, retryable: false)
+            outcomes.pausedForInternalError(entry)
             return (false, .failure(error))
         } catch let error as APIError where error.token == .accountPaused {
             // Kept until the pause ends; nothing is refused or dropped.

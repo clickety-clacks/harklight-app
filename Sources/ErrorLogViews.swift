@@ -95,7 +95,8 @@ struct ErrorLogContextBanner: View {
             VStack(alignment: .leading, spacing: 2) {
                 switch status {
                 case .failing:
-                    Text(record.concern.failureTitle).font(.callout.weight(.semibold))
+                    Text(record.concern == .actions && record.code == APIErrorToken.internalError.rawValue
+                         ? "Delivery unconfirmed" : record.concern.failureTitle).font(.callout.weight(.semibold))
                     Text("\(record.domain) \(record.code) · \(errorLogTime(record.lastAt)) · Tap for details")
                         .font(.footnote).foregroundStyle(.hkSecondary)
                 case .resolved:

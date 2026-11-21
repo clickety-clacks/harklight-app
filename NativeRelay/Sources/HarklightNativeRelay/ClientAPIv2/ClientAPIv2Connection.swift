@@ -56,6 +56,8 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
     private var settingsSignal: AsyncStream<Void>.Continuation?
     private var settingsReadID: UUID?
     private var pausedPriorityLevelsRead = false
+    private var pausedMeRead: APIError?
+    private var meReadID: UUID?
     private let lock = NSLock()
 
     /// `directory` holds the model, outbox and last `/v2/me` for this
@@ -125,7 +127,9 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
                 await relay.connection?.confirmPriorityLevels(entry, settings: result.settings)
             }
             await relay.connection?.settleItemAction(entry, result: result)
-        }), publish: { relay.connection?.publishModel() })
+        }), publish: { relay.connection?.publishModel() }, onInternalError: { entry in
+            relay.connection?.recordReply(entry, disposition: .outcomeUnknown(entry.id))
+        })
         self.outbox = try ActionOutbox(persistence: persistence, transport: transport, outcomes: outcomes,
             errors: errors, startsPaused: foregroundOnlyWrites, canSend: { entry in
                 access.state == .available &&
@@ -149,18 +153,33 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
         access.restorePause(from: model, savedMePaused: savedMe?.accountState == "paused", errors: errors)
     }
 
+    public var canPollMe: Bool { lock.withLock { pausedMeRead == nil } }
+
     /// Reads `GET /v2/me` (answerable even while the account is paused),
     /// saves it with the model and puts its rules in force.
     @discardableResult
-    public func refreshMe() async throws -> APIMe {
+    public func refreshMe(userInitiated: Bool = false) async throws -> APIMe {
+        let id = UUID()
+        try lock.withLock {
+            if !userInitiated, let pausedMeRead { throw pausedMeRead }
+            meReadID = id
+        }
         let check = access.beginMeCheck()
         let response: APIResponse
         do {
             response = try await transport.send(.get("/v2/me"))
-        } catch let error as APIError where error.token == .internalError {
-            errors.report(ErrorLogReport(concern: .snapshot, connectionRole: .request, operation: "me",
-                phase: "read", reason: .api(error), initiator: .serverClosed, retryable: false,
-                correlation: .request(error.requestID), httpStatus: error.status))
+        } catch {
+            let api = error as? APIError
+            let stop = api?.token == .internalError
+            lock.withLock {
+                guard meReadID == id, !Task.isCancelled else { return }
+                pausedMeRead = stop ? api : nil
+                if let api, stop {
+                    errors.report(ErrorLogReport(concern: .snapshot, connectionRole: .request, operation: "me",
+                        phase: "read", reason: .api(api), initiator: .serverClosed, retryable: false,
+                        correlation: .request(api.requestID), httpStatus: api.status))
+                }
+            }
             throw error
         }
         try Task.checkCancellation()
@@ -168,6 +187,10 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
         let update: (editingEnabled: Bool, resumed: Bool)? = lock.withLock {
             let wasPaused = access.state == .paused
             guard access.applyMeAccountState(me.accountState, check: check) else { return nil }
+            if meReadID == id {
+                pausedMeRead = nil
+                errors.resolve(concern: .snapshot, operation: "me")
+            }
             let principal = me.pushPrincipal.flatMap {
                 $0.personID == context.identity.personID && $0.deviceID == context.identity.deviceID ? $0 : nil
             }
@@ -206,18 +229,17 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
             await recoverPendingPriorityLevels()
             await outbox.wake(operation: "priority_levels")
         }
-        errors.resolve(concern: .snapshot, operation: "me")
         publishModel()
         return me
     }
 
     /// Reads `/v2/me` until it succeeds, waiting longer after each failure:
     /// until it is read on a first run nothing can be published.
-    func readMeUntilRead() async {
+    func readMeUntilRead(userInitiated: Bool = false) async {
         var attempt = 0
         while !Task.isCancelled {
             do {
-                try await refreshMe()
+                try await refreshMe(userInitiated: userInitiated && attempt == 0)
                 return
             } catch where Task.isCancelled || (error as? APIError)?.token == .internalError {
                 return
@@ -244,7 +266,7 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
     public func runForeground() async {
         guard access.state != .revoked else { return }
         if access.state == .paused {
-            await readMeUntilRead()
+            await readMeUntilRead(userInitiated: true)
             guard access.state == .available, !Task.isCancelled else { return }
         }
         let (signals, continuation) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
@@ -276,7 +298,7 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
         queuedContinuation.yield(())
         await outbox.resumeSending()
         await withTaskGroup(of: Void.self) { group in
-            group.addTask { await self.readMeUntilRead() }
+            group.addTask { await self.readMeUntilRead(userInitiated: true) }
             group.addTask { await self.reconcileAcceptedRepliesWhileForeground(signals) }
             group.addTask {
                 for await _ in settings { await self.refreshPriorityLevels(userInitiated: false) }
@@ -418,7 +440,10 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
     /// A saved intent is enough to wake delivery. A deliberate Retry may
     /// also re-arm an already frozen, refused outbox write.
     public func queuedReplyWasSaved(_ message: ConversationDraft) async throws {
-        if let operation = message.operationID,
+        if case let .outcomeUnknown(operation) = message.disposition {
+            await outbox.resumeSending()
+            await outbox.retryInternalErrors(operation: "reply", id: operation)
+        } else if let operation = message.operationID,
            let prior = await outbox.failedWrites.first(where: { $0.id == operation }) {
             try await outbox.submit(target: prior.target, operation: prior.operation, write: prior.write,
                                     idempotencyKey: operation)
@@ -641,7 +666,7 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
         (try? repository.snapshot(context: context).priorityLevels.editorWasOpened) == true
     }
 
-    public func refreshPriorityLevels(userInitiated: Bool = true) async {
+    public func refreshPriorityLevels(userInitiated: Bool = false) async {
         guard priorityLevelsEditingEnabled, !Task.isCancelled else { return }
         let readID = UUID()
         let generation = model.syncPosition.generation
@@ -793,14 +818,30 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
     public func loadEntriesIfNeeded(itemID: ExactText) async throws {
         guard model.snapshot.items[itemID] != nil,
               !model.snapshot.loadedEntryItems.contains(itemID) else { return }
-        try await modelWriter.loadEntries(of: itemID)
-        publishModel()
+        do {
+            try await modelWriter.loadEntries(of: itemID)
+            errors.resolve(concern: .snapshot, operation: "load_entries")
+            publishModel()
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            let api = error as? APIError
+            let reason: ErrorLogReason = error is ServerModelV2Store.SupersededGeneration
+                ? .app("snapshot_superseded") : .api(error)
+            errors.report(ErrorLogReport(concern: .snapshot, connectionRole: .request,
+                operation: "load_entries", phase: "read", reason: reason,
+                initiator: api?.token == .internalError ? .serverClosed : .unknown,
+                retryable: api?.token != .internalError,
+                correlation: ErrorLogCorrelation(requestID: api?.requestID, resourceID: itemID.rawValue),
+                httpStatus: api?.status))
+            throw error
+        }
     }
 
     public func retryInternalError(_ record: ErrorLogRecord) async throws {
         switch (record.concern, record.operation) {
         case (.snapshot, "me"):
-            try await refreshMe()
+            try await refreshMe(userInitiated: true)
         case (.snapshot, "confirm_reply"):
             if let resource = record.correlation.resourceID {
                 await checkAcceptedReply(itemID: ExactText(resource))
@@ -808,10 +849,9 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
         case (.snapshot, "load_entries"):
             if let resource = record.correlation.resourceID {
                 try await loadEntriesIfNeeded(itemID: ExactText(resource))
-                errors.resolve(concern: .snapshot, operation: record.operation)
             }
         case (.snapshot, "priority_levels"):
-            await refreshPriorityLevels()
+            await refreshPriorityLevels(userInitiated: true)
         case (.actions, "stage_reply_upload"):
             lock.withLock { pausedReplyUploads.removeAll() }
             signalQueuedReplies()
@@ -1062,10 +1102,16 @@ private final class PublishingSyncWriter: SyncModelWriting, @unchecked Sendable 
 private final class PublishingOutcomes: OutboxOutcomeHandling, @unchecked Sendable {
     private let inner: ServerModelOutboxOutcomes
     private let publish: @Sendable () -> Void
-    init(inner: ServerModelOutboxOutcomes, publish: @escaping @Sendable () -> Void) {
+    private let onInternalError: @Sendable (OutboxEntry) -> Void
+
+    init(inner: ServerModelOutboxOutcomes, publish: @escaping @Sendable () -> Void,
+         onInternalError: @escaping @Sendable (OutboxEntry) -> Void) {
         self.inner = inner
         self.publish = publish
+        self.onInternalError = onInternalError
     }
+
+    func pausedForInternalError(_ entry: OutboxEntry) { onInternalError(entry) }
     var modelGeneration: UInt64 { inner.modelGeneration }
 
     func accepted(_ entry: OutboxEntry, response: APIResponse, generation: UInt64) async {
