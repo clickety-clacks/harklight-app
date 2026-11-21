@@ -30,6 +30,7 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
     public let presentation: ServerModelV2Presentation
     public let outbox: ActionOutbox
     public let sync: ChangeFeedSync
+    public let files: ClientAPIFiles
     private let transport: any ClientAPITransport
     private let foregroundOnlyWrites: Bool
     private let modelWriter: ServerModelSyncWriter
@@ -40,7 +41,9 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
     private let onPublished: @Sendable () -> Void
     private let meWaitBeforeRetry: @Sendable (Int) async throws -> Void
     private let replyWaitBeforeRetry: @Sendable (Int) async throws -> Void
+    private let replyUploads: QueuedReplyUploads?
     private var replySignal: AsyncStream<Void>.Continuation?
+    private var queuedReplySignal: AsyncStream<Void>.Continuation?
     private var checkingReplyItems: Set<ExactText> = []
     private let lock = NSLock()
 
@@ -52,6 +55,7 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
                 outboxWaitBeforeRetry: @escaping @Sendable (Int, TimeInterval?) async throws -> Void = ActionOutbox.backoff,
                 meWaitBeforeRetry: @escaping @Sendable (Int) async throws -> Void = ChangeFeedSync.backoff,
                 replyWaitBeforeRetry: @escaping @Sendable (Int) async throws -> Void = ChangeFeedSync.backoff,
+                retainedUploadURL: (@Sendable (ConversationFile) throws -> URL)? = nil,
                 onLiveState: @escaping @Sendable (ChangeFeedSync.LiveState) -> Void = { _ in },
                 onShow: @escaping @Sendable (Data) async -> Void = { _ in },
                 onRejected: @escaping @Sendable (OutboxEntry, APIError) async -> Void = { _, _ in },
@@ -66,6 +70,9 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
         self.model = model
         self.presentation = ServerModelV2Presentation(savedMe: savedMe)
         self.transport = transport
+        let files = ClientAPIFiles(transport: transport)
+        self.files = files
+        self.replyUploads = try retainedUploadURL.map { try QueuedReplyUploads(directory: directory, files: files, source: $0) }
         self.foregroundOnlyWrites = foregroundOnlyWrites
         self.repository = repository
         self.context = context
@@ -87,6 +94,7 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
             if let responseEntry = result.entry {
                 relay.connection?.recordReply(entry, disposition: .acceptedPendingReplay(
                     operation: entry.id, turn: responseEntry.entryID))
+                await relay.connection?.finishReplyUploads(entry.id)
             }
         }), publish: { relay.connection?.publishModel() })
         self.outbox = try ActionOutbox(persistence: persistence, transport: transport, outcomes: outcomes,
@@ -97,7 +105,10 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
                                        if state == .live, !foregroundOnlyWrites {
                                            relay.connection?.sendSavedWrites()
                                        }
-                                       if state == .live { relay.connection?.signalAcceptedReplyCheck() }
+                                       if state == .live {
+                                           relay.connection?.signalAcceptedReplyCheck()
+                                           relay.connection?.signalQueuedReplies()
+                                       }
                                        onLiveState(state)
                                    }, onShow: onShow)
         relay.connection = self
@@ -119,6 +130,7 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
             }
         }
         presentation.apply(me)
+        signalQueuedReplies()
         errors.resolve(concern: .snapshot, operation: "me")
         publishModel()
         return me
@@ -155,21 +167,28 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
     /// follows the change feed until cancelled or stopped by the server.
     public func runForeground() async {
         let (signals, continuation) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
-        lock.withLock { replySignal = continuation }
+        let (queued, queuedContinuation) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        lock.withLock {
+            replySignal = continuation
+            queuedReplySignal = queuedContinuation
+        }
         defer {
-            lock.withLock { replySignal = nil }
+            lock.withLock {
+                replySignal = nil
+                queuedReplySignal = nil
+            }
             continuation.finish()
+            queuedContinuation.finish()
         }
         publishModel()
         continuation.yield(())
+        queuedContinuation.yield(())
         await outbox.resumeSending()
         await withTaskGroup(of: Void.self) { group in
             group.addTask { await self.readMeUntilRead() }
             group.addTask { await self.reconcileAcceptedRepliesWhileForeground(signals) }
-            group.addTask {
-                await self.recoverQueuedReplies()
-                await self.outbox.flush()
-            }
+            group.addTask { await self.sendQueuedRepliesWhileForeground(queued) }
+            group.addTask { await self.outbox.flush() }
             await sync.runForeground()
             group.cancelAll()
             if foregroundOnlyWrites { await outbox.pauseSending() }
@@ -254,25 +273,174 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
         }
     }
 
-    private func recoverQueuedReplies() async {
+    public func signalQueuedReplies() {
+        lock.withLock { queuedReplySignal?.yield(()) }
+    }
+
+    /// A saved intent is enough to wake delivery. A deliberate Retry may
+    /// also re-arm an already frozen, refused outbox write.
+    public func queuedReplyWasSaved(_ message: ConversationDraft) async throws {
+        if let operation = message.operationID,
+           let prior = await outbox.failedWrites.first(where: { $0.id == operation }) {
+            try await outbox.submit(target: prior.target, operation: prior.operation, write: prior.write,
+                                    idempotencyKey: operation)
+        }
+        signalQueuedReplies()
+    }
+
+    public func queuedReplyWasEdited(_ operation: UUID) async {
+        await outbox.discardFailed(operation)
+        signalQueuedReplies()
+    }
+
+    public func cancelQueuedAttachmentReply(_ operation: UUID, request: RequestKey) async throws {
+        guard let replyUploads, request.accountScope == context.identity.personID else {
+            throw ConversationError.missingRequest
+        }
+        try await replyUploads.cancelBeforeHandOff(operation) { [repository, context] in
+            try repository.editQueuedChatMessage(operation, in: request, allowUnsentAttachment: true, context: context)
+        }
+        signalQueuedReplies()
+    }
+
+    private func sendQueuedRepliesWhileForeground(_ signals: AsyncStream<Void>) async {
+        let (cleanup, cleanupSignal) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        await withTaskGroup(of: Void.self) { group in
+            var items: [ExactText: AsyncStream<Void>.Continuation] = [:]
+            group.addTask {
+                await self.retryOnReplySignals(cleanup) { await self.discardAbandonedReplyUploads() }
+            }
+            for await _ in signals {
+                do {
+                    let queued = try repository.queuedChatMessages(context: context)
+                    for item in Set(queued.map { $0.binding.request.messageID }) {
+                        if let signal = items[item] {
+                            signal.yield(())
+                            continue
+                        }
+                        let (work, signal) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+                        items[item] = signal
+                        signal.yield(())
+                        group.addTask {
+                            await self.retryOnReplySignals(work) {
+                                let retry = await self.recoverQueuedReplies(for: item)
+                                cleanupSignal.yield(())
+                                return retry
+                            }
+                        }
+                    }
+                } catch {
+                    reportReplyRecovery(error)
+                }
+                cleanupSignal.yield(())
+            }
+            for signal in items.values { signal.finish() }
+            cleanupSignal.finish()
+            group.cancelAll()
+        }
+    }
+
+    private func retryOnReplySignals(_ signals: AsyncStream<Void>,
+                                     retryWork: () async -> Bool) async {
+        for await _ in signals {
+            var attempt = 0
+            while !Task.isCancelled, await retryWork() {
+                attempt += 1
+                do { try await replyWaitBeforeRetry(attempt) } catch { return }
+            }
+        }
+    }
+
+    private func recoverQueuedReplies(for item: ExactText) async -> Bool {
         do {
             let messages = try repository.queuedChatMessages(context: context)
+                .filter { $0.binding.request.messageID == item }
                 .sorted { ($0.submittedAt ?? .distantPast) < ($1.submittedAt ?? .distantPast) }
             for message in messages {
                 try Task.checkCancellation()
-                guard message.files.isEmpty else { continue }
+                guard let operation = message.operationID else { continue }
                 switch message.disposition {
                 case .submitting, .outcomeUnknown:
-                    try await submitQueuedReply(message, retryRefused: false)
+                    if !message.files.isEmpty, !presentation.hasRules {
+                        // Reading /me wakes this item when its rules are available.
+                        return false
+                    }
+                    do {
+                        try await submitQueuedReply(message, retryRefused: false)
+                    } catch ConversationError.missingRequest {
+                        // A local cancellation retired this saved intent.
+                    } catch where Task.isCancelled {
+                        return false
+                    } catch {
+                        let permanent = error is ConversationError || error is QueuedReplyError ||
+                            (error as? APIError)?.isPermanent == true
+                        reportUpload(error, operation: "stage_reply_upload", item: item, retryable: !permanent)
+                        if permanent {
+                            let reason: String
+                            if case .retainedAttachmentUnavailable? = error as? ConversationError {
+                                reason = "attachment_unavailable"
+                            } else if case .uploadCapExceeded? = error as? ConversationError {
+                                reason = APIErrorToken.payloadTooLarge.rawValue
+                            } else {
+                                reason = (error as? APIError)?.token.rawValue ?? "attachment_failed"
+                            }
+                            try repository.recordQueuedChatMessage(operation, in: message.binding.request,
+                                disposition: .rejected(ExactText(reason)), context: context)
+                        } else {
+                            return true
+                        }
+                    }
                 case .saved, .acceptedPendingReplay, .rejected:
                     continue
                 }
             }
+            return false
         } catch is CancellationError {
-            return
+            return false
+        } catch {
+            reportReplyRecovery(error)
+            return true
+        }
+    }
+
+    private func discardAbandonedReplyUploads() async -> Bool {
+        guard let replyUploads else { return false }
+        let active = await outbox.pending.map(\.id)
+        let failures = await replyUploads.discardAbandoned(keeping: Set(active)) { [repository, context] operation in
+            try repository.queuedChatMessages(context: context).contains {
+                $0.operationID == operation
+            }
+        }
+        for failure in failures {
+            reportUpload(failure.error, operation: "discard_reply_upload", item: failure.item,
+                         retryable: failure.retryable)
+        }
+        return failures.contains(where: \.retryable)
+    }
+
+    private func reportReplyRecovery(_ error: any Error) {
+        errors.report(ErrorLogReport(concern: .actions, connectionRole: .request,
+            operation: "reply", phase: "restore", reason: .from(error: error),
+            initiator: .unknown, retryable: true))
+    }
+
+    private func reportUpload(_ error: any Error, operation: String, item: ExactText, retryable: Bool) {
+        let api = error as? APIError
+        let reason: ErrorLogReason = (error as? ConversationError) == .retainedAttachmentUnavailable
+            ? .app("attachment_unavailable") : .api(error)
+        errors.report(ErrorLogReport(concern: .actions, connectionRole: .request,
+            operation: operation, phase: "reply_files", reason: reason,
+            initiator: .forFailure(error), retryable: retryable,
+            correlation: ErrorLogCorrelation(requestID: api?.requestID, resourceID: item.rawValue),
+            httpStatus: api?.status))
+    }
+
+    private func finishReplyUploads(_ operation: UUID) async {
+        do {
+            try await replyUploads?.accepted(operation)
         } catch {
             errors.report(ErrorLogReport(concern: .actions, connectionRole: .request,
-                operation: "reply", phase: "restore", reason: .from(error: error),
+                operation: "finish_reply_upload", phase: "save", reason: .from(error: error),
                 initiator: .unknown, retryable: true))
         }
     }
@@ -282,8 +450,29 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
     public func submitQueuedReply(_ message: ConversationDraft, retryRefused: Bool = true) async throws {
         guard let operation = message.operationID,
               message.binding.request.accountScope == context.identity.personID else { return }
-        guard message.files.isEmpty else { throw QueuedReplyError.attachmentsUnavailable }
-        let reply = ClientAPIWrites.reply(itemID: message.binding.request.messageID, text: message.text)
+        let handles: [UploadHandle]
+        if message.files.isEmpty {
+            handles = []
+        } else {
+            let pending = await outbox.pending
+            let failed = await outbox.failedWrites
+            if let saved = (pending + failed).first(where: { $0.id == operation }) {
+                try await outbox.submit(target: saved.target, operation: saved.operation, write: saved.write,
+                                        idempotencyKey: operation, retryRefused: retryRefused)
+                return
+            }
+            guard let replyUploads else { throw QueuedReplyError.attachmentsUnavailable }
+            let stillQueued: @Sendable () throws -> Bool = { [repository, context] in
+                try repository.queuedChatMessages(context: context).contains {
+                    $0.operationID == operation
+                }
+            }
+            handles = try await replyUploads.prepare(message, operation: operation, cap: presentation.uploadCap,
+                                                      stillQueued: stillQueued)
+            try Task.checkCancellation()
+            guard try await replyUploads.handOff(operation, stillQueued: stillQueued) else { return }
+        }
+        let reply = ClientAPIWrites.reply(itemID: message.binding.request.messageID, text: message.text, fileIDs: handles)
         try await outbox.submit(target: reply.target, operation: reply.operation, write: reply.write,
                                 idempotencyKey: operation, retryRefused: retryRefused)
     }

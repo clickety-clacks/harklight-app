@@ -12,12 +12,18 @@ public typealias Rev = UInt64
 public struct APIRequest: Equatable, Sendable {
     public enum Method: String, Codable, Sendable { case get = "GET", post = "POST", put = "PUT", delete = "DELETE" }
 
+    struct FileBody: Equatable, Sendable {
+        let url: URL
+        let byteCount: UInt64
+    }
+
     public var method: Method
     /// Path below the API root, for example `/v2/inbox`, already
     /// percent-encoded: an opaque id is encoded once, where it is inserted.
     public var path: String
     public var query: [String: String]
     public var body: Data?
+    var fileBody: FileBody? = nil
     public var contentType: String?
     public var contentDisposition: String?
     public var accept: String?
@@ -50,16 +56,19 @@ public struct APIResponse: Equatable, Sendable {
     public let requestID: String?
     public let body: Data
     public let etag: String?
+    public let contentType: String?
     /// The server returned the stored response of an earlier identical
     /// request. It counts as the original outcome.
     public let replayed: Bool
 
-    public init(status: Int, requestID: String?, body: Data, etag: String? = nil, replayed: Bool = false) {
+    public init(status: Int, requestID: String?, body: Data, etag: String? = nil, replayed: Bool = false,
+                contentType: String? = nil) {
         self.status = status
         self.requestID = requestID
         self.body = body
         self.etag = etag
         self.replayed = replayed
+        self.contentType = contentType
     }
 
     /// The `rev` member of a JSON response body.
@@ -205,12 +214,20 @@ public struct FeedBatch: Equatable, Sendable {
 /// answer and the system error for a transport failure.
 public protocol ClientAPITransport: Sendable {
     func send(_ request: APIRequest) async throws -> APIResponse
+    /// A successful response body is written to destination; the return value carries its headers.
+    func download(_ request: APIRequest, to destination: URL) async throws -> APIResponse
     /// `GET /v2/changes?after=` as Server-Sent Events: the backlog after
     /// `after`, then live changes, with no gap. A `410` is thrown as
     /// `APIError` with token `cursor_expired`.
     func changeFeed(after: Rev) -> AsyncThrowingStream<FeedEvent, any Error>
     /// `GET /v2/changes?after=` as one JSON batch.
     func changeBatch(after: Rev) async throws -> FeedBatch
+}
+
+public extension ClientAPITransport {
+    func download(_ request: APIRequest, to destination: URL) async throws -> APIResponse {
+        throw URLError(.unsupportedURL)
+    }
 }
 
 extension ErrorLogCorrelation {

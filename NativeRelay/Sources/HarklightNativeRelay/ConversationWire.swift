@@ -91,6 +91,7 @@ public struct ConversationWire: Sendable {
                     JSONMember("size", .number(JSONNumber(lexeme: String(prepared.byteCount)))),
                     JSONMember("sha256", .string(prepared.sha256))]
             case .localFile: throw ConversationError.uploadRequired(prepared.name)
+            case .v2Download: throw ConversationError.fileMismatch
             }
             encoded.append(.object(fields))
         }

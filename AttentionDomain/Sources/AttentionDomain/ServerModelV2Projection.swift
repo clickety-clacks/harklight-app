@@ -172,7 +172,7 @@ public enum ServerModelV2Projection {
 
     static func file(_ file: APIFileRef) -> ConversationFile {
         ConversationFile(id: file.fileID.value, name: file.name, byteCount: file.size,
-                         sha256: ExactText(file.sha256), content: .uploaded(file.fileID.value))
+                         sha256: ExactText(file.sha256), content: .v2Download(file.fileID, contentType: file.contentType))
     }
 
     // MARK: Inbox view
@@ -269,6 +269,7 @@ public final class ServerModelV2Presentation: @unchecked Sendable {
     }
 
     public var hasRules: Bool { lock.withLock { me != nil } }
+    public var uploadCap: APIUploadCap? { lock.withLock { me?.uploadCap } }
 
     public func cachedState(_ model: ServerModelV2, identity: ProfileIdentity) throws -> CachedAttentionServerState {
         guard hasRules else { throw PresentationError.rulesNotRead }

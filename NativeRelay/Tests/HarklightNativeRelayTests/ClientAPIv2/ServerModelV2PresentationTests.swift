@@ -80,4 +80,15 @@ final class ServerModelV2PresentationTests: XCTestCase {
         XCTAssertEqual(AnswerScreenRules.current,
                        AnswerScreenRules(limits: .builtIn, degradesUnshowableScreens: true))
     }
+
+    func testUploadCapDistinguishesNumericUnlimitedAndMissing() throws {
+        let presentation = ServerModelV2Presentation(savedMe: try me(documentBytes: 262_144))
+        XCTAssertEqual(presentation.uploadCap, .bytes(1))
+        let unlimited = try APIMe(json: V2Fixture.json(#"{"limits":{"upload_cap_bytes_per_file":"none"}}"#))
+        presentation.apply(unlimited)
+        XCTAssertEqual(presentation.uploadCap, .unlimited)
+        let missing = try APIMe(json: V2Fixture.json(#"{"limits":{}}"#))
+        presentation.apply(missing)
+        XCTAssertNil(presentation.uploadCap)
+    }
 }

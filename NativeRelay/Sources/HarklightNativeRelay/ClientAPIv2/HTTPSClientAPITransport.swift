@@ -39,8 +39,29 @@ public final class HTTPSClientAPITransport: ClientAPITransport, @unchecked Senda
     // MARK: Requests
 
     public func send(_ request: APIRequest) async throws -> APIResponse {
-        let (data, response) = try await session.data(for: urlRequest(for: request))
+        let urlRequest = urlRequest(for: request)
+        let (data, response): (Data, URLResponse)
+        if let file = request.fileBody {
+            (data, response) = try await session.upload(for: urlRequest, fromFile: file.url)
+        } else {
+            (data, response) = try await session.data(for: urlRequest)
+        }
         return try Self.response(response, body: data)
+    }
+
+    public func download(_ request: APIRequest, to destination: URL) async throws -> APIResponse {
+        let (source, response) = try await session.download(for: urlRequest(for: request))
+        defer { try? FileManager.default.removeItem(at: source) }
+        if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+            let handle = try FileHandle(forReadingFrom: source)
+            defer { try? handle.close() }
+            let errorBody = try handle.read(upToCount: 4096) ?? Data()
+            return try Self.response(response, body: errorBody)
+        }
+        let result = try Self.response(response, body: Data())
+        try Task.checkCancellation()
+        try FileManager.default.moveItem(at: source, to: destination)
+        return result
     }
 
     func urlRequest(for request: APIRequest, accept: String = "application/json") -> URLRequest {
@@ -61,7 +82,9 @@ public final class HTTPSClientAPITransport: ClientAPITransport, @unchecked Senda
         if let contentType = request.contentType { urlRequest.setValue(contentType, forHTTPHeaderField: "Content-Type") }
         if let disposition = request.contentDisposition {
             urlRequest.setValue(disposition, forHTTPHeaderField: "Content-Disposition")
-            if let body = request.body {
+            if let fileBody = request.fileBody {
+                urlRequest.setValue(String(fileBody.byteCount), forHTTPHeaderField: "Content-Length")
+            } else if let body = request.body {
                 urlRequest.setValue(String(body.count), forHTTPHeaderField: "Content-Length")
             }
         }
@@ -81,7 +104,8 @@ public final class HTTPSClientAPITransport: ClientAPITransport, @unchecked Senda
         }
         return APIResponse(status: http.statusCode, requestID: requestID, body: body,
                            etag: http.value(forHTTPHeaderField: "ETag"),
-                           replayed: http.value(forHTTPHeaderField: "Idempotent-Replayed")?.lowercased() == "true")
+                           replayed: http.value(forHTTPHeaderField: "Idempotent-Replayed")?.lowercased() == "true",
+                           contentType: http.value(forHTTPHeaderField: "Content-Type"))
     }
 
     // MARK: Change feed
