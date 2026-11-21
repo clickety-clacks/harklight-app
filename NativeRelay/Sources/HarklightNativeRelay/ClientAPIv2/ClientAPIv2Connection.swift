@@ -812,7 +812,7 @@ extension ClientAPIv2Connection {
     public func sendSavedConversationReads() async {
         do {
             let snapshot = try repository.conversationSnapshot(context: context)
-            for pending in snapshot.pendingChatReadPositions {
+            for pending in try repository.savedV2ReadPositions(context: context) {
                 let entryID = pending.entryID ?? snapshot.threads[pending.request]?.turns.first {
                     $0.conversationSequence == pending.readThroughConversationSequence
                 }?.id
@@ -821,7 +821,7 @@ extension ClientAPIv2Connection {
                 await handOffItemAction(write.operation, operationID: pending.operationID) {
                     try await outbox.submit(target: write.target, operation: write.operation, write: write.write,
                                             idempotencyKey: pending.operationID, retryRefused: false) { [repository, context] in
-                        try repository.conversationSnapshot(context: context).pendingChatReadPositions.contains {
+                        try repository.savedV2ReadPositions(context: context).contains {
                             $0.operationID == pending.operationID
                         }
                     }
@@ -894,17 +894,7 @@ extension ClientAPIv2Connection {
             case "mark_seen":
                 _ = try repository.retireMessageOpen(entry.id, context: context)
             case "read_position":
-                let snapshot = try repository.conversationSnapshot(context: context)
-                guard let saved = snapshot.pendingChatReadPositions.first(where: { $0.operationID == entry.id }) else {
-                    return
-                }
-                if rejection != nil {
-                    try repository.retireConversationReadPosition(saved, context: context)
-                } else {
-                    let held = snapshot.chatReadPositions?[saved.request] ?? 0
-                    try repository.acceptConversationReadPosition(saved,
-                        serverPosition: max(held, saved.readThroughConversationSequence), context: context)
-                }
+                try repository.settleV2ReadPosition(entry.id, accepted: rejection == nil, context: context)
             case "answer":
                 guard let intent = entry.answerIntentID else { return }
                 if let result {

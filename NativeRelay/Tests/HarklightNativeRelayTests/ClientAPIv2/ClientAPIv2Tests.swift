@@ -190,7 +190,7 @@ final class SavedV2ItemActionTests: XCTestCase {
         let answer = try XCTUnwrap(first.lookupIntent(receipt.intentID, context: context))
 
         let reopened = try ClientRepository(context: context, persistence: persistence)
-        XCTAssertEqual(try reopened.conversationSnapshot(context: context).pendingChatReadPositions.first?.entryID,
+        XCTAssertEqual(try reopened.savedV2ReadPositions(context: context).first?.entryID,
                        ExactText("entry-first"))
         let server = FakeClientAPIServer()
         server.inboxItems = [V2Fixture.item("i", rev: 3, rankKey: "a")
@@ -205,7 +205,7 @@ final class SavedV2ItemActionTests: XCTestCase {
             guard let live = try? reopened.lookupIntent(answer.intentID, context: context),
                   case .accepted = live.disposition else { return false }
             return (try? reopened.snapshot(context: context).pendingMessageOpens.isEmpty) == true &&
-                (try? reopened.conversationSnapshot(context: context).pendingChatReadPositions.isEmpty) == true
+                (try? reopened.savedV2ReadPositions(context: context).isEmpty) == true
         }
         let writes = server.received.filter { $0.idempotencyKey != nil }
         XCTAssertEqual(writes.compactMap(\.idempotencyKey), keys)
