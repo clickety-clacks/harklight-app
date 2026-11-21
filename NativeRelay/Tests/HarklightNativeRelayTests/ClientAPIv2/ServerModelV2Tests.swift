@@ -367,3 +367,23 @@ final class ServerModelV2UnreadableResourceTests: XCTestCase {
     }
 
 }
+
+final class UnreadableRebaselineOnceTests: XCTestCase {
+    /// L-13: the one rebaseline an unreadable change earns is spent only
+    /// once that rebaseline succeeds.
+    func testAFailedRebaselineLeavesTheNextUnreadableChangeToAskAgain() async throws {
+        let store = ServerModelV2Store(fileURL: nil)
+        let transport = InboxPagesTransport()
+        let writer = ServerModelSyncWriter(store: store, transport: transport, errors: RecordingErrorLogV2())
+        let broken = FeedChange(rev: 1, kind: .item, data: Data(#"{"item_id":"x","rev":1}"#.utf8))
+        do { try await writer.apply([broken], cursor: 1); XCTFail("Asks for a rebaseline.") }
+        catch { XCTAssertTrue(error is SyncNeedsRebaseline) }
+        do { _ = try await writer.rebaseline(); XCTFail("No inbox is served yet.") } catch {}
+        do { try await writer.apply([broken], cursor: 1); XCTFail("Still asks, as the rebaseline failed.") }
+        catch { XCTAssertTrue(error is SyncNeedsRebaseline) }
+        transport.pages[nil] = #"{"rev":1,"items":[],"counts":{"unresolved":0}}"#
+        _ = try await writer.rebaseline()
+        try await writer.apply([broken], cursor: 1)
+        XCTAssertEqual(store.heldCursor, 1, "After a successful rebaseline a recurrence is skipped.")
+    }
+}

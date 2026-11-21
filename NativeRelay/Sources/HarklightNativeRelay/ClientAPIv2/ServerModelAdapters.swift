@@ -15,7 +15,10 @@ public final class ServerModelSyncWriter: SyncModelWriting, @unchecked Sendable 
     private let errors: any ErrorLogging
     private let pageLimit: Int
     private let lock = NSLock()
+    /// Set once a rebaseline asked for by an unreadable change has succeeded;
+    /// until then the next unreadable change asks again.
     private var rebaselinedForUnreadable = false
+    private var unreadableRebaselineRequested = false
 
     public init(store: ServerModelV2Store, transport: any ClientAPITransport, errors: any ErrorLogging,
                 pageLimit: Int = 200) {
@@ -40,8 +43,9 @@ public final class ServerModelSyncWriter: SyncModelWriting, @unchecked Sendable 
             return
         }
         let firstTime = lock.withLock { () -> Bool in
-            defer { rebaselinedForUnreadable = true }
-            return !rebaselinedForUnreadable
+            guard !rebaselinedForUnreadable else { return false }
+            unreadableRebaselineRequested = true
+            return true
         }
         if firstTime {
             report(change, reason: "decode_failed_rebaselining", retryable: true)
@@ -85,6 +89,9 @@ public final class ServerModelSyncWriter: SyncModelWriting, @unchecked Sendable 
         } while page != nil
         guard let first else { throw FeedDecodingError.invalidBatch }
         try store.rebaseline(items: items, keeping: unreadable, counts: first.counts, position: first.position)
+        lock.withLock {
+            if unreadableRebaselineRequested { rebaselinedForUnreadable = true }
+        }
         return first.position
     }
 }
