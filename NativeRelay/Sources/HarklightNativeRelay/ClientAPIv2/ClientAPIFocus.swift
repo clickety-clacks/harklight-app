@@ -91,9 +91,13 @@ public actor ClientAPIFocusChannel {
     private let renewEvery: Duration
     private let sleep: @Sendable (Duration) async throws -> Void
     private let now: @Sendable () -> Date
+    private let waitBeforeRetry: @Sendable (Int) async throws -> Void
     private let onShow: ShowHandler
     private var latest: FocusReport?
     private var renewal: Task<Void, Never>?
+    private var retryTimer: Task<Void, Never>?
+    private var drainTask: Task<Void, Never>?
+    private var backgroundFailures = 0
     private var deliveredShows: [String] = []
     private static let rememberedShows = 64
 
@@ -101,6 +105,7 @@ public actor ClientAPIFocusChannel {
                 ttlSeconds: Int = 120, renewEvery: Duration = .seconds(60),
                 sleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) },
                 now: @escaping @Sendable () -> Date = Date.init,
+                waitBeforeRetry: @escaping @Sendable (Int) async throws -> Void = ChangeFeedSync.backoff,
                 onShow: @escaping ShowHandler) {
         self.transport = transport
         self.errors = errors
@@ -109,6 +114,7 @@ public actor ClientAPIFocusChannel {
         self.renewEvery = renewEvery
         self.sleep = sleep
         self.now = now
+        self.waitBeforeRetry = waitBeforeRetry
         self.onShow = onShow
     }
 
@@ -119,36 +125,68 @@ public actor ClientAPIFocusChannel {
     /// the reply of the write that superseded it.
     @discardableResult
     public func report(_ report: FocusReport) async -> FocusReportReply {
+        await withCheckedContinuation { continuation in
+            waiters.append(continuation)
+            enqueue(report)
+        }
+    }
+
+    /// Queues the latest screen without waiting for the current HTTP write.
+    public func enqueue(_ report: FocusReport) {
         latest = report
         renewal?.cancel()
         renewal = nil
-        let reply = await write(report)
-        if let latest, Self.isInFront(latest), renewal == nil { scheduleRenewal(of: latest) }
-        return reply
+        retryTimer?.cancel()
+        retryTimer = nil
+        backgroundFailures = 0
+        queue(report)
     }
 
-    private var writing = false
     private var waiting: FocusReport?
     private var waiters: [CheckedContinuation<FocusReportReply, Never>] = []
 
-    private func write(_ report: FocusReport) async -> FocusReportReply {
-        guard !writing else {
-            waiting = report
-            return await withCheckedContinuation { waiters.append($0) }
-        }
-        writing = true
-        var next: FocusReport? = report
+    /// Timers only queue work. The drain owns HTTP and is canceled only by stop.
+    private func queue(_ report: FocusReport) {
+        waiting = report
+        guard drainTask == nil else { return }
+        drainTask = Task { await self.drain() }
+    }
+
+    private func drain() async {
         var reply = FocusReportReply.rejected
-        while let current = next {
-            reply = await send(current)
-            next = waiting
+        while !Task.isCancelled, let current = waiting {
             waiting = nil
+            reply = await send(current)
+            if current.screen == .notInFront, current == latest, waiting == nil, !Task.isCancelled {
+                if reply == .rejected {
+                    scheduleBackgroundRetry(of: current)
+                } else {
+                    backgroundFailures = 0
+                }
+            }
         }
-        writing = false
+        drainTask = nil
         let done = waiters
         waiters = []
         done.forEach { $0.resume(returning: reply) }
-        return reply
+        if let latest, Self.isInFront(latest), renewal == nil { scheduleRenewal(of: latest) }
+    }
+
+    private func scheduleBackgroundRetry(of report: FocusReport) {
+        backgroundFailures += 1
+        let attempt = backgroundFailures
+        let wait = waitBeforeRetry
+        retryTimer = Task { [weak self] in
+            do { try await wait(attempt) } catch { return }
+            guard !Task.isCancelled else { return }
+            await self?.backgroundRetryReady(report)
+        }
+    }
+
+    private func backgroundRetryReady(_ report: FocusReport) {
+        guard !Task.isCancelled, report == latest else { return }
+        retryTimer = nil
+        queue(report)
     }
 
     /// A show that arrived on the change feed (`event: show`).
@@ -164,8 +202,12 @@ public actor ClientAPIFocusChannel {
     /// Stops renewing, for sign-out or when the connection is torn down.
     public func stop() {
         latest = nil
+        waiting = nil
         renewal?.cancel()
         renewal = nil
+        retryTimer?.cancel()
+        retryTimer = nil
+        drainTask?.cancel()
     }
 
     static func isInFront(_ report: FocusReport) -> Bool {
@@ -178,6 +220,8 @@ public actor ClientAPIFocusChannel {
             errors.resolve(concern: .actions, operation: "focus")
             if let show = ClientAPIFocusWire.show(inResponse: response.body) { await deliver(show) }
             return .accepted
+        } catch where Task.isCancelled {
+            return .rejected
         } catch {
             errors.report(ErrorLogReport(concern: .actions, connectionRole: .request, operation: "focus",
                 phase: "send", reason: .api(error), initiator: .forFailure(error),
@@ -195,13 +239,16 @@ public actor ClientAPIFocusChannel {
         renewal = Task { [weak self] in
             while !Task.isCancelled {
                 do { try await sleep(interval) } catch { return }
-                guard let self, await self.isLatest(report) else { return }
-                _ = await self.write(report)
+                guard !Task.isCancelled, let self, await self.queueRenewal(report) else { return }
             }
         }
     }
 
-    private func isLatest(_ report: FocusReport) -> Bool { latest == report }
+    private func queueRenewal(_ report: FocusReport) -> Bool {
+        guard !Task.isCancelled, latest == report else { return false }
+        queue(report)
+        return true
+    }
 
     /// The report waiting behind the write in flight, if any (for tests).
     var waitingReport: FocusReport? { waiting }

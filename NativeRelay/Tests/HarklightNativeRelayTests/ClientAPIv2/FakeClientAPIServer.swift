@@ -146,6 +146,7 @@ final class FakeClientAPIServer: ClientAPITransport, @unchecked Sendable {
                                body: Data(#"{"rev":\#(head),"items":[\#(items)],"counts":{"unresolved":0}}"#.utf8))
         }
         if let gate = lock.withLock({ _holdWrites[request.path] }) { await gate.wait() }
+        try Task.checkCancellation()
         let digest = (request.path + request.method.rawValue).data(using: .utf8)! + (request.body ?? Data())
         if let key = request.idempotencyKey, let prior = lock.withLock({ stored[key] }) {
             guard prior.digest == digest else {

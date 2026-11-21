@@ -53,6 +53,7 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
                 meWaitBeforeRetry: @escaping @Sendable (Int) async throws -> Void = ChangeFeedSync.backoff,
                 replyWaitBeforeRetry: @escaping @Sendable (Int) async throws -> Void = ChangeFeedSync.backoff,
                 onLiveState: @escaping @Sendable (ChangeFeedSync.LiveState) -> Void = { _ in },
+                onShow: @escaping @Sendable (Data) async -> Void = { _ in },
                 onRejected: @escaping @Sendable (OutboxEntry, APIError) async -> Void = { _, _ in },
                 onPublished: @escaping @Sendable () -> Void = {}) throws {
         if let directory {
@@ -98,7 +99,7 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
                                        }
                                        if state == .live { relay.connection?.signalAcceptedReplyCheck() }
                                        onLiveState(state)
-                                   })
+                                   }, onShow: onShow)
         relay.connection = self
     }
 
@@ -130,6 +131,8 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
         while !Task.isCancelled {
             do {
                 try await refreshMe()
+                return
+            } catch where Task.isCancelled {
                 return
             } catch {
                 errors.report(ErrorLogReport(concern: .snapshot, connectionRole: .request, operation: "me",
@@ -225,10 +228,7 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
         do {
             try await modelWriter.loadEntries(of: itemID)
             publishModel()
-            if missingAcceptedReplyItems().isEmpty {
-                errors.resolve(concern: .snapshot, operation: "confirm_reply")
-            }
-        } catch is CancellationError {
+        } catch where Task.isCancelled || error is CancellationError {
             return
         } catch {
             let api = error as? APIError
@@ -288,6 +288,18 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
                                 idempotencyKey: operation, retryRefused: retryRefused)
     }
 
+    public func resolveShowItem(itemID: ExactText) async throws -> APIItem? {
+        if let held = model.snapshot.items[itemID] { return held }
+        let generation = model.syncPosition.generation
+        let path = "/v2/items/" + ServerModelSyncWriter.pathSegment(itemID)
+        let response = try await transport.send(.get(path))
+        let result = try APIWriteResult(json: JSONValue.parse(response.body))
+        guard result.item?.itemID == itemID else { throw FeedDecodingError.invalidBatch }
+        try model.apply(result, generation: generation)
+        publishModel()
+        return model.snapshot.items[itemID]
+    }
+
     public func loadEntriesIfNeeded(itemID: ExactText) async throws {
         guard model.snapshot.items[itemID] != nil,
               !model.snapshot.loadedEntryItems.contains(itemID) else { return }
@@ -297,12 +309,24 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
 
     /// Publishes the model into the repository when it holds a full
     /// baseline and the answer-screen rules are known.
+    private func hasAcceptedRepliesAwaitingEntries() -> Bool {
+        guard let messages = try? repository.queuedChatMessages(context: context) else { return true }
+        return messages.contains {
+            if case .acceptedPendingReplay = $0.disposition { return true }
+            return false
+        }
+    }
+
     public func publishModel() {
         lock.withLock {
             guard model.heldCursor != nil, presentation.hasRules,
                   let cached = try? presentation.cachedState(model.snapshot, identity: context.identity) else { return }
             do {
+                let awaitingEntries = hasAcceptedRepliesAwaitingEntries()
                 try repository.restoreCachedServerState(cached, context: context)
+                if awaitingEntries, !hasAcceptedRepliesAwaitingEntries() {
+                    errors.resolve(concern: .snapshot, operation: "confirm_reply")
+                }
             } catch {
                 errors.report(ErrorLogReport(concern: .snapshot, connectionRole: .request, operation: "publish",
                     phase: "restore", reason: Self.restoreFailure(error), initiator: .unknown, retryable: true))

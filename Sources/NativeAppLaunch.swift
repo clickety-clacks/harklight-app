@@ -475,6 +475,13 @@ final class NativeAppLaunch {
 
     func applyPushedView(_ show: ViewShowFrame) async {
         notificationRouter.consumed()
+        if let unavailable = show.unavailable {
+            pendingMessageDeepLink = nil
+            notificationNavigationMessage = unavailable == .notSent
+                ? "This message was never sent to this Harklight inbox."
+                : "This message hasn't arrived yet."
+            return
+        }
         let deepLink = NativeMessageDeepLink(
             senderID: show.senderID,
             messageID: show.messageID,

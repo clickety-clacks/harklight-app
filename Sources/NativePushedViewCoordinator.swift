@@ -56,7 +56,11 @@ final class NativePushedViewCoordinator {
 
     func receive(_ data: Data) {
         guard let frame = wire.frame(data) else { return }
-        let arrival = uptime() -
+        receive(frame)
+    }
+
+    func receive(_ frame: ViewShowFrame, elapsedSinceReceipt: TimeInterval = 0) {
+        let arrival = uptime() - elapsedSinceReceipt -
             TimeInterval(frame.heldMilliseconds ?? 0) / 1_000
         pendingShow = PendingShow(frame: frame, arrivalUptime: arrival)
         cancelApplyTask()
