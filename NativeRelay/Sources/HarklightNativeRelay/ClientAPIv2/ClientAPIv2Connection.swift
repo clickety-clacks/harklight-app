@@ -203,9 +203,9 @@ private final class PublishingSyncWriter: SyncModelWriting, @unchecked Sendable 
         self.inner = inner
         self.publish = publish
     }
-    func heldCursor() throws -> Rev? { try inner.heldCursor() }
-    func apply(_ changes: [FeedChange], cursor: Rev) async throws {
-        try await inner.apply(changes, cursor: cursor)
+    func syncPosition() throws -> (revision: Rev?, generation: UInt64) { try inner.syncPosition() }
+    func apply(_ changes: [FeedChange], cursor: Rev, generation: UInt64) async throws {
+        try await inner.apply(changes, cursor: cursor, generation: generation)
         publish()
     }
     func rebaseline() async throws -> Rev {

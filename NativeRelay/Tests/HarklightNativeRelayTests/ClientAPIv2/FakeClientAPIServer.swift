@@ -241,9 +241,10 @@ final class RecordingSyncModel: SyncModelWriting, @unchecked Sendable {
         return self
     }
 
+    func syncPosition() throws -> (revision: Rev?, generation: UInt64) { (try heldCursor(), 0) }
     func heldCursor() throws -> Rev? { try cursor.load() }
 
-    func apply(_ changes: [FeedChange], cursor rev: Rev) async throws {
+    func apply(_ changes: [FeedChange], cursor rev: Rev, generation: UInt64) async throws {
         for change in changes { onApply?(change) }
         let admitted = try lock.withLock { () -> [Rev] in
             if let failApplyAt = _failApplyAt, changes.contains(where: { $0.rev == failApplyAt }) {
