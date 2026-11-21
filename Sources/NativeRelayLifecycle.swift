@@ -1273,12 +1273,14 @@ final class NativeRelayLifecycle {
         }
         let transport = try HTTPSClientAPITransport(baseURL: baseURL,
             clientIdentity: TrustedKeychainIdentity(clientIdentity), trustedRootDER: trustedRootDER)
+        let retainedFiles = try ConversationFileStorage(identity: context.identity)
         let attempt = UUID()
         let focus = ClientAPIFocusChannel(transport: transport, errors: errorLog) { [weak self] show, receivedAt in
             await self?.receiveV2Show(show, receivedAt: receivedAt, attempt: attempt)
         }
         let connection = try ClientAPIv2Connection(transport: transport, repository: store, context: context,
             directory: Self.v2Directory(for: context.identity), errors: errorLog, foregroundOnlyWrites: true,
+            retainedUploadURL: { try retainedFiles.verifiedUploadURL(for: $0) },
             onLiveState: { [weak self] state in
                 guard state == .live else { return }
                 Task { @MainActor [weak self] in
@@ -1379,12 +1381,23 @@ final class NativeRelayLifecycle {
     func sendV2QueuedReply(_ message: ConversationDraft, expected: ProfileContext) async {
         guard let connection = v2Connection, context == expected else { return }
         do {
-            try await connection.submitQueuedReply(message)
+            try await connection.queuedReplyWasSaved(message)
         } catch {
             errorLog.report(ErrorLogReport(concern: .actions, connectionRole: .request,
                 operation: "reply", phase: "queue", reason: .from(error: error),
                 initiator: .unknown, retryable: true))
         }
+    }
+
+    func v2QueuedReplyWasEdited(_ operation: UUID, expected: ProfileContext) async {
+        guard let connection = v2Connection, context == expected else { return }
+        await connection.queuedReplyWasEdited(operation)
+    }
+
+    func cancelV2QueuedAttachmentReply(_ operation: UUID, for key: RequestKey,
+                                       expected: ProfileContext) async throws {
+        guard let connection = v2Connection, context == expected else { throw NativeRelayCoreError.inactive }
+        try await connection.cancelQueuedAttachmentReply(operation, request: key)
     }
 
     @discardableResult
@@ -2102,7 +2115,21 @@ final class NativeRelayLifecycle {
     }
 
     func fetchConversationFile(_ file: ConversationFile, to destination: URL, expected: ProfileContext) async throws {
-        guard context == expected, let configuration else { throw NativeRelayCoreError.inactive }
+        guard context == expected else { throw NativeRelayCoreError.inactive }
+        if case let .v2Download(id, contentType) = file.content {
+            guard let connection = v2Connection else { throw NativeRelayCoreError.inactive }
+            let staged = destination.deletingLastPathComponent().appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: staged) }
+            _ = try await connection.files.download(id, to: staged, expectedContentType: contentType)
+            try await Task.detached { try ConversationFileStorage.verify(file, at: staged) }.value
+            try Task.checkCancellation()
+            guard context == expected, v2Connection === connection else { throw NativeRelayCoreError.inactive }
+            if !FileManager.default.fileExists(atPath: destination.path) {
+                try FileManager.default.moveItem(at: staged, to: destination)
+            }
+            return
+        }
+        guard let configuration else { throw NativeRelayCoreError.inactive }
         let token = UUID()
         defer { fileTransports.removeValue(forKey: token) }
         // The file origin comes from the live conversation catch-up. Opening a

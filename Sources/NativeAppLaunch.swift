@@ -2388,10 +2388,6 @@ final class LivePresentationStore {
         catch { diagnose(.localStore, .projectionRefresh, .failed, error: error, request: key) }
     }
 
-    var allowsDiscussionAttachments: Bool {
-        isLocalExample || !NativeRelayLifecycle.shared.clientAPIV2Enabled
-    }
-
     func sendDiscussion(for key: RequestKey, revision: UInt64,
                         onQueued: (() -> Void)? = nil,
                         onResult: ((Bool) -> Void)? = nil) {
@@ -2412,10 +2408,6 @@ final class LivePresentationStore {
             }
             let binding = ConversationBinding(request: key, revision: revision)
             if thread.chatNeverCloses == true {
-                guard thread.drafts[revision]?.files.isEmpty != false else {
-                    conversationError = "Remove the attachments to send this message. Your draft is saved."
-                    return
-                }
                 // Client API v2 (APP-07): each message is its own operation.
                 // It is saved with its id, the composer empties and stays
                 // enabled, and the message is handed to the outbox; nothing
@@ -2528,6 +2520,8 @@ final class LivePresentationStore {
         guard !isReadOnly else { return }
         do {
             try attentionStore.editQueuedChatMessage(operation, in: key, context: profileContext)
+            let context = profileContext
+            Task { await NativeRelayLifecycle.shared.v2QueuedReplyWasEdited(operation, expected: context) }
             conversationError = nil
             try refreshFromDurableStore()
         } catch {
@@ -2535,6 +2529,23 @@ final class LivePresentationStore {
             diagnose(.localStore, .draftSave, .failed, error: error, request: key)
             do { try refreshFromDurableStore() }
             catch { diagnose(.localStore, .projectionRefresh, .failed, error: error, request: key) }
+        }
+    }
+
+    func cancelQueuedAttachmentReply(_ operation: UUID, for key: RequestKey) async {
+        guard !isReadOnly else { return }
+        do {
+            try await NativeRelayLifecycle.shared.cancelV2QueuedAttachmentReply(operation, for: key,
+                                                                                expected: profileContext)
+            conversationError = nil
+            try refreshFromDurableStore()
+        } catch ConversationError.pendingSubmission {
+            conversationError = "The attachments have been uploaded and the message is already being sent."
+            conversationEditErrorBinding = nil
+        } catch {
+            conversationError = "Your message could not be moved back into the composer."
+            conversationEditErrorBinding = nil
+            diagnose(.conversation, .discussionSubmission, .failed, error: error, operationID: operation, request: key)
         }
     }
 

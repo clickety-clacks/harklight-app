@@ -545,6 +545,11 @@ public struct APIRevision: Equatable, Sendable {
 }
 
 /// `GET /v2/me`: the principal's facts. Members not used yet are kept raw.
+public enum APIUploadCap: Equatable, Sendable {
+    case bytes(UInt64)
+    case unlimited
+}
+
 public struct APIMe: Equatable, Sendable {
     /// active or paused.
     public let accountState: String?
@@ -552,6 +557,8 @@ public struct APIMe: Equatable, Sendable {
     public let features: [String: Bool]
     /// `limits.answer_ui_limits`, or nil when it is missing or incomplete.
     public let answerUILimits: SenderDocumentLimits?
+    /// Nil while the server has not supplied a usable file limit.
+    public let uploadCap: APIUploadCap?
     public let body: JSONValue
 
     public init(json: JSONValue) throws {
@@ -564,6 +571,14 @@ public struct APIMe: Equatable, Sendable {
         self.features = features
         answerUILimits = reader.raw("limits")?.uniqueValue(named: "answer_ui_limits")
             .flatMap(SenderDocumentLimits.init(answerUILimits:))
+        let cap = reader.raw("limits")?.uniqueValue(named: "upload_cap_bytes_per_file")
+        if cap == .string(ExactText("none")) {
+            uploadCap = .unlimited
+        } else if let bytes = cap?.integerValue, bytes >= 0 {
+            uploadCap = .bytes(UInt64(bytes))
+        } else {
+            uploadCap = nil
+        }
         body = json
     }
 }

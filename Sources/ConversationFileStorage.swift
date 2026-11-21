@@ -25,7 +25,7 @@ struct ConversationFileStorage: Sendable {
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         do {
             try FileManager.default.copyItem(at: source, to: destination)
-            let checked = try measuredBytes(at: destination)
+            let checked = try Self.measuredBytes(at: destination)
             return ConversationFile(id: ExactText(id), name: ExactText(source.lastPathComponent),
                 byteCount: checked.count, sha256: ExactText(checked.sha256), content: .localFile(ExactText(relative)))
         } catch {
@@ -53,6 +53,19 @@ struct ConversationFileStorage: Sendable {
     func fileURL(for file: ConversationFile) throws -> URL {
         guard case let .localFile(name) = file.content else { throw ConversationError.fileMismatch }
         return directory.appendingPathComponent(name.rawValue)
+    }
+
+    func verifiedUploadURL(for file: ConversationFile) throws -> URL {
+        let url = try fileURL(for: file)
+        try Self.verify(file, at: url)
+        return url
+    }
+
+    static func verify(_ file: ConversationFile, at url: URL) throws {
+        let measured = try measuredBytes(at: url)
+        guard measured.count == file.byteCount, ExactText(measured.sha256) == file.sha256 else {
+            throw ConversationError.fileMismatch
+        }
     }
 
     func previewDestination(for file: ConversationFile) throws -> URL {
@@ -87,7 +100,7 @@ struct ConversationFileStorage: Sendable {
         if FileManager.default.fileExists(atPath: directory.path) { try FileManager.default.removeItem(at: directory) }
     }
 
-    private func measuredBytes(at url: URL) throws -> (count: UInt64, sha256: String) {
+    private static func measuredBytes(at url: URL) throws -> (count: UInt64, sha256: String) {
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
         var digest = SHA256()

@@ -66,6 +66,7 @@ public struct ConversationFile: Equatable, Codable, Identifiable, Sendable {
     public enum Content: Equatable, Codable, Sendable {
         case inline(Data)
         case uploaded(ExactText)
+        case v2Download(FileDownloadID, contentType: String?)
         /// Account-owned local copy retained while upload or submission is unconfirmed.
         case localFile(ExactText)
     }
@@ -705,6 +706,8 @@ public enum ConversationError: Error, Equatable, Sendable {
     case pendingSubmission
     case emptyDraft
     case fileMismatch
+    case fileMediaTypeMismatch
+    case retainedAttachmentUnavailable
     case uploadRequired(ExactText)
     case uploadCapExceeded(file: ExactText, cap: UInt64)
 }

@@ -327,6 +327,9 @@ struct ConversationPanel: View {
                                     previewURL = try await store.prepareConversationPreview(file, for: key,
                                         revision: inspectedFileRevision ?? revision)
                                 }
+                                catch ConversationError.fileMediaTypeMismatch {
+                                    fileError = "\(file.name.rawValue) could not be opened. The downloaded file type did not match the attachment."
+                                }
                                 catch { fileError = "\(file.name.rawValue) could not be opened (\(error)). Its saved metadata and draft are retained." }
                             }
                         }.disabled(openingFile || (store.isReadOnly && !store.hasCachedConversationPreview(file)))
@@ -476,6 +479,7 @@ private struct ConversationHistoryContent: View, Equatable {
                                 if pending.isQueued { store.editQueuedChatMessage(pending.id, for: key) }
                                 else { store.editRejectedDiscussion(for: key, revision: pending.revision) }
                             },
+                            cancelUpload: { await store.cancelQueuedAttachmentReply(pending.id, for: key) },
                             checkAgain: { await store.checkAcceptedDiscussion(for: key) },
                             inspect: { file in inspect(file, pending.revision) })
                         .id(pending.id)
@@ -690,6 +694,7 @@ private struct ConversationPendingSubmissionView: View {
     let editEnabled: Bool
     let retry: () -> Void
     let edit: () -> Void
+    let cancelUpload: () async -> Void
     let checkAgain: () async -> Void
     let inspect: (ConversationFile) -> Void
 
@@ -713,6 +718,11 @@ private struct ConversationPendingSubmissionView: View {
                     .accessibilityIdentifier("conversation-pending-check-again")
             } else {
                 ConversationDraftStatus(disposition: submission.disposition)
+            }
+            if submission.isQueued, !submission.files.isEmpty, !isClosed, editEnabled,
+               case .submitting = submission.disposition {
+                Button("Cancel upload") { Task { await cancelUpload() } }
+                    .accessibilityIdentifier("conversation-pending-cancel-upload")
             }
             if case let .rejected(reason) = submission.disposition, !isClosed {
                 HStack {
@@ -748,6 +758,8 @@ enum ConversationDraftPresentationText {
         case "closed": "This request was already closed. Your message is saved."
         case "not_found": "This request is no longer available. Your message is saved."
         case "forbidden": "The server did not allow this message. Your message is saved."
+        case "payload_too_large": "An attachment is too large for this server. Your message and files are saved."
+        case "attachment_unavailable": "A saved attachment could not be read. Edit the message to remove or add it again. Your text is saved."
         case "stale_revision": "This request changed before the message was sent. Your message is saved."
         default: "Message not sent. Your text and files are saved."
         }
@@ -915,27 +927,25 @@ private struct ConversationComposer: View {
         }
         // Each regular glass button adds 7 points around its label, for a 44-point target.
         HStack(alignment: .bottom, spacing: 10) {
-            if store.allowsDiscussionAttachments {
-                Button {
-                    guard persistStagedText() else { return }
-                    if store.isLocalExample { attachmentChoices = true } else { pickingFiles = true }
-                } label: {
-                    Image(systemName: "plus")
-                        .foregroundStyle(.hkText)
-                        .frame(width: 30, height: 30)
-                        .contentShape(Circle())
-                }
-                    .buttonStyle(.glass).buttonBorderShape(.circle).controlSize(.regular)
-                    .accessibilityLabel(store.isLocalExample ? "Add sample attachment" : "Add attachment")
-                    .accessibilityIdentifier("sample-chat-add-attachment")
-                    .disabled(frozen || !allowsDraftEditing)
-                    .confirmationDialog("Add a local example", isPresented: $attachmentChoices, titleVisibility: .visible) {
-                        Button("Sample photo") { addExample("Photo") }
-                        Button("Sample file") { addExample("Document") }
-                        Button("Sample camera image") { addExample("Camera") }
-                        Button("Cancel", role: .cancel) {}
-                    }
+            Button {
+                guard persistStagedText() else { return }
+                if store.isLocalExample { attachmentChoices = true } else { pickingFiles = true }
+            } label: {
+                Image(systemName: "plus")
+                    .foregroundStyle(.hkText)
+                    .frame(width: 30, height: 30)
+                    .contentShape(Circle())
             }
+                .buttonStyle(.glass).buttonBorderShape(.circle).controlSize(.regular)
+                .accessibilityLabel(store.isLocalExample ? "Add sample attachment" : "Add attachment")
+                .accessibilityIdentifier("sample-chat-add-attachment")
+                .disabled(frozen || !allowsDraftEditing)
+                .confirmationDialog("Add a local example", isPresented: $attachmentChoices, titleVisibility: .visible) {
+                    Button("Sample photo") { addExample("Photo") }
+                    Button("Sample file") { addExample("Document") }
+                    Button("Sample camera image") { addExample("Camera") }
+                    Button("Cancel", role: .cancel) {}
+                }
             VStack(alignment: .leading, spacing: 8) {
                 ConversationComposerTextInput(session: textSession,
                     isEnabled: !frozen && allowsDraftEditing,
