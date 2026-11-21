@@ -49,6 +49,21 @@ public final class HTTPSClientAPITransport: ClientAPITransport, @unchecked Senda
         return try Self.response(response, body: data)
     }
 
+    public func download(_ request: APIRequest, to destination: URL) async throws -> APIResponse {
+        let (source, response) = try await session.download(for: urlRequest(for: request))
+        defer { try? FileManager.default.removeItem(at: source) }
+        if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+            let handle = try FileHandle(forReadingFrom: source)
+            defer { try? handle.close() }
+            let errorBody = try handle.read(upToCount: 4096) ?? Data()
+            return try Self.response(response, body: errorBody)
+        }
+        let result = try Self.response(response, body: Data())
+        try Task.checkCancellation()
+        try FileManager.default.moveItem(at: source, to: destination)
+        return result
+    }
+
     func urlRequest(for request: APIRequest, accept: String = "application/json") -> URLRequest {
         // The path is already percent-encoded (ids are encoded once, where the
         // request is built); appending it as a component would encode it again.
@@ -89,7 +104,8 @@ public final class HTTPSClientAPITransport: ClientAPITransport, @unchecked Senda
         }
         return APIResponse(status: http.statusCode, requestID: requestID, body: body,
                            etag: http.value(forHTTPHeaderField: "ETag"),
-                           replayed: http.value(forHTTPHeaderField: "Idempotent-Replayed")?.lowercased() == "true")
+                           replayed: http.value(forHTTPHeaderField: "Idempotent-Replayed")?.lowercased() == "true",
+                           contentType: http.value(forHTTPHeaderField: "Content-Type"))
     }
 
     // MARK: Change feed

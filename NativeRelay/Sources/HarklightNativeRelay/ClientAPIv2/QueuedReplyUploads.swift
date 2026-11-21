@@ -23,6 +23,7 @@ actor QueuedReplyUploads {
     struct CleanupFailure: Sendable {
         let item: ExactText
         let error: any Error
+        var retryable = true
     }
 
     private let url: URL?
@@ -73,7 +74,14 @@ actor QueuedReplyUploads {
                 continue
             }
             let input = group.uploads[index]
-            let url = try source(input.file)
+            let url: URL
+            do {
+                url = try source(input.file)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                throw ConversationError.retainedAttachmentUnavailable
+            }
             group.uploads[index].attempted = true
             try save(group, for: operation)
             let created: APIFileCreated
@@ -141,7 +149,9 @@ actor QueuedReplyUploads {
                         group.uploads[index].handle = handle
                         try save(group, for: operation)
                     }
-                    try await discard(handle)
+                    if let conflict = try await discard(handle) {
+                        failures.append(CleanupFailure(item: group.item, error: conflict, retryable: false))
+                    }
                     group.uploads[index].attempted = false
                     group.uploads[index].handle = nil
                     try save(group, for: operation)
@@ -164,11 +174,15 @@ actor QueuedReplyUploads {
                                contentType: input.contentType, idempotencyKey: input.key)
     }
 
-    private func discard(_ handle: UploadHandle) async throws {
+    private func discard(_ handle: UploadHandle) async throws -> APIError? {
         do {
             try await files.discard(handle)
-        } catch let error as APIError where error.token == .notFound || error.token == .alreadyClosed {
-            // The handle is gone, or the already accepted reply owns the bytes.
+            return nil
+        } catch let error as APIError where error.token == .notFound {
+            return nil
+        } catch let error as APIError where error.token == .alreadyClosed {
+            // An accepted reply owns these bytes. The conflict is diagnostic only.
+            return error
         }
     }
 

@@ -438,6 +438,8 @@ final class NativeClientDiagnosticJournal {
             case .pendingSubmission: return "conversation_submission_pending"
             case .emptyDraft: return "conversation_empty_draft"
             case .fileMismatch: return "conversation_file_mismatch"
+            case .fileMediaTypeMismatch: return "conversation_file_media_type_mismatch"
+            case .retainedAttachmentUnavailable: return "conversation_attachment_unavailable"
             case .uploadRequired: return "conversation_upload_required"
             case .uploadCapExceeded: return "conversation_upload_cap_exceeded"
             }

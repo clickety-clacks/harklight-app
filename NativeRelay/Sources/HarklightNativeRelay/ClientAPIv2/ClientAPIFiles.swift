@@ -47,6 +47,25 @@ public struct ClientAPIFiles: Sendable {
         return response.body
     }
 
+    public func download(_ id: FileDownloadID, to destination: URL,
+                         expectedContentType: String? = nil) async throws -> APIResponse {
+        let response = try await transport.download(
+            APIRequest(method: .get, path: Self.path(id.value), accept: "*/*"), to: destination)
+        if let expectedContentType {
+            guard let declared = Self.mediaType(expectedContentType),
+                  declared == Self.mediaType(response.contentType) else {
+                try? FileManager.default.removeItem(at: destination)
+                throw ConversationError.fileMediaTypeMismatch
+            }
+        }
+        return response
+    }
+
+    private static func mediaType(_ header: String?) -> String? {
+        header?.split(separator: ";", maxSplits: 1).first?
+            .trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+
     public func discard(_ handle: UploadHandle) async throws {
         _ = try await transport.send(APIRequest(method: .delete, path: Self.path(handle.value)))
     }

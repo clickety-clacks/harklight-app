@@ -101,14 +101,23 @@ final class QueuedReplyUploadsTests: XCTestCase {
     }
 
     func testCancelDuringUploadRestoresDraftAndDeletesStagingWithoutAReply() async throws {
+        try await assertCancelDuringUpload(attachedConflict: false)
+    }
+
+    func testAttachedDiscardConflictIsReportedWithRequestAndItemAndSettlesCleanup() async throws {
+        try await assertCancelDuringUpload(attachedConflict: true)
+    }
+
+    private func assertCancelDuringUpload(attachedConflict: Bool) async throws {
         let (directory, fileURL, draft) = try fixture()
         defer { try? FileManager.default.removeItem(at: directory) }
-        let server = HeldUploadTransport()
+        let server = HeldUploadTransport(attachedConflict: attachedConflict)
         let (repository, context) = try seededRepository(server.base)
         let reply = try queue(draft.text, files: draft.files, item: "item", in: repository, context: context)
         let operation = try XCTUnwrap(reply.operationID)
+        let errors = RecordingErrorLogV2()
         let v2 = try ClientAPIv2Connection(transport: server, repository: repository, context: context,
-            directory: directory, errors: NoopErrorLog(), foregroundOnlyWrites: true,
+            directory: directory, errors: errors, foregroundOnlyWrites: true,
             retainedUploadURL: { _ in fileURL })
         let run = Task { await v2.runForeground() }
         defer { server.gate.release(); run.cancel() }
@@ -122,6 +131,60 @@ final class QueuedReplyUploadsTests: XCTestCase {
         server.gate.release()
         try await waitFor { await server.discarded == ["/v2/files/stage-1"] }
         XCTAssertFalse(server.base.received.contains { $0.idempotencyKey == operation })
+        if attachedConflict {
+            try await waitFor { errors.reports.contains { $0.operation == "discard_reply_upload" } }
+            let report = try XCTUnwrap(errors.reports.first { $0.operation == "discard_reply_upload" })
+            XCTAssertEqual(report.reason, .serverReason("already_closed"))
+            XCTAssertEqual(report.httpStatus, 409)
+            XCTAssertEqual(report.correlation.requestID, "discard-conflict")
+            XCTAssertEqual(report.correlation.resourceID, "item")
+            XCTAssertFalse(report.retryable)
+            let journal = directory.appendingPathComponent("queued-reply-uploads-v2.json")
+            let empty = try JSONDecoder().decode([UUID: String].self, from: Data(contentsOf: journal))
+            XCTAssertTrue(empty.isEmpty, "Settled cleanup must not retry this handle.")
+        }
+    }
+
+    func testMissingRetainedSourceRejectsTheAttachmentAndAllowsEditingTheSavedText() async throws {
+        let (directory, fileURL, draft) = try fixture()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.removeItem(at: fileURL)
+        let server = HeldUploadTransport()
+        let (repository, context) = try seededRepository(server.base)
+        let reply = try queue(draft.text, files: draft.files, item: "item", in: repository, context: context)
+        let operation = try XCTUnwrap(reply.operationID)
+        let errors = RecordingErrorLogV2()
+        let v2 = try ClientAPIv2Connection(transport: server, repository: repository, context: context,
+            directory: directory, errors: errors, foregroundOnlyWrites: true,
+            retainedUploadURL: { _ in
+                let handle = try FileHandle(forReadingFrom: fileURL)
+                try handle.close()
+                return fileURL
+            })
+        let run = Task { await v2.runForeground() }
+        defer { server.gate.release(); run.cancel() }
+
+        try await waitFor {
+            try repository.queuedChatMessages(context: context).first?.disposition ==
+                .rejected(ExactText("attachment_unavailable"))
+        }
+        let attempts = await server.uploadCount
+        XCTAssertEqual(attempts, 0)
+        XCTAssertFalse(server.base.received.contains { $0.idempotencyKey == operation })
+        let report = try XCTUnwrap(errors.reports.first { $0.operation == "stage_reply_upload" })
+        XCTAssertEqual(report.reason, .app("attachment_unavailable"))
+        XCTAssertFalse(report.retryable)
+
+        try repository.editQueuedChatMessage(operation, in: reply.binding.request, context: context)
+        let thread = try XCTUnwrap(repository.conversationSnapshot(context: context).threads[reply.binding.request])
+        var editable = try XCTUnwrap(thread.drafts[1])
+        XCTAssertEqual(editable.text, draft.text)
+        XCTAssertEqual(editable.files, draft.files)
+        editable.files = []
+        try repository.saveConversationDraft(editable, context: context)
+        let saved = try repository.conversationSnapshot(context: context).threads[reply.binding.request]?.drafts[1]
+        XCTAssertEqual(saved?.text, draft.text)
+        XCTAssertEqual(saved?.files, [])
     }
 
     func testAdvertisedCapPreservesTheFilesForEditWithoutStartingAnUpload() async throws {
@@ -187,6 +250,11 @@ private actor HeldUploadTransport: ClientAPITransport {
     nonisolated let gate = AsyncGate()
     private(set) var uploadCount = 0
     private(set) var discarded: [String] = []
+    let attachedConflict: Bool
+
+    init(attachedConflict: Bool = false) {
+        self.attachedConflict = attachedConflict
+    }
 
     func send(_ request: APIRequest) async throws -> APIResponse {
         if request.path == "/v2/files", request.method == .post {
@@ -198,6 +266,9 @@ private actor HeldUploadTransport: ClientAPITransport {
         }
         if request.method == .delete, request.path == "/v2/files/stage-1" {
             discarded.append(request.path)
+            if attachedConflict {
+                throw APIError(status: 409, token: .alreadyClosed, retryable: false, requestID: "discard-conflict")
+            }
             return APIResponse(status: 204, requestID: "discard", body: Data())
         }
         return try await base.send(request)

@@ -327,6 +327,9 @@ struct ConversationPanel: View {
                                     previewURL = try await store.prepareConversationPreview(file, for: key,
                                         revision: inspectedFileRevision ?? revision)
                                 }
+                                catch ConversationError.fileMediaTypeMismatch {
+                                    fileError = "\(file.name.rawValue) could not be opened. The downloaded file type did not match the attachment."
+                                }
                                 catch { fileError = "\(file.name.rawValue) could not be opened (\(error)). Its saved metadata and draft are retained." }
                             }
                         }.disabled(openingFile || (store.isReadOnly && !store.hasCachedConversationPreview(file)))
@@ -756,6 +759,7 @@ enum ConversationDraftPresentationText {
         case "not_found": "This request is no longer available. Your message is saved."
         case "forbidden": "The server did not allow this message. Your message is saved."
         case "payload_too_large": "An attachment is too large for this server. Your message and files are saved."
+        case "attachment_unavailable": "A saved attachment could not be read. Edit the message to remove or add it again. Your text is saved."
         case "stale_revision": "This request changed before the message was sent. Your message is saved."
         default: "Message not sent. Your text and files are saved."
         }

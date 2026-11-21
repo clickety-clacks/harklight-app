@@ -48,13 +48,19 @@ private final class V2ScenePushTransport: ClientAPITransport, @unchecked Sendabl
         case "/v2/items/item/entries":
             lock.withLock { entryReads += 1 }
             body = #"{"rev":2,"entries":[],"older":false}"#
-        case "/v2/files/download%2F1":
-            lock.withLock { fileReads.append(request.path) }
-            return APIResponse(status: 200, requestID: "test", body: Data("abc".utf8))
         default:
             body = #"{"rev":0,"items":[],"counts":{"unresolved":0}}"#
         }
         return APIResponse(status: 200, requestID: "test", body: Data(body.utf8))
+    }
+
+    func download(_ request: APIRequest, to destination: URL) async throws -> APIResponse {
+        guard request.method == .get, request.path == "/v2/files/download%2F1" else {
+            throw URLError(.unsupportedURL)
+        }
+        lock.withLock { fileReads.append(request.path) }
+        try Data("abc".utf8).write(to: destination)
+        return APIResponse(status: 200, requestID: "test", body: Data(), contentType: "text/plain; charset=utf-8")
     }
 
     func changeBatch(after: Rev) async throws -> FeedBatch {
@@ -87,7 +93,7 @@ final class HarklightTests: XCTestCase {
         let lifecycle = NativeRelayLifecycle(clientAPIV2Enabled: true)
         lifecycle.installV2Connection(connection, context: context)
         let item = Data(#"{"item_id":"item","rev":1,"sender":"sender","request_revision":1,"message":{"title":"Attachment"},"files":[],"seen":false,"rank":{"key":"a","section":"current"},"chat":{"available":true,"started":true}}"#.utf8)
-        let page = Data(#"{"rev":2,"older":false,"entries":[{"entry_id":"entry","item_id":"item","rev":2,"position":1,"kind":"reply","author":"origin","request_revision":1,"files":[{"file_id":"download/1","name":"file.txt","size":3,"sha256":"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"}]}]}"#.utf8)
+        let page = Data(#"{"rev":2,"older":false,"entries":[{"entry_id":"entry","item_id":"item","rev":2,"position":1,"kind":"reply","author":"origin","request_revision":1,"files":[{"file_id":"download/1","name":"file.txt","size":3,"sha256":"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad","content_type":"text/plain"}]}]}"#.utf8)
         try connection.model.apply([.init(rev: 1, kind: "item", data: item)], cursor: 1)
         try connection.model.apply(APIEntriesPage(json: JSONValue.parse(page)), of: ExactText("item"))
         let projection = ServerModelV2Projection.cachedState(connection.model.snapshot, identity: identity)
@@ -109,6 +115,17 @@ final class HarklightTests: XCTestCase {
             XCTFail("A response with the wrong byte count cannot be previewed.")
         } catch ConversationError.fileMismatch {
             XCTAssertFalse(FileManager.default.fileExists(atPath: mismatch.path))
+        }
+
+        let wrongType = ConversationFile(id: attachment.id, name: attachment.name, byteCount: attachment.byteCount,
+            sha256: attachment.sha256, content: .v2Download(FileDownloadID(attachment.id), contentType: "image/png"))
+        let wrongTypeDestination = folder.appendingPathComponent("wrong-type.png")
+        do {
+            try await lifecycle.fetchConversationFile(wrongType, to: wrongTypeDestination, expected: context)
+            XCTFail("A response with the wrong Content-Type cannot be previewed even when the bytes match.")
+        } catch ConversationError.fileMediaTypeMismatch {
+            let entries = try FileManager.default.contentsOfDirectory(atPath: folder.path)
+            XCTAssertEqual(entries, ["valid.txt"], "Rejected and temporary files must be removed.")
         }
         await lifecycle.deactivate()
     }

@@ -213,6 +213,39 @@ final class HTTPSClientAPITransportTests: XCTestCase {
                        "attachment; filename*=UTF-8''caf%C3%A9%20100%25.bin")
     }
 
+    func testDiskDownloadReturnsTheContentTypeAndWritesTheBytesWithoutABufferedBody() async throws {
+        let first = Data([0x89, 0x50, 0x4e, 0x47])
+        let second = Data([0x0d, 0x0a, 0x1a, 0x0a])
+        let api = transport { _ in
+            StubURLProtocol.Reply(status: 200, headers: ["Content-Type": "image/png", "Request-Id": "download"],
+                                  chunks: [first, second])
+        }
+        let destination = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: destination) }
+        let result = try await ClientAPIFiles(transport: api).download(FileDownloadID(ExactText("download/1")),
+                                                                     to: destination)
+        XCTAssertEqual(result.contentType, "image/png")
+        XCTAssertEqual(result.requestID, "download")
+        XCTAssertTrue(result.body.isEmpty)
+        XCTAssertEqual(try Data(contentsOf: destination), first + second)
+    }
+
+    func testDiskDownloadRejectsTheWrongContentTypeAndRemovesTheFile() async throws {
+        let api = transport { _ in
+            StubURLProtocol.Reply(status: 200, headers: ["Content-Type": "text/plain; charset=utf-8"],
+                                  chunks: [Data("abc".utf8)])
+        }
+        let destination = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: destination) }
+        do {
+            _ = try await ClientAPIFiles(transport: api).download(FileDownloadID(ExactText("download/1")),
+                to: destination, expectedContentType: "image/png")
+            XCTFail("The attachment and HTTP media types must agree.")
+        } catch ConversationError.fileMediaTypeMismatch {
+            XCTAssertFalse(FileManager.default.fileExists(atPath: destination.path))
+        }
+    }
+
     func testPreviouslySavedFileRefStillDecodesWithATypedDownloadID() throws {
         let legacy = Data(#"{"fileID":{"rawValue":"download/1"},"name":{"rawValue":"file.bin"},"size":3,"sha256":"hash"}"#.utf8)
         let ref = try JSONDecoder().decode(APIFileRef.self, from: legacy)

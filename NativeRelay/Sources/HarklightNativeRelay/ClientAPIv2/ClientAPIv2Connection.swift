@@ -377,7 +377,9 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
                         reportUpload(error, operation: "stage_reply_upload", item: item, retryable: !permanent)
                         if permanent {
                             let reason: String
-                            if case .uploadCapExceeded? = error as? ConversationError {
+                            if case .retainedAttachmentUnavailable? = error as? ConversationError {
+                                reason = "attachment_unavailable"
+                            } else if case .uploadCapExceeded? = error as? ConversationError {
                                 reason = APIErrorToken.payloadTooLarge.rawValue
                             } else {
                                 reason = (error as? APIError)?.token.rawValue ?? "attachment_failed"
@@ -410,9 +412,10 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
             }
         }
         for failure in failures {
-            reportUpload(failure.error, operation: "discard_reply_upload", item: failure.item, retryable: true)
+            reportUpload(failure.error, operation: "discard_reply_upload", item: failure.item,
+                         retryable: failure.retryable)
         }
-        return !failures.isEmpty
+        return failures.contains(where: \.retryable)
     }
 
     private func reportReplyRecovery(_ error: any Error) {
@@ -423,8 +426,10 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
 
     private func reportUpload(_ error: any Error, operation: String, item: ExactText, retryable: Bool) {
         let api = error as? APIError
+        let reason: ErrorLogReason = (error as? ConversationError) == .retainedAttachmentUnavailable
+            ? .app("attachment_unavailable") : .api(error)
         errors.report(ErrorLogReport(concern: .actions, connectionRole: .request,
-            operation: operation, phase: "reply_files", reason: .api(error),
+            operation: operation, phase: "reply_files", reason: reason,
             initiator: .forFailure(error), retryable: retryable,
             correlation: ErrorLogCorrelation(requestID: api?.requestID, resourceID: item.rawValue),
             httpStatus: api?.status))
