@@ -451,17 +451,24 @@ final class ActionOutboxTests: XCTestCase {
     func testADefinitiveRefusalLeavesTheOutboxAndIsShownWithItsToken() async throws {
         let server = FakeClientAPIServer()
         server.nextWriteFailures = [APIError(status: 409, token: .staleRequest, retryable: false, requestID: "req-x")]
-        let outcomes = RecordingOutcomes()
+        let persistence = MemoryOutboxPersistence()
         let errors = RecordingErrorLogV2()
-        let box = try outbox(server, MemoryOutboxPersistence(), outcomes, errors: errors)
+        let outcomes = RecordingOutcomes { entry, error in
+            let failedWrites = try? persistence.load().filter { $0.failure != nil }
+            XCTAssertEqual(failedWrites?.map(\.idempotencyKey), [entry.idempotencyKey],
+                           "The failed write is persisted before the handler is called.")
+            XCTAssertEqual(failedWrites?.first?.failure?.token, error.token.rawValue)
+            let reports = errors.reports
+            XCTAssertEqual(reports.count, 1, "The Error Log record exists when the handler is called.")
+            XCTAssertEqual(reports.first?.correlation.requestID, "req-x")
+            XCTAssertEqual(reports.first?.httpStatus, 409)
+            XCTAssertEqual(reports.first?.retryable, false)
+        }
+        let box = try outbox(server, persistence, outcomes, errors: errors)
         try await box.submit(target: "a", operation: "answer",
             write: FrozenWrite(method: .post, path: "/v2/items/a/answer", body: Data("{}".utf8)))
         await eventually("refused") { outcomes.rejected.count == 1 }
         XCTAssertEqual(outcomes.rejected.first?.1.token, .staleRequest)
-        XCTAssertEqual(errors.reports.first?.correlation.requestID, "req-x",
-                       "The Request-Id is kept for correlation.")
-        XCTAssertEqual(errors.reports.first?.httpStatus, 409)
-        XCTAssertEqual(errors.reports.first?.retryable, false)
         let pending = await box.pending
         XCTAssertTrue(pending.isEmpty)
     }

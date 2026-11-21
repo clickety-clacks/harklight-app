@@ -165,6 +165,7 @@ final class ServerModelV2ProjectionTests: XCTestCase {
         XCTAssertEqual(view.replies?.map(\.priority), [.low, .high])
         let row = try XCTUnwrap(view.listItems?.first { $0.kind == .reply })
         XCTAssertEqual(row.score, 0.8)
+        XCTAssertEqual(row.priority, .high)
         XCTAssertEqual(row.scoreKind, .current)
     }
 
