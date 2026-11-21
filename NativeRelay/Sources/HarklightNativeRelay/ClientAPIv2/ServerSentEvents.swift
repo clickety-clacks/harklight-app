@@ -5,6 +5,8 @@ public struct ServerSentEvent: Equatable, Sendable {
     public let id: String?
     public let event: String
     public let data: String
+    /// The wire frame carried an id field, independently of the inherited id.
+    public let hasExplicitID: Bool
 }
 
 /// Incremental `text/event-stream` parser. Feed it lines without their line
@@ -17,6 +19,7 @@ public struct ServerSentEventParser: Sendable {
     /// The last `id` seen, which a reconnect sends as `Last-Event-ID`.
     public private(set) var lastEventID: String?
     private var sawData = false
+    private var hasExplicitID = false
 
     public init() {}
 
@@ -40,6 +43,7 @@ public struct ServerSentEventParser: Sendable {
         case "event":
             eventName = String(value)
         case "id":
+            hasExplicitID = true
             if !value.contains("\u{0}") { lastEventID = String(value) }
         default:
             break
@@ -52,10 +56,11 @@ public struct ServerSentEventParser: Sendable {
             dataLines.removeAll()
             eventName = ""
             sawData = false
+            hasExplicitID = false
         }
         guard sawData else { return nil }
         return ServerSentEvent(id: lastEventID, event: eventName.isEmpty ? "message" : eventName,
-                               data: dataLines.joined(separator: "\n"))
+                               data: dataLines.joined(separator: "\n"), hasExplicitID: hasExplicitID)
     }
 }
 
@@ -69,6 +74,7 @@ extension FeedEvent {
             return
         }
         if event.event == "closing" {
+            guard !event.hasExplicitID else { throw FeedDecodingError.unexpectedClosingID }
             let object = (try? JSONSerialization.jsonObject(with: Data(event.data.utf8))) as? [String: Any]
             self = .closing(reason: (object?["reason"] as? String) ?? "other")
             return
@@ -86,4 +92,5 @@ public enum FeedDecodingError: Error, Equatable {
     case missingRev
     case outOfOrder
     case invalidBatch
+    case unexpectedClosingID
 }

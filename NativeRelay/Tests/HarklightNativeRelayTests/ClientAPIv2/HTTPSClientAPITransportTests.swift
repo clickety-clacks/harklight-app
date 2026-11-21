@@ -86,7 +86,7 @@ final class HTTPSClientAPITransportTests: XCTestCase {
     }
 
     func testTheFeedSplitsChunkedEventsAcrossLineEndingsAndIgnoresHeartbeats() async throws {
-        let stream = "event: heartbeat\r\ndata: {}\r\n\r\nid: 5\r\nevent: item\r\ndata: {\"a\"\r\n:x\r\ndata: :1}\r\n\r\nid: 6\nevent: closing\ndata: {\"reason\":\"idle_timeout\"}\n\n"
+        let stream = "event: heartbeat\r\ndata: {}\r\n\r\nid: 5\r\nevent: item\r\ndata: {\"a\"\r\n:x\r\ndata: :1}\r\n\r\nevent: closing\ndata: {\"reason\":\"storage_unavailable\"}\n\n"
         let bytes = Array(stream.utf8)
         let chunks = stride(from: 0, to: bytes.count, by: 7).map { Data(bytes[$0..<min($0 + 7, bytes.count)]) }
         let api = transport { _ in
@@ -99,7 +99,7 @@ final class HTTPSClientAPITransportTests: XCTestCase {
             .opened(requestID: "feed-1"),
             .heartbeat,
             .change(FeedChange(rev: 5, kind: .item, data: Data("{\"a\"\n:1}".utf8))),
-            .closing(reason: "idle_timeout")
+            .closing(reason: "storage_unavailable")
         ])
         let sent = StubURLProtocol.lock.withLock { StubURLProtocol.seen.first }
         XCTAssertEqual(sent?.url?.query, "after=4")
@@ -120,6 +120,38 @@ final class HTTPSClientAPITransportTests: XCTestCase {
             XCTFail("Expected the client's own idle timeout.")
         } catch ChangeFeedIdleTimeout.expired {
             // The response stayed open and sent no bytes.
+        }
+    }
+
+    func testRevokedClosingWithAnExplicitIDKeepsSyncRetryable() async throws {
+        for frame in ["id: 8\nevent: closing\ndata: {\"reason\":\"revoked\"}\n\n",
+                      "id:\nevent: closing\ndata: {\"reason\":\"revoked\"}\n\n"] {
+            let api = transport { request in
+                if request.value(forHTTPHeaderField: "Accept") != "text/event-stream" {
+                    return StubURLProtocol.Reply(status: 200,
+                        chunks: [Data(#"{"changes":[],"rev":7,"more":false}"#.utf8)])
+                }
+                return StubURLProtocol.Reply(status: 200, headers: ["Content-Type": "text/event-stream",
+                    "Request-Id": "feed-7"], chunks: [Data(frame.utf8)])
+            }
+            defer { api.close() }
+            let cursor = MemoryRevCursor(7)
+            let model = RecordingSyncModel(snapshotRev: { 3 })
+            let errors = RecordingErrorLogV2()
+            let sync = ChangeFeedSync(transport: api, model: model.using(cursor), errors: errors,
+                waitBeforeRetry: { _ in throw CancellationError() })
+            await sync.runForeground()
+            let report = try XCTUnwrap(errors.reports.first)
+            XCTAssertEqual(report.phase, "stream")
+            XCTAssertEqual(report.correlation.requestID, "feed-7")
+            XCTAssertEqual(report.initiator, .unknown)
+            XCTAssertTrue(report.retryable)
+            XCTAssertNotEqual(report.reason, .serverReason("revoked"))
+            let liveState = await sync.liveState
+            XCTAssertEqual(liveState, .paused(.unknown))
+            XCTAssertEqual(try cursor.load(), 7)
+            XCTAssertEqual(model.rebaselines, 0)
+            XCTAssertTrue(model.applied.isEmpty)
         }
     }
 
