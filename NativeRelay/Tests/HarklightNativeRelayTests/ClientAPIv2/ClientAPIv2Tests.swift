@@ -188,6 +188,9 @@ final class SavedV2ItemActionTests: XCTestCase {
         let replacement = FakeClientAPIServer()
         replacement.inboxItems = [item]
         replacement.meBody = #"{"account":{"state":"active"},"features":{},"limits":{}}"#
+        replacement.replyEntry = { revision in
+            #"{"entry_id":"accepted","item_id":"i","rev":\#(revision),"position":5,"kind":"reply","author":"person","request_revision":1,"text":"back online","files":[]}"#
+        }
         let reminted = ProfileContext(identity: identity, transportMode: .relay)
         XCTAssertThrowsError(try ClientAPIv2Connection(transport: replacement, repository: repository,
             context: reminted, directory: nil, errors: RecordingErrorLogV2())) {
@@ -214,10 +217,8 @@ final class SavedV2ItemActionTests: XCTestCase {
             let keys = replacement.received.compactMap(\.idempotencyKey)
             return Set(keys) == Set(expected.keys)
         }
-        let writes = replacement.received.filter { $0.idempotencyKey != nil }
-        XCTAssertEqual(writes.count, expected.count)
-        for write in writes {
-            XCTAssertEqual(write.path, expected[try XCTUnwrap(write.idempotencyKey)])
+        for (key, path) in expected {
+            XCTAssertEqual(replacement.received.filter { $0.idempotencyKey == key }.map(\.path), [path])
         }
         foreground.cancel()
         await foreground.value
