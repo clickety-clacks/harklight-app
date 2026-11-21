@@ -1018,19 +1018,11 @@ struct ConversationState: Codable, Equatable {
                                       position: UInt64,
                                       entryID: ExactText? = nil) -> PendingConversationReadPosition? {
         guard chatReadPositionSupport == true, position > 0 else { return nil }
-        let positions = chatReadPositions ?? [:]
-        let current = positions[request] ?? 0
-        if current >= position {
-            if let pending = pendingChatReadPositions?[request],
-               pending.readThroughConversationSequence >= position {
-                return pending
-            }
-            return nil
-        }
         var pending = pendingChatReadPositions ?? [:]
-        if let previous = pending[request], previous.readThroughConversationSequence == position {
+        if let previous = pending[request], previous.readThroughConversationSequence >= position {
             return previous
         }
+        guard position > (chatReadPositions?[request] ?? 0) else { return nil }
         let saved = PendingConversationReadPosition(request: request, operationID: operationID,
             readThroughConversationSequence: position, entryID: entryID)
         pending[request] = saved

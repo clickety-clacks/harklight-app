@@ -165,6 +165,46 @@ private actor HeldMeTransport: ClientAPITransport {
 }
 
 final class SavedV2ItemActionTests: XCTestCase {
+    func testAnOlderVisibleEntryCannotReplaceAHigherPendingReadAcrossRelaunch() async throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+            personID: ExactText("person"), deviceID: ExactText("device"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let persistence = FilePendingActionPersistence(directoryURL: directory)
+        let first = try ClientRepository(context: context, persistence: persistence)
+        let model = ServerModelV2Store(fileURL: nil)
+        let item = try APIItem(json: V2Fixture.json(V2Fixture.item("i", rev: 1, rankKey: "a")))
+        try model.rebaseline(items: [item], counts: APICounts(unresolved: 1), position: 1)
+        try model.open("i")
+        try model.apply(kind: "entry", rev: 2,
+                        data: V2Fixture.json(V2Fixture.entry("at-four", item: "i", rev: 2, position: 4)))
+        try model.apply(kind: "entry", rev: 3,
+                        data: V2Fixture.json(V2Fixture.entry("at-nine", item: "i", rev: 3, position: 9)))
+        try first.restoreCachedServerState(ServerModelV2Projection.cachedState(model.snapshot, identity: identity),
+                                           context: context)
+        let key = ServerModelV2Projection.key(for: item.itemID, sender: item.sender, identity: identity)
+        let higher = try XCTUnwrap(first.markConversationRead(key, through: ExactText("at-nine"), context: context))
+        let olderCallback = try first.markConversationRead(key, through: ExactText("at-four"), context: context)
+        XCTAssertEqual(olderCallback, higher)
+        XCTAssertEqual(higher.readThroughConversationSequence, 9)
+
+        let reopened = try ClientRepository(context: context, persistence: persistence)
+        XCTAssertEqual(try reopened.savedV2ReadPositions(context: context), [higher])
+        let server = FakeClientAPIServer()
+        let connection = try ClientAPIv2Connection(transport: server, repository: reopened, context: context,
+            directory: nil, errors: RecordingErrorLogV2())
+        await connection.sendSavedConversationReads()
+        await eventually("position nine settles under its original key") {
+            (try? reopened.savedV2ReadPositions(context: context).isEmpty) == true
+        }
+        let sent = try XCTUnwrap(server.received.first)
+        XCTAssertEqual(server.received.count, 1)
+        XCTAssertEqual(sent.idempotencyKey, higher.operationID)
+        XCTAssertEqual(sent.path, "/v2/items/i/read-position")
+        XCTAssertEqual(String(decoding: sent.body ?? Data(), as: UTF8.self), #"{"entry_id":"at-nine"}"#)
+    }
+
     func testTerminalAnswerRefusalsCloseTheRowWithoutAFeedUpdate() async throws {
         let scenarios: [(APIErrorToken, AppLifecycleStatus, String)] = [
             (.alreadyRetracted, .cleared, "The sender retracted this message."),
