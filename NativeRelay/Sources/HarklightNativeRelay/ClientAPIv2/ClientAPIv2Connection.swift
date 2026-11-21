@@ -31,6 +31,7 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
     public let outbox: ActionOutbox
     public let sync: ChangeFeedSync
     private let transport: any ClientAPITransport
+    private let modelWriter: ServerModelSyncWriter
     private let repository: ClientRepository
     private let context: ProfileContext
     private let errors: any ErrorLogging
@@ -68,11 +69,17 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
             FileOutboxPersistence(url: $0.appendingPathComponent("outbox-v2.json"))
         } ?? MemoryOutbox()
         let relay = PublishRelay()
-        let writer = PublishingSyncWriter(inner: ServerModelSyncWriter(store: model, transport: transport,
-                                                                       errors: errors),
-                                          publish: { relay.connection?.publishModel() })
-        let outcomes = PublishingOutcomes(inner: ServerModelOutboxOutcomes(store: model, onRejected: onRejected),
-                                          publish: { relay.connection?.publishModel() })
+        let modelWriter = ServerModelSyncWriter(store: model, transport: transport, errors: errors)
+        self.modelWriter = modelWriter
+        let writer = PublishingSyncWriter(inner: modelWriter, publish: { relay.connection?.publishModel() })
+        let outcomes = PublishingOutcomes(inner: ServerModelOutboxOutcomes(store: model, onRejected: { entry, error in
+            relay.connection?.recordReply(entry, disposition: .rejected(ExactText(error.token.rawValue)))
+            await onRejected(entry, error)
+        }, onApplied: { entry, result in
+            if let turn = result.entry?.entryID {
+                relay.connection?.recordReply(entry, disposition: .acceptedPendingReplay(operation: entry.id, turn: turn))
+            }
+        }), publish: { relay.connection?.publishModel() })
         self.outbox = try ActionOutbox(persistence: persistence, transport: transport, outcomes: outcomes,
                                        errors: errors, waitBeforeRetry: outboxWaitBeforeRetry)
         self.sync = ChangeFeedSync(transport: transport, model: writer, errors: errors,
@@ -156,6 +163,36 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
         if let persisted = model.persistedCursor(), persisted >= revision { return false }
         try await catchUp()
         return model.heldCursor != before
+    }
+
+    private func recordReply(_ entry: OutboxEntry, disposition: ConversationDraft.Disposition) {
+        guard entry.operation == "reply" else { return }
+        do {
+            let threads = try repository.conversationSnapshot(context: context).threads
+            guard let pair = threads.first(where: { _, thread in
+                thread.queuedMessages?.contains { $0.operationID == entry.id } == true
+            }) else { return }
+            try repository.recordQueuedChatMessage(entry.id, in: pair.key, disposition: disposition, context: context)
+        } catch {
+            errors.report(ErrorLogReport(concern: .actions, connectionRole: .request,
+                operation: "reply", phase: "overlay", reason: .from(error: error),
+                initiator: .unknown, retryable: true))
+        }
+    }
+
+    public func submitQueuedReply(_ message: ConversationDraft) async throws {
+        guard let operation = message.operationID, message.files.isEmpty,
+              message.binding.request.accountScope == context.identity.personID else { return }
+        let reply = ClientAPIWrites.reply(itemID: message.binding.request.messageID, text: message.text)
+        try await outbox.submit(target: reply.target, operation: reply.operation, write: reply.write,
+                                idempotencyKey: operation)
+    }
+
+    public func loadEntriesIfNeeded(itemID: ExactText) async throws {
+        guard model.snapshot.items[itemID] != nil,
+              !model.snapshot.loadedEntryItems.contains(itemID) else { return }
+        try await modelWriter.loadEntries(of: itemID)
+        publishModel()
     }
 
     /// Publishes the model into the repository when it holds a full

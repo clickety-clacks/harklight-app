@@ -871,6 +871,11 @@ final class NativeAppLaunch {
                   self.foregroundConnectProgress?.outcome != .confirmed else { return }
             self.clearForegroundConnectionDetails()
         }
+        if usesV2 {
+            presentation.chatMessageQueued = { message in
+                Task { await NativeRelayLifecycle.shared.sendV2QueuedReply(message, expected: context) }
+            }
+        }
         presentation.startObserving()
         state = .live(presentation)
         isShowingDisconnectedArchive = false
@@ -2287,6 +2292,11 @@ final class LivePresentationStore {
         default: return false
         }
         return conversationThreads[key]?.uploadGroups?[operation]?.cleanupID != nil
+    }
+
+    func loadDiscussionOnOpen(_ key: RequestKey) async {
+        guard permitsDelivery else { return }
+        await NativeRelayLifecycle.shared.loadV2EntriesOnOpen(key, expected: profileContext)
     }
 
     func refreshDiscussionHistory() async {

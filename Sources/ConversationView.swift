@@ -248,6 +248,7 @@ struct ConversationPanel: View {
             }
         }
         .simultaneousGesture(chatDismissGesture)
+        .task(id: key) { await store.loadDiscussionOnOpen(key) }
         .onAppear {
             if scenePhase == .active { NativeNotificationRouter.shared.conversationBecameVisible(key) }
             reportEmptyChatFocusIfNeeded()

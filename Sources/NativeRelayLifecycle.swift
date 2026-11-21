@@ -1279,6 +1279,31 @@ final class NativeRelayLifecycle {
         startV2Foreground()
     }
 
+    func sendV2QueuedReply(_ message: ConversationDraft, expected: ProfileContext) async {
+        guard let connection = v2Connection, context == expected else { return }
+        do {
+            try await connection.submitQueuedReply(message)
+        } catch {
+            errorLog.report(ErrorLogReport(concern: .actions, connectionRole: .request,
+                operation: "reply", phase: "queue", reason: .from(error: error),
+                initiator: .unknown, retryable: true))
+        }
+    }
+
+    func loadV2EntriesOnOpen(_ key: RequestKey, expected: ProfileContext) async {
+        guard let connection = v2Connection, context == expected,
+              key.accountScope == expected.identity.personID else { return }
+        do {
+            try await connection.loadEntriesIfNeeded(itemID: key.messageID)
+        } catch is ServerModelV2Store.SupersededGeneration {
+            // A reset during the read leaves the thread unloaded for its next open.
+        } catch {
+            errorLog.report(ErrorLogReport(concern: .snapshot, connectionRole: .request,
+                operation: "load_entries", phase: "read", reason: .from(error: error),
+                initiator: .unknown, retryable: true))
+        }
+    }
+
     func refreshV2ForPush(_ payload: JSONValue, enrollment: NativeEnrollmentRecord) async -> Bool {
         guard clientAPIV2Enabled, let connection = v2Connection, let context,
               let revision = NativeV2PushWake.revision(payload, enrollment: enrollment,

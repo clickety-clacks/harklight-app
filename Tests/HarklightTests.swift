@@ -8,15 +8,23 @@ private final class V2ScenePushTransport: ClientAPITransport, @unchecked Sendabl
     private var opened = 0
     private var closed = 0
     private var batches = 0
+    private var entryReads = 0
 
-    var counts: (opened: Int, closed: Int, batches: Int) {
-        lock.withLock { (opened, closed, batches) }
+    var counts: (opened: Int, closed: Int, batches: Int, entryReads: Int) {
+        lock.withLock { (opened, closed, batches, entryReads) }
     }
 
     func send(_ request: APIRequest) async throws -> APIResponse {
-        let body = request.path == "/v2/me"
-            ? #"{"account":{"state":"active"},"features":{},"limits":{}}"#
-            : #"{"rev":0,"items":[],"counts":{"unresolved":0}}"#
+        let body: String
+        switch request.path {
+        case "/v2/me":
+            body = #"{"account":{"state":"active"},"features":{},"limits":{}}"#
+        case "/v2/items/item/entries":
+            lock.withLock { entryReads += 1 }
+            body = #"{"rev":2,"entries":[],"older":false}"#
+        default:
+            body = #"{"rev":0,"items":[],"counts":{"unresolved":0}}"#
+        }
         return APIResponse(status: 200, requestID: "test", body: Data(body.utf8))
     }
 
@@ -78,6 +86,30 @@ final class HarklightTests: XCTestCase {
         XCTAssertEqual(transport.counts.batches, 1)
         XCTAssertEqual(transport.counts.opened, 0, "A background push fetches a batch without opening a feed.")
         await on.deactivate()
+    }
+
+    @MainActor
+    func testOpeningAnUnloadedV2ThreadRefetchesAfterAReset() async throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                                       personID: ExactText("person"), deviceID: ExactText("device"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let transport = V2ScenePushTransport()
+        let store = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        let connection = try ClientAPIv2Connection(transport: transport, repository: store, context: context,
+                                                    directory: nil, errors: NoopErrorLog())
+        let lifecycle = NativeRelayLifecycle(clientAPIV2Enabled: true)
+        lifecycle.installV2Connection(connection, context: context)
+        let key = RequestKey(accountScope: identity.personID, senderID: ExactText("sender"), messageID: ExactText("item"))
+        let item = try APIItem(json: JSONValue.parse(Data(#"{"item_id":"item","rev":1,"sender":"sender","request_revision":1,"message":{"title":"Question"},"files":[],"seen":false,"rank":{"key":"a","section":"current"},"chat":{"available":true,"started":true}}"#.utf8)))
+        try connection.model.rebaseline(items: [item], counts: APICounts(unresolved: 1), position: 2)
+        await lifecycle.loadV2EntriesOnOpen(key, expected: context)
+        await lifecycle.loadV2EntriesOnOpen(key, expected: context)
+        XCTAssertEqual(transport.counts.entryReads, 1)
+        try connection.model.rebaseline(items: [item], counts: APICounts(unresolved: 1), position: 1)
+        await lifecycle.loadV2EntriesOnOpen(key, expected: context)
+        XCTAssertEqual(transport.counts.entryReads, 2)
+        XCTAssertTrue(connection.model.snapshot.loadedEntryItems.contains(key.messageID))
+        await lifecycle.deactivate()
     }
 
     @MainActor
