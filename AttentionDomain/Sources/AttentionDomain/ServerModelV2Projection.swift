@@ -230,3 +230,38 @@ public enum ServerModelV2Projection {
                          freeOrderVersion: freeOrder ? 1 : nil)
     }
 }
+
+/// The one way the v2 model reaches the screen. The answer-screen rules
+/// `GET /v2/me` publishes are put in force before the first projection, so no
+/// screen is ever judged by today's rules or the built-in limits while a v2
+/// model is shown (review L-27).
+public final class ServerModelV2Presentation: @unchecked Sendable {
+    public enum PresentationError: Error, Equatable {
+        /// No `GET /v2/me` has been read on this device yet.
+        case rulesNotRead
+    }
+
+    private let lock = NSLock()
+    private var me: APIMe?
+
+    /// `savedMe` is the last `GET /v2/me` kept with the model, so a launch
+    /// without a connection shows the saved model under the same rules.
+    public init(savedMe: APIMe? = nil) {
+        if let savedMe { apply(savedMe) }
+    }
+
+    /// Puts a freshly read `GET /v2/me` in force.
+    public func apply(_ me: APIMe) {
+        lock.withLock {
+            self.me = me
+            AnswerScreenRules.current = .v2(me)
+        }
+    }
+
+    public var hasRules: Bool { lock.withLock { me != nil } }
+
+    public func cachedState(_ model: ServerModelV2, identity: ProfileIdentity) throws -> CachedAttentionServerState {
+        guard hasRules else { throw PresentationError.rulesNotRead }
+        return ServerModelV2Projection.cachedState(model, identity: identity)
+    }
+}

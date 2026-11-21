@@ -475,6 +475,8 @@ public struct APIMe: Equatable, Sendable {
     public let accountState: String?
     /// Server-controlled client features still behind a flag at 0.2.
     public let features: [String: Bool]
+    /// `limits.answer_ui_limits`, or nil when it is missing or incomplete.
+    public let answerUILimits: SenderDocumentLimits?
     public let body: JSONValue
 
     public init(json: JSONValue) throws {
@@ -485,6 +487,8 @@ public struct APIMe: Equatable, Sendable {
             for member in members { if case let .bool(on) = member.value { features[member.key.rawValue] = on } }
         }
         self.features = features
+        answerUILimits = reader.raw("limits")?.uniqueValue(named: "answer_ui_limits")
+            .flatMap(SenderDocumentLimits.init(answerUILimits:))
         body = json
     }
 }
