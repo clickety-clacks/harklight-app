@@ -172,8 +172,12 @@ final class FakeClientAPIServer: ClientAPITransport, @unchecked Sendable {
         }
     }
 
+    private var _batchPositions: [Rev] = []
+    var batchPositions: [Rev] { lock.withLock { _batchPositions } }
+
     func changeBatch(after: Rev) async throws -> FeedBatch {
         try lock.withLock {
+            _batchPositions.append(after)
             guard after >= retainedFrom else {
                 throw APIError(status: 410, token: .cursorExpired, retryable: false, requestID: "req-batch")
             }
@@ -237,9 +241,10 @@ final class RecordingSyncModel: SyncModelWriting, @unchecked Sendable {
         return self
     }
 
+    func syncPosition() throws -> (revision: Rev?, generation: UInt64) { (try heldCursor(), 0) }
     func heldCursor() throws -> Rev? { try cursor.load() }
 
-    func apply(_ changes: [FeedChange], cursor rev: Rev) async throws {
+    func apply(_ changes: [FeedChange], cursor rev: Rev, generation: UInt64) async throws {
         for change in changes { onApply?(change) }
         let admitted = try lock.withLock { () -> [Rev] in
             if let failApplyAt = _failApplyAt, changes.contains(where: { $0.rev == failApplyAt }) {

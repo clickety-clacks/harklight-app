@@ -148,6 +148,16 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
         try await sync.catchUp()
     }
 
+    /// Applies a push's change batch only when its revision is newer than
+    /// the durable position. The push revision is a hint, never a cursor.
+    @discardableResult
+    public func catchUp(forPushRevision revision: Rev) async throws -> Bool {
+        let before = model.heldCursor
+        if let persisted = model.persistedCursor(), persisted >= revision { return false }
+        try await catchUp()
+        return model.heldCursor != before
+    }
+
     /// Publishes the model into the repository when it holds a full
     /// baseline and the answer-screen rules are known.
     public func publishModel() {
@@ -193,9 +203,9 @@ private final class PublishingSyncWriter: SyncModelWriting, @unchecked Sendable 
         self.inner = inner
         self.publish = publish
     }
-    func heldCursor() throws -> Rev? { try inner.heldCursor() }
-    func apply(_ changes: [FeedChange], cursor: Rev) async throws {
-        try await inner.apply(changes, cursor: cursor)
+    func syncPosition() throws -> (revision: Rev?, generation: UInt64) { try inner.syncPosition() }
+    func apply(_ changes: [FeedChange], cursor: Rev, generation: UInt64) async throws {
+        try await inner.apply(changes, cursor: cursor, generation: generation)
         publish()
     }
     func rebaseline() async throws -> Rev {

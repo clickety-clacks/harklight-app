@@ -1,20 +1,20 @@
+import AttentionDomain
 import Foundation
 
 /// The local model as Sync writes it. The model holds Sync's one cursor (the
 /// last applied `rev`) with its data, so the two are saved together and a
 /// model that is discarded takes its cursor with it.
 ///
-/// Every write goes through the version gate (a change or snapshot older
-/// than what is held is a no-op), so order relative to reads and writes
-/// never matters.
+/// Feed and batch writes carry the generation they started in. Installing
+/// a snapshot advances that generation even when the revision is unchanged.
 public protocol SyncModelWriting: Sendable {
     /// The cursor saved with the model; nil before the first snapshot or
     /// after the model was discarded, which makes Sync take a snapshot.
-    func heldCursor() throws -> Rev?
+    func syncPosition() throws -> (revision: Rev?, generation: UInt64)
     /// Applies `changes` (in `rev` order) and records `cursor`, in one
     /// durable write. A change the writer cannot read is reported and skipped
     /// by the writer, never retried; a failed save throws and applies nothing.
-    func apply(_ changes: [FeedChange], cursor: Rev) async throws
+    func apply(_ changes: [FeedChange], cursor: Rev, generation: UInt64) async throws
     /// Takes one inbox snapshot and records its position as the cursor.
     func rebaseline() async throws -> Rev
 }
@@ -23,6 +23,11 @@ public protocol SyncModelWriting: Sendable {
 /// skip: Sync rebaselines from a full snapshot and continues.
 public struct SyncNeedsRebaseline: Error, Equatable {
     public init() {}
+}
+
+/// The inbox read lost to newer local Sync progress and was never installed.
+struct SyncSnapshotSuperseded: Error {
+    let position: Rev
 }
 
 /// Sync (design section 3) over the r2 change feed. It owns the only feed
@@ -41,6 +46,7 @@ public actor ChangeFeedSync {
     static let feedOperation = "change_feed"
     static let catchUpOperation = "catch_up"
 
+    private var foregroundAttempt: Task<FeedEnd, Never>?
     private let transport: any ClientAPITransport
     private let model: any SyncModelWriting
     private let errors: any ErrorLogging
@@ -76,10 +82,19 @@ public actor ChangeFeedSync {
         var attempt = 0
         while !Task.isCancelled {
             openedThisRound = false
-            let end = await followFeedOnce()
+            let attemptTask = Task { await followFeedOnce() }
+            foregroundAttempt = attemptTask
+            let end = await withTaskCancellationHandler {
+                await attemptTask.value
+            } onCancel: {
+                attemptTask.cancel()
+            }
+            foregroundAttempt = nil
+            if attemptTask.isCancelled && !Task.isCancelled { continue }
             // A feed that opened counts as a success: the backoff starts over.
             if openedThisRound { attempt = 0 }
             switch end {
+            case .superseded: continue
             case .revoked:
                 liveState = .stopped
                 return
@@ -100,7 +115,12 @@ public actor ChangeFeedSync {
     /// holding a stream.
     public func catchUp() async throws {
         do {
-            _ = try await drainBatches(from: startingRev())
+            let start = try await startingPosition()
+            do {
+                _ = try await drainBatches(from: start, interruptsForeground: true)
+            } catch is ServerModelV2Store.SupersededGeneration {
+                _ = try await drainBatches(from: startingPosition(), interruptsForeground: true)
+            }
             errors.resolve(concern: .sync, operation: Self.catchUpOperation)
         } catch {
             let cause = (error as? ApplyFailure)?.underlying ?? error
@@ -112,17 +132,22 @@ public actor ChangeFeedSync {
 
     /// Applies JSON batches from `after` until none is left, one durable
     /// write per batch, and returns the new cursor. Rebaselines at most once.
-    private func drainBatches(from start: Rev) async throws -> Rev {
-        var after = start
+    private typealias Position = (revision: Rev, generation: UInt64)
+
+    private func drainBatches(from start: Position, interruptsForeground: Bool = false) async throws -> Position {
+        var after = start.revision
+        var generation = start.generation
         var rebaselined = false
         while true {
             let batch: FeedBatch
             do {
                 batch = try await transport.changeBatch(after: after)
+                try checkGeneration(generation)
             } catch let error as APIError where error.token == .cursorExpired && !rebaselined {
                 // One rebaseline per drain; a second 410 is reported.
+                try checkGeneration(generation)
+                (after, generation) = try await rebaseline(interruptsForeground: interruptsForeground)
                 rebaselined = true
-                after = try await rebaseline()
                 continue
             }
             let fresh = batch.changes.filter { $0.rev > after }
@@ -130,14 +155,14 @@ public actor ChangeFeedSync {
             let through = max(batch.rev, fresh.last?.rev ?? after)
             if through > after {
                 do {
-                    try await apply(fresh, cursor: through)
+                    try await apply(fresh, cursor: through, generation: generation)
                 } catch let failure as ApplyFailure where failure.underlying is SyncNeedsRebaseline && !rebaselined {
+                    (after, generation) = try await rebaseline(interruptsForeground: interruptsForeground)
                     rebaselined = true
-                    after = try await rebaseline()
                     continue
                 }
             }
-            guard batch.more else { return max(after, through) }
+            guard batch.more else { return (max(after, through), generation) }
             // `more` without progress would loop; stop and report it.
             guard through > after else { throw FeedDecodingError.outOfOrder }
             after = through
@@ -147,6 +172,7 @@ public actor ChangeFeedSync {
     // MARK: One feed connection
 
     private enum FeedEnd {
+        case superseded
         case dropped(ErrorLogInitiator, retryPromptly: Bool)
         case revoked
         case accountPaused
@@ -154,21 +180,25 @@ public actor ChangeFeedSync {
     }
 
     private func followFeedOnce() async -> FeedEnd {
-        let after: Rev
+        let after: Position
         do {
-            after = try await startingRev()
+            after = try await startingPosition()
         } catch {
             report(Self.feedOperation, phase: "rebaseline", error: error, initiator: .forFailure(error))
             return .dropped(.forFailure(error), retryPromptly: false)
         }
         liveState = .catchingUp
         feedRequestID = nil
+        var generation = after.generation
         do {
             // The backlog comes by batch (one write per batch); the stream
             // then carries only live changes.
             let caughtUp = try await drainBatches(from: after)
-            var last = caughtUp
-            for try await event in transport.changeFeed(after: caughtUp) {
+            generation = caughtUp.generation
+            var last = caughtUp.revision
+            try checkGeneration(generation)
+            for try await event in transport.changeFeed(after: last) {
+                try checkGeneration(generation)
                 switch event {
                 case let .opened(requestID):
                     openedThisRound = true
@@ -183,7 +213,7 @@ public actor ChangeFeedSync {
                     await onShow(data)
                 case let .change(change):
                     guard change.rev > last else { continue }
-                    try await apply([change], cursor: change.rev)
+                    try await apply([change], cursor: change.rev, generation: generation)
                     last = change.rev
                 case let .closing(reason):
                     let initiator = Self.initiator(forClosingReason: reason)
@@ -221,6 +251,10 @@ public actor ChangeFeedSync {
             report(Self.feedOperation, phase: "stream", reason: .app("ended_without_closing"),
                    initiator: .unknown, retryable: true)
             return .dropped(.unknown, retryPromptly: false)
+        } catch is ServerModelV2Store.SupersededGeneration {
+            return .superseded
+        } catch where Task.isCancelled {
+            return .cancelled
         } catch let error as APIError where error.token == .cursorExpired {
             do {
                 _ = try await rebaseline()
@@ -260,21 +294,56 @@ public actor ChangeFeedSync {
     private struct ApplyFailure: Error { let underlying: any Error }
 
     /// The cursor, or a fresh snapshot's `rev` on first run.
-    private func startingRev() async throws -> Rev {
-        if let held = try model.heldCursor() { return held }
-        return try await rebaseline()
+    private func startingPosition() async throws -> Position {
+        if try model.syncPosition().revision == nil {
+            do {
+                _ = try await model.rebaseline()
+            } catch is SyncSnapshotSuperseded {
+                // Another Sync path already established the cold baseline.
+            }
+        }
+        return try heldPosition()
     }
 
-    /// A rebaseline replaces the cursor, even with a lower value: the
-    /// server's log may have started over.
-    private func rebaseline() async throws -> Rev {
-        try await model.rebaseline()
+    private func heldPosition() throws -> Position {
+        let held = try model.syncPosition()
+        guard let revision = held.revision else { throw FeedDecodingError.invalidBatch }
+        return (revision, held.generation)
+    }
+
+    private func checkGeneration(_ expected: UInt64) throws {
+        guard try model.syncPosition().generation == expected else {
+            throw ServerModelV2Store.SupersededGeneration()
+        }
+        try Task.checkCancellation()
+    }
+
+    /// Once the server has rejected the cursor, concurrent progress on that
+    /// cursor does not replace recovery. Read a fresh snapshot after a fence
+    /// rejection, with a bound on repeated interference.
+    private func rebaseline(interruptsForeground: Bool = false) async throws -> Position {
+        let initialGeneration = try model.syncPosition().generation
+        for attempt in 1...3 {
+            try Task.checkCancellation()
+            do {
+                _ = try await model.rebaseline()
+                if interruptsForeground { foregroundAttempt?.cancel() }
+                return try heldPosition()
+            } catch let error as SyncSnapshotSuperseded {
+                let current = try heldPosition()
+                if current.generation != initialGeneration { return current }
+                if attempt == 3 { throw error }
+            }
+        }
+        throw FeedDecodingError.invalidBatch
     }
 
     /// The cursor moves only with the changes, in the same durable write.
-    private func apply(_ changes: [FeedChange], cursor: Rev) async throws {
+    private func apply(_ changes: [FeedChange], cursor: Rev, generation: UInt64) async throws {
         do {
-            try await model.apply(changes, cursor: cursor)
+            try await model.apply(changes, cursor: cursor, generation: generation)
+        } catch let error as ServerModelV2Store.SupersededGeneration {
+            throw error
         } catch {
             throw ApplyFailure(underlying: error)
         }

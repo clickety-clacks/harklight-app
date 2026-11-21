@@ -163,17 +163,267 @@ final class ServerModelV2Tests: XCTestCase {
 /// Serves `GET /v2/inbox` pages and records writes; enough for rebaseline.
 private final class InboxPagesTransport: ClientAPITransport, @unchecked Sendable {
     var pages: [String?: String] = [:]
+    var beforeReturningPage: @Sendable () async -> Void = {}
+    var maximumBatchPosition: Rev?
+    var onBatch: (@Sendable (Rev) async throws -> FeedBatch)?
+    var onFeed: (@Sendable (Rev) -> AsyncThrowingStream<FeedEvent, any Error>)?
     func send(_ request: APIRequest) async throws -> APIResponse {
         guard request.path == "/v2/inbox", let body = pages[request.query["page"]] else {
             throw APIError(status: 404, token: .notFound, retryable: false, requestID: "r")
         }
+        await beforeReturningPage()
         return APIResponse(status: 200, requestID: "r", body: Data(body.utf8))
     }
-    func changeFeed(after: Rev) -> AsyncThrowingStream<FeedEvent, any Error> { AsyncThrowingStream { $0.finish() } }
-    func changeBatch(after: Rev) async throws -> FeedBatch { FeedBatch(changes: [], rev: after, more: false) }
+    func changeFeed(after: Rev) -> AsyncThrowingStream<FeedEvent, any Error> {
+        onFeed?(after) ?? AsyncThrowingStream { $0.finish() }
+    }
+    func changeBatch(after: Rev) async throws -> FeedBatch {
+        if let onBatch { return try await onBatch(after) }
+        if let maximumBatchPosition, after > maximumBatchPosition {
+            throw APIError(status: 410, token: .cursorExpired, retryable: false, requestID: "r")
+        }
+        return FeedBatch(changes: [], rev: after, more: false)
+    }
+}
+
+private actor ResetBatchScript {
+    private var held = false
+    private var snapshotReads = 0
+
+    func isSecondSnapshot() -> Bool {
+        snapshotReads += 1
+        return snapshotReads == 2
+    }
+
+    func shouldHold(_ after: Rev) -> Bool {
+        guard after == 10, !held else { return false }
+        held = true
+        return true
+    }
+}
+
+private struct SuspendedCommitWriter: SyncModelWriting {
+    let inner: ServerModelSyncWriter
+    let commitStarted: AsyncGate
+    let releaseCommit: AsyncGate
+
+    func syncPosition() throws -> (revision: Rev?, generation: UInt64) { try inner.syncPosition() }
+    func rebaseline() async throws -> Rev { try await inner.rebaseline() }
+    func apply(_ changes: [FeedChange], cursor: Rev, generation: UInt64) async throws {
+        commitStarted.release()
+        await releaseCommit.wait()
+        try await inner.apply(changes, cursor: cursor, generation: generation)
+    }
 }
 
 final class ServerModelAdapterTests: XCTestCase {
+    func testCatchUpRestartsAfterTheStoreFencesAnAlreadyCheckedBatch() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let file = dir.appendingPathComponent("model.json")
+        let store = ServerModelV2Store(fileURL: file)
+        try store.rebaseline(items: [], counts: APICounts(unresolved: 0), position: 10)
+        let transport = InboxPagesTransport()
+        let commitStarted = AsyncGate()
+        let releaseCommit = AsyncGate()
+        let fetchedAfterReset = AsyncGate()
+        let late = FeedChange(rev: 11, kind: .item, data: Data(V2Fixture.item("old", rev: 11, rankKey: "a").utf8))
+        transport.onBatch = { after in
+            if after == 10 { return FeedBatch(changes: [late], rev: 11, more: false) }
+            XCTAssertEqual(after, 1)
+            fetchedAfterReset.release()
+            return FeedBatch(changes: [], rev: after, more: false)
+        }
+        let errors = RecordingErrorLogV2()
+        let inner = ServerModelSyncWriter(store: store, transport: transport, errors: errors)
+        let writer = SuspendedCommitWriter(inner: inner, commitStarted: commitStarted, releaseCommit: releaseCommit)
+        let sync = ChangeFeedSync(transport: transport, model: writer, errors: errors)
+        let catchUp = Task { try await sync.catchUp() }
+        defer { releaseCommit.release() }
+        await commitStarted.wait()
+
+        try store.rebaseline(items: [], counts: APICounts(unresolved: 0), position: 1)
+        releaseCommit.release()
+        try await catchUp.value
+        await fetchedAfterReset.wait()
+        XCTAssertEqual(ServerModelV2Store(fileURL: file).heldCursor, 1)
+        XCTAssertTrue(errors.reports.isEmpty)
+    }
+
+    func testADelayedSnapshotCannotReplaceDurableLiveProgress() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("model.json")
+        let store = ServerModelV2Store(fileURL: url)
+        let transport = InboxPagesTransport()
+        let requested = AsyncGate()
+        let blocked = AsyncGate()
+        transport.pages[nil] = #"{"rev":1,"items":[],"counts":{"unresolved":0}}"#
+        transport.beforeReturningPage = {
+            requested.release()
+            await blocked.wait()
+        }
+        let writer = ServerModelSyncWriter(store: store, transport: transport, errors: RecordingErrorLogV2())
+        let rebaseline = Task { try await writer.rebaseline() }
+        defer { blocked.release() }
+        await requested.wait()
+
+        try store.apply(kind: "item", rev: 2, data: V2Fixture.json(V2Fixture.item("live", rev: 2, rankKey: "a")))
+        blocked.release()
+        do {
+            _ = try await rebaseline.value
+            XCTFail("A fenced snapshot was not installed.")
+        } catch let error as SyncSnapshotSuperseded {
+            XCTAssertEqual(error.position, 2)
+        }
+        let reopened = ServerModelV2Store(fileURL: url)
+        XCTAssertEqual(reopened.heldCursor, 2)
+        XCTAssertNotNil(reopened.snapshot.items[ExactText("live")])
+
+        let reset = try await writer.rebaseline()
+        XCTAssertEqual(reset, 1, "A fresh rebaseline can still follow a server reset.")
+        XCTAssertEqual(ServerModelV2Store(fileURL: url).heldCursor, 1)
+    }
+
+    func testContestedCursorExpiredRecoveryStillInstallsTheReset() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("model.json")
+        let store = ServerModelV2Store(fileURL: url)
+        try store.rebaseline(items: [], counts: APICounts(unresolved: 0), position: 10)
+        let transport = InboxPagesTransport()
+        let requested = AsyncGate()
+        let blocked = AsyncGate()
+        transport.maximumBatchPosition = 1
+        let reset = V2Fixture.item("reset", rev: 1, rankKey: "a")
+        transport.pages[nil] = #"{"rev":1,"items":[\#(reset)],"counts":{"unresolved":1}}"#
+        transport.beforeReturningPage = {
+            requested.release()
+            await blocked.wait()
+        }
+        let errors = RecordingErrorLogV2()
+        let writer = ServerModelSyncWriter(store: store, transport: transport, errors: errors)
+        let sync = ChangeFeedSync(transport: transport, model: writer, errors: errors)
+        let catchUp = Task { try await sync.catchUp() }
+        defer { blocked.release() }
+        await requested.wait()
+
+        // An already-buffered change from the old feed advances the disk
+        // cursor while the first reset snapshot is still loading.
+        try store.apply(kind: "item", rev: 11,
+                        data: V2Fixture.json(V2Fixture.item("old", rev: 11, rankKey: "b")))
+        blocked.release()
+        try await catchUp.value
+
+        let reopened = ServerModelV2Store(fileURL: url)
+        XCTAssertEqual(reopened.heldCursor, 1)
+        XCTAssertEqual(Set(reopened.snapshot.items.keys.map(\.rawValue)), ["reset"])
+    }
+
+    func testResetCancelsOldFeedAndResumesFromTheNewGeneration() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let file = dir.appendingPathComponent("model.json")
+        let store = ServerModelV2Store(fileURL: file)
+        try store.rebaseline(items: [], counts: APICounts(unresolved: 0), position: 10)
+        let oldGeneration = store.syncPosition.generation
+        let transport = InboxPagesTransport()
+        let old = AsyncThrowingStream<FeedEvent, any Error>.makeStream()
+        let resumed = AsyncThrowingStream<FeedEvent, any Error>.makeStream()
+        let oldOpened = AsyncGate()
+        let reopened = AsyncGate()
+        transport.pages[nil] = #"{"rev":1,"items":[],"counts":{"unresolved":0}}"#
+        let initialBatch = ResetBatchScript()
+        transport.onBatch = { after in
+            if after == 10, !(await initialBatch.shouldHold(after)) {
+                throw APIError(status: 410, token: .cursorExpired, retryable: false, requestID: "reset")
+            }
+            return FeedBatch(changes: [], rev: after, more: false)
+        }
+        transport.onFeed = { after in
+            if after == 10 {
+                oldOpened.release()
+                return old.stream
+            }
+            XCTAssertEqual(after, 1)
+            reopened.release()
+            return resumed.stream
+        }
+        let errors = RecordingErrorLogV2()
+        let writer = ServerModelSyncWriter(store: store, transport: transport, errors: errors)
+        let sync = ChangeFeedSync(transport: transport, model: writer, errors: errors)
+        let run = Task { await sync.runForeground() }
+        defer { run.cancel(); old.continuation.finish(); resumed.continuation.finish() }
+        await oldOpened.wait()
+        try await sync.catchUp()
+        await reopened.wait()
+        let late = FeedChange(rev: 11, kind: .item, data: Data(V2Fixture.item("old", rev: 11, rankKey: "a").utf8))
+        old.continuation.yield(.change(late))
+        do {
+            try await writer.apply([late], cursor: 11, generation: oldGeneration)
+            XCTFail("The previous generation must not write.")
+        } catch is ServerModelV2Store.SupersededGeneration {}
+        let saved = ServerModelV2Store(fileURL: file)
+        XCTAssertEqual(saved.heldCursor, 1)
+        XCTAssertEqual(saved.syncPosition.generation, oldGeneration + 1)
+        XCTAssertTrue(saved.snapshot.items.isEmpty)
+    }
+
+    func testOldBatchAndOverlappingPushRecoverAcrossTwoResets() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let file = dir.appendingPathComponent("model.json")
+        let store = ServerModelV2Store(fileURL: file)
+        try store.rebaseline(items: [], counts: APICounts(unresolved: 0), position: 10)
+        let initialGeneration = store.syncPosition.generation
+        let transport = InboxPagesTransport()
+        let batchStarted = AsyncGate()
+        let releaseBatch = AsyncGate()
+        let snapshotStarted = AsyncGate()
+        let overlappingSnapshotStarted = AsyncGate()
+        let releaseSnapshot = AsyncGate()
+        let nextBatch = ResetBatchScript()
+        let late = FeedChange(rev: 11, kind: .item, data: Data(V2Fixture.item("old", rev: 11, rankKey: "a").utf8))
+        transport.pages[nil] = #"{"rev":1,"items":[],"counts":{"unresolved":0}}"#
+        transport.beforeReturningPage = {
+            if await nextBatch.isSecondSnapshot() { overlappingSnapshotStarted.release() }
+            snapshotStarted.release()
+            await releaseSnapshot.wait()
+        }
+        transport.onBatch = { after in
+            if await nextBatch.shouldHold(after) {
+                batchStarted.release()
+                await releaseBatch.wait()
+                return FeedBatch(changes: [late], rev: 11, more: false)
+            }
+            if after > 1 {
+                throw APIError(status: 410, token: .cursorExpired, retryable: false, requestID: "reset")
+            }
+            return FeedBatch(changes: [], rev: after, more: false)
+        }
+        let errors = RecordingErrorLogV2()
+        let writer = ServerModelSyncWriter(store: store, transport: transport, errors: errors)
+        let sync = ChangeFeedSync(transport: transport, model: writer, errors: errors)
+        let first = Task { try await sync.catchUp() }
+        defer { releaseSnapshot.release(); releaseBatch.release() }
+        await batchStarted.wait()
+        let second = Task { try await sync.catchUp() }
+        await snapshotStarted.wait()
+        let duringReset = Task { try await sync.catchUp() }
+        await overlappingSnapshotStarted.wait()
+        releaseSnapshot.release()
+        try await second.value
+        try await duringReset.value
+        releaseBatch.release()
+        try await first.value
+
+        XCTAssertEqual(store.heldCursor, 1)
+        XCTAssertEqual(store.syncPosition.generation, initialGeneration + 1)
+        XCTAssertTrue(store.snapshot.items.isEmpty)
+        _ = try await writer.rebaseline()
+        XCTAssertEqual(ServerModelV2Store(fileURL: file).syncPosition.generation, initialGeneration + 2)
+    }
+
     func testRebaselineReadsEveryPageKeepsTheFirstPositionAndDropsWhatIsGone() async throws {
         let store = ServerModelV2Store(fileURL: nil)
         try store.apply(kind: "item", rev: 2, data: V2Fixture.json(V2Fixture.item("gone", rev: 2, rankKey: "z")))
@@ -376,14 +626,14 @@ final class UnreadableRebaselineOnceTests: XCTestCase {
         let transport = InboxPagesTransport()
         let writer = ServerModelSyncWriter(store: store, transport: transport, errors: RecordingErrorLogV2())
         let broken = FeedChange(rev: 1, kind: .item, data: Data(#"{"item_id":"x","rev":1}"#.utf8))
-        do { try await writer.apply([broken], cursor: 1); XCTFail("Asks for a rebaseline.") }
+        do { try await writer.apply([broken], cursor: 1, generation: store.syncPosition.generation); XCTFail("Asks for a rebaseline.") }
         catch { XCTAssertTrue(error is SyncNeedsRebaseline) }
         do { _ = try await writer.rebaseline(); XCTFail("No inbox is served yet.") } catch {}
-        do { try await writer.apply([broken], cursor: 1); XCTFail("Still asks, as the rebaseline failed.") }
+        do { try await writer.apply([broken], cursor: 1, generation: store.syncPosition.generation); XCTFail("Still asks, as the rebaseline failed.") }
         catch { XCTAssertTrue(error is SyncNeedsRebaseline) }
         transport.pages[nil] = #"{"rev":1,"items":[],"counts":{"unresolved":0}}"#
         _ = try await writer.rebaseline()
-        try await writer.apply([broken], cursor: 1)
+        try await writer.apply([broken], cursor: 1, generation: store.syncPosition.generation)
         XCTAssertEqual(store.heldCursor, 1, "After a successful rebaseline a recurrence is skipped.")
     }
 }

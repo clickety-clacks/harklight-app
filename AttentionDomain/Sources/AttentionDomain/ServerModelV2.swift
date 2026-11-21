@@ -131,7 +131,11 @@ public struct ServerModelV2: Equatable, Codable, Sendable {
     /// `keeping` lists items the inbox named but the client could not read:
     /// their last-known copy stays rather than disappearing.
     mutating func rebaseline(items fresh: [APIItem], keeping unreadable: Set<ExactText> = [], counts: APICounts,
-                             position: UInt64, at now: Date) {
+                             position: UInt64, at now: Date, resetsHistory: Bool) {
+        if resetsHistory {
+            gate = RevGate()
+            settings = nil
+        }
         let listed = Set(fresh.map(\.itemID)).union(unreadable)
         for itemID in Array(items.keys) where !listed.contains(itemID) {
             items[itemID] = nil
@@ -172,6 +176,7 @@ public final class ServerModelV2Store: @unchecked Sendable {
     private struct Stored: Codable {
         let version: Int
         let cursor: UInt64?
+        let generation: UInt64?
         let model: ServerModelV2
     }
 
@@ -179,6 +184,7 @@ public final class ServerModelV2Store: @unchecked Sendable {
     private let fileURL: URL?
     private var model: ServerModelV2
     private var cursor: UInt64?
+    private var generation: UInt64 = 0
     private let now: @Sendable () -> Date
     /// Saves made so far; tests use it to check one write per batch.
     public private(set) var saveCount = 0
@@ -192,6 +198,7 @@ public final class ServerModelV2Store: @unchecked Sendable {
            stored.version == Self.formatVersion {
             model = stored.model
             cursor = stored.cursor
+            generation = stored.generation ?? 0
         } else {
             model = ServerModelV2()
             cursor = nil
@@ -200,6 +207,27 @@ public final class ServerModelV2Store: @unchecked Sendable {
 
     public var snapshot: ServerModelV2 { lock.withLock { model } }
     public var heldCursor: UInt64? { lock.withLock { cursor } }
+
+    public var syncPosition: (revision: UInt64?, generation: UInt64) {
+        lock.withLock { (cursor, generation) }
+    }
+
+    public struct SupersededGeneration: Error { public init() {} }
+
+    /// The position in the saved model. An in-memory model cannot prove that
+    /// a push revision has already been persisted.
+    public func persistedCursor() -> UInt64? {
+        struct Header: Decodable {
+            let version: Int
+            let cursor: UInt64?
+        }
+        return lock.withLock {
+            guard let fileURL, let bytes = try? Data(contentsOf: fileURL),
+                  let header = try? JSONDecoder().decode(Header.self, from: bytes),
+                  header.version == Self.formatVersion else { return nil }
+            return header.cursor
+        }
+    }
 
     /// One feed change as Sync delivers it.
     public struct Change: Sendable {
@@ -220,9 +248,9 @@ public final class ServerModelV2Store: @unchecked Sendable {
     /// Applies feed changes and records `cursor`, in one save. A change that
     /// cannot be read is passed to `onUnreadable`: returning skips it, and
     /// throwing abandons the whole batch, which saves nothing.
-    public func apply(_ changes: [Change], cursor newCursor: UInt64,
+    public func apply(_ changes: [Change], cursor newCursor: UInt64, generation expectedGeneration: UInt64? = nil,
                       onUnreadable: (Change, any Error) throws -> Void = { _, _ in }) throws {
-        try mutate(cursor: newCursor) { model in
+        try mutate(cursor: newCursor, generation: expectedGeneration) { model in
             for change in changes {
                 do {
                     try Self.apply(change, to: &model, now: now())
@@ -302,30 +330,61 @@ public final class ServerModelV2Store: @unchecked Sendable {
     /// cursor, in one save.
     public func rebaseline(items: [APIItem], keeping unreadable: Set<ExactText> = [], counts: APICounts,
                            position: UInt64) throws {
-        try mutate(cursor: position, replacingCursor: true) { model in
-            model.rebaseline(items: items, keeping: unreadable, counts: counts, position: position, at: now())
+        try lock.withLock {
+            try installBaseline(items: items, keeping: unreadable, counts: counts, position: position)
         }
     }
 
-    private func mutate(cursor newCursor: UInt64? = nil, replacingCursor: Bool = false,
+    /// Installs a snapshot only if Sync has held the same position since the
+    /// read began. A reset may legitimately have a lower first-page position.
+    public func rebaseline(items: [APIItem], keeping unreadable: Set<ExactText>, counts: APICounts,
+                           position: UInt64, ifUnchangedFrom expected: (revision: UInt64?, generation: UInt64))
+        throws -> (position: UInt64, installed: Bool) {
+        try lock.withLock {
+            if generation != expected.generation || cursor != expected.revision {
+                return (cursor ?? 0, false)
+            }
+            try installBaseline(items: items, keeping: unreadable, counts: counts, position: position)
+            return (position, true)
+        }
+    }
+
+    private func installBaseline(items: [APIItem], keeping unreadable: Set<ExactText>, counts: APICounts,
+                                 position: UInt64) throws {
+        let resetsHistory = cursor.map { position < $0 } ?? false
+        try mutateLocked(cursor: position, replacingCursor: true) { model in
+            model.rebaseline(items: items, keeping: unreadable, counts: counts, position: position,
+                             at: now(), resetsHistory: resetsHistory)
+        }
+    }
+
+    private func mutate(cursor newCursor: UInt64? = nil, replacingCursor: Bool = false, generation expectedGeneration: UInt64? = nil,
                         _ change: (inout ServerModelV2) throws -> Void) throws {
         try lock.withLock {
-            var next = model
-            try change(&next)
-            var nextCursor = cursor
-            if let newCursor {
-                nextCursor = replacingCursor ? newCursor : max(cursor ?? 0, newCursor)
-            }
-            guard next != model || nextCursor != cursor else { return }
-            if let fileURL {
-                try FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(),
-                                                        withIntermediateDirectories: true)
-                let stored = Stored(version: Self.formatVersion, cursor: nextCursor, model: next)
-                try JSONEncoder().encode(stored).write(to: fileURL, options: [.atomic])
-            }
-            saveCount += 1
-            model = next
-            cursor = nextCursor
+            if let expectedGeneration, expectedGeneration != generation { throw SupersededGeneration() }
+            try mutateLocked(cursor: newCursor, replacingCursor: replacingCursor, change)
         }
+    }
+
+    private func mutateLocked(cursor newCursor: UInt64?, replacingCursor: Bool,
+                              _ change: (inout ServerModelV2) throws -> Void) throws {
+        var next = model
+        try change(&next)
+        var nextCursor = cursor
+        if let newCursor {
+            nextCursor = replacingCursor ? newCursor : max(cursor ?? 0, newCursor)
+        }
+        let nextGeneration = replacingCursor ? generation + 1 : generation
+        guard next != model || nextCursor != cursor || nextGeneration != generation else { return }
+        if let fileURL {
+            try FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(),
+                                                    withIntermediateDirectories: true)
+            let stored = Stored(version: Self.formatVersion, cursor: nextCursor, generation: nextGeneration, model: next)
+            try JSONEncoder().encode(stored).write(to: fileURL, options: [.atomic])
+        }
+        saveCount += 1
+        model = next
+        cursor = nextCursor
+        generation = nextGeneration
     }
 }

@@ -28,11 +28,11 @@ public final class ServerModelSyncWriter: SyncModelWriting, @unchecked Sendable 
         self.pageLimit = pageLimit
     }
 
-    public func heldCursor() throws -> Rev? { store.heldCursor }
+    public func syncPosition() throws -> (revision: Rev?, generation: UInt64) { store.syncPosition }
 
-    public func apply(_ changes: [FeedChange], cursor: Rev) async throws {
+    public func apply(_ changes: [FeedChange], cursor: Rev, generation: UInt64) async throws {
         try store.apply(changes.map { ServerModelV2Store.Change(rev: $0.rev, kind: $0.kind.name, data: $0.data) },
-                        cursor: cursor) { change, error in
+                        cursor: cursor, generation: generation) { change, error in
             try self.unreadable(change, error)
         }
     }
@@ -63,6 +63,7 @@ public final class ServerModelSyncWriter: SyncModelWriting, @unchecked Sendable 
     /// pages may reflect later changes, and the feed from the first position
     /// delivers those again, harmlessly.
     public func rebaseline() async throws -> Rev {
+        let expected = store.syncPosition
         var items: [APIItem] = []
         var unreadable: Set<ExactText> = []
         var first: APIInboxPage?
@@ -88,11 +89,13 @@ public final class ServerModelSyncWriter: SyncModelWriting, @unchecked Sendable 
             page = decoded.nextPage?.rawValue
         } while page != nil
         guard let first else { throw FeedDecodingError.invalidBatch }
-        try store.rebaseline(items: items, keeping: unreadable, counts: first.counts, position: first.position)
+        let result = try store.rebaseline(items: items, keeping: unreadable, counts: first.counts,
+                                          position: first.position, ifUnchangedFrom: expected)
+        guard result.installed else { throw SyncSnapshotSuperseded(position: result.position) }
         lock.withLock {
             if unreadableRebaselineRequested { rebaselinedForUnreadable = true }
         }
-        return first.position
+        return result.position
     }
 
     /// Reads an opened item's entries, newest page first and then each older
