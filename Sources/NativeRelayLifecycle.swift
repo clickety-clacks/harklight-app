@@ -1530,9 +1530,27 @@ final class NativeRelayLifecycle {
             guard let record = try enrollment.load(), record.matchesNotificationIdentity(context.identity),
                   record.v2PushRegistration?.removalID == nil else { return false }
             try v2LegacyAddressStore().clear()
+            let held = connection.model.snapshot.settings?.push
+            var hasBinding = held?.bindingID != nil
+            if !allowed, held == nil, record.v2PushRegistration?.registration == nil,
+               record.v2PushRegistration?.permissionRemovalID == nil {
+                // On the first v2 foreground, a legacy binding can already
+                // exist even though the v2 model and journal are both empty.
+                do {
+                    hasBinding = try await connection.push.status().bindingID != nil
+                } catch {
+                    if !Task.isCancelled, v2Connection === connection { scheduleV2PushRetry(connection: connection) }
+                    throw error
+                }
+                let latestPermission = await v2NotificationPermission.status()
+                guard !Task.isCancelled, v2Connection === connection else { return false }
+                if NativeNotificationPermission.allowed(latestPermission) {
+                    v2PushRegistrationRequested = true
+                    return false
+                }
+            }
             let removal: UUID?
-            if permission == .denied {
-                let hasBinding = connection.model.snapshot.settings?.push?.bindingID != nil
+            if !allowed, permission == .denied || hasBinding {
                 removal = try enrollment.updateV2PushRegistration(for: record) {
                     $0.preparePermissionRemoval(hasBinding: hasBinding)
                 }
