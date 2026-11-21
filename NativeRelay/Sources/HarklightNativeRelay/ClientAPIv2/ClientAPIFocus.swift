@@ -131,6 +131,18 @@ public actor ClientAPIFocusChannel {
         }
     }
 
+    /// Best effort before enrollment removal. A held or offline focus write
+    /// cannot keep the person waiting on sign-out.
+    public func reportSignedOutBeforeClosing(timeout: Duration = .seconds(2)) async {
+        let timer = Task {
+            do { try await Task.sleep(for: timeout) } catch { return }
+            self.stop()
+        }
+        defer { timer.cancel() }
+        _ = await report(.signedOut)
+        stop()
+    }
+
     /// Queues the latest screen without waiting for the current HTTP write.
     public func enqueue(_ report: FocusReport) {
         latest = report
@@ -208,6 +220,9 @@ public actor ClientAPIFocusChannel {
         retryTimer?.cancel()
         retryTimer = nil
         drainTask?.cancel()
+        let abandoned = waiters
+        waiters = []
+        abandoned.forEach { $0.resume(returning: .rejected) }
     }
 
     static func isInFront(_ report: FocusReport) -> Bool {

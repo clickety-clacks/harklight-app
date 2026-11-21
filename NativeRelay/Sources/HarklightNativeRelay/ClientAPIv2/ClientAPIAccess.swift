@@ -14,6 +14,7 @@ public final class ClientAPIAccess: ClientAPITransport, @unchecked Sendable {
     private let onChanged: @Sendable (ClientAPIAccessState) -> Void
     private let lock = NSLock()
     private var current: ClientAPIAccessState = .available
+    private var closed = false
     private var generation = 0
     private var nextMeCheck = 0
     private var latestMeCheck = 0
@@ -27,6 +28,17 @@ public final class ClientAPIAccess: ClientAPITransport, @unchecked Sendable {
     }
 
     public var state: ClientAPIAccessState { lock.withLock { current } }
+
+    /// Local teardown is distinct from an authenticated revocation. It
+    /// invalidates the transport without starting a re-enrolment flow.
+    public func close() {
+        let shouldClose = lock.withLock {
+            guard !closed else { return false }
+            closed = true
+            return true
+        }
+        if shouldClose { transport.close() }
+    }
     struct MeCheck {
         let number: Int
         let generation: Int
@@ -60,7 +72,7 @@ public final class ClientAPIAccess: ClientAPITransport, @unchecked Sendable {
     @discardableResult
     private func update(_ next: ClientAPIAccessState?, meCheck: MeCheck? = nil) -> Bool {
         let result: (accepted: Bool, changed: Bool, saveError: (any Error)?, errors: any ErrorLogging) = lock.withLock {
-            guard current != .revoked else { return (false, false, nil, errors) }
+            guard !closed, current != .revoked else { return (false, false, nil, errors) }
             if let meCheck {
                 guard meCheck.generation == generation, meCheck.number > latestMeCheck else {
                     return (false, false, nil, errors)
@@ -86,7 +98,11 @@ public final class ClientAPIAccess: ClientAPITransport, @unchecked Sendable {
     }
 
     private func check(allowPaused: Bool = false) throws {
-        switch state {
+        let access = try lock.withLock {
+            if closed { throw CancellationError() }
+            return current
+        }
+        switch access {
         case .available: return
         case .paused where allowPaused: return
         case .paused:

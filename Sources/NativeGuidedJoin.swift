@@ -124,6 +124,7 @@ final class NativeGuidedJoinStore {
     private let namespace: String
     private let transport: any NativeJoinTransport
     private let enrollment: NativeEnrollmentStore
+    private var confirmedRemovalIDs: Set<String> = []
     var removePushBeforeDeparture: ((NativeEnrollmentRecord) async -> Void)?
 
     init(namespace: String = "co.clicketyclacks.Harklight.native-enrollment",
@@ -596,6 +597,7 @@ final class NativeGuidedJoinStore {
                   receipt.deviceID == record.deviceID, receipt.enrollmentRevision > 0 else {
                 throw NativeJoinError.wrongApproval
             }
+            confirmedRemovalIDs.insert(departure.archiveID)
             try enrollment.finishPushDeparture(for: record)
             var confirmedDeparture = try savedDeparture(for: record) ?? departure
             confirmedDeparture.removed = true
@@ -603,6 +605,12 @@ final class NativeGuidedJoinStore {
             departure = confirmedDeparture
         }
         try finishConfirmedDeparture(departure)
+    }
+
+    func hasConfirmedRemoval(for record: NativeEnrollmentRecord) throws -> Bool {
+        let archiveID = NativeAccountDeparture(record: record, replacement: nil, removed: true).archiveID
+        if confirmedRemovalIDs.contains(archiveID) { return true }
+        return try savedDeparture(for: record)?.removed == true
     }
 
     func finishConfirmedDeparture(_ departure: NativeAccountDeparture) throws {

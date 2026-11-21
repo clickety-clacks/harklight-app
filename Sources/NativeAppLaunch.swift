@@ -236,7 +236,10 @@ final class NativeAppLaunch {
                   !presentation.isReadOnly, !presentation.isLocalExample,
                   self.activeEnrollmentRecord?.sameNotificationProfile(as: record) == true else { return }
             if lifecycle.clientAPIV2Enabled {
-                try await lifecycle.keepV2PushAccount(record, enrollment: self.enrollment)
+                if try self.guidedJoinStore.hasConfirmedRemoval(for: record) { return }
+                if !lifecycle.isActive(for: presentation.notificationContext) {
+                    try await self.activate(self.enrollment.material(from: record))
+                }
             } else {
                 try self.enrollment.cancelPushDeparture(for: record)
             }

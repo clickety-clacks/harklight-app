@@ -36,6 +36,8 @@ public final class HTTPSClientAPITransport: ClientAPITransport, @unchecked Senda
 
     deinit { session.invalidateAndCancel() }
 
+    public func close() { session.invalidateAndCancel() }
+
     // MARK: Requests
 
     public func send(_ request: APIRequest) async throws -> APIResponse {
