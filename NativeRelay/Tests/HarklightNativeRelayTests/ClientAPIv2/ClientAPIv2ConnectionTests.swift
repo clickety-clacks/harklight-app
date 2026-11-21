@@ -101,9 +101,11 @@ final class ClientAPIv2ConnectionTests: XCTestCase {
     }
 
     func testPushCatchesUpFromTheDurablePositionAndSkipsOlderRevisions() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
         let server = FakeClientAPIServer()
         let repository = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
-        let v2 = try connection(WithMe(server, me: me), repository)
+        let v2 = try connection(WithMe(server, me: me), repository, directory: directory)
         try await v2.refreshMe()
         try await v2.catchUp()
         let baseline = try XCTUnwrap(v2.model.heldCursor)
@@ -121,6 +123,12 @@ final class ClientAPIv2ConnectionTests: XCTestCase {
         let older = try await v2.catchUp(forPushRevision: baseline)
         XCTAssertFalse(older)
         XCTAssertEqual(server.batchPositions.count, initialBatchCount + 1)
+
+        try FileManager.default.removeItem(at: directory.appendingPathComponent("server-model-v2.json"))
+        let afterRemoval = try await v2.catchUp(forPushRevision: revision)
+        XCTAssertFalse(afterRemoval)
+        XCTAssertEqual(server.batchPositions.count, initialBatchCount + 2,
+                       "An in-memory cursor cannot skip a push after its saved model is gone.")
     }
 
     func testNothingIsPublishedUntilTheRulesAreRead() async throws {

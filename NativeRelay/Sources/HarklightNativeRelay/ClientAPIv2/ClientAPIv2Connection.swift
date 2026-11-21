@@ -153,7 +153,7 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
     @discardableResult
     public func catchUp(forPushRevision revision: Rev) async throws -> Bool {
         let before = model.heldCursor
-        if let before, before >= revision { return false }
+        if let persisted = model.persistedCursor(), persisted >= revision { return false }
         try await catchUp()
         return model.heldCursor != before
     }

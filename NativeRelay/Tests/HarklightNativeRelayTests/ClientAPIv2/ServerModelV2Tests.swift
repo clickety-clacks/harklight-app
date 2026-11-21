@@ -163,10 +163,12 @@ final class ServerModelV2Tests: XCTestCase {
 /// Serves `GET /v2/inbox` pages and records writes; enough for rebaseline.
 private final class InboxPagesTransport: ClientAPITransport, @unchecked Sendable {
     var pages: [String?: String] = [:]
+    var beforeReturningPage: @Sendable () async -> Void = {}
     func send(_ request: APIRequest) async throws -> APIResponse {
         guard request.path == "/v2/inbox", let body = pages[request.query["page"]] else {
             throw APIError(status: 404, token: .notFound, retryable: false, requestID: "r")
         }
+        await beforeReturningPage()
         return APIResponse(status: 200, requestID: "r", body: Data(body.utf8))
     }
     func changeFeed(after: Rev) -> AsyncThrowingStream<FeedEvent, any Error> { AsyncThrowingStream { $0.finish() } }
@@ -174,6 +176,37 @@ private final class InboxPagesTransport: ClientAPITransport, @unchecked Sendable
 }
 
 final class ServerModelAdapterTests: XCTestCase {
+    func testADelayedSnapshotCannotReplaceDurableLiveProgress() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("model.json")
+        let store = ServerModelV2Store(fileURL: url)
+        let transport = InboxPagesTransport()
+        let requested = AsyncGate()
+        let blocked = AsyncGate()
+        transport.pages[nil] = #"{"rev":1,"items":[],"counts":{"unresolved":0}}"#
+        transport.beforeReturningPage = {
+            requested.release()
+            await blocked.wait()
+        }
+        let writer = ServerModelSyncWriter(store: store, transport: transport, errors: RecordingErrorLogV2())
+        let rebaseline = Task { try await writer.rebaseline() }
+        defer { blocked.release() }
+        await requested.wait()
+
+        try store.apply(kind: "item", rev: 2, data: V2Fixture.json(V2Fixture.item("live", rev: 2, rankKey: "a")))
+        blocked.release()
+        let position = try await rebaseline.value
+        let reopened = ServerModelV2Store(fileURL: url)
+        XCTAssertEqual(position, 2, "Resume from the position that survived the delayed snapshot.")
+        XCTAssertEqual(reopened.heldCursor, 2)
+        XCTAssertNotNil(reopened.snapshot.items[ExactText("live")])
+
+        let reset = try await writer.rebaseline()
+        XCTAssertEqual(reset, 1, "A fresh rebaseline can still follow a server reset.")
+        XCTAssertEqual(ServerModelV2Store(fileURL: url).heldCursor, 1)
+    }
+
     func testRebaselineReadsEveryPageKeepsTheFirstPositionAndDropsWhatIsGone() async throws {
         let store = ServerModelV2Store(fileURL: nil)
         try store.apply(kind: "item", rev: 2, data: V2Fixture.json(V2Fixture.item("gone", rev: 2, rankKey: "z")))

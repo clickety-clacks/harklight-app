@@ -63,6 +63,7 @@ public final class ServerModelSyncWriter: SyncModelWriting, @unchecked Sendable 
     /// pages may reflect later changes, and the feed from the first position
     /// delivers those again, harmlessly.
     public func rebaseline() async throws -> Rev {
+        let expectedCursor = store.heldCursor
         var items: [APIItem] = []
         var unreadable: Set<ExactText> = []
         var first: APIInboxPage?
@@ -88,11 +89,14 @@ public final class ServerModelSyncWriter: SyncModelWriting, @unchecked Sendable 
             page = decoded.nextPage?.rawValue
         } while page != nil
         guard let first else { throw FeedDecodingError.invalidBatch }
-        try store.rebaseline(items: items, keeping: unreadable, counts: first.counts, position: first.position)
-        lock.withLock {
-            if unreadableRebaselineRequested { rebaselinedForUnreadable = true }
+        let result = try store.rebaseline(items: items, keeping: unreadable, counts: first.counts,
+                                          position: first.position, ifCursorIs: expectedCursor)
+        if result.installed {
+            lock.withLock {
+                if unreadableRebaselineRequested { rebaselinedForUnreadable = true }
+            }
         }
-        return first.position
+        return result.position
     }
 
     /// Reads an opened item's entries, newest page first and then each older

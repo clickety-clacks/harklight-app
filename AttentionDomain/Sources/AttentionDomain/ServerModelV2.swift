@@ -201,6 +201,21 @@ public final class ServerModelV2Store: @unchecked Sendable {
     public var snapshot: ServerModelV2 { lock.withLock { model } }
     public var heldCursor: UInt64? { lock.withLock { cursor } }
 
+    /// The position in the saved model. An in-memory model cannot prove that
+    /// a push revision has already been persisted.
+    public func persistedCursor() -> UInt64? {
+        struct Header: Decodable {
+            let version: Int
+            let cursor: UInt64?
+        }
+        return lock.withLock {
+            guard let fileURL, let bytes = try? Data(contentsOf: fileURL),
+                  let header = try? JSONDecoder().decode(Header.self, from: bytes),
+                  header.version == Self.formatVersion else { return nil }
+            return header.cursor
+        }
+    }
+
     /// One feed change as Sync delivers it.
     public struct Change: Sendable {
         public let rev: UInt64
@@ -307,25 +322,43 @@ public final class ServerModelV2Store: @unchecked Sendable {
         }
     }
 
+    /// Installs a snapshot only if Sync has held the same position since the
+    /// read began. A reset may legitimately have a lower first-page position.
+    public func rebaseline(items: [APIItem], keeping unreadable: Set<ExactText>, counts: APICounts,
+                           position: UInt64, ifCursorIs expectedCursor: UInt64?) throws -> (position: UInt64, installed: Bool) {
+        try lock.withLock {
+            if cursor != expectedCursor, let cursor { return (cursor, false) }
+            try mutateLocked(cursor: position, replacingCursor: true) { model in
+                model.rebaseline(items: items, keeping: unreadable, counts: counts, position: position, at: now())
+            }
+            return (position, true)
+        }
+    }
+
     private func mutate(cursor newCursor: UInt64? = nil, replacingCursor: Bool = false,
                         _ change: (inout ServerModelV2) throws -> Void) throws {
         try lock.withLock {
-            var next = model
-            try change(&next)
-            var nextCursor = cursor
-            if let newCursor {
-                nextCursor = replacingCursor ? newCursor : max(cursor ?? 0, newCursor)
-            }
-            guard next != model || nextCursor != cursor else { return }
-            if let fileURL {
-                try FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(),
-                                                        withIntermediateDirectories: true)
-                let stored = Stored(version: Self.formatVersion, cursor: nextCursor, model: next)
-                try JSONEncoder().encode(stored).write(to: fileURL, options: [.atomic])
-            }
-            saveCount += 1
-            model = next
-            cursor = nextCursor
+            try mutateLocked(cursor: newCursor, replacingCursor: replacingCursor, change)
         }
+    }
+
+    private func mutateLocked(cursor newCursor: UInt64?, replacingCursor: Bool,
+                              _ change: (inout ServerModelV2) throws -> Void) throws {
+        var next = model
+        try change(&next)
+        var nextCursor = cursor
+        if let newCursor {
+            nextCursor = replacingCursor ? newCursor : max(cursor ?? 0, newCursor)
+        }
+        guard next != model || nextCursor != cursor else { return }
+        if let fileURL {
+            try FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(),
+                                                    withIntermediateDirectories: true)
+            let stored = Stored(version: Self.formatVersion, cursor: nextCursor, model: next)
+            try JSONEncoder().encode(stored).write(to: fileURL, options: [.atomic])
+        }
+        saveCount += 1
+        model = next
+        cursor = nextCursor
     }
 }
