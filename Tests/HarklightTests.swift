@@ -28,6 +28,8 @@ private final class V2ScenePushTransport: ClientAPITransport, @unchecked Sendabl
             body = "{}"
         case "/v2/me":
             body = #"{"account":{"state":"active"},"features":{},"limits":{}}"#
+        case "/v2/items/later":
+            throw URLError(.networkConnectionLost)
         case "/v2/items/item/entries":
             lock.withLock { entryReads += 1 }
             body = #"{"rev":2,"entries":[],"older":false}"#
@@ -118,6 +120,41 @@ final class HarklightTests: XCTestCase {
         await lifecycle.loadV2EntriesOnOpen(key, expected: context)
         XCTAssertEqual(transport.counts.entryReads, 2)
         XCTAssertTrue(connection.model.snapshot.loadedEntryItems.contains(key.messageID))
+        await lifecycle.deactivate()
+    }
+
+    @MainActor
+    func testV2ShowWaitsAfterTransientLookupAndAppliesWhenTheItemArrives() async throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                                       personID: ExactText("person"), deviceID: ExactText("device"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let repo = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        let connection = try ClientAPIv2Connection(transport: V2ScenePushTransport(), repository: repo,
+            context: context, directory: nil, errors: NoopErrorLog())
+        let coordinator = NativePushedViewCoordinator()
+        let lifecycle = NativeRelayLifecycle(clientAPIV2Enabled: true, v2ShowCoordinator: coordinator)
+        let attempt = UUID()
+        lifecycle.installV2Connection(connection, context: context, attempt: attempt)
+        var shows: [ViewShowFrame] = []
+        coordinator.setApplyHandler { shows.append($0) }
+        coordinator.scenePhaseChanged(.active)
+        let show = ClientAPIShow(showID: "show", deviceID: "device", itemID: "later",
+                                 target: .message, heldMilliseconds: 0)
+        lifecycle.receiveV2Show(show, receivedAt: Date(), attempt: attempt)
+        let deadline = ContinuousClock.now + .seconds(2)
+        while shows.isEmpty, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(5)) }
+        XCTAssertEqual(shows.first?.unavailable, .notHere)
+
+        let item = Data(#"{"item_id":"later","rev":1,"sender":"sender","request_revision":1,"message":{"title":"Question"},"files":[],"seen":false,"rank":{"key":"a","section":"current"},"chat":{"available":true,"started":true}}"#.utf8)
+        try connection.model.apply(kind: "item", rev: 1, data: item)
+        lifecycle.deliverV2ShowIfHydrated(attempt: attempt)
+        let arrival = ContinuousClock.now + .seconds(2)
+        while shows.count < 2, ContinuousClock.now < arrival { try await Task.sleep(for: .milliseconds(5)) }
+        XCTAssertEqual(shows.last?.messageID, "later")
+        XCTAssertNil(shows.last?.unavailable)
+        let key = RequestKey(accountScope: identity.personID, senderID: ExactText("sender"), messageID: ExactText("later"))
+        XCTAssertTrue(coordinator.isPassive(key))
+        XCTAssertEqual(connection.model.snapshot.items[key.messageID]?.seen, false)
         await lifecycle.deactivate()
     }
 

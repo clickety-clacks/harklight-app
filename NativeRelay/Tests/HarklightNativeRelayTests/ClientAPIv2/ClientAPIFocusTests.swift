@@ -18,24 +18,38 @@ private final class FocusTransport: ClientAPITransport, @unchecked Sendable {
     private let lock = NSLock()
     private var bodies: [String] = []
     private(set) var sent: [APIRequest] = []
-    var failNext: APIError?
-    /// Holds the first write until released.
-    var holdFirst: AsyncGate?
+    private var _failNext: APIError?
+    var failNext: APIError? {
+        get { lock.withLock { _failNext } }
+        set { lock.withLock { _failNext = newValue } }
+    }
+    private var _holdFirst: AsyncGate?
+    /// Holds the next write until released.
+    var holdFirst: AsyncGate? {
+        get { lock.withLock { _holdFirst } }
+        set { lock.withLock { _holdFirst = newValue } }
+    }
+    private var accepted: [APIRequest] = []
+    var acceptedBodies: [String] { lock.withLock { accepted.map { String(decoding: $0.body ?? Data(), as: UTF8.self) } } }
     func respond(_ body: String) { lock.withLock { bodies.append(body) } }
     var sentBodies: [String] { lock.withLock { sent.map { String(decoding: $0.body ?? Data(), as: UTF8.self) } } }
     func send(_ request: APIRequest) async throws -> APIResponse {
-        let gate = lock.withLock { () -> AsyncGate? in defer { holdFirst = nil }; return holdFirst }
+        try Task.checkCancellation()
+        let gate = lock.withLock { () -> AsyncGate? in defer { _holdFirst = nil }; return _holdFirst }
         if let gate {
             lock.withLock { sent.append(request) }
             await gate.wait()
+            try Task.checkCancellation()
+            lock.withLock { accepted.append(request) }
             return APIResponse(status: 200, requestID: "r", body: Data(#"{"rev":1}"#.utf8))
         }
         let (failure, body) = lock.withLock { () -> (APIError?, String) in
             sent.append(request)
-            defer { failNext = nil }
-            return (failNext, bodies.isEmpty ? #"{"rev":1}"# : bodies.removeFirst())
+            defer { _failNext = nil }
+            return (_failNext, bodies.isEmpty ? #"{"rev":1}"# : bodies.removeFirst())
         }
         if let failure { throw failure }
+        lock.withLock { accepted.append(request) }
         return APIResponse(status: 200, requestID: "r", body: Data(body.utf8))
     }
     func changeFeed(after: Rev) -> AsyncThrowingStream<FeedEvent, any Error> { AsyncThrowingStream { $0.finish() } }
@@ -238,6 +252,35 @@ final class ClientAPIFocusTests: XCTestCase {
                                           sleep: { _ in try await Task.sleep(for: .seconds(3600)) }, onShow: { _, _ in })
         await focus.report(.inbox)
         XCTAssertEqual(transport.sentBodies, [#"{"screen":"inbox","ttl_s":1}"#])
+    }
+
+    func testHeldRenewalCannotCancelBackgroundWriteAndBackgroundFailureRetries() async {
+        let transport = FocusTransport()
+        let ticks = ManualTicks()
+        let retries = ManualTicks()
+        let focus = ClientAPIFocusChannel(transport: transport, errors: RecordingErrorLogV2(),
+            sleep: { try await ticks.sleep($0) },
+            waitBeforeRetry: { _ in try await retries.sleep(.seconds(1)) }, onShow: { _, _ in })
+        await focus.report(.inbox)
+        await waitFor("renewal timer is armed") { ticks.sleepers == 1 }
+
+        let held = AsyncGate()
+        transport.holdFirst = held
+        ticks.tick()
+        await waitFor("renewal PUT is in flight") { transport.sentBodies.count == 2 }
+        transport.failNext = APIError(status: 503, token: .storageUnavailable,
+                                      retryable: true, requestID: "background")
+        await focus.enqueue(.notInFront)
+        held.release()
+        await waitFor("background PUT failed and armed a retry") { retries.sleepers == 1 }
+        XCTAssertEqual(transport.acceptedBodies.count, 2, "Canceling the timer must leave its renewal PUT alone.")
+        retries.tick()
+        await waitFor("background retry succeeds") { transport.acceptedBodies.count == 3 }
+        XCTAssertEqual(transport.sentBodies, [
+            #"{"screen":"inbox","ttl_s":120}"#, #"{"screen":"inbox","ttl_s":120}"#,
+            #"{"screen":"not_in_front","ttl_s":120}"#, #"{"screen":"not_in_front","ttl_s":120}"#
+        ])
+        await focus.stop()
     }
 
     func testQueuedScreensAreReplacedByBackgroundWhileTheFirstPUTIsHeld() async {

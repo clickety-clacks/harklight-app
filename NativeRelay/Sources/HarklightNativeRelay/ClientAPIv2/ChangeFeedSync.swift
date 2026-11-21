@@ -183,6 +183,8 @@ public actor ChangeFeedSync {
         let after: Position
         do {
             after = try await startingPosition()
+        } catch where Task.isCancelled {
+            return .cancelled
         } catch {
             report(Self.feedOperation, phase: "rebaseline", error: error, initiator: .forFailure(error))
             return .dropped(.forFailure(error), retryPromptly: false)

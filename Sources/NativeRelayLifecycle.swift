@@ -940,6 +940,7 @@ final class NativeRelayLifecycle {
     private var v2ShowLookup: Task<Void, Never>?
     private var pendingV2Show: (show: ClientAPIShow, receivedAt: Date)?
     private let v2FocusReporter: NativeFocusReporter
+    private let v2ShowCoordinator: NativePushedViewCoordinator
     private var v2ForegroundTask: Task<Void, Never>?
     private var sceneIsActive = false
 
@@ -996,9 +997,11 @@ final class NativeRelayLifecycle {
     }
     private let enrollment = NativeEnrollmentStore()
 
-    init(clientAPIV2Enabled: Bool = false, v2FocusReporter: NativeFocusReporter = .shared) {
+    init(clientAPIV2Enabled: Bool = false, v2FocusReporter: NativeFocusReporter = .shared,
+         v2ShowCoordinator: NativePushedViewCoordinator = .shared) {
         self.clientAPIV2Enabled = clientAPIV2Enabled
         self.v2FocusReporter = v2FocusReporter
+        self.v2ShowCoordinator = v2ShowCoordinator
     }
 
     func v2FocusScenePhaseChanged(_ phase: ScenePhase) {
@@ -1337,18 +1340,18 @@ final class NativeRelayLifecycle {
             if connection.model.snapshot.items[ExactText(show.itemID)] != nil {
                 self.deliverV2ShowIfHydrated(attempt: attempt)
             } else {
-                self.pendingV2Show = nil
-                NativePushedViewCoordinator.shared.receive(.clientAPIUnavailable(show, notFound: notFound),
+                if notFound { self.pendingV2Show = nil }
+                self.v2ShowCoordinator.receive(.clientAPIUnavailable(show, notFound: notFound),
                     elapsedSinceReceipt: max(0, Date().timeIntervalSince(receivedAt)))
             }
         }
     }
 
-    private func deliverV2ShowIfHydrated(attempt: UUID) {
+    func deliverV2ShowIfHydrated(attempt: UUID) {
         guard activeTransportAttemptID == attempt, let pending = pendingV2Show,
               let item = v2Connection?.model.snapshot.items[ExactText(pending.show.itemID)] else { return }
         pendingV2Show = nil
-        NativePushedViewCoordinator.shared.receive(.clientAPI(pending.show, senderID: item.sender.rawValue),
+        v2ShowCoordinator.receive(.clientAPI(pending.show, senderID: item.sender.rawValue),
             elapsedSinceReceipt: max(0, Date().timeIntervalSince(pending.receivedAt)))
     }
 

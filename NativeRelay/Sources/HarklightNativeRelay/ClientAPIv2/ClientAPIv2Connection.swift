@@ -132,6 +132,8 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
             do {
                 try await refreshMe()
                 return
+            } catch where Task.isCancelled {
+                return
             } catch {
                 errors.report(ErrorLogReport(concern: .snapshot, connectionRole: .request, operation: "me",
                     phase: "read", reason: .api(error), initiator: .forFailure(error),
@@ -226,7 +228,7 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
         do {
             try await modelWriter.loadEntries(of: itemID)
             publishModel()
-        } catch is CancellationError {
+        } catch where Task.isCancelled || error is CancellationError {
             return
         } catch {
             let api = error as? APIError
