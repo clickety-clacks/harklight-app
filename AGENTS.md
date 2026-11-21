@@ -18,6 +18,7 @@ Read [HARKLIGHT_GUIDANCE.md](HARKLIGHT_GUIDANCE.md) before adding, changing, or 
 
 - Every merge to `main` triggers an Xcode Cloud build that goes to internal TestFlight automatically. There is nothing to start and nothing to approve. Agents never start Xcode Cloud workflows by hand.
 - Internal TestFlight builds, made automatically on every merge to `main`, follow the owner's ship-to-me rule and are not a release. A release for this app means App Store or public/external TestFlight distribution. It is a separate step outside the automatic build path and needs its own existing authority; this document grants none. Every change in a release must have a clean independent review before that release is tagged.
+- Every published release names its protocol (0.1 or 0.2) and the compatible Server, app, web and agent versions in its release notes.
 - If a shipped build is bad, ship a fix or revert from `main` as the next build. Don't hand-patch a build.
 
 ### The `public-testflight` branch
