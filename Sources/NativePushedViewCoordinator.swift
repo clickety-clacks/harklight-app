@@ -29,6 +29,7 @@ final class NativePushedViewCoordinator {
     private struct PendingShow {
         let frame: ViewShowFrame
         let arrivalUptime: TimeInterval
+        let canSupersedeBeforeApply: Bool
     }
 
     @ObservationIgnored private let wire = ViewShowWire()
@@ -56,7 +57,7 @@ final class NativePushedViewCoordinator {
 
     func receive(_ data: Data) {
         guard let frame = wire.frame(data) else { return }
-        receive(frame)
+        receive(frame, elapsedSinceReceipt: 0, canSupersedeBeforeApply: false)
     }
 
     /// Called when a newer authenticated show arrives, before its item read.
@@ -66,10 +67,16 @@ final class NativePushedViewCoordinator {
         cancelApplyTask()
     }
 
-    func receive(_ frame: ViewShowFrame, elapsedSinceReceipt: TimeInterval = 0) {
+    func receiveV2(_ frame: ViewShowFrame, elapsedSinceReceipt: TimeInterval) {
+        receive(frame, elapsedSinceReceipt: elapsedSinceReceipt, canSupersedeBeforeApply: true)
+    }
+
+    private func receive(_ frame: ViewShowFrame, elapsedSinceReceipt: TimeInterval,
+                         canSupersedeBeforeApply: Bool) {
         let arrival = uptime() - elapsedSinceReceipt -
             TimeInterval(frame.heldMilliseconds ?? 0) / 1_000
-        pendingShow = PendingShow(frame: frame, arrivalUptime: arrival)
+        pendingShow = PendingShow(frame: frame, arrivalUptime: arrival,
+                                  canSupersedeBeforeApply: canSupersedeBeforeApply)
         cancelApplyTask()
         attemptPendingShow()
     }
@@ -225,12 +232,20 @@ final class NativePushedViewCoordinator {
             return
         }
 
+        let pair = NativePushedViewPair(senderID: pendingShow.frame.senderID,
+                                        messageID: pendingShow.frame.messageID)
+        if !pendingShow.canSupersedeBeforeApply {
+            self.pendingShow = nil
+            passivePair = pair
+            Task { @MainActor in await applyHandler(pendingShow.frame) }
+            return
+        }
+
         applyTask = Task { @MainActor [weak self] in
             guard let self, !Task.isCancelled, self.sceneIsActive else { return }
             self.applyTask = nil
             self.pendingShow = nil
-            self.passivePair = NativePushedViewPair(senderID: pendingShow.frame.senderID,
-                                                   messageID: pendingShow.frame.messageID)
+            self.passivePair = pair
             await applyHandler(pendingShow.frame)
         }
     }

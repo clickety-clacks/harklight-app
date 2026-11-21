@@ -33,6 +33,20 @@ final class NativeFocusPushCoordinatorTests: XCTestCase {
         XCTAssertEqual(coordinator.contentTouchRevision, 1)
     }
 
+    func testLegacyShowScheduledWhileActiveStillAppliesAfterSceneBecomesInactive() async throws {
+        let coordinator = NativePushedViewCoordinator()
+        let applied = expectation(description: "Legacy frame applies without scene reactivation")
+        coordinator.setApplyHandler { frame in
+            XCTAssertEqual(frame.messageID, "legacy")
+            applied.fulfill()
+        }
+        coordinator.scenePhaseChanged(.active)
+        coordinator.receive(try viewShow(messageID: "legacy", target: "message"))
+        coordinator.scenePhaseChanged(.inactive)
+
+        await fulfillment(of: [applied], timeout: 1)
+    }
+
     func testPassiveChatKeepsThreeRepliesUnreadUntilContentIsTouched() throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
                                        personID: ExactText("person"), deviceID: ExactText("device"))
