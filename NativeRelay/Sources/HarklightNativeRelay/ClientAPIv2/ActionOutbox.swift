@@ -82,6 +82,7 @@ public actor ActionOutbox {
     private let outcomes: any OutboxOutcomeHandling
     private let errors: any ErrorLogging
     private let waitBeforeRetry: @Sendable (_ attempt: Int, _ retryAfter: TimeInterval?) async throws -> Void
+    private let canSend: @Sendable (OutboxEntry) -> Bool
     private var entries: [OutboxEntry]
     private var sendingTasks: [String: Task<Void, Never>] = [:]
     private var sendingPaused: Bool
@@ -94,13 +95,15 @@ public actor ActionOutbox {
 
     public init(persistence: any OutboxPersisting, transport: any ClientAPITransport,
                 outcomes: any OutboxOutcomeHandling, errors: any ErrorLogging,
-                startsPaused: Bool = false, waitBeforeRetry: @escaping @Sendable (_ attempt: Int, _ retryAfter: TimeInterval?) async throws -> Void
+                startsPaused: Bool = false, canSend: @escaping @Sendable (OutboxEntry) -> Bool = { _ in true },
+                waitBeforeRetry: @escaping @Sendable (_ attempt: Int, _ retryAfter: TimeInterval?) async throws -> Void
                     = ActionOutbox.backoff) throws {
         self.persistence = persistence
         self.transport = transport
         self.outcomes = outcomes
         self.errors = errors
         self.waitBeforeRetry = waitBeforeRetry
+        self.canSend = canSend
         sendingPaused = startsPaused
         entries = try persistence.load()
     }
@@ -169,6 +172,12 @@ public actor ActionOutbox {
         for task in tasks { await task.value }
     }
 
+    func wake(operation: String) {
+        for target in Set(pending.filter { $0.operation == operation }.map(\.target)) {
+            startSending(target)
+        }
+    }
+
     public func resumeSending() {
         sendingPaused = false
     }
@@ -211,6 +220,7 @@ public actor ActionOutbox {
             resendRequested.remove(target)
             while !sendingPaused, !Task.isCancelled,
                   let entry = entries.first(where: { $0.target == target && $0.failure == nil }) {
+                guard canSend(entry) else { return }
                 guard await sendOne(entry) else { return }
             }
         } while resendRequested.contains(target)

@@ -44,7 +44,9 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
     private let replyWaitBeforeRetry: @Sendable (Int) async throws -> Void
     private var replySignal: AsyncStream<Void>.Continuation?
     private var checkingReplyItems: Set<ExactText> = []
-    private var priorityLevelsETag: (value: String, generation: UInt64)?
+    private var priorityLevelsETag: (value: String, revision: UInt64, generation: UInt64)?
+    private var priorityLevelsEnabledFromServer = false
+    private var settingsSignal: AsyncStream<Void>.Continuation?
     private var settingsReadID: UUID?
     private let lock = NSLock()
 
@@ -104,7 +106,9 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
             }
         }), publish: { relay.connection?.publishModel() })
         self.outbox = try ActionOutbox(persistence: persistence, transport: transport, outcomes: outcomes,
-                                       errors: errors, startsPaused: foregroundOnlyWrites, waitBeforeRetry: outboxWaitBeforeRetry)
+            errors: errors, startsPaused: foregroundOnlyWrites, canSend: { entry in
+                entry.operation != "priority_levels" || relay.connection?.priorityLevelsEditingEnabled == true
+            }, waitBeforeRetry: outboxWaitBeforeRetry)
         self.sync = ChangeFeedSync(transport: transport, model: writer, errors: errors,
                                    waitBeforeRetry: waitBeforeRetry, onLiveState: { state in
                                        // Each time the feed is live again, send what the outbox holds.
@@ -122,6 +126,7 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
     @discardableResult
     public func refreshMe() async throws -> APIMe {
         let response = try await transport.send(.get("/v2/me"))
+        try Task.checkCancellation()
         let me = try APIMe(json: JSONValue.parse(response.body))
         if let meURL {
             do {
@@ -133,7 +138,19 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
             }
         }
         presentation.apply(me)
+        let editingEnabled = me.features["priority_level_editing"] == true
+        lock.withLock {
+            priorityLevelsEnabledFromServer = editingEnabled
+            if !editingEnabled {
+                priorityLevelsETag = nil
+                settingsReadID = nil
+            }
+        }
         onMe(me)
+        if editingEnabled {
+            await recoverPendingPriorityLevels()
+            await outbox.wake(operation: "priority_levels")
+        }
         errors.resolve(concern: .snapshot, operation: "me")
         publishModel()
         return me
@@ -170,10 +187,20 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
     /// follows the change feed until cancelled or stopped by the server.
     public func runForeground() async {
         let (signals, continuation) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
-        lock.withLock { replySignal = continuation }
+        let (settings, settingsContinuation) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        lock.withLock {
+            replySignal = continuation
+            settingsSignal = settingsContinuation
+            priorityLevelsEnabledFromServer = false
+        }
         defer {
-            lock.withLock { replySignal = nil }
+            lock.withLock {
+                replySignal = nil
+                settingsSignal = nil
+                priorityLevelsEnabledFromServer = false
+            }
             continuation.finish()
+            settingsContinuation.finish()
         }
         publishModel()
         continuation.yield(())
@@ -182,8 +209,10 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
             group.addTask { await self.readMeUntilRead() }
             group.addTask { await self.reconcileAcceptedRepliesWhileForeground(signals) }
             group.addTask {
+                for await _ in settings { await self.refreshPriorityLevels() }
+            }
+            group.addTask {
                 await self.recoverQueuedReplies()
-                await self.recoverPendingPriorityLevels()
                 await self.outbox.flush()
             }
             await sync.runForeground()
@@ -304,8 +333,20 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
                                 idempotencyKey: operation, retryRefused: retryRefused)
     }
 
+    private var priorityLevelsEditingEnabled: Bool {
+        lock.withLock { priorityLevelsEnabledFromServer }
+    }
+
     public var priorityLevelsCanSave: Bool {
-        lock.withLock { priorityLevelsETag?.generation == model.syncPosition.generation }
+        lock.withLock { currentPriorityLevelsETag() != nil }
+    }
+
+    /// Caller holds the connection lock.
+    private func currentPriorityLevelsETag() -> String? {
+        let position = model.settingsPosition
+        guard priorityLevelsEnabledFromServer, let tag = priorityLevelsETag,
+              tag.generation == position.generation, tag.revision == position.revision else { return nil }
+        return tag.value
     }
 
     public var priorityLevelsEditorWasOpened: Bool {
@@ -313,6 +354,7 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
     }
 
     public func refreshPriorityLevels() async {
+        guard priorityLevelsEditingEnabled, !Task.isCancelled else { return }
         let readID = UUID()
         let generation = model.syncPosition.generation
         lock.withLock { settingsReadID = readID }
@@ -327,11 +369,12 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
                 throw ClientAPIModelError.invalid("settings.priority_levels")
             }
             let current = try lock.withLock { () throws -> Bool in
-                guard settingsReadID == readID else { return false }
+                guard priorityLevelsEnabledFromServer, settingsReadID == readID else { return false }
                 try model.apply(result, generation: generation)
-                guard model.snapshot.settings?.rev == settings.rev else { return false }
+                let position = model.settingsPosition
+                guard position.generation == generation, position.revision == settings.rev else { return false }
                 try repository.recordPriorityLevelsRead(levels, context: context)
-                priorityLevelsETag = (tag, generation)
+                priorityLevelsETag = (tag, settings.rev, generation)
                 return true
             }
             if current {
@@ -354,10 +397,10 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
 
     public func savePriorityLevels(_ levels: [PriorityLevel]) async throws {
         let operation = try lock.withLock {
-            guard let tag = priorityLevelsETag, tag.generation == model.syncPosition.generation else {
+            guard let tag = currentPriorityLevelsETag() else {
                 throw ClientAPIModelError.invalid("settings.etag")
             }
-            return try repository.beginPriorityLevelsSave(levels, context: context, ifMatch: tag.value)
+            return try repository.beginPriorityLevelsSave(levels, context: context, ifMatch: tag)
         }
         onPriorityLevelsChanged()
         try await submitPriorityLevels(operation)
@@ -464,6 +507,10 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
 
     public func publishModel() {
         lock.withLock {
+            if priorityLevelsEnabledFromServer, priorityLevelsETag != nil, currentPriorityLevelsETag() == nil {
+                priorityLevelsETag = nil
+                settingsSignal?.yield(())
+            }
             guard model.heldCursor != nil, presentation.hasRules,
                   let cached = try? presentation.cachedState(model.snapshot, identity: context.identity) else { return }
             do {
