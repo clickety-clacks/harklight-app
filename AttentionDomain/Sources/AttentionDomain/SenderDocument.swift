@@ -23,6 +23,12 @@ public struct AnswerScreenRules: Equatable, Sendable {
 
     public static let today = AnswerScreenRules(limits: .builtIn, degradesUnshowableScreens: false)
 
+    /// The v2 rules: render up to the limits `GET /v2/me` publishes (the
+    /// built-in ones if it published no complete set) and degrade the rest.
+    public static func v2(_ me: APIMe) -> AnswerScreenRules {
+        AnswerScreenRules(limits: me.answerUILimits ?? .builtIn, degradesUnshowableScreens: true)
+    }
+
     private static let lock = NSLock()
     nonisolated(unsafe) private static var currentValue = today
 
