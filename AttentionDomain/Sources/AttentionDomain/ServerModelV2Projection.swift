@@ -7,7 +7,8 @@ import Foundation
 ///
 /// - An item is keyed by its opaque `item_id` (in `RequestKey.messageID`); the
 ///   sender is display data.
-/// - Arrival order (`acceptanceOrder`) follows `Item.created_at_ms`.
+/// - Arrival order (`acceptanceOrder`) is the model's durable, never-reused
+///   arrival number, so the new-messages area keeps working after removals.
 /// - The inbox view follows `Rank.key` byte-wise, with today's sections from
 ///   `Rank.section`/`Rank.group` and unread-reply rows from `Chat.reply_group`
 ///   and `Chat.reply_rank_key`.
@@ -24,17 +25,11 @@ public enum ServerModelV2Projection {
             ($0.itemID, key(for: $0.itemID, sender: $0.sender, identity: identity))
         })
 
-        // Arrival order: first seen first, ties by item id.
-        let byArrival = ordered.sorted {
-            let lhs = $0.createdAtMs ?? 0, rhs = $1.createdAtMs ?? 0
-            if lhs != rhs { return lhs < rhs }
-            return Array($0.itemID.rawValue.utf8).lexicographicallyPrecedes(Array($1.itemID.rawValue.utf8))
-        }
         var requests: [RequestKey: StoredRequest] = [:]
-        for (index, item) in byArrival.enumerated() {
-            guard let key = keys[item.itemID] else { continue }
+        for item in ordered {
+            guard let key = keys[item.itemID], let arrival = model.arrivalOrder[item.itemID] else { continue }
             requests[key] = StoredRequest(key: key, originalPayload: item.message)
-                .assigningAcceptanceOrder(UInt64(index + 1))
+                .assigningAcceptanceOrder(arrival)
         }
 
         var remoteStates: [RequestKey: RemoteRequestState] = [:]
@@ -111,12 +106,11 @@ public enum ServerModelV2Projection {
                 author: author, sessionHandle: item.itemID, text: entry.text ?? ExactText(""),
                 inReplyTo: entry.inReplyTo, files: entry.files.map(file),
                 contentRedacted: entry.state == "retracted" || entry.state == "withdrawn" ? true : nil,
-                kind: kind, conversationSequence: entry.position)
+                kind: kind, resultStatus: entry.result?.status, conversationSequence: entry.position)
             thread.turns.append(turn)
             if let delivery = entry.delivery {
                 var facts = ConversationTurnFacts(acceptedAtMilliseconds: entry.atMs)
                 facts.delivered = delivery.delivered ?? false
-                if delivery.acted == true { facts.actedBy = item.sender }
                 thread.facts[entry.entryID] = facts
             }
         }
@@ -134,6 +128,8 @@ public enum ServerModelV2Projection {
         switch entry.kind {
         case "reply": entry.author == "person" ? .discussion : .reply
         case "revision": .revision
+        // Today's result status turns (contract round 7).
+        case "result": .result
         default: nil
         }
     }
@@ -143,7 +139,7 @@ public enum ServerModelV2Projection {
         case "listening": .listening
         case "not_listening": .notListening(lastDetachedAt: availability.lastDetachedAtMs.map { ExactText(String($0)) })
         case "gone": .gone
-        default: .unsupported(reason: ExactText("Not supported"))
+        default: .unsupported(reason: ExactText(""))
         }
     }
 
@@ -153,6 +149,30 @@ public enum ServerModelV2Projection {
     }
 
     // MARK: Inbox view
+
+    /// The unread-reply (or Replied) row for an item with agent chat replies.
+    /// It quotes the newest origin reply and opens at the first one after the
+    /// read position, as today. It is drawn only once those replies are held;
+    /// until then the model lists the item as needing its entries.
+    static func replyRow(for item: APIItem, key: RequestKey,
+                         model: ServerModelV2) -> (sortKey: [UInt8], item: InboxViewListItem)? {
+        guard let replyKey = item.chat.replyRankKey, item.chat.replyGroup != nil,
+              let last = item.chat.lastOriginReply else { return nil }
+        let originReplies = model.orderedEntries(of: item.itemID).filter { $0.kind == "reply" && $0.author == "origin" }
+        guard let quote = originReplies.first(where: { $0.entryID == last }) else { return nil }
+        let readPosition = item.chat.readPosition.flatMap { read in
+            model.orderedEntries(of: item.itemID).first { $0.entryID == read }?.position
+        } ?? 0
+        let unread = item.chat.unreadReplies ?? originReplies.filter { $0.position > readPosition }.count
+        let open = unread > 0 ? (originReplies.first { $0.position > readPosition } ?? quote) : quote
+        let replyGroup: InboxFreeSection.Group = item.chat.replyGroup == "earlier_chat_replies_unknown"
+            ? .earlierChatRepliesUnknown : .earlierChatReplies
+        let state: InboxFreeSection.State = item.rank.section == "resolved" ? .history : .active
+        return (Array(replyKey.rawValue.utf8),
+                InboxViewListItem(kind: .reply, key: key, conversationSequence: quote.position,
+                                  openAtConversationSequence: open.position, unseenCount: unread,
+                                  freeSection: InboxFreeSection(state: state, group: replyGroup)))
+    }
 
     static func inboxView(_ ordered: [APIItem], keys: [ExactText: RequestKey], model: ServerModelV2) -> InboxView {
         let entries = ordered.compactMap { item -> InboxViewEntry? in
@@ -170,16 +190,8 @@ public enum ServerModelV2Projection {
                          InboxViewListItem(kind: .message, key: key,
                                            score: item.rank.score.flatMap { Double($0.lexeme) },
                                            freeSection: InboxFreeSection(state: state, group: group))))
-            if let replyKey = item.chat.replyRankKey, let unread = item.chat.unreadReplies, unread > 0 {
-                let replyGroup: InboxFreeSection.Group = item.chat.replyGroup == "earlier_chat_replies_unknown"
-                    ? .earlierChatRepliesUnknown : .earlierChatReplies
-                let lastReply = item.chat.lastOriginReply.flatMap { last in
-                    model.orderedEntries(of: item.itemID).first { $0.entryID == last }?.position
-                }
-                rows.append((Array(replyKey.rawValue.utf8),
-                             InboxViewListItem(kind: .reply, key: key, conversationSequence: lastReply,
-                                               unseenCount: unread,
-                                               freeSection: InboxFreeSection(state: .active, group: replyGroup))))
+            if let row = replyRow(for: item, key: key, model: model) {
+                rows.append(row)
             }
         }
         let listItems = rows.sorted { $0.sortKey.lexicographicallyPrecedes($1.sortKey) }.map(\.item)

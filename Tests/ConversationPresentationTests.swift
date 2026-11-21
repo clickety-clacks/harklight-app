@@ -1888,3 +1888,26 @@ private final class SendEligibilitySession: AuthenticatedInboxPagingSession,
         return discussionResult
     }
 }
+
+extension ConversationPresentationTests {
+    /// #377 review B-3: a v2 unread-reply row resolves to its reply text and
+    /// an open target, instead of a permanent loading row.
+    func testV2ReplyRowShowsItsReplyAndOpensAtTheFirstUnread() throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+            personID: ExactText("person"), deviceID: ExactText("device"))
+        let chat = #"{"started":true,"read_position":"r1","last_origin_reply":"r3","unread_replies":2,"reply_group":"earlier_chat_replies","reply_rank_key":"a5"}"#
+        let item = #"{"item_id":"v2","rev":1,"sender":"agent-app","request_revision":1,"message":{"title":"Q"},"files":[],"seen":true,"chat":\#(chat),"rank":{"key":"a","section":"current"},"created_at_ms":1}"#
+        var model = ServerModelV2()
+        _ = model.putForTesting(try APIItem(json: JSONValue.parse(Data(item.utf8))))
+        for (id, position, text) in [("r1", 1, "first"), ("r2", 2, "second"), ("r3", 3, "third")] {
+            let entry = #"{"entry_id":"\#(id)","item_id":"v2","rev":\#(position + 1),"position":\#(position),"kind":"reply","author":"origin","request_revision":1,"text":"\#(text)"}"#
+            _ = model.putForTesting(try APIEntry(json: JSONValue.parse(Data(entry.utf8))))
+        }
+        let cached = ServerModelV2Projection.cachedState(model, identity: identity)
+        let reference = try XCTUnwrap(cached.inboxView?.listItems?.first { $0.kind == .reply })
+        let thread = try XCTUnwrap(cached.conversations[reference.key])
+        let row = try XCTUnwrap(ReplyItemNormalRowProjection.resolve(reference, in: thread))
+        XCTAssertEqual(row.quotedReply.text, ExactText("third"))
+        XCTAssertEqual(row.openTargetTurnID, ExactText("r2"))
+    }
+}

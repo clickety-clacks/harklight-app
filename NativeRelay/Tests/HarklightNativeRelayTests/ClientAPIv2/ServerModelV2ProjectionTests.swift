@@ -25,12 +25,14 @@ final class ServerModelV2ProjectionTests: XCTestCase {
     }
 
     func testItemsAreKeyedByItemIdAndOrderedByArrivalAndRank() throws {
-        let store = try store([
-            V2Fixture.item("late", rev: 1, rankKey: "a", extra: #""created_at_ms":200"#),
-            V2Fixture.item("early", rev: 2, rankKey: "b", extra: #""created_at_ms":100"#)
-        ])
+        let store = ServerModelV2Store(fileURL: nil)
+        try store.rebaseline(items: [
+            APIItem(json: V2Fixture.json(V2Fixture.item("late", rev: 1, rankKey: "a", extra: #""created_at_ms":200"#))),
+            APIItem(json: V2Fixture.json(V2Fixture.item("early", rev: 2, rankKey: "b", extra: #""created_at_ms":100"#)))
+        ], counts: APICounts(unresolved: 2), position: 2)
         let cached = ServerModelV2Projection.cachedState(store.snapshot, identity: identity)
-        XCTAssertEqual(cached.requests[key("early")]?.acceptanceOrder, 1, "Arrival order follows created_at_ms.")
+        XCTAssertEqual(cached.requests[key("early")]?.acceptanceOrder, 1,
+                       "Items first held together are numbered by created_at_ms.")
         XCTAssertEqual(cached.requests[key("late")]?.acceptanceOrder, 2)
         XCTAssertEqual(cached.inboxView?.entries.map(\.key.messageID.rawValue), ["late", "early"],
                        "The inbox order follows rank.key.")
@@ -75,12 +77,17 @@ final class ServerModelV2ProjectionTests: XCTestCase {
     func testSectionsAndUnreadReplyRowsFollowTheServer() throws {
         let store = try store([
             V2Fixture.item("current", rev: 1, rankKey: "a1",
-                chat: #"{"available":true,"started":true,"unread_replies":2,"reply_group":"earlier_chat_replies","reply_rank_key":"a5"}"#)
+                chat: #"{"available":true,"started":true,"read_position":"r1","last_origin_reply":"r3","unread_replies":2,"reply_group":"earlier_chat_replies","reply_rank_key":"a5"}"#)
                 .replacingOccurrences(of: #""section":"current"}"#, with: #""section":"current","group":"common"}"#),
             V2Fixture.item("older", rev: 2, rankKey: "a3")
                 .replacingOccurrences(of: #""section":"current"}"#, with: #""section":"current","group":"earlier_messages"}"#),
             V2Fixture.item("done", rev: 3, rankKey: "b0", section: "resolved")
         ])
+        // Items with agent replies keep their feed entries, unopened.
+        for (id, rev, position) in [("r1", 4, 1), ("r2", 5, 2), ("r3", 6, 3)] {
+            try store.apply(kind: "entry", rev: UInt64(rev),
+                            data: V2Fixture.json(V2Fixture.entry(id, item: "current", rev: rev, position: position)))
+        }
         let view = try XCTUnwrap(ServerModelV2Projection.cachedState(store.snapshot, identity: identity).inboxView)
         let rows = try XCTUnwrap(view.listItems)
         XCTAssertEqual(rows.map { "\($0.kind.rawValue):\($0.key.messageID.rawValue)" },
@@ -89,7 +96,37 @@ final class ServerModelV2ProjectionTests: XCTestCase {
         XCTAssertEqual(rows.map(\.freeSection?.group), [.common, .earlierMessages, .earlierChatReplies, .common])
         XCTAssertEqual(rows.last?.freeSection?.state, .history, "Resolved items are drawn under History.")
         XCTAssertEqual(rows[2].unseenCount, 2)
+        XCTAssertEqual(rows[2].conversationSequence, 3, "The row quotes the newest reply.")
+        XCTAssertEqual(rows[2].openAtConversationSequence, 2, "It opens at the first unread reply.")
         XCTAssertEqual(view.freeOrderVersion, 1)
+    }
+
+    func testAReplyRowWaitsForItsReplyInsteadOfShowingNothing() throws {
+        let store = try store([V2Fixture.item("i", rev: 1, rankKey: "a",
+            chat: #"{"started":true,"last_origin_reply":"r9","unread_replies":1,"reply_group":"earlier_chat_replies","reply_rank_key":"a5"}"#)])
+        let rows = try XCTUnwrap(ServerModelV2Projection.cachedState(store.snapshot, identity: identity).inboxView?.listItems)
+        XCTAssertEqual(rows.map(\.kind), [.message], "No reply row until its reply is held.")
+        XCTAssertEqual(store.snapshot.itemsNeedingEntries, [ExactText("i")])
+    }
+
+    func testAMessageArrivingAfterARemovalStillCountsAsNew() throws {
+        let store = try store([V2Fixture.item("a", rev: 1, rankKey: "a"), V2Fixture.item("b", rev: 2, rankKey: "b")])
+        let before = ServerModelV2Projection.cachedState(store.snapshot, identity: identity)
+        let highWater = before.requests.values.compactMap(\.acceptanceOrder).max() ?? 0
+        try store.apply(kind: "item_removed", rev: 3, data: V2Fixture.json(#"{"item_id":"b"}"#))
+        try store.apply(kind: "item", rev: 4, data: V2Fixture.json(V2Fixture.item("c", rev: 4, rankKey: "c")))
+        let after = ServerModelV2Projection.cachedState(store.snapshot, identity: identity)
+        XCTAssertGreaterThan(after.requests[key("c")]?.acceptanceOrder ?? 0, highWater,
+                             "Above the remembered high-water mark, so New messages admits it.")
+    }
+
+    func testResultEntriesBecomeResultStatusTurns() throws {
+        let store = try store([V2Fixture.item("i", rev: 1, rankKey: "a")])
+        try store.open("i")
+        try store.apply(kind: "entry", rev: 2, data: V2Fixture.json(#"{"entry_id":"res","item_id":"i","rev":2,"position":1,"kind":"result","author":"origin","request_revision":1,"result":{"status":"done","revision":1}}"#))
+        let thread = try XCTUnwrap(ServerModelV2Projection.cachedState(store.snapshot, identity: identity).conversations[key("i")])
+        XCTAssertEqual(thread.turns.first?.kind, .result)
+        XCTAssertEqual(thread.turns.first?.resultStatus?.rawValue, "done")
     }
 
     func testTheStoreAcceptsTheProjectionThroughItsExistingRestorePath() throws {

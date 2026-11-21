@@ -65,6 +65,14 @@ public struct ServerModelV2: Equatable, Codable, Sendable {
     static func itemGateKey(_ id: ExactText) -> String { itemKey(id) }
     private static func entryKey(_ id: ExactText) -> String { "entry:\(id.rawValue)" }
 
+    /// Applies an item through the gate, for tests and previews outside the store.
+    @discardableResult
+    public mutating func putForTesting(_ item: APIItem) -> Bool { put(item) }
+
+    /// Applies an entry as a feed change, for tests and previews outside the store.
+    @discardableResult
+    public mutating func putForTesting(_ entry: APIEntry) -> Bool { put(entry, fromFeed: true) }
+
     @discardableResult
     mutating func put(_ item: APIItem) -> Bool {
         guard gate.admit(Self.itemKey(item.itemID), rev: item.rev) else { return false }
