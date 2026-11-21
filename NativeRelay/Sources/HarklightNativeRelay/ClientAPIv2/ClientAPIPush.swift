@@ -7,12 +7,15 @@ import Foundation
 public struct ClientAPIPush: Sendable {
     private let transport: any ClientAPITransport
     private let model: ServerModelV2Store?
+    private let errors: any ErrorLogging
     private let onSettingsChanged: @Sendable () -> Void
 
     public init(transport: any ClientAPITransport, model: ServerModelV2Store? = nil,
+                errors: any ErrorLogging = NoopErrorLog(),
                 onSettingsChanged: @escaping @Sendable () -> Void = {}) {
         self.transport = transport
         self.model = model
+        self.errors = errors
         self.onSettingsChanged = onSettingsChanged
     }
 
@@ -37,9 +40,40 @@ public struct ClientAPIPush: Sendable {
                                      idempotencyKey: idempotencyKey))
     }
 
+    /// A refusal is definitive. The replacement becomes eligible only after
+    /// the authenticated settings read and a successful protected save.
+    @MainActor
+    public func reconcileRegistration(
+        _ saved: ClientAPIPushRegistrationState.Registration,
+        replaceStale: (UInt64) throws -> ClientAPIPushRegistrationState.Registration?
+    ) async throws -> ClientAPIPushRegistrationState.Registration? {
+        func send(_ intent: ClientAPIPushRegistrationState.Registration) async throws {
+            _ = try await register(token: intent.token, environment: intent.environment,
+                                   revision: intent.revision, idempotencyKey: intent.operationID)
+        }
+        do {
+            try await send(saved)
+            return saved
+        } catch let error as APIError where error.status == 412 && error.token == .preconditionFailed {
+            let current = try await status()
+            guard let replacement = try replaceStale(current.revision) else { return nil }
+            try await send(replacement)
+            return replacement
+        }
+    }
+
     private func request(_ request: APIRequest) async throws -> APIPushStatus {
+        try Task.checkCancellation()
         let generation = model?.syncPosition.generation
-        let reply = try await transport.send(request)
+        let reply: APIResponse
+        if let key = request.idempotencyKey {
+            let write = FrozenWrite(method: request.method, path: request.path, body: request.body)
+            let operation = request.method == .delete ? "remove_push" : "register_push"
+            reply = try await ActionOutbox.attemptProtectedWrite(write, key: key, operation: operation,
+                                                                 transport: transport, errors: errors)
+        } else {
+            reply = try await transport.send(request)
+        }
         try Task.checkCancellation()
         let response = try APIWriteResult(json: JSONValue.parse(reply.body))
         guard let status = response.settings?.push else { throw ClientAPIModelError.invalid("settings.push") }

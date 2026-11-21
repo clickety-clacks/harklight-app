@@ -4,6 +4,48 @@ import Foundation
 import XCTest
 
 final class ClientAPIPushTests: XCTestCase {
+    @MainActor
+    func testProtectedRegistrationSavesReplacementBeforeSendingAndReplaysALostResponse() async throws {
+        let transport = PushSettingsTransport()
+        await transport.loseNextSuccessfulRegistrationResponse()
+        let errors = RecordingErrorLogV2()
+        let push = ClientAPIPush(transport: transport, errors: errors)
+        let token = ExactText(String(repeating: "a", count: 64))
+        var state = ClientAPIPushRegistrationState()
+        let original = try XCTUnwrap(state.prepareRegistration(token: token, environment: .sandbox))
+        var persisted = try JSONEncoder().encode(state)
+        do {
+            _ = try await push.reconcileRegistration(original) {
+                let next = try state.replaceStaleRegistration(original, serverRevision: $0)
+                persisted = try JSONEncoder().encode(state)
+                return next
+            }
+            XCTFail("The server applied the write but its response was lost.")
+        } catch let error as URLError {
+            XCTAssertEqual(error.code, .networkConnectionLost)
+        }
+        state = try JSONDecoder().decode(ClientAPIPushRegistrationState.self, from: persisted)
+        let replacement = try XCTUnwrap(state.prepareRegistration(token: token, environment: .sandbox))
+        XCTAssertEqual(replacement.revision, 5)
+        XCTAssertNotEqual(replacement.operationID, original.operationID)
+        let accepted = try await push.reconcileRegistration(replacement) { _ in
+            XCTFail("A replay of the accepted key should not hit the revision guard.")
+            return nil
+        }
+        XCTAssertEqual(accepted, replacement)
+        state.confirmRegistration(replacement)
+        XCTAssertNil(try state.prepareRegistration(token: token, environment: .sandbox))
+        let requests = await transport.requests
+        XCTAssertEqual(requests.map(\.method), [.put, .get, .put, .put])
+        XCTAssertEqual(requests.map(\.idempotencyKey),
+                       [original.operationID, nil, replacement.operationID, replacement.operationID])
+        XCTAssertEqual(requests[2].body, requests[3].body)
+        XCTAssertTrue(errors.reports.contains {
+            $0.operation == "register_push" && $0.correlation.requestID == "stale-push" &&
+                $0.httpStatus == 412
+        })
+    }
+
     func testSavedRegistrationReplaysAndOnlyARefusalReplacesItsKeyAndRevision() throws {
         let token = ExactText(String(repeating: "a", count: 64))
         var state = ClientAPIPushRegistrationState()
@@ -172,6 +214,12 @@ private actor PushSettingsTransport: ClientAPITransport {
     private(set) var batches: [Rev] = []
     private var revision = 4
     private var environment: String? = "production"
+    private var receipts: Set<UUID> = []
+    private var loseRegistrationResponse = false
+
+    func loseNextSuccessfulRegistrationResponse() {
+        loseRegistrationResponse = true
+    }
 
     func send(_ request: APIRequest) async throws -> APIResponse {
         requests.append(request)
@@ -181,6 +229,8 @@ private actor PushSettingsTransport: ClientAPITransport {
             return APIResponse(status: 200, requestID: "me", body: Data(body.utf8))
         case (.get, "/v2/settings"): break
         case (.put, "/v2/devices/me/push"):
+            let key = try XCTUnwrap(request.idempotencyKey)
+            guard !receipts.contains(key) else { break }
             let body = try JSONValue.parse(XCTUnwrap(request.body))
             let upcoming = try XCTUnwrap(body.uniqueValue(named: "revision")?.integerValue)
             guard upcoming > revision else {
@@ -188,6 +238,11 @@ private actor PushSettingsTransport: ClientAPITransport {
             }
             revision = upcoming
             environment = try XCTUnwrap(body.uniqueValue(named: "environment")?.stringValue?.rawValue)
+            receipts.insert(key)
+            if loseRegistrationResponse {
+                loseRegistrationResponse = false
+                throw URLError(.networkConnectionLost)
+            }
         case (.delete, "/v2/devices/me/push"):
             revision += 1
             environment = nil

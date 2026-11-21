@@ -74,6 +74,12 @@ public protocol OutboxOutcomeHandling: Sendable {
     func rejected(_ entry: OutboxEntry, error: APIError) async
 }
 
+private struct ProtectedWriteOutcome: OutboxOutcomeHandling {
+    var modelGeneration: UInt64 { 0 }
+    func accepted(_ entry: OutboxEntry, response: APIResponse, generation: UInt64) async {}
+    func rejected(_ entry: OutboxEntry, error: APIError) async {}
+}
+
 /// Actions (design section 4) over the r2 API: the durable outbox. Writes
 /// never wait for, or depend on, Sync or the change feed.
 public actor ActionOutbox {
@@ -197,6 +203,19 @@ public actor ActionOutbox {
         await flush()
     }
 
+    /// The enrollment has already persisted the complete intent in Keychain.
+    /// Use the same send and refusal handling without copying it to the file
+    /// outbox. The caller owns the lifetime of this attempt and future replay.
+    static func attemptProtectedWrite(_ write: FrozenWrite, key: UUID, operation: String,
+                                      transport: any ClientAPITransport,
+                                      errors: any ErrorLogging) async throws -> APIResponse {
+        let outbox = try ActionOutbox(persistence: MemoryOutbox(), transport: transport,
+                                      outcomes: ProtectedWriteOutcome(), errors: errors, startsPaused: true)
+        let entry = try await outbox.submit(target: "push", operation: operation, write: write, idempotencyKey: key)
+        try Task.checkCancellation()
+        return try await outbox.sendOne(entry).result.get()
+    }
+
     @discardableResult
     private func startSending(_ target: String) -> Task<Void, Never>? {
         guard !sendingPaused, !unauthorized else { return nil }
@@ -221,13 +240,14 @@ public actor ActionOutbox {
             while !sendingPaused, !Task.isCancelled,
                   let entry = entries.first(where: { $0.target == target && $0.failure == nil }) {
                 guard canSend(entry) else { return }
-                guard await sendOne(entry) else { return }
+                guard await sendOne(entry).continueDraining else { return }
             }
         } while resendRequested.contains(target)
     }
 
-    /// Returns false when the target must wait (its head operation is kept).
-    private func sendOne(_ entry: OutboxEntry) async -> Bool {
+    /// The target waits when its head operation is kept for a retry.
+    private func sendOne(_ entry: OutboxEntry) async
+        -> (continueDraining: Bool, result: Result<APIResponse, any Error>) {
         noteAttempt(entry.idempotencyKey)
         do {
             let generation = outcomes.modelGeneration
@@ -235,16 +255,16 @@ public actor ActionOutbox {
             await outcomes.accepted(entry, response: response, generation: generation)
             remove(entry.idempotencyKey)
             resolveIfNoFailedWrite(entry.operation)
-            return true
+            return (true, .success(response))
         } catch let error as APIError where error.token == .accountPaused {
             // Kept until the pause ends; nothing is refused or dropped.
             unauthorized = true
             report(entry, phase: "send", error: error, initiator: .serverClosed, retryable: false)
-            return false
+            return (false, .failure(error))
         } catch let error where ChangeFeedSync.isRevocation(error) {
             unauthorized = true
             report(entry, phase: "send", error: error, initiator: .deviceRevoked, retryable: false)
-            return false
+            return (false, .failure(error))
         } catch let error as APIError where error.isPermanent || (error.isOutsideContractClientError &&
                     noteOutsideContractFailure(entry.idempotencyKey) >= Self.outsideContractAttempts) {
             // A contract refusal is definitive at once. A 4xx outside the
@@ -259,17 +279,17 @@ public actor ActionOutbox {
             }
             report(entry, phase: "send", error: error, initiator: .unknown, retryable: false)
             await outcomes.rejected(entry, error: error)
-            return true
+            return (true, .failure(error))
         } catch where Task.isCancelled {
             markOutcomeUnknown(entry.idempotencyKey, transportFailure: true)
-            return false
+            return (false, .failure(error))
         } catch {
             // Unknown outcome or retry later: keep the operation and its key.
             markOutcomeUnknown(entry.idempotencyKey, transportFailure: !(error is APIError))
             report(entry, phase: "send", error: error, initiator: .forFailure(error), retryable: true)
             scheduleRetry(entry.target, attempt: entries.first { $0.id == entry.id }?.attempts ?? 1,
                           retryAfter: (error as? APIError)?.retryAfter)
-            return false
+            return (false, .failure(error))
         }
     }
 

@@ -95,7 +95,7 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
             FileOutboxPersistence(url: $0.appendingPathComponent("outbox-v2.json"))
         } ?? MemoryOutbox()
         let relay = PublishRelay()
-        self.push = ClientAPIPush(transport: transport, model: model,
+        self.push = ClientAPIPush(transport: transport, model: model, errors: errors,
                                   onSettingsChanged: { relay.connection?.publishModel() })
         let modelWriter = ServerModelSyncWriter(store: model, transport: transport, errors: errors)
         self.modelWriter = modelWriter
@@ -823,7 +823,7 @@ private final class PublishingOutcomes: OutboxOutcomeHandling, @unchecked Sendab
 }
 
 /// An outbox that lives only in memory, for tests and previews.
-private final class MemoryOutbox: OutboxPersisting, @unchecked Sendable {
+final class MemoryOutbox: OutboxPersisting, @unchecked Sendable {
     private let lock = NSLock()
     private var entries: [OutboxEntry] = []
     func load() throws -> [OutboxEntry] { lock.withLock { entries } }
