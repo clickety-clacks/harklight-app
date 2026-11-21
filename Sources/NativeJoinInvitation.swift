@@ -18,7 +18,8 @@ struct NativeJoinInvitation: Codable, Equatable {
     let caPEM: String
     let caSHA256: String
     let inviteToken: String
-    let expiresAt: Int64
+    /// Nil when the Server gave the invitation no deadline.
+    let expiresAt: Int64?
     let personName: String?
     let inviterName: String?
 
@@ -87,7 +88,7 @@ struct NativeJoinInvitation: Codable, Equatable {
               enrollmentURL.host?.lowercased() == serverName.lowercased(),
               relayURL.host?.lowercased() == serverName.lowercased(),
               Self.hexSecret(inviteToken), Self.hexSecret(caSHA256),
-              expiresAt > 0,
+              expiresAt.map({ $0 > 0 }) ?? true,
               caPEM.components(separatedBy: "-----BEGIN CERTIFICATE-----").count == 2,
               caPEM.components(separatedBy: "-----END CERTIFICATE-----").count == 2,
               let root = NativeEnrollmentSettings.certificateDER(from: caPEM),

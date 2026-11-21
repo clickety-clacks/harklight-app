@@ -129,13 +129,15 @@ struct NativeEnrollmentView: View {
                 Text("Waiting for \(flow.invitation?.approvingOwnerLabel ?? "the server owner").")
             }
             requestDetails
-            if let code = flow.currentApprovalCode, let deadline = flow.attempt?.approvalExpiresAt {
+            if let code = flow.currentApprovalCode {
                 card {
                     Text("Last confirmed approval code").font(.caption).foregroundStyle(.hkSecondary)
                     Text(code).font(.title.monospaced().weight(.bold)).textSelection(.enabled)
                         .accessibilityLabel("Approval code \(code)")
-                    Text("Approval window closes \(Date(timeIntervalSince1970: Double(deadline) / 1000), format: .dateTime.month().day().hour().minute()).")
-                        .font(.caption).foregroundStyle(.hkSecondary)
+                    if let deadline = flow.attempt?.approvalExpiresAt {
+                        Text("Approval window closes \(Date(timeIntervalSince1970: Double(deadline) / 1000), format: .dateTime.month().day().hour().minute()).")
+                            .font(.caption).foregroundStyle(.hkSecondary)
+                    }
                 }
             } else if flow.attempt?.cancellationRequested != true, flow.attempt?.approvalCode != nil {
                 Text("The saved approval details have not been confirmed as current. Harklight will refresh this request when it reaches the server.")

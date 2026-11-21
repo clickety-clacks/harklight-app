@@ -1597,6 +1597,193 @@ final class NativeGuidedJoinTests: XCTestCase {
         XCTAssertFalse(openedSavedAccount, "Startup restore must not override the explicit invitation choice")
     }
 
+    // The Server no longer expires waiting requests or invitations: its
+    // expiry fields are null. An older Server still sends numbers.
+    private func nullExpiryInvitation(_ fixture: Fixture, key: String? = "expires_at") throws -> NativeJoinInvitation {
+        var payload = fixture.payload
+        if let key { payload[key] = NSNull() } else { payload.removeValue(forKey: "expires_at") }
+        return try NativeJoinInvitation.decodePayload(JSONSerialization.data(withJSONObject: payload))
+    }
+
+    func testInvitationWithNullOrAbsentExpiryIsValidAndNumericExpiryStillLoads() throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanup() }
+        XCTAssertNotNil(fixture.invitation.expiresAt, "A numeric expiry from an older Server is kept")
+        for nullInvitation in [try nullExpiryInvitation(fixture), try nullExpiryInvitation(fixture, key: nil)] {
+            XCTAssertNil(nullInvitation.expiresAt)
+            XCTAssertNoThrow(try nullInvitation.validate())
+            let roundTrip = try JSONDecoder().decode(NativeJoinInvitation.self,
+                                                     from: JSONEncoder().encode(nullInvitation))
+            XCTAssertEqual(roundTrip, nullInvitation)
+        }
+        var invalid = fixture.payload
+        invalid["expires_at"] = 0
+        XCTAssertThrowsError(try NativeJoinInvitation.decodePayload(JSONSerialization.data(withJSONObject: invalid)),
+                             "A numeric expiry still has to be positive")
+    }
+
+    func testJoinWithNullExpiryReachesPendingAndNeverShowsExpired() async throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanup() }
+        let invitation = try nullExpiryInvitation(fixture)
+        let transport = FakeTransport()
+        var cancelBodies: [[String: Any]] = []
+        transport.handler = { url, method, body in
+            if method == "GET" { return try response(["error": "invalid_request"], status: 400) }
+            switch url.path {
+            case "/enroll":
+                return try response(["state": "pending", "approval_code": "ABCDEF2345",
+                                     "expires_at": NSNull(), "status_expires_at": NSNull()])
+            case "/enroll/status":
+                return try response(["state": "pending", "person_id": invitation.personID,
+                                     "device_id": try XCTUnwrap(try NativeGuidedJoinStore(
+                                        namespace: fixture.namespace, transport: transport).loadAttempt()).deviceID,
+                                     "approval_code": "ABCDEF2345", "expires_at": NSNull(),
+                                     "status_expires_at": NSNull(), "request_generation": 1])
+            case "/enroll/cancel":
+                cancelBodies.append(try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(body)) as? [String: Any]))
+                return try response(["state": "cancelled"])
+            default:
+                XCTFail("Unexpected guided-join request: \(url.path)")
+                throw NativeJoinError.invalidResponse
+            }
+        }
+        let store = NativeGuidedJoinStore(namespace: fixture.namespace, transport: transport)
+        let flow = NativeGuidedJoinCoordinator(store: store, deviceName: "My phone")
+        await flow.pasteInvitation(fixture.url(invitation).absoluteString)
+        XCTAssertEqual(flow.screen, .confirmation)
+        await flow.join()
+        fixture.retainForCleanup(try XCTUnwrap(store.loadAttempt()))
+        XCTAssertEqual(flow.screen, .pending, "A request with no deadline is waiting, not expired")
+        var attempt = try XCTUnwrap(store.loadAttempt())
+        XCTAssertEqual(attempt.phase, .pending)
+        XCTAssertEqual(attempt.approvalCode, "ABCDEF2345")
+        XCTAssertNil(attempt.approvalExpiresAt)
+        XCTAssertNil(attempt.statusExpiresAt)
+
+        // Status with a generation, as sent by the Server after a restart.
+        attempt = try await store.checkApproval()
+        XCTAssertEqual(attempt.phase, .pending)
+        XCTAssertEqual(attempt.approvalCode, "ABCDEF2345")
+        XCTAssertNil(attempt.approvalExpiresAt)
+        XCTAssertEqual(try NativeGuidedJoinStore(namespace: fixture.namespace, transport: transport).loadAttempt(), attempt,
+                       "The saved request reloads with no deadline")
+
+        // Cancelling binds the exact request the Server gave us: its deadline is null.
+        attempt = try await store.cancel()
+        XCTAssertEqual(attempt.phase, .cancelled)
+        let body = try XCTUnwrap(cancelBodies.first)
+        XCTAssertEqual(Set(body.keys), ["status_secret", "approval_code", "expected_device_id", "expected_expires_at"])
+        XCTAssertTrue(body["expected_expires_at"] is NSNull)
+        XCTAssertEqual(body["approval_code"] as? String, "ABCDEF2345")
+    }
+
+    func testResumeAndStaleCancellationWithNullExpiryFollowTheServersCurrentRequest() async throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanup() }
+        let transport = FakeTransport()
+        let store = NativeGuidedJoinStore(namespace: fixture.namespace, transport: transport)
+        let original = try store.prepare(fixture.invitation, deviceLabel: "My phone")
+        fixture.retainForCleanup(original)
+        // A lost first reply left no code: resume reads the saved request back.
+        var lost = original
+        lost.phase = .expired
+        try fixture.saveLegacyAttempt(lost)
+        transport.handler = { url, _, _ in
+            XCTAssertEqual(url.path, "/enroll/resume")
+            return try response(["state": "pending", "person_id": fixture.invitation.personID,
+                                 "device_id": original.deviceID, "approval_code": "FGHIJK2345",
+                                 "expires_at": NSNull(), "status_expires_at": NSNull(), "request_generation": 1])
+        }
+        let resumed = try await store.checkApproval()
+        XCTAssertEqual(resumed.phase, .pending)
+        XCTAssertEqual(resumed.approvalCode, "FGHIJK2345")
+        XCTAssertNil(resumed.approvalExpiresAt)
+
+        // Cancellation with no saved code sends the stale placeholder, learns the
+        // Server's current null-deadline request, and cancels it exactly.
+        try fixture.saveLegacyAttempt(lost)
+        var deadlines: [Any?] = []
+        transport.handler = { url, _, body in
+            XCTAssertEqual(url.path, "/enroll/cancel")
+            let fields = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(body)) as? [String: Any])
+            deadlines.append(fields["expected_expires_at"])
+            if fields["approval_code"] as? String != "FGHIJK2345" {
+                return try response(["error": "stale_request", "current": [
+                    "state": "pending", "person_id": fixture.invitation.personID, "device_id": original.deviceID,
+                    "approval_code": "FGHIJK2345", "expires_at": NSNull(), "status_expires_at": NSNull(),
+                    "request_generation": 1]], status: 409)
+            }
+            return try response(["state": "cancelled"])
+        }
+        let cancelled = try await store.cancel()
+        XCTAssertEqual(cancelled.phase, .cancelled)
+        XCTAssertEqual(deadlines.count, 2)
+        XCTAssertEqual(deadlines[0] as? Int64, 1, "No saved code: the deliberately stale placeholder is unchanged")
+        XCTAssertTrue(deadlines[1] is NSNull, "The Server's null deadline is echoed as null")
+    }
+
+    func testApprovalWithNullExpiryKeepsAnAccountRecordWithNoDeadline() async throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanup() }
+        let invitation = try nullExpiryInvitation(fixture)
+        let transport = FakeTransport()
+        let store = NativeGuidedJoinStore(namespace: fixture.namespace, transport: transport)
+        let attempt = try store.prepare(invitation, deviceLabel: "My phone")
+        fixture.retainForCleanup(attempt)
+        transport.handler = { _, _, _ in
+            try response(["state": "approved", "person_id": invitation.personID, "device_id": attempt.deviceID,
+                          "approval_code": "ABCDEF2345", "expires_at": NSNull(), "status_expires_at": NSNull(),
+                          "request_generation": 1])
+        }
+        let approved = try await store.checkApproval()
+        XCTAssertEqual(approved.phase, .approved)
+        let record = try XCTUnwrap(store.approvedRecord())
+        XCTAssertNil(record.expiresAt)
+        XCTAssertNil(record.statusExpiresAt)
+        XCTAssertEqual(record.personID, invitation.personID)
+        XCTAssertEqual(try store.approvedRecord(), record, "The record with no deadlines reloads")
+    }
+
+    func testSavedRecordsFromEarlierBuildsAndNullDeadlinesDecode() throws {
+        func recordJSON(_ deadlines: [String: Any]) throws -> Data {
+            var fields: [String: Any] = ["host": "relay.example.test", "enrollmentPort": 443, "relayPort": 443,
+                                         "trustedRootDER": Data().base64EncodedString(),
+                                         "identityLabel": "identity", "deviceID": "device", "approvalCode": "ABCDEF2345",
+                                         "statusSecret": String(repeating: "a", count: 64), "personID": "person"]
+            fields.merge(deadlines) { $1 }
+            return try JSONSerialization.data(withJSONObject: fields)
+        }
+        let earlier = try JSONDecoder().decode(NativeEnrollmentRecord.self,
+                                               from: recordJSON(["expiresAt": 1_700_000_000_000,
+                                                                 "statusExpiresAt": 1_700_086_400_000]))
+        XCTAssertEqual(earlier.expiresAt, 1_700_000_000_000)
+        XCTAssertEqual(earlier.statusExpiresAt, 1_700_086_400_000)
+        let none = try JSONDecoder().decode(NativeEnrollmentRecord.self,
+                                            from: recordJSON(["expiresAt": NSNull(), "statusExpiresAt": NSNull()]))
+        XCTAssertNil(none.expiresAt)
+        XCTAssertNil(none.statusExpiresAt)
+        XCTAssertNoThrow(try JSONDecoder().decode(NativeEnrollmentRecord.self, from: recordJSON([:])))
+        let reencoded = try JSONDecoder().decode(NativeEnrollmentRecord.self, from: JSONEncoder().encode(none))
+        XCTAssertEqual(reencoded, none)
+    }
+
+    func testEnrollStartResponseAcceptsNullAndNumericExpiry() throws {
+        func decode(_ expiry: [String: Any]) throws -> NativeEnrollmentStore.StartResponse {
+            var fields: [String: Any] = ["approval_code": "ABCDEF2345", "status_secret": String(repeating: "a", count: 64)]
+            fields.merge(expiry) { $1 }
+            return try JSONDecoder().decode(NativeEnrollmentStore.StartResponse.self,
+                                            from: JSONSerialization.data(withJSONObject: fields))
+        }
+        let numeric = try decode(["expires_at": 1_700_000_000_000, "status_expires_at": 1_700_086_400_000])
+        XCTAssertEqual(numeric.expiresAt, 1_700_000_000_000)
+        XCTAssertEqual(numeric.statusExpiresAt, 1_700_086_400_000)
+        for none in [try decode(["expires_at": NSNull(), "status_expires_at": NSNull()]), try decode([:])] {
+            XCTAssertNil(none.expiresAt)
+            XCTAssertNil(none.statusExpiresAt)
+        }
+    }
+
     private final class FakeTransport: NativeJoinTransport {
         var handler: ((URL, String, Data?) async throws -> NativeJoinResponse)?
         var removalHandler: (@MainActor (URL, Data, Data, SecIdentity) async throws -> NativeJoinResponse)?

@@ -44,15 +44,16 @@ final class TwoDeviceServerCacheTests: XCTestCase {
             _ = try join.prepare(invitation, deviceLabel: "Isolated second client")
             phase = "submit"
             let attempt = try await join.submit()
-            guard attempt.phase == .pending, let code = attempt.approvalCode,
-                  let expires = attempt.approvalExpiresAt else {
+            guard attempt.phase == .pending, let code = attempt.approvalCode else {
                 print("TWO_DEVICE_REQUEST_PHASE " + attempt.phase.rawValue)
                 XCTFail("Native enrollment did not return a pending approval.")
                 return
             }
             let pending = try documents().appendingPathComponent("two-device-pending.json")
+            // The Server gives no deadline for new requests: the owner binding is null then.
             let data = try JSONSerialization.data(withJSONObject: [
-                "approval_code": code, "device_id": attempt.deviceID, "expires_at": expires
+                "approval_code": code, "device_id": attempt.deviceID,
+                "expires_at": attempt.approvalExpiresAt.map { $0 as Any } ?? NSNull()
             ], options: .sortedKeys)
             try data.write(to: pending, options: .atomic)
             try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: pending.path)
