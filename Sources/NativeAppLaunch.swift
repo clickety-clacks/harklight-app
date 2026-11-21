@@ -591,8 +591,8 @@ final class NativeAppLaunch {
         return values
     }
 
-    var revokedRecoveryArchives: [NativeAccountDeparture] {
-        archivedAccountDepartures.filter { $0.record.v2Revoked == true }
+    var enrollmentRecoveryArchives: [NativeAccountDeparture] {
+        archivedAccountDepartures.filter(\.hasV2TextRecovery)
     }
 
     var displayedArchiveDeparture: NativeAccountDeparture? {

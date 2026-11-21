@@ -74,6 +74,9 @@ final class NativeGuidedJoinTests: XCTestCase {
         XCTAssertTrue(archive.hasV2TextRecovery)
         XCTAssertEqual(archive.stagedRevokedText, [ExactText("Saved draft")])
         XCTAssertNil(try join.approvedRecord())
+        let launch = NativeAppLaunch(arguments: [], enrollmentStore: NativeEnrollmentStore(service: fixture.namespace),
+            joinStore: join, initialState: .enrollmentRequired, initialArchivedDepartures: [archive])
+        XCTAssertEqual(launch.enrollmentRecoveryArchives.first?.archiveID, archive.archiveID)
     }
 
     func testLostJoinReplyRestoresAndRetriesTheSameDeviceRequest() async throws {

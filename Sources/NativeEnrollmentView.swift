@@ -42,7 +42,7 @@ struct NativeEnrollmentView: View {
                         .accessibilityIdentifier("enrollment-client-diagnostics-share")
                     }
                     content
-                    let archives = launch.revokedRecoveryArchives
+                    let archives = launch.enrollmentRecoveryArchives
                     if !archives.isEmpty {
                         NavigationLink("View unsent text") { unsentTextDestination(archives) }
                             .accessibilityIdentifier("enrollment-unsent-text")
