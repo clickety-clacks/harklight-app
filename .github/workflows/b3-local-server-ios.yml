@@ -1,0 +1,25 @@
+name: B3 iOS with a local Server
+
+on:
+  push:
+    branches: [test/b3-local-server-ios]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: b3-local-server-ios
+  cancel-in-progress: true
+
+jobs:
+  enrollment:
+    runs-on: xcode-27
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Install build tools
+        run: brew install elixir openssl@3 xcodegen
+      - name: Run the isolated iOS proof
+        run: bash Scripts/B3LocalServer/run.sh "$RUNNER_TEMP"
