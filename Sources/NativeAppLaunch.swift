@@ -105,6 +105,7 @@ final class NativeAppLaunch {
     @ObservationIgnored private var didRestore = false
     @ObservationIgnored private var activationGeneration = UUID()
     @ObservationIgnored private let archivedPersistence: @MainActor () throws -> any PendingActionPersistence
+    @ObservationIgnored private let departureLifecycle: NativeRelayLifecycle
 
     init(arguments: [String] = ProcessInfo.processInfo.arguments,
          enrollmentStore: NativeEnrollmentStore? = nil,
@@ -119,6 +120,7 @@ final class NativeAppLaunch {
          },
          fetchInboxPageOperation: (@MainActor (LivePresentationStore) async -> Bool)? = nil,
          errorLog suppliedErrorLog: ErrorLogStore? = nil,
+         departureLifecycle: NativeRelayLifecycle = .shared,
          archivedPersistence: @escaping @MainActor () throws -> any PendingActionPersistence = {
              try FilePendingActionPersistence.applicationSupport()
          }) {
@@ -133,6 +135,7 @@ final class NativeAppLaunch {
         let joinStore = suppliedJoinStore ?? NativeGuidedJoinStore()
         self.enrollment = enrollment
         self.archivedPersistence = archivedPersistence
+        self.departureLifecycle = departureLifecycle
         guidedJoinStore = joinStore
         hasPriorAppState = fixture ? false : NativeInstallationHistory.hasPriorAppState(
             enrollment: enrollment, guidedJoin: joinStore)
@@ -150,7 +153,9 @@ final class NativeAppLaunch {
         archivedAccountDepartures = initialArchivedDepartures
         unconfirmedAccountDepartures = fixture ? [] : ((try? joinStore.unconfirmedDepartures()) ?? [])
         let savedDeparture = fixture ? nil : (try? joinStore.departure())
-        let standaloneDeparture = savedDeparture.flatMap { $0.replacement == nil ? $0 : nil }
+        let standaloneDeparture = savedDeparture.flatMap {
+            $0.replacement == nil && ($0.removed || $0.v2SignOut != true) ? $0 : nil
+        }
         disconnectedAccount = standaloneDeparture
         guidedJoin = NativeGuidedJoinCoordinator(store: joinStore,
                                                  deviceName: UIDevice.current.name,
@@ -232,23 +237,33 @@ final class NativeAppLaunch {
             guard let self else { return }
             await NativeRelayLifecycle.shared.removePushBeforeDeparture(for: record, enrollment: self.enrollment)
         }
-        if NativeRelayLifecycle.shared.clientAPIV2Enabled {
+        if departureLifecycle.clientAPIV2Enabled {
             guidedJoinStore.prepareV2Removal = { [weak self] record in
                 guard let self else { throw NativeJoinError.superseded }
                 try await self.prepareV2Removal(record)
             }
+            guidedJoinStore.didConfirmV2Removal = { [weak self] record in
+                guard let self, let current = self.activeEnrollmentRecord,
+                      current.deviceID == record.deviceID, current.profileAuthority == record.profileAuthority,
+                      NativeAuthorityBinding.samePerson(current.personID, record.personID) else {
+                    return
+                }
+                await self.departureLifecycle.deactivate()
+                if self.activeEnrollmentRecord?.sameNotificationProfile(as: current) == true {
+                    self.closeV2ErrorLog()
+                }
+            }
         }
         guidedJoin.didKeepCurrentAccount = { [weak self] record in
-            let lifecycle = NativeRelayLifecycle.shared
+            guard let self else { return }
+            let lifecycle = self.departureLifecycle
             guard lifecycle.clientAPIV2Enabled || lifecycle.featureFlags.isEnabled(.serverMatchedPushRouting),
-                  let self, case let .live(presentation) = self.state,
+                  case let .live(presentation) = self.state,
                   !presentation.isReadOnly, !presentation.isLocalExample,
                   self.activeEnrollmentRecord?.sameNotificationProfile(as: record) == true else { return }
             if lifecycle.clientAPIV2Enabled {
                 if try self.guidedJoinStore.hasConfirmedRemoval(for: record) { return }
-                if !lifecycle.isActive(for: presentation.notificationContext) {
-                    try await self.activate(self.enrollment.material(from: record))
-                }
+                try await self.resumeAfterUnconfirmedV2Removal(record, presentation: presentation)
             } else {
                 try self.enrollment.cancelPushDeparture(for: record)
             }
@@ -279,6 +294,7 @@ final class NativeAppLaunch {
 #if DEBUG
         if isSubmissionFailureSeed { return }
 #endif
+        try? guidedJoinStore.resumeArchivedDepartureCleanup()
         if NativeRelayLifecycle.shared.clientAPIV2Enabled, let record = try? enrollment.load(),
            record.v2Revoked == true {
             refreshArchivedAccounts()
@@ -291,7 +307,7 @@ final class NativeAppLaunch {
         }
         refreshArchivedAccounts()
         if let departure = try? guidedJoinStore.departure(),
-           departure.replacement == nil {
+           departure.replacement == nil, departure.removed || departure.v2SignOut != true {
             disconnectedAccount = departure
             let attempt = try? guidedJoinStore.loadAttempt()
             let active = try? enrollment.load()
@@ -339,12 +355,12 @@ final class NativeAppLaunch {
         disconnectMessage = nil
         do {
             try guidedJoin.prepareStandaloneRemoval(record)
-            if NativeRelayLifecycle.shared.clientAPIV2Enabled {
-                try await prepareV2Removal(record)
-            } else {
-                try enrollment.preparePushRemoval(for: record)
-                await guidedJoinStore.removePushBeforeDeparture?(record)
+            if departureLifecycle.clientAPIV2Enabled {
+                await retryDisconnectRemoval()
+                return
             }
+            try enrollment.preparePushRemoval(for: record)
+            await guidedJoinStore.removePushBeforeDeparture?(record)
             refreshArchivedAccounts()
             let departure = try guidedJoinStore.departure() ??
                 NativeAccountDeparture(record: record, replacement: nil, removed: false)
@@ -370,10 +386,17 @@ final class NativeAppLaunch {
               !isDisconnectBusy(for: departure),
               canRetryUnconfirmedDisconnectRemoval(for: departure) else { return }
         let isConnectedToAnotherAccount: Bool
+        let liveV2Presentation: LivePresentationStore?
         if case .live = state {
             isConnectedToAnotherAccount = activeEnrollmentRecord?.deviceID != departure.record.deviceID
         } else {
             isConnectedToAnotherAccount = false
+        }
+        if departure.v2SignOut == true, departure.replacement == nil,
+           !isConnectedToAnotherAccount, case let .live(presentation) = state {
+            liveV2Presentation = presentation
+        } else {
+            liveV2Presentation = nil
         }
         let isCurrentReplacementFlow = departure.replacement != nil &&
             guidedJoin.screen == .replacementConfirmation &&
@@ -392,6 +415,9 @@ final class NativeAppLaunch {
                 try await guidedJoin.removeStandaloneAccount(departure)
             }
             refreshArchivedAccounts()
+            if let liveV2Presentation, let confirmed = disconnectedAccount, confirmed.removed {
+                await presentConfirmedV2Disconnect(confirmed, presentation: liveV2Presentation)
+            }
             let confirmed = !unconfirmedAccountDepartures.contains { $0.archiveID == departure.archiveID }
             let account = departure.record.savedAccountName ?? "this account"
             let result = confirmed
@@ -404,6 +430,16 @@ final class NativeAppLaunch {
             }
         } catch {
             refreshArchivedAccounts()
+            if let liveV2Presentation {
+                if let confirmed = disconnectedAccount, confirmed.removed {
+                    await presentConfirmedV2Disconnect(confirmed, presentation: liveV2Presentation)
+                    disconnectMessage = "The server confirmed removal. Local cleanup will retry when Harklight next opens."
+                    return
+                }
+                if (try? guidedJoinStore.hasConfirmedRemoval(for: departure.record)) != true {
+                    try? await resumeAfterUnconfirmedV2Removal(departure.record, presentation: liveV2Presentation)
+                }
+            }
             let account = departure.record.savedAccountName ?? "this account"
             let result = "The server did not confirm removal for \(account). You can retry."
             disconnectRemovalMessages[departure.archiveID] = result
@@ -413,6 +449,20 @@ final class NativeAppLaunch {
                                                              presentation: disconnectedStore)
             }
         }
+    }
+
+    private func presentConfirmedV2Disconnect(_ departure: NativeAccountDeparture,
+                                              presentation: LivePresentationStore) async {
+        guard activeEnrollmentRecord?.deviceID == departure.record.deviceID,
+              case let .live(current) = state, current === presentation else { return }
+        disconnectedArchive = presentation
+        isShowingDisconnectedArchive = true
+        presentation.enterReadOnlyMode()
+        state = .disconnected(presentation)
+        activeEnrollmentRecord = nil
+        activationGeneration = UUID()
+        guidedJoin.holdForDisconnectedAccount(departure)
+        clearForegroundConnectionDetails()
     }
 
     var canRetryUnconfirmedDisconnectRemoval: Bool {
@@ -1029,9 +1079,26 @@ final class NativeAppLaunch {
             staged = []
         }
         try guidedJoinStore.markV2Departure(record, stagedText: staged)
-        await NativeRelayLifecycle.shared.prepareV2SignOut(for: record)
-        if current, activeEnrollmentRecord?.sameNotificationProfile(as: record) == true {
-            closeV2ErrorLog()
+        await departureLifecycle.prepareV2SignOut(for: record)
+    }
+
+    private func resumeAfterUnconfirmedV2Removal(_ record: NativeEnrollmentRecord,
+                                                 presentation: LivePresentationStore) async throws {
+        let lifecycle = departureLifecycle
+        guard activeEnrollmentRecord?.sameNotificationProfile(as: record) == true,
+              lifecycle.isPreparingV2SignOut(for: presentation.notificationContext) else { return }
+        let installation = try enrollment.material(from: record)
+        await lifecycle.deactivate()
+        guard activeEnrollmentRecord?.sameNotificationProfile(as: record) == true,
+              case let .live(current) = state, current === presentation else { return }
+        lifecycle.onV2AccountAccessChanged = { [weak self] access, context in
+            self?.applyV2AccountAccess(access, for: context)
+        }
+        try await lifecycle.activate(store: presentation.attentionStore, context: installation.context,
+                                     relayURL: installation.relayURL, clientIdentity: installation.keychainIdentity,
+                                     trustedRootDER: installation.trustedRootDER)
+        if let access = lifecycle.v2AccountAccess {
+            applyV2AccountAccess(access, for: installation.context)
         }
     }
 
@@ -1679,7 +1746,7 @@ final class LivePresentationStore {
     }
 
     @ObservationIgnored private let port: AttentionDomainPort
-    @ObservationIgnored private let attentionStore: ClientRepository
+    @ObservationIgnored fileprivate let attentionStore: ClientRepository
     private let permitsDelivery: Bool
     @ObservationIgnored private let conversationFiles: ConversationFileStorage?
     @ObservationIgnored private let profileContext: ProfileContext

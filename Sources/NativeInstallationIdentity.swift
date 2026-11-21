@@ -36,6 +36,25 @@ struct NativeInstallationIdentityStore {
         try load(creatingIfMissing: false)
     }
 
+    func retire() throws {
+        let certificate: [String: Any] = [
+            kSecClass as String: kSecClassCertificate,
+            kSecAttrLabel as String: namespace + ".certificate"
+        ]
+        let key: [String: Any] = [
+            kSecClass as String: kSecClassKey,
+            kSecAttrApplicationTag as String: Data(namespace.utf8),
+            kSecAttrKeyType as String: kSecAttrKeyTypeRSA,
+            kSecAttrKeyClass as String: kSecAttrKeyClassPrivate
+        ]
+        for query in [key, certificate] {
+            let status = SecItemDelete(query as CFDictionary)
+            guard status == errSecSuccess || status == errSecItemNotFound else {
+                throw InstallationIdentityFailure.keychain(operation: "retire identity", status: status)
+            }
+        }
+    }
+
     private func load(creatingIfMissing: Bool) throws -> NativeInstallationIdentity {
         let privateKey = try retainedPrivateKey(creatingIfMissing: creatingIfMissing)
         guard let publicKey = SecKeyCopyPublicKey(privateKey),

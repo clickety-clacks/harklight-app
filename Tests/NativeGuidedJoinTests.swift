@@ -20,6 +20,12 @@ final class NativeGuidedJoinTests: XCTestCase {
                           "device_id": request.deviceID])
         }
         _ = try await join.checkApproval()
+        let enrollment = NativeEnrollmentStore(service: fixture.namespace)
+        try enrollment.storeV2APNsToken(Data([1, 2, 3]))
+        let approved = try XCTUnwrap(join.approvedRecord())
+        _ = try enrollment.updateV2PushRegistration(for: approved) {
+            try $0.prepareRegistration(token: ExactText("010203"), environment: .sandbox)
+        }
         let record = try XCTUnwrap(join.approvedRecord())
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText(record.profileAuthority),
             personID: ExactText(fixture.invitation.personID), deviceID: ExactText(record.deviceID))
@@ -53,12 +59,14 @@ final class NativeGuidedJoinTests: XCTestCase {
             try join?.markV2Departure(record, stagedText: [ExactText("Saved draft")])
             await lifecycle.prepareV2SignOut(for: record)
         }
+        join.didConfirmV2Removal = { _ in await lifecycle.deactivate() }
         enrollmentWire.removalHandler = { url, body, _, _ in
             XCTAssertEqual(url.path, "/device/remove")
             let request = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: String])
             XCTAssertEqual(request["expected_device_id"], record.deviceID)
             let screens = await v2Wire.screens
             XCTAssertEqual(screens.last, "signed_out")
+            XCTAssertTrue(lifecycle.isActive(for: context))
             XCTAssertTrue(FileManager.default.fileExists(atPath: directory.path))
             do {
                 _ = try await connection.access.send(.get("/v2/me"))
@@ -73,10 +81,127 @@ final class NativeGuidedJoinTests: XCTestCase {
         let archive = try XCTUnwrap(join.archivedDepartures().first)
         XCTAssertTrue(archive.hasV2TextRecovery)
         XCTAssertEqual(archive.stagedRevokedText, [ExactText("Saved draft")])
+        XCTAssertTrue(archive.record.statusSecret.isEmpty)
+        XCTAssertTrue(archive.record.approvalCode.isEmpty)
+        XCTAssertNil(archive.record.v2PushRegistration)
+        XCTAssertNil(try enrollment.v2APNsAddress())
+        XCTAssertNil(try join.loadAttempt())
         XCTAssertNil(try join.approvedRecord())
+        XCTAssertThrowsError(try enrollment.material(from: record))
+        let certificateQuery: [String: Any] = [
+            kSecClass as String: kSecClassCertificate, kSecAttrLabel as String: request.identityLabel
+        ]
+        XCTAssertEqual(SecItemCopyMatching(certificateQuery as CFDictionary, nil), errSecItemNotFound)
         let launch = NativeAppLaunch(arguments: [], enrollmentStore: NativeEnrollmentStore(service: fixture.namespace),
             joinStore: join, initialState: .enrollmentRequired, initialArchivedDepartures: [archive])
         XCTAssertEqual(launch.enrollmentRecoveryArchives.first?.archiveID, archive.archiveID)
+    }
+
+    func testFailedV2StandaloneRemovalKeepsLiveAccountAndRestoresItAfterRelaunch() async throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanup() }
+        let wire = FakeTransport()
+        let join = NativeGuidedJoinStore(namespace: fixture.namespace, transport: wire)
+        let request = try join.prepare(fixture.invitation, deviceLabel: "My phone")
+        fixture.retainForCleanup(request)
+        wire.handler = { _, _, _ in
+            try response(["state": "approved", "person_id": fixture.invitation.personID,
+                          "device_id": request.deviceID])
+        }
+        _ = try await join.checkApproval()
+        let enrollment = NativeEnrollmentStore(service: fixture.namespace)
+        try enrollment.markForegroundRelayConfirmed(for: request.deviceID)
+        try enrollment.markNotificationExplanationSeen(for: request.deviceID)
+        let record = try XCTUnwrap(join.approvedRecord())
+        let context = try enrollment.material(from: record).context
+        let repository = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        let presentation = try LivePresentationStore(store: repository, context: context)
+        let lifecycle = NativeRelayLifecycle(clientAPIV2Enabled: true, v2FocusReporter: NativeFocusReporter())
+        let oldConnection = try ClientAPIv2Connection(transport: SignOutFocusTransport(), repository: repository,
+            context: context, directory: nil, errors: NoopErrorLog())
+        lifecycle.installV2Connection(oldConnection, context: context)
+        defer { Task { await lifecycle.deactivate() } }
+        let launch = NativeAppLaunch(arguments: [], enrollmentStore: enrollment, joinStore: join,
+            initialState: .live(presentation), initialEnrollmentRecord: record, departureLifecycle: lifecycle)
+        var removalRequests = 0
+        wire.removalHandler = { _, _, _, _ in
+            removalRequests += 1
+            guard case let .live(current) = launch.state, current === presentation else {
+                XCTFail("Signing out must leave the account live while removal is unconfirmed")
+                throw URLError(.notConnectedToInternet)
+            }
+            XCTAssertFalse(current.isReadOnly)
+            throw URLError(.notConnectedToInternet)
+        }
+        await launch.disconnectCurrentAccount()
+        XCTAssertEqual(removalRequests, 1)
+        guard case let .live(current) = launch.state, current === presentation else {
+            return XCTFail("A failed removal must leave the original account live")
+        }
+        XCTAssertFalse(current.isReadOnly)
+        XCTAssertTrue(lifecycle.isActive(for: context))
+        XCTAssertFalse(lifecycle.isPreparingV2SignOut(for: context))
+        let pending = try XCTUnwrap(launch.unconfirmedAccountDepartures.first)
+        XCTAssertTrue(launch.canRetryUnconfirmedDisconnectRemoval(for: pending))
+        XCTAssertNotNil(launch.disconnectRemovalMessage(for: pending))
+        XCTAssertEqual(try join.approvedRecord(), record)
+
+        let reopened = NativeGuidedJoinStore(namespace: fixture.namespace, transport: wire)
+        let cold = NativeAppLaunch(arguments: [], enrollmentStore: enrollment, joinStore: reopened,
+            departureLifecycle: lifecycle)
+        var restoredDeviceID: String?
+        cold.guidedJoin.connectApproved = { restored in
+            restoredDeviceID = restored.deviceID
+            return true
+        }
+        await cold.restoreInstallation()
+        XCTAssertEqual(restoredDeviceID, record.deviceID)
+        XCTAssertEqual(cold.guidedJoin.screen, .connected)
+        XCTAssertFalse(cold.guidedJoin.isShowing)
+        XCTAssertTrue(cold.canRetryUnconfirmedDisconnectRemoval)
+        XCTAssertEqual(removalRequests, 1)
+    }
+
+    func testConfirmedLegacyRemovalResumesFailedPushCleanupAfterRelaunch() async throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanup() }
+        let wire = FakeTransport()
+        let join = NativeGuidedJoinStore(namespace: fixture.namespace, transport: wire)
+        let request = try join.prepare(fixture.invitation, deviceLabel: "My phone")
+        fixture.retainForCleanup(request)
+        wire.handler = { _, _, _ in
+            try response(["state": "approved", "person_id": fixture.invitation.personID,
+                          "device_id": request.deviceID])
+        }
+        _ = try await join.checkApproval()
+        let record = try XCTUnwrap(join.approvedRecord())
+        var removalRequests = 0
+        wire.removalHandler = { _, _, _, _ in
+            removalRequests += 1
+            return try response(["state": "removed", "person_id": fixture.invitation.personID,
+                                 "device_id": request.deviceID, "enrollment_revision": 2])
+        }
+        join.finishLegacyPushDeparture = { _ in throw NativeEnrollmentError.identityStorage }
+        do {
+            try await join.removeCurrentAccount(record)
+            XCTFail("Expected the injected cleanup error")
+        } catch NativeEnrollmentError.identityStorage {}
+        XCTAssertEqual(try join.departure()?.cleanupPending, true)
+        XCTAssertEqual(try join.approvedRecord(), record)
+
+        let reopened = NativeGuidedJoinStore(namespace: fixture.namespace, transport: wire)
+        var cleanups = 0
+        reopened.finishLegacyPushDeparture = { retired in
+            XCTAssertEqual(retired.deviceID, request.deviceID)
+            cleanups += 1
+        }
+        let restored = NativeGuidedJoinCoordinator(store: reopened, deviceName: "My phone")
+        await restored.restore()
+        XCTAssertEqual(cleanups, 1)
+        XCTAssertEqual(removalRequests, 1)
+        XCTAssertEqual(try reopened.departure()?.removed, true)
+        XCTAssertNil(try reopened.departure()?.cleanupPending)
+        XCTAssertNil(try reopened.approvedRecord())
     }
 
     func testLostJoinReplyRestoresAndRetriesTheSameDeviceRequest() async throws {

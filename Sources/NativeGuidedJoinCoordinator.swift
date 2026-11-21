@@ -71,7 +71,7 @@ final class NativeGuidedJoinCoordinator {
                     if hasSuccessorAttempt || hasSuccessorEnrollment {
                         unconfirmedDepartureDeviceID = departure.record.deviceID
                         currentAccount = hasSuccessorEnrollment ? current : nil
-                    } else if departure.replacement == nil {
+                    } else if departure.replacement == nil && departure.v2SignOut != true {
                         currentAccount = current
                         screen = .replacementConfirmation
                         message = "The previous server may still have this phone registered. Its saved account is kept here while you retry removal."

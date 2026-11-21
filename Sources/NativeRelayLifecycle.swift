@@ -1686,7 +1686,10 @@ final class NativeRelayLifecycle {
             v2DepartureTask = task
         }
         await task.value
-        if v2Connection === connection { await deactivate() }
+    }
+
+    func isPreparingV2SignOut(for expected: ProfileContext) -> Bool {
+        context == expected && v2DepartureTask != nil
     }
 
     func removePushBeforeDeparture(for record: NativeEnrollmentRecord,
