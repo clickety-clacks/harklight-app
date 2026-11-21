@@ -49,7 +49,7 @@ final class B3EnrollmentProof: XCTestCase {
             if continueAfterApproval.isHittable {
                 try signal("connected", at: signals)
                 continueAfterApproval.tap()
-                tapVisible(app.buttons["Not now"], in: app)
+                tapVisible(app.scrollViews.buttons["Not now"], in: app)
             } else if Date() >= nextStatusCheck, check.isHittable {
                 check.tap()
                 nextStatusCheck = Date().addingTimeInterval(5)
