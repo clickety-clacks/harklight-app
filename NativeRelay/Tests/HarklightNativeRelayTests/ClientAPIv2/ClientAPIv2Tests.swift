@@ -20,6 +20,81 @@ private let noOutboxWait: @Sendable (Int, TimeInterval?) async throws -> Void = 
     try await Task.sleep(for: .seconds(3600))
 }
 
+final class ClientAPIAccessTests: XCTestCase {
+    private func connection(_ server: FakeClientAPIServer, directory: URL) throws -> ClientAPIv2Connection {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                                       personID: ExactText("person"), deviceID: ExactText("device"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let repository = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        return try ClientAPIv2Connection(transport: server, repository: repository, context: context,
+            directory: directory, errors: RecordingErrorLogV2(), foregroundOnlyWrites: true)
+    }
+
+    func testPausedFeedKeepsTheCacheAndSavedWritesUntilMeConfirmsRecovery() async throws {
+        let server = FakeClientAPIServer()
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        server.inboxItems = [V2Fixture.item("i", rev: 1, rankKey: "a")]
+        server.meBody = #"{"account":{"state":"active"},"features":{},"limits":{}}"#
+        let connection = try connection(server, directory: directory)
+        let initial = Task { await connection.runForeground() }
+        defer { initial.cancel() }
+        await eventually("the held inbox and feed") {
+            server.openFeedCount == 1 && connection.model.snapshot.items[ExactText("i")] != nil &&
+                server.received.contains { $0.path == "/v2/me" }
+        }
+        let held = connection.model.heldCursor
+        server.closeFeeds(reason: "account_paused")
+        await initial.value
+        XCTAssertEqual(connection.access.state, .paused)
+        XCTAssertEqual(connection.model.persistedCursor(), held)
+        XCTAssertNotNil(connection.model.snapshot.items[ExactText("i")])
+
+        let write = ClientAPIWrites.reply(itemID: ExactText("i"), text: ExactText("saved while paused"))
+        let key = UUID()
+        try await connection.outbox.submit(target: write.target, operation: write.operation, write: write.write,
+                                           idempotencyKey: key)
+        let before = server.received.count
+        server.meBody = #"{"account":{"state":"paused"},"features":{},"limits":{}}"#
+        await connection.runForeground()
+        XCTAssertEqual(Array(server.received.dropFirst(before)).map(\.path), ["/v2/me"])
+        let pending = await connection.outbox.pending
+        XCTAssertEqual(pending.map(\.id), [key])
+
+        server.meBody = #"{"account":{"state":"active"},"features":{},"limits":{}}"#
+        let resumed = Task { await connection.runForeground() }
+        defer { resumed.cancel() }
+        await eventually("recovery sends the saved operation under its original key") {
+            server.received.contains { $0.idempotencyKey == key }
+        }
+        XCTAssertEqual(connection.access.state, .available)
+        XCTAssertEqual(server.received.filter { $0.idempotencyKey == key }.count, 1)
+    }
+
+    func testRevokedFeedBlocksSubsequentConnectionAndIndependentRequests() async throws {
+        let server = FakeClientAPIServer()
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let connection = try connection(server, directory: directory)
+        let initial = Task { await connection.runForeground() }
+        defer { initial.cancel() }
+        await eventually("the stream is open") { server.openFeedCount == 1 }
+        server.closeFeeds(reason: "revoked")
+        await initial.value
+        XCTAssertEqual(connection.access.state, .revoked)
+        let before = server.received.count
+        await connection.runForeground()
+        do {
+            _ = try await connection.access.send(.get("/v2/me"))
+            XCTFail("The revoked connection must not make another request.")
+        } catch let error as APIError {
+            XCTAssertEqual(error.token, .unauthorized)
+        }
+        XCTAssertEqual(server.received.count, before)
+        XCTAssertEqual(server.openFeedCount, 0)
+    }
+}
+
 final class ServerSentEventParserTests: XCTestCase {
     private func events(_ lines: [String]) -> [ServerSentEvent] {
         var parser = ServerSentEventParser()

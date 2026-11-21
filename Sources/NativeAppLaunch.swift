@@ -42,6 +42,7 @@ struct NativeForegroundConnectFailureKey: Equatable, Hashable {
 final class NativeAppLaunch {
     enum State {
         case enrollmentRequired
+        case reenrolmentRequired(NativeEnrollmentRecord)
         case enrollmentPending(NativeEnrollmentRecord)
         case fixture(PrototypeStore)
         case live(LivePresentationStore)
@@ -259,6 +260,12 @@ final class NativeAppLaunch {
 #if DEBUG
         if isSubmissionFailureSeed { return }
 #endif
+        if NativeRelayLifecycle.shared.clientAPIV2Enabled, let record = try? enrollment.load(),
+           record.v2Revoked == true {
+            activeEnrollmentRecord = nil
+            state = .reenrolmentRequired(record)
+            return
+        }
         refreshArchivedAccounts()
         if let departure = try? guidedJoinStore.departure(),
            departure.replacement == nil {
@@ -430,6 +437,7 @@ final class NativeAppLaunch {
     }
 
     func receiveInvitation(_ url: URL) async {
+        if case .reenrolmentRequired = state { return }
         if NativeMessageDeepLink.recognizes(url) {
             notificationRouter.consumed()
             guard let deepLink = NativeMessageDeepLink(url: url) else {
@@ -858,6 +866,11 @@ final class NativeAppLaunch {
         guard activationGeneration == generation else { return }
         let presentation = activation.presentation
         NativeRelayLifecycle.shared.errorLog = errorLog
+        if usesV2 {
+            NativeRelayLifecycle.shared.onV2AccountAccessChanged = { [weak self] access, context in
+                self?.applyV2AccountAccess(access, for: context)
+            }
+        }
         do {
             try await NativeRelayLifecycle.shared.activate(store: store,
                                                            context: installation.context,
@@ -890,6 +903,10 @@ final class NativeAppLaunch {
         }
         presentation.startObserving()
         state = .live(presentation)
+        if usesV2, let access = NativeRelayLifecycle.shared.v2AccountAccess {
+            applyV2AccountAccess(access, for: context)
+            guard activationGeneration == generation else { return }
+        }
         isShowingDisconnectedArchive = false
         Task { [weak self] in
             guard let self else { return }
@@ -1000,6 +1017,44 @@ final class NativeAppLaunch {
     func refreshForForegroundActivation() async {
         foregroundActivationPushCheckPending = true
         await refreshLive()
+    }
+
+    private func applyV2AccountAccess(_ access: ClientAPIAccessState, for context: ProfileContext) {
+        guard case let .live(presentation) = state, presentation.profileContext == context else { return }
+        presentation.v2AccountPaused = access == .paused
+        guard access == .revoked, let record = activeEnrollmentRecord,
+              record.matchesNotificationIdentity(context.identity) else { return }
+        do {
+            try enrollment.markV2Revoked(record)
+        } catch {
+            diagnostics.record(area: .localStore, phase: .accountRemoval, transition: .failed, error: error)
+        }
+        activationGeneration = UUID()
+        presentation.enterReadOnlyMode()
+        clearForegroundConnectionDetails()
+        notificationRouter.consumed()
+        pendingMessageDeepLink = nil
+        activeEnrollmentRecord = nil
+        state = .reenrolmentRequired(record)
+        Task {
+            let lifecycle = NativeRelayLifecycle.shared
+            if lifecycle.isActive(for: context), lifecycle.v2AccountAccess == .revoked {
+                await lifecycle.deactivate()
+            }
+        }
+    }
+
+    func beginV2Reenrolment() {
+        guard case let .reenrolmentRequired(record) = state, !guidedJoin.busy else { return }
+        do {
+            try enrollment.markV2Revoked(record)
+            try guidedJoinStore.forgetRevokedInstallation(record)
+            enrollmentMessage = nil
+            state = .enrollmentRequired
+            guidedJoin.beginReconnect()
+        } catch {
+            enrollmentMessage = "The app could not clear this device's saved enrolment. Try again."
+        }
     }
 
     func refreshLive() async {
@@ -1498,8 +1553,10 @@ final class LivePresentationStore {
     var notificationWarning: String?
     private(set) var pushRegistrationWarning: String?
     private var storedConnectionWarning: String?
+    var v2AccountPaused = false
     var connectionWarning: String? {
         get {
+            if v2AccountPaused { return "This account is paused. Your saved messages are still available." }
             guard NativeRelayLifecycle.shared.refreshFailureMessage(for: profileContext) != nil ||
                     storedConnectionWarning != nil else { return nil }
             return "Waiting for the server. Your pending actions are saved."

@@ -92,6 +92,8 @@ struct HarklightApp: App {
             Group {
                 if showsTierReference {
                     InboxTierReferenceScreen()
+                } else if case .reenrolmentRequired = launch.state {
+                    v2ReenrolmentView
                 } else if let archive = launch.selectedArchivedPresentation,
                    let departure = launch.selectedArchivedAccount {
                     LiveContentView(store: archive, samples: samples, launch: launch,
@@ -109,6 +111,8 @@ struct HarklightApp: App {
                     switch launch.state {
                     case .enrollmentRequired:
                         NativeEnrollmentView(launch: launch)
+                    case .reenrolmentRequired:
+                        v2ReenrolmentView
                     case let .enrollmentPending(record):
                         NativeEnrollmentView(launch: launch, pending: record)
                     case let .fixture(store):
@@ -160,7 +164,8 @@ struct HarklightApp: App {
                     if isActivationRefresh {
                         await launch.refreshForForegroundActivation()
                         isActivationRefresh = false
-                    } else if !NativeRelayLifecycle.shared.usesClientAPIV2 {
+                    } else if !NativeRelayLifecycle.shared.usesClientAPIV2 ||
+                                NativeRelayLifecycle.shared.v2AccountAccess == .paused {
                         await launch.refreshLive()
                     }
                     await launch.guidedJoin.retryAutomaticallyIfNeeded()
@@ -175,6 +180,16 @@ struct HarklightApp: App {
                 }
             }
             .environment(launch)
+        }
+    }
+
+    private var v2ReenrolmentView: some View {
+        ContentUnavailableView {
+            Label("This device was revoked", systemImage: "xmark.shield")
+        } description: {
+            Text(launch.enrollmentMessage ?? "Use a new server invitation to enrol this device again.")
+        } actions: {
+            Button("Enrol again") { launch.beginV2Reenrolment() }
         }
     }
 }

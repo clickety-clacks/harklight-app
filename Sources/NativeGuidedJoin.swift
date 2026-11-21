@@ -338,6 +338,15 @@ final class NativeGuidedJoinStore {
 
     func approvedRecord() throws -> NativeEnrollmentRecord? { try enrollment.load() }
 
+    func forgetRevokedInstallation(_ record: NativeEnrollmentRecord) throws {
+        guard let current = try enrollment.load(), current.v2Revoked == true,
+              sameInstallation(current, record) else { throw NativeJoinError.superseded }
+        if let attempt = try loadAttempt(), attempt.deviceID == record.deviceID {
+            try deleteData(account: "guided-request")
+        }
+        try enrollment.clearAfterConfirmedRemoval(of: record)
+    }
+
     func cancel() async throws -> NativeJoinAttempt {
         guard var attempt = try loadAttempt() else { throw NativeEnrollmentError.noPendingEnrollment }
         if attempt.isTerminal || attempt.phase == .approved {
