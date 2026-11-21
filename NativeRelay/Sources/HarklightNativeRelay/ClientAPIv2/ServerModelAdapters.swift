@@ -135,7 +135,7 @@ public final class ServerModelSyncWriter: SyncModelWriting, @unchecked Sendable 
         try store.apply(pages, of: itemID, complete: complete, generation: generation)
     }
 
-    private static func pathSegment(_ id: ExactText) -> String {
+    static func pathSegment(_ id: ExactText) -> String {
         var allowed = CharacterSet.urlPathAllowed
         allowed.remove(charactersIn: "/")
         return id.rawValue.addingPercentEncoding(withAllowedCharacters: allowed) ?? id.rawValue

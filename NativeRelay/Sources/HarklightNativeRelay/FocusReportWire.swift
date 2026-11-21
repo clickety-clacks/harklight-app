@@ -153,17 +153,29 @@ public struct ViewShowFrame: Equatable, Sendable {
     public let messageID: String
     public let target: ViewShowTarget
     public let heldMilliseconds: UInt64?
+    public let unavailable: Unavailable?
+
+    public enum Unavailable: Equatable, Sendable {
+        case notSent
+        case notHere
+    }
 
     fileprivate init(senderID: String, messageID: String,
-                     target: ViewShowTarget, heldMilliseconds: UInt64?) {
+                     target: ViewShowTarget, heldMilliseconds: UInt64?, unavailable: Unavailable? = nil) {
         self.senderID = senderID
         self.messageID = messageID
         self.target = target
         self.heldMilliseconds = heldMilliseconds
+        self.unavailable = unavailable
     }
 }
 
 extension ViewShowFrame {
+    public static func clientAPIUnavailable(_ show: ClientAPIShow, notFound: Bool) -> Self {
+        Self(senderID: "", messageID: show.itemID, target: show.target,
+             heldMilliseconds: show.heldMilliseconds, unavailable: notFound ? .notSent : .notHere)
+    }
+
     /// A client API v2 show in the shape the pushed-view coordinator already
     /// takes. Under v2 the message id is the item id; the sender is the item's.
     public static func clientAPI(_ show: ClientAPIShow, senderID: String) -> ViewShowFrame {

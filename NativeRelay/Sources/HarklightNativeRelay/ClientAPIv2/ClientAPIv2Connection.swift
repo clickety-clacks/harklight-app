@@ -286,6 +286,18 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
                                 idempotencyKey: operation, retryRefused: retryRefused)
     }
 
+    public func resolveShowItem(itemID: ExactText) async throws -> APIItem? {
+        if let held = model.snapshot.items[itemID] { return held }
+        let generation = model.syncPosition.generation
+        let path = "/v2/items/" + ServerModelSyncWriter.pathSegment(itemID)
+        let response = try await transport.send(.get(path))
+        let result = try APIWriteResult(json: JSONValue.parse(response.body))
+        guard result.item?.itemID == itemID else { throw FeedDecodingError.invalidBatch }
+        try model.apply(result, generation: generation)
+        publishModel()
+        return model.snapshot.items[itemID]
+    }
+
     public func loadEntriesIfNeeded(itemID: ExactText) async throws {
         guard model.snapshot.items[itemID] != nil,
               !model.snapshot.loadedEntryItems.contains(itemID) else { return }

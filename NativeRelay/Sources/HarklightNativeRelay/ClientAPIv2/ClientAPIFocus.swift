@@ -127,6 +127,27 @@ public actor ClientAPIFocusChannel {
         return reply
     }
 
+    /// Queues the latest screen without waiting for the current HTTP write.
+    public func enqueue(_ report: FocusReport) {
+        latest = report
+        renewal?.cancel()
+        renewal = nil
+        waiting = report
+        guard !writing else { return }
+        writing = true
+        Task { await self.sendQueuedReports() }
+    }
+
+    private func sendQueuedReports() async {
+        guard let first = waiting else {
+            writing = false
+            return
+        }
+        waiting = nil
+        _ = await drain(startingWith: first)
+        if let latest, Self.isInFront(latest), renewal == nil { scheduleRenewal(of: latest) }
+    }
+
     private var writing = false
     private var waiting: FocusReport?
     private var waiters: [CheckedContinuation<FocusReportReply, Never>] = []
@@ -137,6 +158,10 @@ public actor ClientAPIFocusChannel {
             return await withCheckedContinuation { waiters.append($0) }
         }
         writing = true
+        return await drain(startingWith: report)
+    }
+
+    private func drain(startingWith report: FocusReport) async -> FocusReportReply {
         var next: FocusReport? = report
         var reply = FocusReportReply.rejected
         while let current = next {

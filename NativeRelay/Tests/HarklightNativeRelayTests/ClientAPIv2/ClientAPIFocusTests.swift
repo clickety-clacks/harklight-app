@@ -240,6 +240,46 @@ final class ClientAPIFocusTests: XCTestCase {
         XCTAssertEqual(transport.sentBodies, [#"{"screen":"inbox","ttl_s":1}"#])
     }
 
+    func testQueuedScreensAreReplacedByBackgroundWhileTheFirstPUTIsHeld() async {
+        let transport = FocusTransport()
+        let held = AsyncGate()
+        transport.holdFirst = held
+        let focus = channel(transport)
+        await focus.enqueue(.inbox)
+        await waitFor("inbox PUT starts") { transport.sentBodies.count == 1 }
+
+        await focus.enqueue(.message(senderID: "agent", messageID: "item"))
+        await focus.enqueue(.settings)
+        await focus.enqueue(.notInFront)
+        XCTAssertEqual(transport.sentBodies.count, 1)
+
+        held.release()
+        await waitFor("background PUT follows inbox") { transport.sentBodies.count == 2 }
+        XCTAssertEqual(transport.sentBodies, [#"{"screen":"inbox","ttl_s":120}"#,
+                                              #"{"screen":"not_in_front","ttl_s":120}"#])
+        await focus.stop()
+    }
+
+    func testResolvingAnUnheldShowItemFetchesItWithoutAdvancingSync() async throws {
+        let transport = FocusTransport()
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                                       personID: ExactText("person"), deviceID: ExactText("device"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let repository = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        let connection = try ClientAPIv2Connection(transport: transport, repository: repository, context: context,
+                                                    directory: nil, errors: RecordingErrorLogV2())
+        try connection.model.rebaseline(items: [], counts: APICounts(unresolved: 0), position: 1)
+        let item = V2Fixture.item("not-yet-held", rev: 2, rankKey: "a")
+        transport.respond(#"{"rev":2,"item":\#(item)}"#)
+
+        let resolved = try await connection.resolveShowItem(itemID: ExactText("not-yet-held"))
+        XCTAssertEqual(resolved?.sender, ExactText("agent-app"))
+        XCTAssertEqual(transport.sent.first?.path, "/v2/items/not-yet-held")
+        XCTAssertEqual(transport.sent.first?.method, .get)
+        XCTAssertEqual(connection.model.heldCursor, 1)
+        XCTAssertEqual(connection.model.snapshot.items[ExactText("not-yet-held")]?.seen, false)
+    }
+
     /// Focus addendum: one focus write in flight; the latest report replaces
     /// any waiting one, so an older write never lands after a newer one.
     func testRapidScreenChangesSendOneAtATimeAndTheLatestWins() async throws {

@@ -937,6 +937,7 @@ final class NativeRelayLifecycle {
     let clientAPIV2Enabled: Bool
     private var v2Connection: ClientAPIv2Connection?
     private var v2FocusChannel: ClientAPIFocusChannel?
+    private var v2ShowLookup: Task<Void, Never>?
     private var pendingV2Show: (show: ClientAPIShow, receivedAt: Date)?
     private let v2FocusReporter: NativeFocusReporter
     private var v2ForegroundTask: Task<Void, Never>?
@@ -1304,16 +1305,43 @@ final class NativeRelayLifecycle {
         v2FocusReporter.installReportHandler(for: attempt) { report in
             // The channel may return the last drained reply, so this sender
             // does not treat a reply as acknowledgement of an individual write.
-            _ = await focus.report(report)
+            if report.screen == .signedOut {
+                _ = await focus.report(report)
+            } else {
+                await focus.enqueue(report)
+            }
         }
         v2FocusReporter.relaySessionBecameReady(attempt)
     }
 
-    private func receiveV2Show(_ show: ClientAPIShow, receivedAt: Date, attempt: UUID) {
-        guard activeTransportAttemptID == attempt,
+    func receiveV2Show(_ show: ClientAPIShow, receivedAt: Date, attempt: UUID) {
+        guard activeTransportAttemptID == attempt, let connection = v2Connection,
               context?.identity.deviceID.rawValue == show.deviceID else { return }
+        v2ShowLookup?.cancel()
         pendingV2Show = (show, receivedAt)
-        deliverV2ShowIfHydrated(attempt: attempt)
+        if connection.model.snapshot.items[ExactText(show.itemID)] != nil {
+            deliverV2ShowIfHydrated(attempt: attempt)
+            return
+        }
+        // The item lookup is an independent request; a slow read must not
+        // block a focus PUT or consumption of the change feed.
+        v2ShowLookup = Task { [weak self] in
+            let notFound: Bool
+            do {
+                notFound = try await connection.resolveShowItem(itemID: ExactText(show.itemID)) == nil
+            } catch {
+                notFound = (error as? APIError)?.status == 404
+            }
+            guard let self, !Task.isCancelled, self.activeTransportAttemptID == attempt,
+                  self.pendingV2Show?.show.showID == show.showID else { return }
+            if connection.model.snapshot.items[ExactText(show.itemID)] != nil {
+                self.deliverV2ShowIfHydrated(attempt: attempt)
+            } else {
+                self.pendingV2Show = nil
+                NativePushedViewCoordinator.shared.receive(.clientAPIUnavailable(show, notFound: notFound),
+                    elapsedSinceReceipt: max(0, Date().timeIntervalSince(receivedAt)))
+            }
+        }
     }
 
     private func deliverV2ShowIfHydrated(attempt: UUID) {
@@ -1425,6 +1453,8 @@ final class NativeRelayLifecycle {
         let v2Task = v2ForegroundTask
         let focus = v2FocusChannel
         v2FocusChannel = nil
+        v2ShowLookup?.cancel()
+        v2ShowLookup = nil
         pendingV2Show = nil
         v2ForegroundTask = nil
         v2Connection = nil
