@@ -124,8 +124,14 @@ public struct APIError: Error, Equatable, Sendable {
 
     /// A definitive refusal: the same request will never succeed. A paused
     /// account is not one: the request is kept until the pause ends.
+    /// A 4xx without a contract body (for example from something in front
+    /// of the server), other than 401, 408 and 429.
+    public var isOutsideContractClientError: Bool {
+        token == .other && (400..<500).contains(status) && ![401, 408, 429].contains(status)
+    }
+
     /// Only a contract refusal is definitive; an answer outside the contract
-    /// never drops the person's write.
+    /// never drops the person's write at once.
     public var isPermanent: Bool {
         token != .other && !retryable && status != 401 && status < 500 && token != .accountPaused
     }

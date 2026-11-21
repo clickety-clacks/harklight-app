@@ -166,7 +166,11 @@ public actor ActionOutbox {
             unauthorized = true
             report(entry, phase: "send", error: error, initiator: .deviceRevoked, retryable: false)
             return false
-        } catch let error as APIError where error.isPermanent {
+        } catch let error as APIError where error.isPermanent || (error.isOutsideContractClientError &&
+                    attempts(of: entry.idempotencyKey) >= Self.outsideContractAttempts) {
+            // A contract refusal is definitive at once. A 4xx outside the
+            // contract (no contract body) is retried a few times, then given
+            // up, so it cannot block that item's later writes forever.
             await outcomes.rejected(entry, error: error)
             remove(entry.idempotencyKey)
             report(entry, phase: "send", error: error, initiator: .unknown, retryable: false)
@@ -199,6 +203,13 @@ public actor ActionOutbox {
         guard retryTasks[target]?.id == id else { return false }
         retryTasks[target] = nil
         return true
+    }
+
+    /// Tries before a 4xx answer outside the contract counts as a refusal.
+    static let outsideContractAttempts = 3
+
+    private func attempts(of key: UUID) -> Int {
+        entries.first { $0.id == key }?.attempts ?? 0
     }
 
     private func noteAttempt(_ key: UUID) {

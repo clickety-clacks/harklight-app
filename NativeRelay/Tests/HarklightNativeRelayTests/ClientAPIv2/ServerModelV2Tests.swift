@@ -6,7 +6,7 @@ import XCTest
 /// Fixtures in the accepted contract's shapes (docs/client-api-v2.md edff7e9
 /// with contract rulings round 2).
 enum V2Fixture {
-    static func item(_ id: String, rev: Int, rankKey: String, section: String = "priority",
+    static func item(_ id: String, rev: Int, rankKey: String, section: String = "current",
                      message: String = #"{"title":"Question","body":"b"}"#, terminal: String? = nil,
                      chat: String = #"{"available":true,"started":false}"#, extra: String = "") -> String {
         var members = [
@@ -48,7 +48,7 @@ final class ServerModelV2Tests: XCTestCase {
         let item = try APIItem(json: V2Fixture.json(V2Fixture.item("i1", rev: 3, rankKey: "a", message: message)))
         XCTAssertEqual(item.message.jsonString, message, "Message content passes through unchanged.")
         XCTAssertEqual(item.rank.score?.lexeme, "0.930")
-        XCTAssertEqual(item.rank.section, "priority")
+        XCTAssertEqual(item.rank.section, "current")
         XCTAssertEqual(item.availability?.state, "not_listening")
     }
 
@@ -63,12 +63,12 @@ final class ServerModelV2Tests: XCTestCase {
 
     func testTheInboxIsInRankKeyOrderByteWiseWithSectionsKept() throws {
         let store = ServerModelV2Store(fileURL: nil)
-        for (id, key, section) in [("c", "b0", "history"), ("a", "a1", "priority"), ("b", "B9", "priority")] {
+        for (id, key, section) in [("c", "b0", "resolved"), ("a", "a1", "current"), ("b", "B9", "current")] {
             try store.apply(kind: "item", rev: 2, data: V2Fixture.json(V2Fixture.item(id, rev: 2, rankKey: key, section: section)))
         }
         let ordered = store.snapshot.orderedItems
         XCTAssertEqual(ordered.map(\.itemID.rawValue), ["b", "a", "c"], "Byte-wise: uppercase sorts first.")
-        XCTAssertEqual(ordered.map(\.rank.section), ["priority", "priority", "history"])
+        XCTAssertEqual(ordered.map(\.rank.section), ["current", "current", "resolved"])
     }
 
     func testEntriesSortByPositionAndOnlyANewerRevChangesOne() throws {
@@ -227,20 +227,63 @@ final class ServerModelAdapterTests: XCTestCase {
 }
 
 final class ServerModelV2RobustnessTests: XCTestCase {
-    func testABadChangeIsReportedAndSkippedSoSyncKeepsGoing() async throws {
+    private func syncOverStore(_ server: FakeClientAPIServer, _ store: ServerModelV2Store,
+                               _ errors: RecordingErrorLogV2) -> ChangeFeedSync {
+        ChangeFeedSync(transport: server,
+                       model: ServerModelSyncWriter(store: store, transport: server, errors: errors),
+                       errors: errors, waitBeforeRetry: { _ in await Task.yield() })
+    }
+
+    func testAnUnreadableKnownChangeRebaselinesOnceThenIsSkippedIfItRecurs() async throws {
         let server = FakeClientAPIServer()
         let store = ServerModelV2Store(fileURL: nil)
         try store.rebaseline(items: [], counts: APICounts(unresolved: 0), position: 0)
         let errors = RecordingErrorLogV2()
-        let sync = ChangeFeedSync(transport: server,
-                                  model: ServerModelSyncWriter(store: store, transport: server, errors: errors),
-                                  errors: errors, waitBeforeRetry: { _ in await Task.yield() })
+        let sync = syncOverStore(server, store, errors)
         server.commit("item", #"{"item_id":"broken","rev":1}"#)
         server.commit("item", V2Fixture.item("good", rev: 2, rankKey: "a"))
+        server.inboxItems = [V2Fixture.item("good", rev: 2, rankKey: "a")]
         try await sync.catchUp()
-        XCTAssertEqual(store.heldCursor, 2, "The cursor moves past the unreadable change.")
-        XCTAssertEqual(store.snapshot.items.keys.map(\.rawValue), ["good"])
-        XCTAssertEqual(errors.reports.map(\.operation), ["apply_change"], "The bad change is in the Error Log.")
+        XCTAssertEqual(store.heldCursor, 2, "The full snapshot replaced the batch with the unreadable change.")
+        XCTAssertEqual(store.snapshot.items.keys.map(\.rawValue), ["good"], "Nothing the snapshot holds is lost.")
+        XCTAssertEqual(errors.reports.map(\.reason), [.app("decode_failed_rebaselining")])
+
+        server.commit("item", #"{"item_id":"broken-again","rev":3}"#)
+        try await sync.catchUp()
+        XCTAssertEqual(store.heldCursor, 3, "A recurrence is skipped, so Sync never wedges.")
+        XCTAssertEqual(errors.reports.last?.reason, .app("decode_failed"))
+        XCTAssertEqual(errors.reports.last?.retryable, false, "Kept in the Error Log as an unresolved failure.")
+    }
+
+    func testAnUnknownFutureKindIsReportedAndSkipped() async throws {
+        let server = FakeClientAPIServer()
+        let store = ServerModelV2Store(fileURL: nil)
+        try store.rebaseline(items: [], counts: APICounts(unresolved: 0), position: 0)
+        let errors = RecordingErrorLogV2()
+        server.commit("sticker", #"{"anything":1}"#)
+        try await syncOverStore(server, store, errors).catchUp()
+        XCTAssertEqual(store.heldCursor, 1)
+        XCTAssertEqual(errors.reports.map(\.reason), [.app("unknown_kind")])
+    }
+
+    func testARebaselineStopsOnARepeatedPageCursor() async throws {
+        let store = ServerModelV2Store(fileURL: nil)
+        let transport = InboxPagesTransport()
+        transport.pages[nil] = #"{"rev":4,"items":[],"counts":{"unresolved":0},"next_page":"p"}"#
+        transport.pages["p"] = #"{"rev":4,"items":[],"counts":{"unresolved":0},"next_page":"p"}"#
+        do {
+            _ = try await ServerModelSyncWriter(store: store, transport: transport, errors: RecordingErrorLogV2()).rebaseline()
+            XCTFail("A repeating page cursor ends the rebaseline.")
+        } catch {}
+    }
+
+    func testRoundFiveAndSixSectionAndReplyRowFieldsDecode() throws {
+        let item = try APIItem(json: V2Fixture.json(V2Fixture.item("i", rev: 2, rankKey: "a",
+            chat: #"{"available":true,"started":true,"unread_replies":2,"reply_group":"earlier_chat_replies","reply_rank_key":"a5"}"#)
+            .replacingOccurrences(of: #""section":"current"}"#, with: #""section":"current","group":"earlier_messages"}"#)))
+        XCTAssertEqual(item.rank.group, "earlier_messages")
+        XCTAssertEqual(item.chat.replyGroup, "earlier_chat_replies")
+        XCTAssertEqual(item.chat.replyRankKey?.rawValue, "a5")
     }
 
     func testABatchIsOneSaveWithItsCursor() throws {

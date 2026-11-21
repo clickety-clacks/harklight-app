@@ -7,6 +7,7 @@ import Foundation
 
 public enum ClientAPIModelError: Error, Equatable {
     case invalid(String)
+    case unknownKind(String)
 }
 
 public struct APIFileRef: Equatable, Codable, Sendable {
@@ -25,6 +26,11 @@ public struct APIChat: Equatable, Codable, Sendable {
     public let lastOriginReply: ExactText?
     /// Server-computed count of agent replies after the read position.
     public let unreadReplies: Int?
+    /// earlier_chat_replies or earlier_chat_replies_unknown; present only
+    /// while there are unread replies (the inbox draws a reply row).
+    public let replyGroup: String?
+    /// Where that reply row sorts, in `Rank.key`'s space.
+    public let replyRankKey: ExactText?
 }
 
 public struct APIAvailability: Equatable, Codable, Sendable {
@@ -64,8 +70,11 @@ public struct APIRank: Equatable, Codable, Sendable {
     public let key: ExactText
     public let score: JSONNumber?
     public let dueAtMs: UInt64?
-    /// Server-assigned inbox section; a heading is drawn where it changes.
+    /// current or resolved; the History heading is drawn for resolved.
     public let section: String?
+    /// common or earlier_messages, for current items in free order; common
+    /// has no heading.
+    public let group: String?
 }
 
 public struct APIItem: Equatable, Codable, Sendable {
@@ -259,7 +268,9 @@ extension APIItem {
         self.chat = APIChat(available: try chat.bool("available"), started: try chat.bool("started"),
                             readPosition: try chat.optionalString("read_position"),
                             lastOriginReply: try chat.optionalString("last_origin_reply"),
-                            unreadReplies: try chat.optionalUnsigned("unread_replies").map { Int($0) })
+                            unreadReplies: try chat.optionalUnsigned("unread_replies").map { Int($0) },
+                            replyGroup: try chat.optionalString("reply_group")?.rawValue,
+                            replyRankKey: try chat.optionalString("reply_rank_key"))
         availability = try reader.optionalObject("availability").map(APIAvailability.init)
         terminal = try reader.optionalObject("terminal").map(APITerminal.init)
         result = try reader.optionalObject("result").map { result in
@@ -276,7 +287,8 @@ extension APIItem {
         }
         self.rank = APIRank(key: try rank.string("key"), score: score,
                             dueAtMs: try rank.optionalUnsigned("due_at_ms"),
-                            section: try rank.optionalString("section")?.rawValue)
+                            section: try rank.optionalString("section")?.rawValue,
+                            group: try rank.optionalString("group")?.rawValue)
         createdAtMs = try reader.optionalUnsigned("created_at_ms")
         guard rev >= 1 else { throw ClientAPIModelError.invalid("item.rev") }
     }

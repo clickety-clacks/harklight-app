@@ -223,6 +223,18 @@ final class ChangeFeedSyncTests: XCTestCase {
         XCTAssertEqual(errors.reports.first?.operation, "catch_up")
     }
 
+    func testA401OnTheFeedStopsSyncLikeATLSRefusal() async throws {
+        let server = FakeClientAPIServer()
+        server.feedFailure = APIError(status: 401, token: .unauthorized, retryable: false, requestID: "r")
+        let errors = RecordingErrorLogV2()
+        let sync = ChangeFeedSync(transport: server, model: RecordingSyncModel(snapshotRev: { 0 }).using(MemoryRevCursor(0)),
+                                  errors: errors, waitBeforeRetry: noWait)
+        await sync.runForeground()
+        let state = await sync.liveState
+        XCTAssertEqual(state, .stopped)
+        XCTAssertEqual(errors.reports.map(\.initiator), [.deviceRevoked])
+    }
+
     func testPushCatchUpAppliesEveryBatchFromTheCursor() async throws {
         let server = FakeClientAPIServer()
         for _ in 0..<5 { server.commit("item", "{}") }
@@ -371,6 +383,33 @@ final class ActionOutboxTests: XCTestCase {
         XCTAssertEqual(persistence.keys, [entry.idempotencyKey])
         await box.resumeAfterReenrolment()
         XCTAssertEqual(outcomes.accepted.map(\.0), [entry.idempotencyKey])
+    }
+
+    func testA401OnAnOpenConnectionHoldsTheOutboxLikeATLSRefusal() async throws {
+        let server = FakeClientAPIServer()
+        server.nextWriteFailures = [APIError(status: 401, token: .unauthorized, retryable: false, requestID: "r")]
+        let persistence = MemoryOutboxPersistence()
+        let outcomes = RecordingOutcomes()
+        let box = try outbox(server, persistence, outcomes)
+        let entry = try await box.submit(target: "a", operation: "mark_seen", write: seen)
+        await eventually("held") { await box.unauthorized }
+        XCTAssertTrue(outcomes.rejected.isEmpty)
+        XCTAssertEqual(persistence.keys, [entry.idempotencyKey], "Kept for review after re-enrolment.")
+    }
+
+    func testA4xxOutsideTheContractIsGivenUpAfterAFewTries() async throws {
+        let outside = APIError(status: 404, body: Data("<html>not here</html>".utf8), requestID: nil, retryAfter: nil)
+        XCTAssertTrue(outside.isOutsideContractClientError)
+        let server = FakeClientAPIServer()
+        server.nextWriteFailures = [outside, outside, outside]
+        let outcomes = RecordingOutcomes()
+        let box = try outbox(server, MemoryOutboxPersistence(), outcomes)
+        try await box.submit(target: "a", operation: "mark_seen", write: seen)
+        await eventually("first try") { server.received.count == 1 }
+        await box.flush()
+        await box.flush()
+        XCTAssertEqual(server.received.count, 3)
+        XCTAssertEqual(outcomes.rejected.count, 1, "It no longer blocks the item's later writes.")
     }
 
     func testAForbiddenWriteIsADefinitiveRefusal() async throws {

@@ -2,14 +2,20 @@ import AttentionDomain
 import Foundation
 
 /// Sync's writer over the v2 local model. A batch of feed changes and the
-/// cursor are saved together; a change that cannot be read is reported to the
-/// Error Log and skipped, so the item it describes is degraded (left as it
-/// was) rather than stopping Sync. A rebaseline reads the full inbox.
+/// cursor are saved together. A change that cannot be read is handled by kind:
+/// - an unknown (future) kind is reported and skipped;
+/// - an unreadable change of a known kind may be real data the client would
+///   otherwise lose, so the first one asks Sync to rebaseline from the full
+///   inbox; if one recurs after that, it is reported and skipped, leaving the
+///   item as it was, so Sync never wedges.
+/// A rebaseline reads the full inbox.
 public final class ServerModelSyncWriter: SyncModelWriting, @unchecked Sendable {
     private let store: ServerModelV2Store
     private let transport: any ClientAPITransport
     private let errors: any ErrorLogging
     private let pageLimit: Int
+    private let lock = NSLock()
+    private var rebaselinedForUnreadable = false
 
     public init(store: ServerModelV2Store, transport: any ClientAPITransport, errors: any ErrorLogging,
                 pageLimit: Int = 200) {
@@ -22,13 +28,31 @@ public final class ServerModelSyncWriter: SyncModelWriting, @unchecked Sendable 
     public func heldCursor() throws -> Rev? { store.heldCursor }
 
     public func apply(_ changes: [FeedChange], cursor: Rev) async throws {
-        let errors = errors
         try store.apply(changes.map { ServerModelV2Store.Change(rev: $0.rev, kind: $0.kind.name, data: $0.data) },
                         cursor: cursor) { change, error in
-            errors.report(ErrorLogReport(concern: .sync, connectionRole: .stream, operation: "apply_change",
-                phase: change.kind, reason: .app("decode_failed"), initiator: .unknown, retryable: false))
-            _ = error
+            try self.unreadable(change, error)
         }
+    }
+
+    private func unreadable(_ change: ServerModelV2Store.Change, _ error: any Error) throws {
+        if case .unknownKind = error as? ClientAPIModelError {
+            report(change, reason: "unknown_kind", retryable: false)
+            return
+        }
+        let firstTime = lock.withLock { () -> Bool in
+            defer { rebaselinedForUnreadable = true }
+            return !rebaselinedForUnreadable
+        }
+        if firstTime {
+            report(change, reason: "decode_failed_rebaselining", retryable: true)
+            throw SyncNeedsRebaseline()
+        }
+        report(change, reason: "decode_failed", retryable: false)
+    }
+
+    private func report(_ change: ServerModelV2Store.Change, reason: String, retryable: Bool) {
+        errors.report(ErrorLogReport(concern: .sync, connectionRole: .stream, operation: "apply_change",
+            phase: change.kind, reason: .app(reason), initiator: .unknown, retryable: retryable))
     }
 
     /// Reads every inbox page. The cursor is the first page's position: later
@@ -38,9 +62,14 @@ public final class ServerModelSyncWriter: SyncModelWriting, @unchecked Sendable 
         var items: [APIItem] = []
         var first: APIInboxPage?
         var page: String?
+        var seenPages: Set<String> = []
         repeat {
             var query = ["limit": String(pageLimit)]
-            if let page { query["page"] = page }
+            if let page {
+                // A repeated page cursor would loop forever.
+                guard seenPages.insert(page).inserted else { throw FeedDecodingError.outOfOrder }
+                query["page"] = page
+            }
             let response = try await transport.send(.get("/v2/inbox", query: query))
             let decoded = try APIInboxPage(json: JSONValue.parse(response.body))
             if first == nil { first = decoded }

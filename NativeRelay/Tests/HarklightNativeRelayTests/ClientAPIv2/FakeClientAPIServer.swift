@@ -24,6 +24,8 @@ final class FakeClientAPIServer: ClientAPITransport, @unchecked Sendable {
     var feedFailure: (any Error)?
     /// Queued answers for writes, consumed in order; nil means accept.
     var nextWriteFailures: [(any Error)?] = []
+    /// Item JSON served by GET /v2/inbox.
+    var inboxItems: [String] = []
     /// Suspends a write to `path` until released.
     var holdWrites: [String: AsyncGate] = [:]
 
@@ -89,7 +91,10 @@ final class FakeClientAPIServer: ClientAPITransport, @unchecked Sendable {
             if request.method != .get { keysPersistedAtSend.append(persisted) }
         }
         if request.method == .get {
-            return APIResponse(status: 200, requestID: nextRequestID(), body: Data(#"{"rev":\#(head)}"#.utf8))
+            // The inbox as a snapshot: the items the fake serves, at its head.
+            let items = lock.withLock { inboxItems.joined(separator: ",") }
+            return APIResponse(status: 200, requestID: nextRequestID(),
+                               body: Data(#"{"rev":\#(head),"items":[\#(items)],"counts":{"unresolved":0}}"#.utf8))
         }
         if let gate = lock.withLock({ holdWrites[request.path] }) { await gate.wait() }
         let digest = (request.path + request.method.rawValue).data(using: .utf8)! + (request.body ?? Data())

@@ -19,6 +19,12 @@ public protocol SyncModelWriting: Sendable {
     func rebaseline() async throws -> Rev
 }
 
+/// Thrown by a model writer that met a change it cannot read but should not
+/// skip: Sync rebaselines from a full snapshot and continues.
+public struct SyncNeedsRebaseline: Error, Equatable {
+    public init() {}
+}
+
 /// Sync (design section 3) over the r2 change feed. It owns the only feed
 /// and the only cursor, and nothing else waits on it.
 public actor ChangeFeedSync {
@@ -117,7 +123,13 @@ public actor ChangeFeedSync {
             // Every batch is gap-free and reflects the log through its `rev`.
             let through = max(batch.rev, fresh.last?.rev ?? after)
             if through > after {
-                try await apply(fresh, cursor: through)
+                do {
+                    try await apply(fresh, cursor: through)
+                } catch let failure as ApplyFailure where failure.underlying is SyncNeedsRebaseline && !rebaselined {
+                    rebaselined = true
+                    after = try await rebaseline()
+                    continue
+                }
             }
             guard batch.more else { return max(after, through) }
             // `more` without progress would loop; stop and report it.
@@ -195,6 +207,14 @@ public actor ChangeFeedSync {
             return .revoked
         } catch is CancellationError {
             return .cancelled
+        } catch let error as ApplyFailure where error.underlying is SyncNeedsRebaseline {
+            do {
+                _ = try await rebaseline()
+                return .dropped(.unknown, retryPromptly: true)
+            } catch {
+                report(Self.feedOperation, phase: "rebaseline", error: error, initiator: .forFailure(error))
+                return .dropped(.forFailure(error), retryPromptly: false)
+            }
         } catch let error as ApplyFailure {
             report(Self.feedOperation, phase: "apply", error: error.underlying, initiator: .unknown)
             return .dropped(.unknown, retryPromptly: false)

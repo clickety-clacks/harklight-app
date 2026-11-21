@@ -170,17 +170,21 @@ public final class ServerModelV2Store: @unchecked Sendable {
         }
     }
 
+    /// Kinds this client reads. A change of any other kind (a future one) is
+    /// passed to `onUnreadable` as `ClientAPIModelError.unknownKind`.
+    public static let knownKinds: Set<String> = ["item", "item_removed", "entry", "counts", "settings"]
+
     /// Applies feed changes and records `cursor`, in one save. A change that
-    /// cannot be read is skipped and passed to `onUnreadable`; it is never
-    /// retried, so one bad change cannot stop Sync.
+    /// cannot be read is passed to `onUnreadable`: returning skips it, and
+    /// throwing abandons the whole batch, which saves nothing.
     public func apply(_ changes: [Change], cursor newCursor: UInt64,
-                      onUnreadable: (Change, any Error) -> Void = { _, _ in }) throws {
+                      onUnreadable: (Change, any Error) throws -> Void = { _, _ in }) throws {
         try mutate(cursor: newCursor) { model in
             for change in changes {
                 do {
                     try Self.apply(change, to: &model, now: now())
                 } catch {
-                    onUnreadable(change, error)
+                    try onUnreadable(change, error)
                 }
             }
         }
@@ -198,7 +202,7 @@ public final class ServerModelV2Store: @unchecked Sendable {
         case "entry": model.put(try APIEntry(json: data), fromFeed: true)
         case "counts": model.put(try APICounts(json: data), rev: change.rev)
         case "settings": model.put(try APISettings(json: data))
-        default: break
+        default: throw ClientAPIModelError.unknownKind(change.kind)
         }
     }
 
