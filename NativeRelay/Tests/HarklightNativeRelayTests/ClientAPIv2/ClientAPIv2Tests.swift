@@ -734,7 +734,6 @@ final class ActionOutboxTests: XCTestCase {
         })
         let entry = try await box.submit(target: "a", operation: "mark_seen", write: seen)
         await eventually("the first request is held") { server.received.count == 1 }
-        await box.flush()
         XCTAssertTrue(outcomes.accepted.isEmpty)
         XCTAssertEqual(persistence.keys, [entry.idempotencyKey])
 
