@@ -1020,7 +1020,7 @@ final class NativeAppLaunch {
     }
 
     private func applyV2AccountAccess(_ access: ClientAPIAccessState, for context: ProfileContext) {
-        guard case let .live(presentation) = state, presentation.profileContext == context else { return }
+        guard case let .live(presentation) = state, presentation.notificationContext == context else { return }
         presentation.v2AccountPaused = access == .paused
         guard access == .revoked, let record = activeEnrollmentRecord,
               record.matchesNotificationIdentity(context.identity) else { return }
