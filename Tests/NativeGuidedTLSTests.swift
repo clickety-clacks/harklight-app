@@ -152,6 +152,44 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertEqual(result.data, Data("{\"state\":\"reachable\"}".utf8))
     }
 
+    func testV01EnrollmentRestoresTheSavedDevicePortAndKeyForV2Me() async throws {
+        let service = "Harklight.legacy-device-origin-test." + UUID().uuidString
+        let namespace = service + ".key.retained"
+        let keyStore = NativeInstallationIdentityStore(namespace: namespace)
+        let identity = try keyStore.loadOrCreate()
+        let server = try LocalEnrollmentTLS(expectedDevice: identity.deviceID)
+        let item: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
+                                   kSecAttrService as String: service,
+                                   kSecAttrAccount as String: "current-installation"]
+        defer {
+            server.close()
+            try? keyStore.retire()
+            SecItemDelete(item as CFDictionary)
+        }
+        let port = try await server.start()
+        let saved: [String: Any] = [
+            "host": "localhost", "enrollmentPort": port == 18444 ? 18445 : 18444, "relayPort": port,
+            "trustedRootDER": server.rootDER.base64EncodedString(), "identityLabel": identity.label,
+            "deviceID": identity.deviceID, "personID": "previous-person", "approvalCode": "TEST",
+            "statusSecret": "test-only"
+        ]
+        var savedItem = item
+        savedItem[kSecValueData as String] = try JSONSerialization.data(withJSONObject: saved)
+        XCTAssertEqual(SecItemAdd(savedItem as CFDictionary, nil), errSecSuccess)
+
+        let enrollment = NativeEnrollmentStore(service: service)
+        let record = try XCTUnwrap(enrollment.load())
+        let material = try enrollment.material(from: record)
+        XCTAssertEqual(material.deviceURL, URL(string: "https://localhost:\(port)"))
+        XCTAssertEqual(material.context.identity.personID, ExactText("previous-person"))
+        XCTAssertEqual(material.context.identity.deviceID, ExactText(identity.deviceID))
+        let transport = try HTTPSClientAPITransport(baseURL: material.deviceURL,
+            clientIdentity: TrustedKeychainIdentity(material.keychainIdentity), trustedRootDER: material.trustedRootDER)
+        let response = try await transport.send(.get("/v2/me"))
+        XCTAssertEqual(response.status, 200)
+        XCTAssertEqual(server.requestLine, "GET /v2/me HTTP/1.1")
+    }
+
     func testJoinSecretIsNotSentToAServerWithDifferentPinnedTrust() async throws {
         let namespace = "Harklight.wrong-join-trust-test." + UUID().uuidString
         let other = try NativeInstallationIdentityStore(namespace: namespace).loadOrCreate()
@@ -583,9 +621,9 @@ final class NativeGuidedTLSTests: XCTestCase {
         let invitationRoot = "-----BEGIN CERTIFICATE-----\n" +
             tlsFixture.rootDER.base64EncodedString(options: [.lineLength64Characters, .endLineWithLineFeed]) +
             "-----END CERTIFICATE-----\n"
-        let invitation = NativeJoinInvitation(v: 1, personID: "person-replacement", serverName: "localhost",
+        let invitation = NativeJoinInvitation(v: 2, personID: "person-replacement", serverName: "localhost",
             enrollmentURL: URL(string: "https://localhost:18444/enroll")!,
-            relayURL: URL(string: "wss://localhost:18443/relay")!, caPEM: invitationRoot,
+            deviceURL: URL(string: "https://localhost:18443")!, caPEM: invitationRoot,
             caSHA256: fixtureRootSHA256(tlsFixture.rootDER),
             inviteToken: String(repeating: "d", count: 64),
             expiresAt: Int64(Date().timeIntervalSince1970 * 1_000) + 60_000,
@@ -647,11 +685,11 @@ final class NativeGuidedTLSTests: XCTestCase {
         let caDER = try XCTUnwrap(NativeEnrollmentSettings.certificateDER(from: caPEM))
         let caSHA256 = SHA256.hash(data: caDER).map { String(format: "%02x", $0) }.joined()
         let payload: [String: Any] = [
-            "v": 1,
+            "v": 2,
             "person_id": "invited-person",
             "server_name": "relay.example.test",
             "enrollment_url": "https://relay.example.test:18444/enroll",
-            "relay_url": "wss://relay.example.test:18443/relay",
+            "device_url": "https://relay.example.test:18443",
             "ca_pem": caPEM,
             "ca_sha256": caSHA256,
             "invite_token": String(repeating: "1", count: 64),
@@ -776,9 +814,11 @@ private final class LocalEnrollmentTLS: @unchecked Sendable {
     // All connection ownership is serialized on queue, including close().
     private var connections: [NWConnection] = []
     private var requestWasReceived = false
+    private var firstRequestLine: String?
     private var connectionWasClosed = false
     var acceptedConnectionCount: Int { queue.sync { connections.count } }
     var receivedRequest: Bool { queue.sync { requestWasReceived } }
+    var requestLine: String? { queue.sync { firstRequestLine } }
     var clientClosed: Bool { queue.sync { connectionWasClosed } }
 
     init(expectedDevice: String?, replyBody: Data = Data("{\"state\":\"reachable\"}".utf8),
@@ -875,6 +915,7 @@ private final class LocalEnrollmentTLS: @unchecked Sendable {
                     .flatMap { Int($0.dropFirst("content-length:".count).trimmingCharacters(in: .whitespaces)) } ?? 0
                 if next.count - boundary.upperBound >= length {
                     requestWasReceived = true
+                    firstRequestLine = header.components(separatedBy: "\r\n").first
                     if stallRequest {
                         receive(connection, buffer: Data())
                         return

@@ -413,7 +413,7 @@ public enum NativeDiagnosticCauseCode {
         "enrollment_identity_storage", "enrollment_invalid_response", "enrollment_server_rejected",
         "enrollment_approval_pending", "enrollment_approval_expired", "enrollment_no_pending_request",
         "enrollment_wrong_approved_device", "enrollment_key_pending", "enrollment_key_in_use",
-        "enrollment_identity_mismatch", "invitation_invalid", "invitation_expired", "join_existing_account",
+        "enrollment_identity_mismatch", "invitation_invalid", "invitation_expired", "invitation_older_server", "join_existing_account",
         "join_saved_request_exists", "join_attempt_superseded", "join_request_expired", "join_invitation_used",
         "join_transport_refused", "join_request_not_found", "join_service_unavailable", "join_response_invalid",
         "join_approval_identity_mismatch", "local_example_operation_refused", "answer_request_not_open", "answer_input_incomplete",

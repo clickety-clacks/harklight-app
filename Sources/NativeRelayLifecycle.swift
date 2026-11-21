@@ -965,13 +965,10 @@ final class NativeRelayLifecycle {
 
 
 
-    func activate(store: ClientRepository, context: ProfileContext, relayURL: URL,
+    func activate(store: ClientRepository, context: ProfileContext, deviceURL: URL,
                   clientIdentity: SecIdentity, trustedRootDER: Data,
                   diagnostics: NativeClientDiagnosticJournal? = nil) throws {
-        guard let baseURL = ClientAPIv2Endpoint.baseURL(fromRelayURL: relayURL) else {
-            throw ClientConnectionError.invalidEndpoint
-        }
-        let transport = try HTTPSClientAPITransport(baseURL: baseURL,
+        let transport = try HTTPSClientAPITransport(baseURL: deviceURL,
             clientIdentity: TrustedKeychainIdentity(clientIdentity), trustedRootDER: trustedRootDER)
         let retainedFiles = try ConversationFileStorage(identity: context.identity)
         let attempt = UUID()

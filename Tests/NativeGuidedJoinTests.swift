@@ -935,17 +935,76 @@ final class NativeGuidedJoinTests: XCTestCase {
         XCTAssertNil(try store.loadAttempt())
     }
 
-    func testTamperedTrustOrRelayDestinationIsRejected() throws {
+    func testTamperedTrustOrDeviceDestinationIsRejected() throws {
         let fixture = try Fixture()
         defer { fixture.cleanup() }
         var fields = fixture.payload
         fields["ca_sha256"] = String(repeating: "0", count: 64)
         XCTAssertThrowsError(try NativeJoinInvitation.decodePayload(JSONSerialization.data(withJSONObject: fields)))
         fields = fixture.payload
-        fields["relay_url"] = "wss://another-server.test:18443/relay"
+        fields["device_url"] = "https://another-server.test:18443"
         XCTAssertThrowsError(try NativeJoinInvitation.decodePayload(JSONSerialization.data(withJSONObject: fields)))
     }
 
+    func testV2InvitationRequiresAnHTTPSDeviceOriginAndIgnoresRelayURL() throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanup() }
+        var fields = fixture.payload
+        fields["relay_url"] = "wss://another-server.test:8123/relay"
+        let decoded = try NativeJoinInvitation.decodePayload(JSONSerialization.data(withJSONObject: fields))
+        XCTAssertEqual(decoded.deviceURL, URL(string: "https://relay.example.test:18443"))
+        for origin in [nil, "http://relay.example.test:18443", "https://relay.example.test:18443/v2",
+                       "https://relay.example.test:18443?x=1", "https://relay.example.test:18443#x",
+                       "https://user@relay.example.test:18443"] as [String?] {
+            fields["device_url"] = origin
+            XCTAssertThrowsError(try NativeJoinInvitation.decodePayload(JSONSerialization.data(withJSONObject: fields)))
+        }
+    }
+
+    func testOlderServerInvitationAsksForReplacementBeforeAnyRequest() async throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanup() }
+        var fields = fixture.payload
+        fields["v"] = 1
+        fields.removeValue(forKey: "device_url")
+        fields["relay_url"] = "wss://relay.example.test:18443/relay"
+        let data = try JSONSerialization.data(withJSONObject: fields)
+        let encoded = data.base64EncodedString().replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
+        let url = try XCTUnwrap(URL(string: "harklight://join#" + encoded))
+        let transport = FakeTransport()
+        transport.handler = { _, _, _ in
+            XCTFail("A v1 invitation must not reach the network.")
+            throw NativeJoinError.refused
+        }
+        let store = NativeGuidedJoinStore(namespace: fixture.namespace, transport: transport)
+        let flow = NativeGuidedJoinCoordinator(store: store, deviceName: "My phone")
+        await flow.receive(url)
+        XCTAssertEqual(flow.screen, .refused)
+        XCTAssertEqual(flow.message, "This invitation is from an older Server. Ask the owner for a new invitation.")
+        XCTAssertNil(try store.loadAttempt())
+    }
+
+    func testSavedV1AttemptDoesNotBlockAReissuedInvitation() throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanup() }
+        let store = NativeGuidedJoinStore(namespace: fixture.namespace, transport: FakeTransport())
+        let prior = try store.prepare(fixture.invitation, deviceLabel: "My phone")
+        fixture.retainForCleanup(prior)
+        var saved = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(prior)) as? [String: Any])
+        var legacy = fixture.payload
+        legacy["v"] = 1
+        legacy.removeValue(forKey: "device_url")
+        legacy["relay_url"] = "wss://relay.example.test:18443/relay"
+        saved["invitation"] = legacy
+        try fixture.saveAttemptData(JSONSerialization.data(withJSONObject: saved))
+
+        XCTAssertNil(try store.loadAttempt())
+        let replacement = try fixture.invitationWith(token: String(repeating: "2", count: 64))
+        let reissued = try store.prepare(replacement, deviceLabel: "My phone")
+        fixture.retainForCleanup(reissued)
+        XCTAssertEqual(try store.loadAttempt()?.invitation, replacement)
+    }
 
     func testConnectedScreenWaitsForOwnerApprovalAndRelayProgress() async throws {
         let fixture = try Fixture()
@@ -1658,6 +1717,8 @@ final class NativeGuidedJoinTests: XCTestCase {
             _ = try await store.checkApproval()
             let record = try XCTUnwrap(store.approvedRecord())
             XCTAssertEqual(record.personID, invitation.personID)
+            XCTAssertEqual(record.deviceURL, invitation.deviceURL)
+            XCTAssertEqual(record.enrollmentPort, invitation.enrollmentURL.port)
             XCTAssertEqual(record.accountDisplayName, label)
             XCTAssertEqual(record.savedAccountName, label)
         }
@@ -1953,9 +2014,9 @@ final class NativeGuidedJoinTests: XCTestCase {
             labels.insert(root.label)
             let pem = "-----BEGIN CERTIFICATE-----\n" + root.certificateDER.base64EncodedString() +
                 "\n-----END CERTIFICATE-----\n"
-            payload = ["v": 1, "person_id": "invited-person", "server_name": "relay.example.test",
+            payload = ["v": 2, "person_id": "invited-person", "server_name": "relay.example.test",
                        "enrollment_url": "https://relay.example.test:18444/enroll",
-                       "relay_url": "wss://relay.example.test:18443/relay", "ca_pem": pem,
+                       "device_url": "https://relay.example.test:18443", "ca_pem": pem,
                        "ca_sha256": SHA256.hash(data: root.certificateDER).map { String(format: "%02x", $0) }.joined(),
                        "invite_token": String(repeating: "1", count: 64),
                        "expires_at": Int64(Date().timeIntervalSince1970 * 1000) + 1_800_000]
@@ -1987,11 +2048,15 @@ final class NativeGuidedJoinTests: XCTestCase {
         // Model the durable format written by the previously shipped app,
         // including an expired request retained across an app upgrade.
         func saveLegacyAttempt(_ attempt: NativeJoinAttempt) throws {
+            try saveAttemptData(JSONEncoder().encode(attempt))
+        }
+
+        func saveAttemptData(_ data: Data) throws {
             let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
                                        kSecAttrService as String: namespace,
                                        kSecAttrAccount as String: "guided-request"]
             let status = SecItemUpdate(query as CFDictionary,
-                                      [kSecValueData as String: try JSONEncoder().encode(attempt)] as CFDictionary)
+                                      [kSecValueData as String: data] as CFDictionary)
             guard status == errSecSuccess else { throw NativeEnrollmentError.identityStorage }
         }
 

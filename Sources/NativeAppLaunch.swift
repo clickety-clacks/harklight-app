@@ -12,7 +12,7 @@ import UserNotifications
 /// from the bundled fictional fixture.
 struct NativeInstallationMaterial {
     let context: ProfileContext
-    let relayURL: URL
+    let deviceURL: URL
     let keychainIdentity: SecIdentity
     let trustedRootDER: Data
 }
@@ -908,7 +908,7 @@ final class NativeAppLaunch {
         do {
             try NativeRelayLifecycle.shared.activate(store: store,
                                                       context: installation.context,
-                                                      relayURL: installation.relayURL,
+                                                      deviceURL: installation.deviceURL,
                                                       clientIdentity: installation.keychainIdentity,
                                                       trustedRootDER: installation.trustedRootDER,
                                                       diagnostics: diagnostics)
@@ -1028,7 +1028,7 @@ final class NativeAppLaunch {
             self?.applyV2AccountAccess(access, for: context)
         }
         try lifecycle.activate(store: presentation.attentionStore, context: context,
-                                     relayURL: installation.relayURL, clientIdentity: installation.keychainIdentity,
+                                     deviceURL: installation.deviceURL, clientIdentity: installation.keychainIdentity,
                                      trustedRootDER: installation.trustedRootDER)
         if let access = lifecycle.v2AccountAccess {
             applyV2AccountAccess(access, for: context)

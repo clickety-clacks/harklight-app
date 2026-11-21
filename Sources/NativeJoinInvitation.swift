@@ -5,6 +5,7 @@ import Security
 enum NativeJoinInvitationError: Error {
     case invalid
     case expired
+    case olderServer
 }
 
 /// An owner-provided claim and trust bootstrap. It conveys no owner/sender
@@ -14,7 +15,7 @@ struct NativeJoinInvitation: Codable, Equatable {
     let personID: String
     let serverName: String
     let enrollmentURL: URL
-    let relayURL: URL
+    let deviceURL: URL
     let caPEM: String
     let caSHA256: String
     let inviteToken: String
@@ -28,7 +29,7 @@ struct NativeJoinInvitation: Codable, Equatable {
         case personID = "person_id"
         case serverName = "server_name"
         case enrollmentURL = "enrollment_url"
-        case relayURL = "relay_url"
+        case deviceURL = "device_url"
         case caPEM = "ca_pem"
         case caSHA256 = "ca_sha256"
         case inviteToken = "invite_token"
@@ -74,19 +75,20 @@ struct NativeJoinInvitation: Codable, Equatable {
         guard !data.isEmpty else { throw NativeJoinInvitationError.invalid }
         let result: NativeJoinInvitation
         do { result = try JSONDecoder().decode(Self.self, from: data) }
+        catch NativeJoinInvitationError.olderServer { throw NativeJoinInvitationError.olderServer }
         catch { throw NativeJoinInvitationError.invalid }
         try result.validate()
         return result
     }
 
     func validate(now _: Date? = nil) throws {
-        guard v == 1,
+        guard v == 2,
               !personID.isEmpty,
               !serverName.isEmpty, serverName.utf8.count <= 253,
               Self.endpoint(enrollmentURL, scheme: "https", path: "/enroll"),
-              Self.endpoint(relayURL, scheme: "wss", path: "/relay"),
+              Self.endpoint(deviceURL, scheme: "https", path: ""),
               enrollmentURL.host?.lowercased() == serverName.lowercased(),
-              relayURL.host?.lowercased() == serverName.lowercased(),
+              deviceURL.host?.lowercased() == serverName.lowercased(),
               Self.hexSecret(inviteToken), Self.hexSecret(caSHA256),
               expiresAt.map({ $0 > 0 }) ?? true,
               caPEM.components(separatedBy: "-----BEGIN CERTIFICATE-----").count == 2,
@@ -100,13 +102,13 @@ struct NativeJoinInvitation: Codable, Equatable {
 
     func sameAccount(as other: NativeJoinInvitation) -> Bool {
         NativeAuthorityBinding.samePerson(personID, other.personID) && enrollmentURL == other.enrollmentURL &&
-            relayURL == other.relayURL && trustedRootDER == other.trustedRootDER
+            deviceURL == other.deviceURL && trustedRootDER == other.trustedRootDER
     }
 
     static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.v == rhs.v && NativeAuthorityBinding.samePerson(lhs.personID, rhs.personID) &&
             lhs.serverName == rhs.serverName && lhs.enrollmentURL == rhs.enrollmentURL &&
-            lhs.relayURL == rhs.relayURL && lhs.caPEM == rhs.caPEM && lhs.caSHA256 == rhs.caSHA256 &&
+            lhs.deviceURL == rhs.deviceURL && lhs.caPEM == rhs.caPEM && lhs.caSHA256 == rhs.caSHA256 &&
             lhs.inviteToken == rhs.inviteToken && lhs.expiresAt == rhs.expiresAt &&
             lhs.personName == rhs.personName && lhs.inviterName == rhs.inviterName
     }
@@ -121,5 +123,24 @@ struct NativeJoinInvitation: Codable, Equatable {
 
     private static func hexSecret(_ value: String) -> Bool {
         value.utf8.count == 64 && value.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) })
+    }
+}
+
+extension NativeJoinInvitation {
+    init(from decoder: any Decoder) throws {
+        let fields = try decoder.container(keyedBy: CodingKeys.self)
+        v = try fields.decode(Int.self, forKey: .v)
+        if v == 1 { throw NativeJoinInvitationError.olderServer }
+        guard v == 2 else { throw NativeJoinInvitationError.invalid }
+        personID = try fields.decode(String.self, forKey: .personID)
+        serverName = try fields.decode(String.self, forKey: .serverName)
+        enrollmentURL = try fields.decode(URL.self, forKey: .enrollmentURL)
+        deviceURL = try fields.decode(URL.self, forKey: .deviceURL)
+        caPEM = try fields.decode(String.self, forKey: .caPEM)
+        caSHA256 = try fields.decode(String.self, forKey: .caSHA256)
+        inviteToken = try fields.decode(String.self, forKey: .inviteToken)
+        expiresAt = try fields.decodeIfPresent(Int64.self, forKey: .expiresAt)
+        personName = try fields.decodeIfPresent(String.self, forKey: .personName)
+        inviterName = try fields.decodeIfPresent(String.self, forKey: .inviterName)
     }
 }

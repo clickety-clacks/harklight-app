@@ -371,6 +371,7 @@ final class NativeClientDiagnosticJournal {
             switch value {
             case .invalid: return "invitation_invalid"
             case .expired: return "invitation_expired"
+            case .olderServer: return "invitation_older_server"
             }
         }
         if let value = error as? NativeJoinError {

@@ -91,6 +91,15 @@ struct NativeEnrollmentRecord: Codable, Equatable {
     }
     var profileAuthority: String { localProfileAuthority ?? host }
 
+    var deviceURL: URL? {
+        // The existing record stores the device listener port as relayPort.
+        var origin = URLComponents()
+        origin.scheme = "https"
+        origin.host = host
+        origin.port = relayPort
+        return origin.url
+    }
+
     func removalArchiveRecord() -> Self {
         Self(host: host, enrollmentPort: enrollmentPort, relayPort: relayPort,
              trustedRootDER: trustedRootDER, identityLabel: identityLabel,
@@ -323,7 +332,7 @@ struct NativeEnrollmentStore {
     func material(from record: NativeEnrollmentRecord) throws -> NativeInstallationMaterial {
         guard let personID = record.personID,
               !personID.isEmpty,
-              let relayURL = URL(string: "wss://\(record.host):\(record.relayPort)/relay") else {
+              let deviceURL = record.deviceURL else {
             throw NativeEnrollmentError.invalidIdentity
         }
         let clientIdentity: SecIdentity
@@ -351,7 +360,7 @@ struct NativeEnrollmentStore {
                                                                deviceID: ExactText(record.deviceID)),
                                      transportMode: .relay)
         return NativeInstallationMaterial(context: profile,
-                                          relayURL: relayURL,
+                                          deviceURL: deviceURL,
                                           keychainIdentity: clientIdentity,
                                           trustedRootDER: record.trustedRootDER)
     }
