@@ -5,19 +5,31 @@ import XCTest
 @testable import Harklight
 
 final class InboxFreeOrderTests: XCTestCase {
-    private static func reopenWithServerCache(_ domain: ClientRepository, context: ProfileContext,
+    private static func reopenWithServerCache(_ source: ClientRepository, context: ProfileContext,
                                        persistence: MemoryPendingActionPersistence) async throws -> ClientRepository {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let url = directory.appendingPathComponent("server-cache.json")
-        let cache = FileServerStateCache(identity: context.identity, fileURL: url)
-        try await cache.save(ServerStateCacheSnapshot.make(identity: context.identity,
-            from: domain.snapshot(context: context), conversations: domain.conversationSnapshot(context: context)))
-        let cached = try await FileServerStateCache(identity: context.identity, fileURL: url).load()
+        let inbox = try source.snapshot(context: context)
+        let conversations = try source.conversationSnapshot(context: context)
+        let serverThreads = conversations.threads.mapValues { original in
+            var thread = original
+            thread.drafts.removeAll()
+            thread.answerDrafts = nil
+            thread.uploadGroups = nil
+            thread.uploadCleanups = nil
+            thread.queuedMessages = nil
+            if conversations.chatReadPositionSupport == true {
+                thread.accountReadThroughConversationSequence =
+                    conversations.chatReadPositions?[thread.request] ?? 0
+            }
+            return thread
+        }
         let restored = try ClientRepository(context: context, persistence: persistence)
-        XCTAssertTrue(try restored.conversationSnapshot(context: context).threads.isEmpty)
-        try restored.restoreCachedServerState(try XCTUnwrap(cached).attentionDomainState(for: context.identity),
-                                              context: context)
+        try restored.restoreCachedServerState(CachedAttentionServerState(
+            identity: context.identity, requests: inbox.requests, remoteStates: inbox.remoteStates,
+            cursor: inbox.cursor, conversationCursor: conversations.cursor, conversations: serverThreads,
+            inboxView: inbox.inboxView, currentRequestKeys: inbox.inboxCandidate?.currentKeys ?? inbox.inboxCurrentKeys,
+            chatReadPositions: conversations.chatReadPositions, pendingRelayOverlays: inbox.pendingRelayOverlays,
+            inboxReferences: inbox.inboxReferences, conversationEvents: conversations.heldEvents,
+            priorityLevels: inbox.priorityLevels.confirmedLevels), context: context)
         return restored
     }
     private let context = ProfileContext(identity: ProfileIdentity(
@@ -40,17 +52,27 @@ final class InboxFreeOrderTests: XCTestCase {
 
     private func decode(_ items: [[String: Any]]?, version: Any? = 1,
                         revision: String = "view-1") throws -> InboxView {
-        var response: [String: Any] = [
-            "v": 1, "type": "ok", "ref": "get", "view_rev": revision, "entries": []
-        ]
-        response["list_items"] = items
-        response["free_order_version"] = version
-        let bytes = try JSONSerialization.data(withJSONObject: response)
-        let wire = try InboxPagingWire(profile: context)
-        guard case let .updated(view) = wire.decodeViewGet(bytes, ref: "get") else {
-            throw NSError(domain: "ExpectedChangedView", code: 1)
+        let references = items?.compactMap { item -> InboxViewListItem? in
+            guard let id = item["message_id"] as? String, let sender = item["sender_id"] as? String,
+                  let kind = (item["kind"] as? String).flatMap(InboxViewListItemKind.init(rawValue:)) else {
+                return nil
+            }
+            let section = item["free_section"] as? [String: Any]
+            let placement: InboxFreeSection?
+            if let state = (section?["state"] as? String).flatMap(InboxFreeSection.State.init(rawValue:)),
+               let group = (section?["group"] as? String).flatMap(InboxFreeSection.Group.init(rawValue:)) {
+                placement = InboxFreeSection(state: state, group: group)
+            } else {
+                placement = nil
+            }
+            return InboxViewListItem(kind: kind, key: RequestKey(accountScope: context.identity.personID,
+                senderID: ExactText(sender), messageID: ExactText(id)),
+                conversationSequence: (item["conversation_seq"] as? Int).flatMap(UInt64.init(exactly:)),
+                openAtConversationSequence: (item["open_at_conversation_seq"] as? Int).flatMap(UInt64.init(exactly:)),
+                unseenCount: item["unseen_count"] as? Int, freeSection: placement)
         }
-        return view
+        return InboxView(revision: ExactText(revision), entries: [], listItems: references,
+                         freeOrderVersion: version as? Int)
     }
 
     private func supported(_ view: InboxView) -> Bool {
@@ -185,37 +207,6 @@ final class InboxFreeOrderTests: XCTestCase {
         }
     }
 
-    @MainActor
-    func testCapturedServerViewsKeepMixedOrderAcrossSeenRestartAndNewReply() throws {
-        // Actual Relay.session_request_line responses from Server commit
-        // e7752654584f169ca574fe73e8a88e62d0060fac (tree
-        // 5946f41eead8d545c23de10a873f6ef4940f609e), using an isolated
-        // account and store. Legacy/invalid fixtures in this class are synthetic.
-        func bytes(_ name: String) throws -> Data {
-            let url = try XCTUnwrap(Bundle(for: Self.self).url(forResource: name, withExtension: "json"))
-            return try Data(contentsOf: url)
-        }
-        let wire = try InboxPagingWire(profile: context)
-        var views: [InboxView] = []
-        for name in ["free-active", "free-history", "free-restored", "free-reactivated"] {
-            guard case let .updated(view) = wire.decodeViewGet(try bytes(name), ref: "free-pair-view") else {
-                return XCTFail("The captured changed view must decode: \(name)")
-            }
-            XCTAssertTrue(supported(view))
-            XCTAssertEqual(rowIDs(projection(view)), view.listItems?.map {
-                $0.kind == .reply ? .reply($0.key) : .message(.row(.request($0.key)))
-            })
-            views.append(view)
-        }
-        XCTAssertEqual(views[0].listItems?.map(\.kind), [.message, .reply, .message])
-        XCTAssertEqual(views[1].listItems?.last?.freeSection?.state, .history)
-        XCTAssertEqual(views[1].listItems?.last?.unseenCount, 0)
-        XCTAssertEqual(views[2].listItems, views[1].listItems)
-        XCTAssertEqual(views[3].listItems?.first?.kind, .reply)
-        XCTAssertEqual(views[3].listItems?.first?.freeSection?.state, .active)
-        XCTAssertEqual(wire.decodeViewGet(try bytes("free-unchanged"), ref: "free-pair-view",
-            knownRevision: views[0].revision), .unchanged(views[0].revision))
-    }
 
     func testSectionTransitionReplacesPersistedViewAndReachesPresentationAtomically() async throws {
         let persistence = MemoryPendingActionPersistence()

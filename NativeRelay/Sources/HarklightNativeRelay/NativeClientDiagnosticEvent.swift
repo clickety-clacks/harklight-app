@@ -474,34 +474,11 @@ public enum NativeDiagnosticCauseCode {
     public static func forError(_ error: Error) -> String {
         if error is CancellationError { return "cancelled" }
         if let value = error as? URLError { return "url_session_error_code_\(value.errorCode)" }
-        if let value = error as? InstallationTransportError {
+        if let value = error as? ClientConnectionError {
             switch value {
             case .invalidEndpoint: return "invalid_relay_endpoint"
             case .invalidTrustAnchor: return "invalid_trust_anchor"
-            case .wrongDeviceIdentity: return "wrong_device_identity"
-            case .invalidServerTrust: return "server_trust_rejected"
-            case .unexpectedServerFrame: return "unexpected_relay_frame"
-            case .serverRejected: return "relay_server_rejected"
-            case .conversationsUnavailable: return "conversations_unavailable"
-            case .acknowledgementBehind: return "relay_acknowledgement_behind"
-            }
-        }
-        if let value = error as? ConversationFileTransportError {
-            switch value {
-            case let .server(status, _): return "file_http_status_\(status)"
-            }
-        }
-        if let value = error as? NativeRelayCoreError {
-            switch value {
-            case .fixtureProfile: return "relay_fixture_profile"
-            case .wrongInstallation: return "relay_wrong_installation"
             case .inactive: return "relay_inactive"
-            case .invalidReplay: return "relay_invalid_replay"
-            case .missingOriginContent: return "relay_origin_content_missing"
-            case .eventRejected: return "relay_event_rejected"
-            case .mismatchedOperationResult: return "relay_operation_result_mismatch"
-            case .inboxPagingUnavailable: return "relay_inbox_paging_unavailable"
-            case .inboxPagingBusy: return "relay_inbox_paging_busy"
             }
         }
         if let value = error as? ConversationError {

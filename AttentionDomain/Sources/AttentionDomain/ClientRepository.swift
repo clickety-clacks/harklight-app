@@ -3197,6 +3197,32 @@ public final class ClientRepository: @unchecked Sendable {
         return state.pendingConversations.values.flatMap { $0.queuedMessages ?? [] }
     }
 
+    /// Release a previous-protocol send into the composer without replaying it.
+    /// Already accepted receipts and v2 queued messages keep their identities.
+    public func recoverLegacyDiscussionDrafts(context suppliedContext: ProfileContext) throws {
+        writerLock.lock()
+        defer { writerLock.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        var next = state
+        var changed = false
+        for (key, var pending) in next.pendingConversations {
+            for (revision, draft) in pending.drafts {
+                switch draft.disposition {
+                case .submitting, .outcomeUnknown:
+                    pending.drafts[revision] = ConversationDraft(binding: draft.binding, text: draft.text,
+                        files: draft.files, disposition: .rejected(ExactText("previous_transport_unconfirmed")))
+                    changed = true
+                case .saved, .rejected, .acceptedPendingReplay:
+                    continue
+                }
+            }
+            next.pendingConversations[key] = pending
+        }
+        if changed { try commit(next) }
+    }
+
     /// A read-only view of old-account text, even when no server projection
     /// or conversation thread is currently hydrated.
     public func unsentText(context suppliedContext: ProfileContext) throws -> [ExactText] {

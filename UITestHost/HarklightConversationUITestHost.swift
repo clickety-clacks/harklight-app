@@ -115,25 +115,10 @@ struct HarklightConversationUITestHost: App {
         guard conversationFixture.viewModel.conversation(for: key)?.latestAgentReply != nil else {
             preconditionFailure("The local chat fixture has no agent reply for the notification route.")
         }
-        let locator: [String: Any] = [
-            "v": 1,
-            "binding_id": "11111111-2222-3333-4444-555555555555",
-            "person_id": key.accountScope.rawValue,
-            "device_id": "local-fixture-device",
-            "sender_id": key.senderID.rawValue,
-            "message_id": key.messageID.rawValue,
-            "acceptance_seq": 1,
-            "target": "chat"
-        ]
-        let object: [String: Any] = [
-            "attention": ["v": 1, "type": "sync", "locator": locator]
-        ]
-        guard let data = try? JSONSerialization.data(withJSONObject: object),
-              let payload = try? JSONValue.parse(data) else {
-            preconditionFailure("The local chat fixture notification could not be encoded.")
-        }
+        let locator = NativeNotificationLocator(v2Request: key, bindingID: ExactText("local-fixture-binding"),
+            deviceID: ExactText("local-fixture-device"), serverID: "local-fixture-server", target: "chat")
         let router = NativeNotificationRouter.shared
-        guard router.receiveForegroundNotification(payload, title: "Agent reply",
+        guard router.receiveForegroundNotification(.null, locator: locator, title: "Agent reply",
                                                    body: "A new chat reply is ready."),
               router.foregroundChatIndicator != nil else {
             preconditionFailure("The local chat fixture notification was not recognized as a chat target.")

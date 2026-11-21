@@ -12,10 +12,10 @@ public final class HTTPSClientAPITransport: ClientAPITransport, @unchecked Senda
     /// `baseURL` is the device listener, for example `https://host:port`.
     public convenience init(baseURL: URL, clientIdentity: TrustedKeychainIdentity, trustedRootDER: Data) throws {
         guard baseURL.scheme == "https", let host = baseURL.host?.lowercased(), !host.isEmpty else {
-            throw InstallationTransportError.invalidEndpoint
+            throw ClientConnectionError.invalidEndpoint
         }
         guard let root = SecCertificateCreateWithData(nil, trustedRootDER as CFData) else {
-            throw InstallationTransportError.invalidTrustAnchor
+            throw ClientConnectionError.invalidTrustAnchor
         }
         let configuration = URLSessionConfiguration.ephemeral
         configuration.tlsMinimumSupportedProtocolVersion = .TLSv12

@@ -88,14 +88,11 @@ final class NativeAppLaunch {
     private(set) var notificationNavigation: NativeInboxNavigation?
     private(set) var notificationNavigationMessage: String?
     @ObservationIgnored private var notificationSynchronized = false
-    @ObservationIgnored private var notificationRefreshFinished = false
     @ObservationIgnored private var handledNotificationSerial: UInt64?
-    @ObservationIgnored private var resolvingNotificationSerial: UInt64?
     @ObservationIgnored private var pendingMessageDeepLink: NativeMessageDeepLink?
     @ObservationIgnored private var didFinishRestoring = false
     @ObservationIgnored private var foregroundActivationPushCheckPending = false
     @ObservationIgnored private let refreshOperation: @MainActor (Bool) async -> NativeRelayRefreshResult
-    @ObservationIgnored private let fetchInboxPageOperation: (@MainActor (LivePresentationStore) async -> Bool)?
 
     private var dismissedForegroundConnectFailure: NativeForegroundConnectFailureKey?
 
@@ -118,7 +115,6 @@ final class NativeAppLaunch {
              await NativeRelayLifecycle.shared.refreshResultFromTrustedRelay(
                 checkBlockedPush: checkBlockedPush)
          },
-         fetchInboxPageOperation: (@MainActor (LivePresentationStore) async -> Bool)? = nil,
          errorLog suppliedErrorLog: ErrorLogStore? = nil,
          departureLifecycle: NativeRelayLifecycle = .shared,
          archivedPersistence: @escaping @MainActor () throws -> any PendingActionPersistence = {
@@ -147,7 +143,6 @@ final class NativeAppLaunch {
         legacyErrorLogModel = ErrorLogModel(store: errorLog)
         self.notificationRouter = notificationRouter
         self.refreshOperation = refreshOperation
-        self.fetchInboxPageOperation = fetchInboxPageOperation
         didFinishRestoring = initialState != nil
         activeEnrollmentRecord = initialEnrollmentRecord
         archivedAccountDepartures = initialArchivedDepartures
@@ -233,40 +228,28 @@ final class NativeAppLaunch {
         guidedJoin.notificationChoice = { [weak self] enabled in
             await self?.chooseNotifications(enabled)
         }
-        guidedJoinStore.removePushBeforeDeparture = { [weak self] record in
-            guard let self else { return }
-            await NativeRelayLifecycle.shared.removePushBeforeDeparture(for: record, enrollment: self.enrollment)
+        guidedJoinStore.prepareV2Removal = { [weak self] record in
+            guard let self else { throw NativeJoinError.superseded }
+            try await self.prepareV2Removal(record)
         }
-        if departureLifecycle.clientAPIV2Enabled {
-            guidedJoinStore.prepareV2Removal = { [weak self] record in
-                guard let self else { throw NativeJoinError.superseded }
-                try await self.prepareV2Removal(record)
+        guidedJoinStore.didConfirmV2Removal = { [weak self] record in
+            guard let self, let current = self.activeEnrollmentRecord,
+                  current.deviceID == record.deviceID, current.profileAuthority == record.profileAuthority,
+                  NativeAuthorityBinding.samePerson(current.personID, record.personID) else {
+                return
             }
-            guidedJoinStore.didConfirmV2Removal = { [weak self] record in
-                guard let self, let current = self.activeEnrollmentRecord,
-                      current.deviceID == record.deviceID, current.profileAuthority == record.profileAuthority,
-                      NativeAuthorityBinding.samePerson(current.personID, record.personID) else {
-                    return
-                }
-                await self.departureLifecycle.deactivate()
-                if self.activeEnrollmentRecord?.sameNotificationProfile(as: current) == true {
-                    self.closeV2ErrorLog()
-                }
+            await self.departureLifecycle.deactivate()
+            if self.activeEnrollmentRecord?.sameNotificationProfile(as: current) == true {
+                self.closeV2ErrorLog()
             }
         }
         guidedJoin.didKeepCurrentAccount = { [weak self] record in
             guard let self else { return }
-            let lifecycle = self.departureLifecycle
-            guard lifecycle.clientAPIV2Enabled || lifecycle.featureFlags.isEnabled(.serverMatchedPushRouting),
-                  case let .live(presentation) = self.state,
+            guard case let .live(presentation) = self.state,
                   !presentation.isReadOnly, !presentation.isLocalExample,
                   self.activeEnrollmentRecord?.sameNotificationProfile(as: record) == true else { return }
-            if lifecycle.clientAPIV2Enabled {
-                if try self.guidedJoinStore.hasConfirmedRemoval(for: record) { return }
-                try await self.resumeAfterUnconfirmedV2Removal(record, presentation: presentation)
-            } else {
-                try self.enrollment.cancelPushDeparture(for: record)
-            }
+            if try self.guidedJoinStore.hasConfirmedRemoval(for: record) { return }
+            try await self.resumeAfterUnconfirmedV2Removal(record, presentation: presentation)
             await self.refreshLive()
         }
         guidedJoin.didRemoveCurrentAccount = { [weak self] in
@@ -295,8 +278,7 @@ final class NativeAppLaunch {
         if isSubmissionFailureSeed { return }
 #endif
         try? guidedJoinStore.resumeArchivedDepartureCleanup()
-        if NativeRelayLifecycle.shared.clientAPIV2Enabled, let record = try? enrollment.load(),
-           record.v2Revoked == true {
+        if let record = try? enrollment.load(), record.v2Revoked == true {
             refreshArchivedAccounts()
             let archived = NativeAccountDeparture(record: record, replacement: nil, removed: true)
             let source = archivedAccountDepartures.first { $0.archiveID == archived.archiveID } ?? archived
@@ -348,33 +330,13 @@ final class NativeAppLaunch {
     }
 
     func disconnectCurrentAccount() async {
-        guard case let .live(presentation) = state,
+        guard case .live = state,
               let record = try? enrollment.load(), record.isApproved,
               !isDisconnectBusy(for: NativeAccountDeparture(
                 record: record, replacement: nil, removed: false)) else { return }
         disconnectMessage = nil
         do {
             try guidedJoin.prepareStandaloneRemoval(record)
-            if departureLifecycle.clientAPIV2Enabled {
-                await retryDisconnectRemoval()
-                return
-            }
-            try enrollment.preparePushRemoval(for: record)
-            await guidedJoinStore.removePushBeforeDeparture?(record)
-            refreshArchivedAccounts()
-            let departure = try guidedJoinStore.departure() ??
-                NativeAccountDeparture(record: record, replacement: nil, removed: false)
-            disconnectedAccount = departure
-            disconnectedArchive = presentation
-            isShowingDisconnectedArchive = true
-            presentation.enterReadOnlyMode()
-            if case let .live(current) = state, current === presentation {
-                state = .disconnected(presentation)
-            }
-            activeEnrollmentRecord = nil
-            activationGeneration = UUID()
-            await NativeRelayLifecycle.shared.deactivate()
-            clearForegroundConnectionDetails()
             await retryDisconnectRemoval()
         } catch {
             disconnectMessage = "Harklight could not save the removal request. Nothing was sent; this account is still connected. Try again."
@@ -537,7 +499,6 @@ final class NativeAppLaunch {
     private func receiveMessageDeepLink(_ deepLink: NativeMessageDeepLink) async {
         pendingMessageDeepLink = deepLink
         notificationSynchronized = false
-        notificationRefreshFinished = false
         notificationNavigationMessage = nil
         guard case let .live(presentation) = state,
               !presentation.isReadOnly, !presentation.isLocalExample else { return }
@@ -913,7 +874,6 @@ final class NativeAppLaunch {
         activationGeneration = generation
         notificationNavigation = nil
         notificationSynchronized = false
-        notificationRefreshFinished = false
         disconnectMessage = nil
         isEnrollmentExpired = false
         if case let .live(previous) = state { previous.stopObserving() }
@@ -922,63 +882,36 @@ final class NativeAppLaunch {
         guard activationGeneration == generation else { return }
         closeV2ErrorLog()
         let context = installation.context
-        let usesV2 = NativeRelayLifecycle.shared.clientAPIV2Enabled
-        let (store, fileStorage, serverStateCache) = try await Task.detached(priority: .userInitiated) {
+        let (store, fileStorage) = try await Task.detached(priority: .userInitiated) {
             let persistence = try FilePendingActionPersistence.applicationSupport()
             let fileStorage = try ConversationFileStorage(identity: context.identity)
             let store = try ClientRepository(context: context, persistence: persistence,
                                                  conversationFileReferences: fileStorage)
-            let cache: FileServerStateCache
-            if !usesV2, let persistent = try? FileServerStateCache.applicationCache(for: context.identity) {
-                cache = persistent
-            } else {
-                cache = FileServerStateCache(identity: context.identity)
-            }
-            var cachedState: CachedAttentionServerState?
-            if let saved = try? await cache.load() {
-                if let projection = try? saved.attentionDomainState(for: context.identity) {
-                    cachedState = projection
-                } else {
-                    try? await cache.discard()
-                }
-            }
-            if let cachedState {
-                do {
-                    try store.restoreCachedServerState(cachedState, context: context)
-                } catch {
-                    try? await cache.discard()
-                }
-            }
-            return (store, fileStorage, cache)
+            try store.recoverLegacyDiscussionDrafts(context: context)
+            return (store, fileStorage)
         }.value
         guard activationGeneration == generation else { return }
         diagnostics.recordPendingActionsRecoveries(store.pendingActionsRecoveries)
-        let activation = try await LivePresentationStore.makeForActivationRecoveringSavedState(
-            store: store, context: context, serverStateCache: serverStateCache, diagnostics: diagnostics,
+        let activation = try await LivePresentationStore.makeForActivation(
+            store: store, context: context, diagnostics: diagnostics,
             newMessageAreaDefaults: .standard, conversationFiles: fileStorage)
         guard activationGeneration == generation else { return }
         let presentation = activation.presentation
-        if usesV2 {
-            let directory = try NativeRelayLifecycle.v2Directory(for: context.identity)
-            let log = ErrorLogStore(fileURL: directory.appendingPathComponent("error-log-v2.json"),
-                                    build: Self.errorLogBuild())
-            v2ErrorLog = (log, ErrorLogModel(store: log))
-        }
+        let directory = try NativeRelayLifecycle.v2Directory(for: context.identity)
+        let log = ErrorLogStore(fileURL: directory.appendingPathComponent("error-log-v2.json"),
+                                build: Self.errorLogBuild())
+        v2ErrorLog = (log, ErrorLogModel(store: log))
         NativeRelayLifecycle.shared.errorLog = errorLog
-        if usesV2 {
-            NativeRelayLifecycle.shared.onV2AccountAccessChanged = { [weak self] access, context in
-                self?.applyV2AccountAccess(access, for: context)
-            }
+        NativeRelayLifecycle.shared.onV2AccountAccessChanged = { [weak self] access, context in
+            self?.applyV2AccountAccess(access, for: context)
         }
         do {
-            try await NativeRelayLifecycle.shared.activate(store: store,
-                                                           context: installation.context,
-                                                           relayURL: installation.relayURL,
-                                                           clientIdentity: installation.keychainIdentity,
-                                                           trustedRootDER: installation.trustedRootDER,
-                                                           diagnostics: diagnostics,
-                                                           serverStateCache: serverStateCache,
-                                                           awaitingFirstConnection: try awaitingFirstConnection(for: installation.context))
+            try NativeRelayLifecycle.shared.activate(store: store,
+                                                      context: installation.context,
+                                                      relayURL: installation.relayURL,
+                                                      clientIdentity: installation.keychainIdentity,
+                                                      trustedRootDER: installation.trustedRootDER,
+                                                      diagnostics: diagnostics)
         } catch {
             if activationGeneration != generation { return }
             diagnostics.record(area: .connection, phase: .approvedConnection, transition: .failed,
@@ -987,7 +920,10 @@ final class NativeAppLaunch {
         }
         guard activationGeneration == generation else { return }
         presentation.notificationProjectionDidChange = { [weak self] in
-            Task { await self?.resolveNotificationNavigation() }
+            Task { [weak self] in
+                guard let self else { return }
+                await self.resolveMessageDeepLink(synchronized: self.notificationSynchronized)
+            }
         }
         presentation.confirmedRelayRefresh = { [weak self, weak presentation] in
             guard let self, let presentation,
@@ -995,14 +931,12 @@ final class NativeAppLaunch {
                   self.foregroundConnectProgress?.outcome != .confirmed else { return }
             self.clearForegroundConnectionDetails()
         }
-        if usesV2 {
-            presentation.chatMessageQueued = { message in
-                Task { await NativeRelayLifecycle.shared.sendV2QueuedReply(message, expected: context) }
-            }
+        presentation.chatMessageQueued = { message in
+            Task { await NativeRelayLifecycle.shared.sendV2QueuedReply(message, expected: context) }
         }
         presentation.startObserving()
         state = .live(presentation)
-        if usesV2, let access = NativeRelayLifecycle.shared.v2AccountAccess {
+        if let access = NativeRelayLifecycle.shared.v2AccountAccess {
             applyV2AccountAccess(access, for: context)
             guard activationGeneration == generation else { return }
         }
@@ -1033,9 +967,7 @@ final class NativeAppLaunch {
             try enrollment.markNotificationExplanationSeen(for: record.deviceID)
             let allowed = try await notifications.choose(enabled) { self.activationGeneration == epoch }
             guard activationGeneration == epoch else { return }
-            if NativeRelayLifecycle.shared.clientAPIV2Enabled {
-                Task { await NativeRelayLifecycle.shared.refreshAfterPushAddressStored() }
-            }
+            Task { await NativeRelayLifecycle.shared.refreshAfterPushAddressStored() }
             if allowed {
                 presentation.notificationWarning = nil
                 diagnostics.record(area: .notifications, phase: .pushRegistration, transition: .completed)
@@ -1095,7 +1027,7 @@ final class NativeAppLaunch {
         lifecycle.onV2AccountAccessChanged = { [weak self] access, context in
             self?.applyV2AccountAccess(access, for: context)
         }
-        try await lifecycle.activate(store: presentation.attentionStore, context: context,
+        try lifecycle.activate(store: presentation.attentionStore, context: context,
                                      relayURL: installation.relayURL, clientIdentity: installation.keychainIdentity,
                                      trustedRootDER: installation.trustedRootDER)
         if let access = lifecycle.v2AccountAccess {
@@ -1214,13 +1146,10 @@ final class NativeAppLaunch {
         defer { presentation.endRefresh() }
         let checkBlockedPush = takeForegroundActivationPushCheck()
         notificationSynchronized = false
-        notificationRefreshFinished = false
         let result = await refreshOperation(checkBlockedPush)
         guard case let .live(current) = state, current === presentation else { return }
         presentation.applyRefreshResult(result)
-        notificationRefreshFinished = true
         notificationSynchronized = result.relayConfirmed && result.confirmedContext == presentation.notificationContext
-        await resolveNotificationNavigation()
         await resolveMessageDeepLink(synchronized: notificationSynchronized)
     }
 
@@ -1241,35 +1170,7 @@ final class NativeAppLaunch {
             if notificationNavigation?.request != key {
                 navigateToMessage(key, in: presentation, from: deepLink)
             }
-            var pageAvailability = presentation.inboxPageAvailability()
-            while synchronized, pageAvailability == .more {
-                guard pendingMessageDeepLink == deepLink else { return }
-                let revisionBeforePage = presentation.presentation.revision
-                let fetched: Bool
-                if let fetchInboxPageOperation {
-                    fetched = await fetchInboxPageOperation(presentation)
-                } else {
-                    fetched = await presentation.fetchNextInboxPage()
-                }
-                guard pendingMessageDeepLink == deepLink,
-                      case let .live(current) = state, current === presentation else { return }
-                if presentation.isRetracted(key) {
-                    navigateToMessage(key, in: presentation, from: deepLink)
-                    pendingMessageDeepLink = nil
-                    notificationNavigationMessage = "The sender retracted this message."
-                    return
-                }
-                if presentation.request(for: key) != nil {
-                    navigateToMessage(key, in: presentation, from: deepLink)
-                    pendingMessageDeepLink = nil
-                    notificationNavigationMessage = nil
-                    return
-                }
-                pageAvailability = presentation.inboxPageAvailability()
-                guard fetched, presentation.presentation.revision != revisionBeforePage else { break }
-            }
-            let confirmed = synchronized && notificationSynchronized
-            notificationNavigationMessage = confirmed && pageAvailability == .exhausted
+            notificationNavigationMessage = synchronized
                 ? "This message was never sent to this Harklight inbox."
                 : "This message hasn't arrived yet. Harklight will keep checking while it's open."
         }
@@ -1283,11 +1184,7 @@ final class NativeAppLaunch {
 
     func openForegroundChatIndicator(id: UUID) async {
         guard let indicator = notificationRouter.consumeForegroundChatIndicator(id: id) else { return }
-        if NativeRelayLifecycle.shared.clientAPIV2Enabled {
-            notificationRouter.pendingV2Tap = indicator.payload
-        } else {
-            notificationRouter.receive(indicator.payload, opened: true)
-        }
+        notificationRouter.pendingV2Tap = indicator.payload
         await handleNotification()
     }
 
@@ -1298,162 +1195,32 @@ final class NativeAppLaunch {
     }
 
     func handleNotification() async {
-        guard didFinishRestoring else { return }
-        if NativeRelayLifecycle.shared.clientAPIV2Enabled, let payload = notificationRouter.pendingV2Tap {
-            notificationRouter.pendingV2Tap = nil
-            let lifecycle = NativeRelayLifecycle.shared
-            guard let locator = await lifecycle.v2LocatorForPush(payload),
-                  case let .live(presentation) = state,
-                  !presentation.isReadOnly, !presentation.isLocalExample,
-                  lifecycle.isActive(for: presentation.notificationContext) else { return }
-            do {
-                try presentation.refreshFromDurableStore()
-            } catch {
-                notificationNavigationMessage = "Could not load this notification."
-                return
-            }
-            notificationRouter.receive(locator: locator)
-            guard let intent = notificationRouter.intent else { return }
-            handledNotificationSerial = intent.serial
-            pendingMessageDeepLink = nil
-            selectedArchivedAccount = nil
-            selectedArchivedPresentation = nil
-            isShowingDisconnectedArchive = false
-            presentation.selectRequest(locator.request)
-            notificationNavigation = NativeInboxNavigation(serial: intent.serial, request: locator.request,
-                                                             opensChat: locator.target == "chat")
-            notificationNavigationMessage = nil
-            notificationRouter.consumed()
+        guard didFinishRestoring, let payload = notificationRouter.pendingV2Tap else { return }
+        notificationRouter.pendingV2Tap = nil
+        let lifecycle = NativeRelayLifecycle.shared
+        guard let locator = await lifecycle.v2LocatorForPush(payload),
+              case let .live(presentation) = state,
+              !presentation.isReadOnly, !presentation.isLocalExample,
+              lifecycle.isActive(for: presentation.notificationContext) else { return }
+        do {
+            try presentation.refreshFromDurableStore()
+        } catch {
+            notificationNavigationMessage = "Could not load this notification."
             return
         }
-        guard let intent = notificationRouter.intent,
-              handledNotificationSerial != intent.serial else { return }
+        notificationRouter.receive(locator: locator)
+        guard let intent = notificationRouter.intent else { return }
         handledNotificationSerial = intent.serial
         pendingMessageDeepLink = nil
-        notificationSynchronized = false
-        // Leave any archive surface; never activate an archive from a locator.
         selectedArchivedAccount = nil
         selectedArchivedPresentation = nil
         isShowingDisconnectedArchive = false
-        notificationNavigation = NativeInboxNavigation(serial: intent.serial, request: nil)
-        notificationNavigationMessage = intent.locator == nil ? nil : "Checking this notification."
-        if case let .live(presentation) = state, !presentation.isReadOnly, !presentation.isLocalExample {
-            presentation.selectRequest(nil)
-            if let record = try? enrollment.load(),
-               intent.locator?.profile(in: [record]) != nil {
-                _ = notificationRouter.resolve(records: [record], context: presentation.notificationContext,
-                    requests: [], synchronized: false)
-            }
-            presentation.notificationProjectionDidChange = { [weak self] in
-                Task { await self?.resolveNotificationNavigation() }
-            }
-            await refreshLive()
-        } else {
-            notificationRouter.fallback()
-            notificationNavigationMessage = nil
-        }
+        presentation.selectRequest(locator.request)
+        notificationNavigation = NativeInboxNavigation(serial: intent.serial, request: locator.request,
+                                                         opensChat: locator.target == "chat")
+        notificationNavigationMessage = nil
+        notificationRouter.consumed()
     }
-
-    func resolveNotificationNavigation() async {
-        guard notificationRefreshFinished, let intent = notificationRouter.intent,
-              handledNotificationSerial == intent.serial,
-              case let .live(presentation) = state, !presentation.isReadOnly, !presentation.isLocalExample,
-              resolvingNotificationSerial != intent.serial else { return }
-        resolvingNotificationSerial = intent.serial
-        defer {
-            if resolvingNotificationSerial == intent.serial {
-                resolvingNotificationSerial = nil
-            }
-        }
-        let record: NativeEnrollmentRecord?
-        do { record = try enrollment.load() }
-        catch {
-            notificationNavigationMessage = "Could not check this notification's account."
-            return
-        }
-        let records = record.map { [$0] } ?? []
-        if let key = notificationRouter.resolve(records: records,
-            context: presentation.notificationContext, requests: presentation.presentation.requests,
-            synchronized: notificationSynchronized) {
-            presentation.selectRequest(key)
-            let opensChat = notificationRouter.intent?.locator?.target == "chat"
-            notificationNavigation = NativeInboxNavigation(serial: intent.serial, request: key,
-                                                            opensChat: opensChat)
-            notificationNavigationMessage = nil
-            notificationRouter.consumed()
-            return
-        }
-        guard let locator = notificationRouter.intent?.locator else {
-            presentation.selectRequest(nil)
-            notificationNavigationMessage = nil
-            notificationRouter.consumed()
-            return
-        }
-
-        presentation.selectRequest(nil)
-        guard notificationSynchronized else {
-            notificationNavigationMessage = "Could not verify notification. Checking again while open."
-            return
-        }
-
-        var pageAvailability = presentation.inboxPageAvailability()
-        while pageAvailability == .more {
-            guard notificationRouter.intent?.serial == intent.serial,
-                  notificationRouter.intent?.locator != nil,
-                  notificationSynchronized, notificationRefreshFinished,
-                  case let .live(current) = state, current === presentation else { return }
-            // A present identity with a different acceptance sequence is stale;
-            // older pages cannot make it current.
-            if presentation.presentation.requests.contains(where: { $0.key == locator.request }) {
-                break
-            }
-
-            let revisionBeforePage = presentation.presentation.revision
-            let fetched: Bool
-            if let fetchInboxPageOperation {
-                fetched = await fetchInboxPageOperation(presentation)
-            } else {
-                fetched = await presentation.fetchNextInboxPage()
-            }
-            guard notificationRouter.intent?.serial == intent.serial,
-                  notificationRouter.intent?.locator != nil,
-                  notificationSynchronized, notificationRefreshFinished,
-                  case let .live(current) = state, current === presentation else { return }
-
-            if let key = notificationRouter.resolve(records: records,
-                context: presentation.notificationContext,
-                requests: presentation.presentation.requests, synchronized: true) {
-                presentation.selectRequest(key)
-                let opensChat = notificationRouter.intent?.locator?.target == "chat"
-                notificationNavigation = NativeInboxNavigation(serial: intent.serial, request: key,
-                                                                opensChat: opensChat)
-                notificationNavigationMessage = nil
-                notificationRouter.consumed()
-                return
-            }
-            guard notificationRouter.intent?.locator != nil else {
-                presentation.selectRequest(nil)
-                notificationNavigationMessage = nil
-                notificationRouter.consumed()
-                return
-            }
-            if presentation.presentation.requests.contains(where: { $0.key == locator.request }) {
-                break
-            }
-
-            pageAvailability = presentation.inboxPageAvailability()
-            guard fetched, presentation.presentation.revision != revisionBeforePage else { break }
-        }
-        guard notificationRouter.intent?.serial == intent.serial,
-              notificationRouter.intent?.locator != nil else { return }
-        notificationNavigationMessage = "This notification's message has not loaded yet."
-    }
-
-    func awaitingFirstConnection(for context: ProfileContext) throws -> Bool {
-        let saved = try enrollment.load()
-        return saved?.deviceID == context.identity.deviceID.rawValue && saved?.foregroundRelayConfirmed == false
-    }
-
     func retryForegroundConnection() async {
         guard case .live = state else { return }
         await guidedJoin.retryApprovedConnection()
@@ -1607,9 +1374,6 @@ final class LivePresentationStore {
     private(set) var conversationError: String? {
         didSet { conversationEditErrorBinding = nil }
     }
-    typealias DiscussionSubmitter = @MainActor (ConversationBinding, ProfileContext,
-        @escaping @Sendable (ConversationFile) async throws -> URL) async throws -> DiscussionOperationResult
-    @ObservationIgnored private let discussionSubmitter: DiscussionSubmitter
 
     private struct DiscussionSubmissionNotice {
         let context: ProfileContext
@@ -1621,6 +1385,10 @@ final class LivePresentationStore {
 
     func conversationError(for key: RequestKey, revision: UInt64) -> String? {
         if let conversationError { return conversationError }
+        if case let .rejected(reason)? = conversationThreads[key]?.drafts[revision]?.disposition,
+           reason.rawValue == "previous_transport_unconfirmed" {
+            return ConversationDraftPresentationText.rejectionMessage(reason)
+        }
         let binding = ConversationBinding(request: key, revision: revision)
         guard let notice = discussionSubmissionNotices[binding], notice.context == profileContext else { return nil }
         return notice.text
@@ -1812,10 +1580,6 @@ final class LivePresentationStore {
         guard (canSendToCurrentServer || isLocalExample) && !isReadOnly,
               let thread = conversationThreads[key],
               thread.isComposerOpen else { return false }
-        // Under the v2 chat rules an agent that is not listening is shown as
-        // information; the server holds the reply until it next reads.
-        guard isLocalExample || thread.chatNeverCloses == true ||
-                discussionAvailability(in: thread)?.state == .listening else { return false }
         return thread.drafts[thread.currentRevision]?.isPermanentlyRefused != true
     }
     @ObservationIgnored var notificationProjectionDidChange: (() -> Void)?
@@ -1837,10 +1601,6 @@ final class LivePresentationStore {
     // Clearing a retracted row is list state on this device only: no frame is
     // sent and the retracted record stays intact in the durable store.
     private(set) var clearedRetractions: Set<RequestKey> = []
-#if DEBUG
-    @ObservationIgnored private var pendingRetractionExpiryAdvance: CheckedContinuation<Void, Never>?
-    @ObservationIgnored private var retractionExpiryAdvanceRequested = false
-#endif
     @ObservationIgnored private let clearedRetractionDefaults: UserDefaults
     private static let clearedRetractionsDefaultsKey = "harklight.cleared-retracted-requests"
     private static let retractedRowVisibilityDuration: TimeInterval = 24 * 60 * 60
@@ -1850,14 +1610,12 @@ final class LivePresentationStore {
                      featureFlags: RemoteFeatureFlags = NativeRelayLifecycle.shared.featureFlags,
                      conversationAvailability: NativeConversationAvailability = NativeRelayLifecycle.shared.conversationAvailability,
                      diagnostics: NativeClientDiagnosticJournal? = nil,
-                     discussionSubmitter: DiscussionSubmitter? = nil,
                      clearedRetractionDefaults: UserDefaults = .standard,
                      newMessageAreaDefaults: UserDefaults? = nil) throws {
         guard context.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
         try self.init(store: store, context: context, permitsDelivery: true, diagnostics: diagnostics,
                       featureFlags: featureFlags,
                       conversationAvailability: conversationAvailability,
-                      discussionSubmitter: discussionSubmitter,
                       clearedRetractionDefaults: clearedRetractionDefaults,
                       newMessageAreaDefaults: newMessageAreaDefaults)
     }
@@ -1888,36 +1646,6 @@ final class LivePresentationStore {
         guard context.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
         try self.init(store: store, context: context, permitsDelivery: false, isReadOnly: true,
                       diagnostics: nil, newMessageAreaDefaults: newMessageAreaDefaults)
-    }
-
-    /// Activation from the restored Server cache. A cache that cannot be
-    /// presented is only a cache: record it, discard it (repository and
-    /// file) keeping the person's queue, and open with what the relay
-    /// rebuilds, rather than failing every launch.
-    static func makeForActivationRecoveringSavedState(
-        store: ClientRepository,
-        context: ProfileContext,
-        featureFlags: RemoteFeatureFlags = NativeRelayLifecycle.shared.featureFlags,
-        serverStateCache: any ServerStateCaching,
-        diagnostics: NativeClientDiagnosticJournal? = nil,
-        newMessageAreaDefaults: UserDefaults? = nil,
-        conversationFiles: ConversationFileStorage? = nil
-    ) async throws -> (presentation: LivePresentationStore,
-                        mainActorWorkMilliseconds: Double,
-                        activationPreparationMilliseconds: Double) {
-        do {
-            return try await makeForActivation(store: store, context: context, featureFlags: featureFlags, diagnostics: diagnostics,
-                newMessageAreaDefaults: newMessageAreaDefaults, conversationFiles: conversationFiles)
-        } catch let error where NativeRelayCoreError.isInvalidSavedServerState(error) {
-            diagnostics?.record(area: .localStore, phase: .projectionRefresh, transition: .retrying,
-                                error: error)
-            try store.discardServerState(context: context)
-            try await serverStateCache.discard()
-            diagnostics?.record(area: .localStore, phase: .projectionRefresh, transition: .completed,
-                                causeCode: "saved_server_state_rebuilt")
-            return try await makeForActivation(store: store, context: context, featureFlags: featureFlags, diagnostics: diagnostics,
-                newMessageAreaDefaults: newMessageAreaDefaults, conversationFiles: conversationFiles)
-        }
     }
 
     static func makeForActivation(
@@ -2007,7 +1735,6 @@ final class LivePresentationStore {
                  diagnostics: NativeClientDiagnosticJournal? = nil,
                  featureFlags: RemoteFeatureFlags = NativeRelayLifecycle.shared.featureFlags,
                  conversationAvailability: NativeConversationAvailability = NativeRelayLifecycle.shared.conversationAvailability,
-                 discussionSubmitter: DiscussionSubmitter? = nil,
                  clearedRetractionDefaults: UserDefaults = .standard,
                  newMessageAreaDefaults: UserDefaults? = nil,
                  preparedInitialState: PreparedLivePresentationInitialState? = nil) throws {
@@ -2022,10 +1749,6 @@ final class LivePresentationStore {
         }
         self.replyAreaStore = replyStore
         self.conversationAvailability = conversationAvailability
-        self.discussionSubmitter = discussionSubmitter ?? { binding, context, retainedFile in
-            try await NativeRelayLifecycle.shared.submitDiscussion(binding, expected: context,
-                                                                   retainedFile: retainedFile)
-        }
         self.permitsDelivery = permitsDelivery
         self.profileContext = context
         self.isReadOnly = isReadOnly
@@ -2144,14 +1867,7 @@ final class LivePresentationStore {
               let table = PriorityLevelsTableValidation.levels(from: priorityLevelsDraftRows) else { return }
         do {
             priorityLevelsLocalError = nil
-            let lifecycle = NativeRelayLifecycle.shared
-            if lifecycle.usesClientAPIV2 {
-                try await lifecycle.saveV2PriorityLevels(table, expected: profileContext)
-            } else {
-                _ = try attentionStore.beginPriorityLevelsSave(table, context: profileContext)
-                refreshPriorityLevelsProjection()
-                await lifecycle.sendPendingPriorityLevelsSave(expected: profileContext)
-            }
+            try await NativeRelayLifecycle.shared.saveV2PriorityLevels(table, expected: profileContext)
             refreshPriorityLevelsProjection()
         } catch {
             priorityLevelsLocalError = "This save could not be started. Your local edits are unchanged."
@@ -2221,14 +1937,6 @@ final class LivePresentationStore {
 
     func waitForNextRetractionExpiry() async {
         guard let expiry = nextRetractionExpiry else { return }
-#if DEBUG
-        if ProcessInfo.processInfo.arguments.contains("--harklight-test-server-retraction") {
-            await waitForRetractionExpiryAdvance()
-            guard !Task.isCancelled else { return }
-            refreshRetractionVisibility(at: expiry)
-            return
-        }
-#endif
         while !Task.isCancelled {
             let remaining = expiry.timeIntervalSince(retractionVisibilityTime)
             guard remaining > 0 else { break }
@@ -2243,26 +1951,6 @@ final class LivePresentationStore {
         refreshRetractionVisibility()
     }
 
-#if DEBUG
-    func advanceRetractionExpiryForTesting() {
-        if let continuation = pendingRetractionExpiryAdvance {
-            pendingRetractionExpiryAdvance = nil
-            continuation.resume()
-        } else {
-            retractionExpiryAdvanceRequested = true
-        }
-    }
-
-    private func waitForRetractionExpiryAdvance() async {
-        if retractionExpiryAdvanceRequested {
-            retractionExpiryAdvanceRequested = false
-            return
-        }
-        await withCheckedContinuation { continuation in
-            pendingRetractionExpiryAdvance = continuation
-        }
-    }
-#endif
 
     func retractionLabel(_ key: RequestKey) -> String {
         guard let date = retractionDate(key) else { return "Retracted" }
@@ -2503,35 +2191,6 @@ final class LivePresentationStore {
     func navigateMessage(from previous: RequestKey?, to next: RequestKey?) {
         guard previous != next else { return }
         if let previous { flushPendingDraft(for: previous) }
-        if !isReadOnly, let previous {
-            do {
-                let hasAcceptedSend = conversationThreads[previous]?.drafts.values.contains { draft in
-                    if draft.operationID != nil { return true }
-                    switch draft.disposition {
-                    case .submitting, .outcomeUnknown, .acceptedPendingReplay: return true
-                    case .saved, .rejected: return false
-                    }
-                } == true
-                let pending = hasAcceptedSend ? [] : try port.abandonConversationUploads(for: previous, context: port.context)
-                try refreshFromDurableStore()
-                UIDiagnostics.shared.record("store.navigate \(UIDiagnostics.describe(previous))->\(UIDiagnostics.describe(next)) local=\(self.isLocalExample) pending=\(pending.count)")
-                if !pending.isEmpty {
-                    if permitsDelivery { Task { await retryUploadCleanup(for: previous) } }
-                    else {
-                        try port.markConversationCleanupUnknown(for: previous,
-                            reason: ExactText("Local example: no service is contacted"), context: port.context)
-                        try refreshFromDurableStore()
-                    }
-                }
-            } catch {
-                UIDiagnostics.shared.record("store.navigate \(UIDiagnostics.describe(previous))->\(UIDiagnostics.describe(next)) error=\(error)")
-                diagnose(.upload, .uploadCleanup,
-                         NativeDiagnosticCauseCode.failureTransition(for: error), error: error,
-                         request: previous)
-            }
-        } else {
-            UIDiagnostics.shared.record("store.navigate \(UIDiagnostics.describe(previous))->\(UIDiagnostics.describe(next)) local=\(self.isLocalExample) readOnly=\(self.isReadOnly)")
-        }
         selectRequest(next)
     }
 
@@ -2570,22 +2229,6 @@ final class LivePresentationStore {
         catch { diagnose(.localStore, .projectionRefresh, .failed, error: error) }
     }
 
-    @discardableResult
-    func fetchNextInboxPage() async -> Bool {
-        guard permitsDelivery, !isReadOnly else { return false }
-        let fetched = await NativeRelayLifecycle.shared.fetchNextInboxPage()
-        if fetched {
-            do { try refreshFromDurableStore() }
-            catch { diagnose(.localStore, .projectionRefresh, .failed, error: error) }
-        }
-        return fetched
-    }
-
-    func inboxPageAvailability() -> InboxPageAvailability {
-        guard let checkpoint = try? attentionStore.snapshot(context: profileContext).inboxCheckpoint,
-              checkpoint.checkpointAccepted, checkpoint.hasInitialPage else { return .unknown }
-        return checkpoint.nextCursor == nil ? .exhausted : .more
-    }
 
     func uploadNeedsReselection(_ file: ConversationFile, for key: RequestKey, revision: UInt64) -> Bool {
         false
@@ -2605,25 +2248,6 @@ final class LivePresentationStore {
         }
     }
 
-    func retryUploadCleanup(for key: RequestKey) async {
-        guard permitsDelivery, retryingCleanupRequests.insert(key).inserted else { return }
-        defer { retryingCleanupRequests.remove(key) }
-        do {
-            try await NativeRelayLifecycle.shared.discardAbandonedUploads(for: key, expected: profileContext)
-        } catch {
-            diagnose(.upload, .uploadCleanup,
-                     NativeDiagnosticCauseCode.failureTransition(for: error), error: error, request: key)
-            do {
-                try port.markConversationCleanupUnknown(for: key,
-                    reason: ExactText("Cleanup not confirmed: \(error)"), context: port.context)
-            } catch {
-                diagnose(.localStore, .draftSave, .failed, error: error, request: key)
-            }
-        }
-        do { try refreshFromDurableStore() }
-        catch { diagnose(.localStore, .projectionRefresh, .failed, error: error, request: key) }
-    }
-
     func sendDiscussion(for key: RequestKey, revision: UInt64,
                         onQueued: (() -> Void)? = nil,
                         onResult: ((Bool) -> Void)? = nil) {
@@ -2635,15 +2259,8 @@ final class LivePresentationStore {
             }
             guard thread.isComposerOpen,
                   thread.drafts[revision]?.isPermanentlyRefused != true else { throw ConversationError.closed }
-            // Under the v2 chat rules, 'not listening' is information only.
-            guard isLocalExample || thread.chatNeverCloses == true ||
-                    discussionAvailability(in: thread)?.state == .listening else {
-                conversationError = "The agent is not listening on this conversation. Your text and files are saved."
-                try refreshFromDurableStore()
-                return
-            }
             let binding = ConversationBinding(request: key, revision: revision)
-            if thread.chatNeverCloses == true {
+            if permitsDelivery || thread.chatNeverCloses == true {
                 // Client API v2 (APP-07): each message is its own operation.
                 // It is saved with its id, the composer empties and stays
                 // enabled, and the message is handed to the outbox; nothing
@@ -2653,63 +2270,6 @@ final class LivePresentationStore {
                 try refreshFromDurableStore()
                 onQueued?()
                 chatMessageQueued?(message)
-                return
-            }
-            if permitsDelivery {
-                guard !sendingDiscussionBindings.contains(binding), let files = conversationFiles else { return }
-                let context = profileContext
-                let operation = try attentionStore.prepareDiscussion(binding, context: context)
-                if conversationEditErrorBinding == binding { conversationError = nil }
-                discussionSubmissionNotices[binding] = DiscussionSubmissionNotice(
-                    context: context, operation: operation)
-                try refreshFromDurableStore()
-                onQueued?()
-                sendingDiscussionBindings.insert(binding)
-                Task { [weak self] in
-                    guard let self else { return }
-                    defer { sendingDiscussionBindings.remove(binding) }
-                    do {
-                        let result = try await discussionSubmitter(binding, context) { file in
-                            try files.fileURL(for: file)
-                        }
-                        do { try refreshFromDurableStore() }
-                        catch {
-                            diagnose(.localStore, .projectionRefresh, .failed, error: error,
-                                     request: key, revision: revision)
-                        }
-                        switch result {
-                        case .accepted:
-                            updateDiscussionNotice(nil, binding: binding, operation: operation, context: context)
-                            onResult?(true)
-                        case let .rejected(reason):
-                            updateDiscussionNotice(ConversationDraftPresentationText.rejectionMessage(reason),
-                                transient: false, binding: binding, operation: operation, context: context)
-                            onResult?(false)
-                        case .unresolved:
-                            updateDiscussionNotice("Sending… Your text and files are saved.",
-                                binding: binding, operation: operation, context: context)
-                            onResult?(false)
-                        }
-                    } catch {
-                        diagnose(.conversation, .discussionSubmission,
-                                 NativeDiagnosticCauseCode.unresolvedTransition(for: error), error: error,
-                                 operationID: discussionOperationID(for: key, revision: revision),
-                                 request: key, revision: revision, receiptState: .unknown)
-                        do { try refreshFromDurableStore() }
-                        catch { diagnose(.localStore, .projectionRefresh, .failed, error: error,
-                                         request: key, revision: revision) }
-                        if case InstallationTransportError.conversationsUnavailable = error {
-                            // The conversation surface shows the capability message.
-                            updateDiscussionNotice(nil, binding: binding, operation: operation, context: context)
-                        } else if (error as? ConversationError) == .emptyDraft {
-                            updateDiscussionNotice("Add a message before sending these files. Your draft is retained.",
-                                transient: false, binding: binding, operation: operation, context: context)
-                        } else {
-                            updateDiscussionNotice("Can't reach the server. Your text and files are saved and will resume when connected.",
-                                binding: binding, operation: operation, context: context)
-                        }
-                    }
-                }
                 return
             }
             try port.appendFixtureDiscussion(binding, context: port.context)
@@ -4056,7 +3616,6 @@ final class LivePresentationStore {
                                                  afterRevision: presentation.revision)
                 for try await snapshot in updates {
                     _ = try await adoptForLiveUpdates(snapshot)
-                    observationRecoveredWithoutUpdate = false
                 }
             } catch is CancellationError {
                 return
@@ -4066,37 +3625,8 @@ final class LivePresentationStore {
                 observationError = "The local request view could not be refreshed."
                 diagnose(.localStore, .projectionRefresh,
                          NativeDiagnosticCauseCode.failureTransition(for: error), error: error)
-                guard !Task.isCancelled, recoverSavedServerState(after: error) else { return }
-                startObserving()
             }
         }
-    }
-
-    /// Set after a recovery and cleared by the next adopted update, so a
-    /// failure that a fresh rebuild does not fix is reported, not repeated.
-    @ObservationIgnored private var observationRecoveredWithoutUpdate = false
-
-    /// Saved Server state that cannot be presented is only a cache. Discard
-    /// it, keeping the person's queue, and ask the relay to rebuild it.
-    private func recoverSavedServerState(after error: Error) -> Bool {
-        guard NativeRelayCoreError.isInvalidSavedServerState(error), !observationRecoveredWithoutUpdate,
-              permitsDelivery, !isReadOnly, profileContext.transportMode == .relay else { return false }
-        do {
-            try attentionStore.discardServerState(context: profileContext)
-        } catch {
-            diagnose(.localStore, .projectionRefresh, .failed, error: error)
-            return false
-        }
-        observationRecoveredWithoutUpdate = true
-        observationError = nil
-        diagnose(.localStore, .projectionRefresh, .completed, causeCode: "saved_server_state_rebuilt")
-        let context = profileContext
-        Task {
-            // The relay discards its cache file as part of the rebuild.
-            guard NativeRelayLifecycle.shared.isActive(for: context) else { return }
-            _ = await NativeRelayLifecycle.shared.refreshResultFromTrustedRelay()
-        }
-        return true
     }
 
     func stopObserving() {

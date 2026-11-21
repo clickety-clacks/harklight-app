@@ -11,8 +11,8 @@ final class NativeFocusPushCoordinatorTests: XCTestCase {
         let coordinator = NativePushedViewCoordinator()
         var applied: [ViewShowFrame] = []
         coordinator.setApplyHandler { applied.append($0) }
-        coordinator.receive(try viewShow(messageID: "first", target: "message"))
-        coordinator.receive(try viewShow(messageID: "latest", target: "chat"))
+        coordinator.receiveV2(viewShow(messageID: "first", target: "message"), elapsedSinceReceipt: 0)
+        coordinator.receiveV2(viewShow(messageID: "latest", target: "chat"), elapsedSinceReceipt: 0)
         coordinator.scenePhaseChanged(.active)
         await Task.yield()
 
@@ -33,19 +33,6 @@ final class NativeFocusPushCoordinatorTests: XCTestCase {
         XCTAssertEqual(coordinator.contentTouchRevision, 1)
     }
 
-    func testLegacyShowScheduledWhileActiveStillAppliesAfterSceneBecomesInactive() async throws {
-        let coordinator = NativePushedViewCoordinator()
-        let applied = expectation(description: "Legacy frame applies without scene reactivation")
-        coordinator.setApplyHandler { frame in
-            XCTAssertEqual(frame.messageID, "legacy")
-            applied.fulfill()
-        }
-        coordinator.scenePhaseChanged(.active)
-        coordinator.receive(try viewShow(messageID: "legacy", target: "message"))
-        coordinator.scenePhaseChanged(.inactive)
-
-        await fulfillment(of: [applied], timeout: 1)
-    }
 
     func testPassiveChatKeepsThreeRepliesUnreadUntilContentIsTouched() throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
@@ -79,7 +66,7 @@ final class NativeFocusPushCoordinatorTests: XCTestCase {
 
         let coordinator = NativePushedViewCoordinator()
         coordinator.setApplyHandler { _ in }
-        coordinator.receive(try viewShow(messageID: "request", target: "chat"))
+        coordinator.receiveV2(viewShow(messageID: "request", target: "chat"), elapsedSinceReceipt: 0)
         coordinator.scenePhaseChanged(.active)
         XCTAssertTrue(coordinator.isPassive(key))
 
@@ -120,14 +107,14 @@ final class NativeFocusPushCoordinatorTests: XCTestCase {
         let coordinator = NativePushedViewCoordinator(uptime: { uptime })
         var applied: [ViewShowFrame] = []
         coordinator.setApplyHandler { applied.append($0) }
-        coordinator.receive(try viewShow(messageID: "older", target: "message", heldMilliseconds: 1_000))
+        coordinator.receiveV2(viewShow(messageID: "older", target: "message", heldMilliseconds: 1_000), elapsedSinceReceipt: 0)
         coordinator.recordOwnOpen()
         coordinator.scenePhaseChanged(.active)
         await Task.yield()
 
         XCTAssertTrue(applied.isEmpty)
         uptime += 0.1
-        coordinator.receive(try viewShow(messageID: "newer", target: "message"))
+        coordinator.receiveV2(viewShow(messageID: "newer", target: "message"), elapsedSinceReceipt: 0)
         await Task.yield()
         XCTAssertEqual(applied.map(\.messageID), ["newer"])
     }
@@ -139,7 +126,7 @@ final class NativeFocusPushCoordinatorTests: XCTestCase {
         coordinator.setApplyHandler { applied.append($0) }
         coordinator.scenePhaseChanged(.active)
         coordinator.replyEditorFocusChanged(true)
-        coordinator.receive(try viewShow(messageID: "deferred", target: "chat"))
+        coordinator.receiveV2(viewShow(messageID: "deferred", target: "chat"), elapsedSinceReceipt: 0)
 
         uptime += 2
         coordinator.scenePhaseChanged(.inactive)
@@ -159,7 +146,7 @@ final class NativeFocusPushCoordinatorTests: XCTestCase {
         leavingField.setApplyHandler { _ in appliedAfterBlur.fulfill() }
         leavingField.scenePhaseChanged(.active)
         leavingField.conversationComposerFocusChanged(true)
-        leavingField.receive(try viewShow(messageID: "after-blur", target: "message"))
+        leavingField.receiveV2(viewShow(messageID: "after-blur", target: "message"), elapsedSinceReceipt: 0)
         leavingField.conversationComposerFocusChanged(false)
         await fulfillment(of: [appliedAfterBlur], timeout: 1)
 
@@ -168,12 +155,9 @@ final class NativeFocusPushCoordinatorTests: XCTestCase {
     }
 
     private func viewShow(messageID: String, target: String,
-                          heldMilliseconds: Int? = nil) throws -> Data {
-        var frame: [String: Any] = [
-            "v": 1, "type": "view_show", "sender_id": "agent",
-            "message_id": messageID, "target": target
-        ]
-        if let heldMilliseconds { frame["held_ms"] = heldMilliseconds }
-        return try JSONSerialization.data(withJSONObject: frame)
+                          heldMilliseconds: UInt64 = 0) -> ViewShowFrame {
+        .clientAPI(ClientAPIShow(showID: messageID, deviceID: "device", itemID: messageID,
+                                target: target == "chat" ? .chat : .message,
+                                heldMilliseconds: heldMilliseconds), senderID: "agent")
     }
 }

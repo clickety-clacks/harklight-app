@@ -24,49 +24,6 @@ final class ServerCacheReplacementTests: XCTestCase {
         XCTAssertEqual(try repository.snapshot(context: context).requests.count, 42)
     }
 
-    func testHeldConversationFactSurvivesCacheRestartAndInboxReplacement() async throws {
-        let context = context()
-        let key = key("older-chat", context: context)
-        let binding = ConversationBinding(request: key, revision: 1)
-        let repository = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
-        let turn = ConversationTurn(id: ExactText("held-reply"), binding: binding, author: .origin,
-            sessionHandle: ExactText("session"), text: ExactText("Before the older page"), kind: .reply)
-        try repository.applyConversation(ConversationEvent(sequence: 1, binding: binding,
-            fact: .turn(turn)), context: context)
-        XCTAssertNil(try repository.conversationSnapshot(context: context).threads[key])
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let path = directory.appendingPathComponent("cache.json")
-        let cache = FileServerStateCache(identity: context.identity, fileURL: path)
-        try await cache.save(ServerStateCacheSnapshot.make(identity: context.identity,
-            from: repository.serverCacheSnapshot(context: context),
-            conversations: repository.conversationSnapshot(context: context)))
-        let stored = try await FileServerStateCache(identity: context.identity, fileURL: path).load()
-        XCTAssertEqual(stored?.conversationEvents?.count, 1,
-                       "The held fact must survive until its older request is loaded.")
-        let restored = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
-        try restored.restoreCachedServerState(XCTUnwrap(stored).attentionDomainState(for: context.identity), context: context)
-        _ = try restored.beginInboxCandidate(startupID: "after-reset", since: 0, batches: [], context: context)
-        try restored.saveInboxInitialPage(snapshotID: "after-reset", highWater: 1,
-            items: [], nextCursor: "older", receiptCursor: nil, context: context)
-        XCTAssertEqual(try restored.conversationSnapshot(context: context).cursor, 1,
-                       "An ordinary inbox replacement cannot reset the separate conversation stream.")
-        _ = try restored.prepareInboxCheckpointAcknowledgement(context: context)
-        _ = try restored.acceptInboxCheckpoint(snapshotID: "after-reset", highWater: 1, context: context)
-        let acceptance = RelayEvent(sequence: 1,
-            body: .delivery(request(key, title: "Older chat"), .message),
-            conversation: RelayConversationMetadata(revision: 1, sessionHandle: ExactText("session")))
-        try restored.saveInboxOlderPage(snapshotID: "after-reset", highWater: 1, cursor: "older",
-            items: [InboxSnapshotItem(acceptance: acceptance, terminal: nil)], nextCursor: nil, context: context)
-        let conversation = try restored.conversationSnapshot(context: context)
-        XCTAssertEqual(conversation.cursor, 1)
-        XCTAssertEqual(conversation.threads[key]?.turns.map(\.id), [turn.id])
-        XCTAssertEqual(conversation.threads[key]?.turns.first?.text, turn.text)
-        let hydrated = ServerStateCacheSnapshot.make(identity: context.identity,
-            from: try restored.serverCacheSnapshot(context: context), conversations: conversation)
-        XCTAssertTrue(hydrated.conversationEvents?.isEmpty == true,
-                      "The hydrated thread replaces the held journal copy.")
-    }
 
     func testSnapshotReplacesChangedPayloadAndAcceptanceOrderWithoutStoppingOtherRows() throws {
         let context = context()
@@ -93,48 +50,6 @@ final class ServerCacheReplacementTests: XCTestCase {
         XCTAssertTrue(state.inboxCandidate?.hasInitialPage == true)
     }
 
-    func testRevisedRenderedCacheCannotRejectOriginalInboxDeliveryAfterRestart() async throws {
-        let context = context()
-        let key = key("revised", context: context)
-        let original = request(key, title: "Original")
-        let revised = request(key, title: "Revised")
-        let repository = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
-        _ = try repository.apply(RelayEvent(sequence: 1,
-            body: .delivery(original, .message)), context: context)
-        for (sequence, payload) in [(UInt64(1), original.originalPayload), (UInt64(2), revised.originalPayload)] {
-            try repository.applyConversation(ConversationEvent(sequence: sequence,
-                binding: ConversationBinding(request: key, revision: sequence),
-                fact: .request(sessionHandle: ExactText("session"), payload: payload)), context: context)
-        }
-        let rendered = try repository.snapshot(context: context)
-        XCTAssertEqual(rendered.requests[key]?.originalPayload, revised.originalPayload)
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let url = directory.appendingPathComponent("server-cache.json")
-        let cache = FileServerStateCache(identity: context.identity, fileURL: url)
-        try await cache.save(ServerStateCacheSnapshot.make(identity: context.identity,
-            from: rendered, conversations: repository.conversationSnapshot(context: context)))
-        let reopenedCache = FileServerStateCache(identity: context.identity, fileURL: url)
-        let loaded = try await reopenedCache.load()
-        let cached = try XCTUnwrap(loaded)
-        XCTAssertEqual(cached.requests.first?.request.originalPayload, revised.originalPayload,
-                       "The rendered cache can differ from the original supplied by inbox_start.")
-        let restarted = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
-        try restarted.restoreCachedServerState(cached.attentionDomainState(for: context.identity), context: context)
-        _ = try restarted.beginInboxCandidate(startupID: "after-revised-cache", since: 1,
-            batches: [], context: context)
-        try restarted.saveInboxInitialPage(snapshotID: "original-delivery", highWater: 1,
-            items: [InboxSnapshotItem(acceptance: RelayEvent(sequence: 1,
-                body: .delivery(original, .message)))], nextCursor: nil, receiptCursor: nil, context: context)
-        XCTAssertEqual(try restarted.snapshot(context: context).requests[key]?.originalPayload, revised.originalPayload,
-                       "The inbox replacement keeps the separate conversation stream, so the current revision stays shown.")
-        for (sequence, payload) in [(UInt64(1), original.originalPayload), (UInt64(2), revised.originalPayload)] {
-            try restarted.applyConversation(ConversationEvent(sequence: sequence,
-                binding: ConversationBinding(request: key, revision: sequence),
-                fact: .request(sessionHandle: ExactText("session"), payload: payload)), context: context)
-        }
-        XCTAssertEqual(try restarted.snapshot(context: context).requests[key]?.originalPayload, revised.originalPayload)
-    }
 
     func testRefreshKeepsCacheUntilServerRespondsThenReplacesItEvenWhenEmpty() throws {
         let context = context()
@@ -173,28 +88,6 @@ final class ServerCacheReplacementTests: XCTestCase {
         XCTAssertEqual(state.cursor, 0)
     }
 
-    func testCacheFromAnotherServerPersonOrDeviceIsDiscarded() async throws {
-        let original = context().identity
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let file = directory.appendingPathComponent("cache.json")
-        let snapshot = ServerStateCacheSnapshot(identity: original, cursor: 10, conversationCursor: 4,
-            requests: [], conversations: [], inboxView: nil, currentRequestKeys: [])
-        let identities = [
-            ProfileIdentity(trustedRelayAuthority: ExactText("other.example"), personID: original.personID, deviceID: original.deviceID),
-            ProfileIdentity(trustedRelayAuthority: original.trustedRelayAuthority, personID: ExactText("another-person"), deviceID: original.deviceID),
-            ProfileIdentity(trustedRelayAuthority: original.trustedRelayAuthority, personID: original.personID, deviceID: ExactText("another-device"))
-        ]
-        for identity in identities {
-            let writer = FileServerStateCache(identity: original, fileURL: file)
-            try await writer.save(snapshot)
-            let reader = FileServerStateCache(identity: identity, fileURL: file)
-            let loaded = try await reader.load()
-            XCTAssertNil(loaded)
-            XCTAssertFalse(FileManager.default.fileExists(atPath: file.path))
-            XCTAssertThrowsError(try snapshot.attentionDomainState(for: identity))
-        }
-    }
 
     func testUpgradeMovesOnlyUnsentUserInputOnceAndDiscardsServerState() throws {
         let context = context()
@@ -515,49 +408,6 @@ final class ServerCacheReplacementTests: XCTestCase {
         XCTAssertTrue(thread.hasUnreadAgentReply, "No local read maximum overrides the server snapshot.")
     }
 
-    func testQueuedReadStaysOutOfTheServerCacheAndRollsBackWhenRetired() throws {
-        let context = context()
-        let key = key("chat", context: context)
-        let persistence = MemoryPendingActionPersistence()
-        let repository = try ClientRepository(context: context, persistence: persistence)
-        _ = try repository.apply(RelayEvent(sequence: 1,
-            body: .delivery(request(key, title: "Chat"), .message),
-            conversation: RelayConversationMetadata(revision: 1, sessionHandle: ExactText("session"))), context: context)
-        let binding = ConversationBinding(request: key, revision: 1)
-        let turn = ConversationTurn(id: ExactText("reply"), binding: binding, author: .origin,
-            sessionHandle: ExactText("session"), text: ExactText("Reply"), kind: .reply)
-        _ = try repository.applyConversation(ConversationEvent(sequence: 1,
-            binding: binding, fact: .turn(turn)), context: context)
-        try repository.finishConversationReplay(at: 1, chatReadPositions: [], context: context)
-        let pending = try XCTUnwrap(repository.markConversationRead(key, through: turn.id, context: context))
-
-        func cacheRoundTrip(_ source: ClientRepository) throws -> (ServerStateCacheSnapshot, ClientRepository) {
-            let cached = ServerStateCacheSnapshot.make(identity: context.identity,
-                from: try source.snapshot(context: context),
-                conversations: try source.conversationSnapshot(context: context))
-            let restored = try ClientRepository(context: context, persistence: persistence)
-            try restored.restoreCachedServerState(try cached.attentionDomainState(for: context.identity),
-                                                  context: context)
-            return (cached, restored)
-        }
-
-        let (cached, restored) = try cacheRoundTrip(repository)
-        XCTAssertEqual(cached.conversations.first?.thread.accountReadThroughConversationSequence, 0,
-                       "The server cache keeps only the confirmed read position.")
-        XCTAssertEqual(cached.chatReadPositions?[key] ?? 0, 0)
-        var thread = try XCTUnwrap(restored.conversationSnapshot(context: context).threads[key])
-        XCTAssertFalse(thread.hasUnreadAgentReply, "After restart the queued read still shows from the queue.")
-
-        try restored.retireConversationReadPosition(pending, context: context)
-        thread = try XCTUnwrap(restored.conversationSnapshot(context: context).threads[key])
-        XCTAssertTrue(thread.hasUnreadAgentReply, "A refused read restores the unread badge.")
-        XCTAssertEqual(thread.accountReadThroughConversationSequence, 0)
-
-        let (_, relaunched) = try cacheRoundTrip(restored)
-        thread = try XCTUnwrap(relaunched.conversationSnapshot(context: context).threads[key])
-        XCTAssertTrue(thread.hasUnreadAgentReply, "A restart after the refusal keeps the reply unread.")
-        XCTAssertTrue(try relaunched.conversationSnapshot(context: context).pendingChatReadPositions.isEmpty)
-    }
 
     private func context() -> ProfileContext {
         ProfileContext(identity: ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
@@ -613,38 +463,6 @@ final class SavedStateRecoveryPresentationTests: XCTestCase {
             cursor: 1, conversationCursor: 0, conversations: [:], inboxView: nil, currentRequestKeys: [key])
     }
 
-    func testActivationRebuildsAnUnpresentableRestoredCacheAndKeepsTheQueue() async throws {
-        let context = ProfileContext(identity: ProfileIdentity(
-            trustedRelayAuthority: ExactText("relay.example"),
-            personID: ExactText("activation-" + UUID().uuidString),
-            deviceID: ExactText("reader")), transportMode: .relay)
-        let domain = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
-        let key = RequestKey(accountScope: context.identity.personID,
-            senderID: ExactText("sender"), messageID: ExactText("message"))
-        let payload = try JSONValue.parse(Data(#"{"title":"Question","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"yes","label":"Yes","kind":"value","value":{"ok":true}}]}}"#.utf8))
-        _ = try domain.apply(RelayEvent(sequence: 1,
-            body: .delivery(StoredRequest(key: key, originalPayload: payload), .message)), context: context)
-        let port = AttentionDomainPort(store: domain)
-        let selector = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first?.selector)
-        let unsent = try port.submit(SubmitIntent(context: port.context, selector: selector,
-            intentID: UUID(), inputs: [.compatibilityValue(action: ExactText("yes"))]))
-        try domain.restoreCachedServerState(unorderedCache(key, payload: payload, identity: context.identity),
-                                            context: context)
-        let cacheURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".json")
-        defer { try? FileManager.default.removeItem(at: cacheURL) }
-        let cache = FileServerStateCache(identity: context.identity, fileURL: cacheURL)
-        try await cache.save(ServerStateCacheSnapshot(identity: context.identity, cursor: 1, conversationCursor: 0,
-            requests: [], conversations: [], inboxView: nil, currentRequestKeys: nil))
-
-        let activation = try await LivePresentationStore.makeForActivationRecoveringSavedState(
-            store: domain, context: context, serverStateCache: cache)
-
-        XCTAssertNil(activation.presentation.request(for: key), "The bad cache is gone; the relay rebuilds it.")
-        let savedCache = try await cache.load()
-        XCTAssertNil(savedCache, "The cache file is discarded too, so a relaunch cannot restore it.")
-        XCTAssertEqual(try domain.snapshot(context: context).intents[unsent.intentID]?.operationID, unsent.opID,
-                       "The unsent answer is kept under its original operation ID.")
-    }
 
     func testLiveObserverRecoversFromUnpresentableStateAndKeepsUpdating() async throws {
         let context = ProfileContext(identity: ProfileIdentity(

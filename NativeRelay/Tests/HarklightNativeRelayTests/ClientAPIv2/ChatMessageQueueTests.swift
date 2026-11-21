@@ -50,6 +50,29 @@ final class ChatMessageQueueTests: XCTestCase {
         XCTAssertEqual(thread.queuedMessages?.compactMap(\.operationID), ids, "Saved before anything is sent.")
     }
 
+    func testUpgradeKeepsAnUnconfirmedLegacyDiscussionEditableWithoutQueuingItAgain() throws {
+        let persistence = MemoryPendingActionPersistence()
+        let (previous, context, binding) = try repository(v2: true, persistence: persistence)
+        try type("previously typed", previous, binding, context)
+        let legacyOperation = try previous.prepareDiscussion(binding, context: context)
+        try previous.markDiscussionOutcome(binding, operation: legacyOperation, rejection: nil, context: context)
+
+        let cold = try ClientRepository(context: context, persistence: persistence)
+        try cold.recoverLegacyDiscussionDrafts(context: context)
+        try cold.recoverLegacyDiscussionDrafts(context: context)
+        XCTAssertEqual(try cold.unsentText(context: context), [ExactText("previously typed")])
+        XCTAssertTrue(try cold.queuedChatMessages(context: context).isEmpty)
+
+        let (reopened, _, _) = try repository(v2: true, persistence: persistence, context: context)
+        let draft = try XCTUnwrap(reopened.conversationSnapshot(context: context).threads[binding.request]?.drafts[1])
+        XCTAssertNil(draft.operationID)
+        XCTAssertEqual(draft.disposition, .rejected(ExactText("previous_transport_unconfirmed")))
+        try type("explicit edit", reopened, binding, context)
+        let submitted = try reopened.queueChatMessage(binding, context: context)
+        XCTAssertNotEqual(submitted.operationID, legacyOperation)
+        XCTAssertEqual(submitted.text, ExactText("explicit edit"))
+    }
+
     func testAReplySavedBeforeOutboxHandoffSurvivesWarmRelaunch() async throws {
         try await assertReplyRecovery(cold: false)
     }
@@ -215,8 +238,14 @@ final class ChatMessageQueueTests: XCTestCase {
         await second.value
         XCTAssertTrue(try repository.queuedChatMessages(context: context).isEmpty)
         let accepted = try repository.conversationSnapshot(context: context).threads[binding.request]
-        XCTAssertTrue(accepted?.turns.contains { $0.id == ExactText("accepted") } == true)
-        XCTAssertEqual(server.received.filter { $0.idempotencyKey == operation }.count, 2)
+        XCTAssertEqual(accepted?.turns.filter { $0.id == ExactText("accepted") }.count, 1)
+        // Foreground recovery may race with settlement and replay the same
+        // operation. Every attempt must carry the saved key and body.
+        let attempts = server.received.filter { $0.path.hasSuffix("/replies") }
+        XCTAssertGreaterThanOrEqual(attempts.count, 2)
+        XCTAssertTrue(attempts.allSatisfy { $0.idempotencyKey == operation })
+        let original = try XCTUnwrap(attempts.first?.body)
+        XCTAssertTrue(attempts.allSatisfy { $0.body == original })
     }
 
     func testOneMessagesOutcomeLeavesTheOthersAlone() throws {
@@ -354,12 +383,16 @@ final class ChatMessageQueueTests: XCTestCase {
         let (repository, context, binding) = try repository(v2: true)
         try type("private words", repository, binding, context)
         try repository.queueChatMessage(binding, context: context)
-        let snapshot = ServerStateCacheSnapshot.make(identity: identity,
-                                                     from: try repository.snapshot(context: context),
-                                                     conversations: try repository.conversationSnapshot(context: context))
-        XCTAssertTrue(snapshot.conversations.allSatisfy { $0.thread.queuedMessages == nil })
-        let encoded = String(decoding: try JSONEncoder().encode(snapshot), as: UTF8.self)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let connection = try ClientAPIv2Connection(transport: FakeClientAPIServer(), repository: repository,
+            context: context, directory: directory, errors: NoopErrorLog())
+        try connection.model.apply(kind: "item", rev: 1,
+            data: V2Fixture.json(V2Fixture.item("i", rev: 1, rankKey: "a")))
+        let model = directory.appendingPathComponent("server-model-v2.json")
+        let encoded = String(decoding: try Data(contentsOf: model), as: UTF8.self)
         XCTAssertFalse(encoded.contains("private words"))
+        XCTAssertEqual(try repository.queuedChatMessages(context: context).map(\.text.rawValue), ["private words"])
     }
 
     func testTheOutboxResendsARefusedWriteHandedOverAgainUnderItsKey() async throws {

@@ -12,7 +12,7 @@ struct RemoteFeatureFlag: Sendable {
     // Default-on exception: Progress was requested, reviewed and merged before
     // servers supported flags. Older servers must continue to show it.
     static let progressInbox = Self(name: "progress_inbox", defaultValue: true)
-    static let serverMatchedPushRouting = Self(name: "server_matched_push_routing", defaultValue: false)
+    static let serverMatchedPushRouting = Self(name: "server_matched_push_routing", defaultValue: true)
     static let priorityLevelEditing = Self(name: "priority_level_editing", defaultValue: false)
 }
 

@@ -256,48 +256,6 @@ final class InboxPageUpdateTests: XCTestCase {
     }
 
 
-    func testServerCacheRestoresLoadedBodiesAndTerminalWithoutRestoringCheckpointAuthority() async throws {
-        let f = try PageFixture()
-        defer { f.remove() }
-        let terminal = RelayEvent(sequence: PageFixture.highWater + 1,
-            body: .terminal(f.key(2), .answered, nil), accountAnswerOutcome: .reply(ExactText("Server reply")))
-        guard case .deferred = f.store.applyRelayEvent(terminal, context: f.context) else {
-            return XCTFail("The unloaded request's terminal must wait for its server body.")
-        }
-        try f.save([f.item(3), f.item(2)], next: nil)
-        let snapshot = try ServerStateCacheSnapshot.make(identity: f.context.identity,
-            from: f.store.snapshot(context: f.context), conversations: f.store.conversationSnapshot(context: f.context))
-        let file = f.directory.appendingPathComponent("server-cache.json")
-        let cache = FileServerStateCache(identity: f.context.identity, fileURL: file)
-        try await cache.save(snapshot)
-        let reader = FileServerStateCache(identity: f.context.identity, fileURL: file)
-        let loadedValue = try await reader.load()
-        let loaded = try XCTUnwrap(loadedValue)
-        let restarted = try ClientRepository(context: f.context, persistence: f.persistence)
-        XCTAssertTrue(try restarted.snapshot(context: f.context).requests.isEmpty)
-        try restarted.restoreCachedServerState(loaded.attentionDomainState(for: f.context.identity), context: f.context)
-        let restored = try restarted.snapshot(context: f.context)
-        XCTAssertEqual(Set(restored.requests.keys), Set([f.key(1), f.key(2), f.key(3)]))
-        XCTAssertEqual(restored.remoteStates[f.key(2)]?.accountAnswerOutcome, .reply(ExactText("Server reply")))
-        XCTAssertEqual(restored.inboxCurrentKeys, Set([f.key(1), f.key(2), f.key(3)]))
-        XCTAssertNil(restored.inboxCheckpoint, "Restored content does not confirm a new connection.")
-        XCTAssertEqual(restored.cursor, terminal.sequence)
-    }
 
-    func testDiscardedServerCacheCannotBeRebuiltFromThePendingActionFile() async throws {
-        let f = try PageFixture()
-        defer { f.remove() }
-        let cache = FileServerStateCache(identity: f.context.identity,
-            fileURL: f.directory.appendingPathComponent("server-cache.json"))
-        let snapshot = try ServerStateCacheSnapshot.make(identity: f.context.identity,
-            from: f.store.snapshot(context: f.context), conversations: f.store.conversationSnapshot(context: f.context))
-        try await cache.save(snapshot)
-        try await cache.discard()
-        let cached = try await cache.load()
-        XCTAssertNil(cached)
-        let restarted = try ClientRepository(context: f.context, persistence: f.persistence)
-        XCTAssertTrue(try restarted.snapshot(context: f.context).requests.isEmpty)
-        XCTAssertNil(try restarted.snapshot(context: f.context).inboxCheckpoint)
-    }
 
 }

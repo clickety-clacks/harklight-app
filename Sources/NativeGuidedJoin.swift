@@ -132,10 +132,8 @@ final class NativeGuidedJoinStore {
     private let transport: any NativeJoinTransport
     private let enrollment: NativeEnrollmentStore
     private var confirmedRemovalIDs: Set<String> = []
-    var removePushBeforeDeparture: ((NativeEnrollmentRecord) async -> Void)?
     var prepareV2Removal: ((NativeEnrollmentRecord) async throws -> Void)?
     var didConfirmV2Removal: ((NativeEnrollmentRecord) async -> Void)?
-    var finishLegacyPushDeparture: ((NativeEnrollmentRecord) throws -> Void)?
 
     init(namespace: String = "co.clicketyclacks.Harklight.native-enrollment",
          transport: any NativeJoinTransport = PinnedNativeJoinTransport()) {
@@ -605,12 +603,7 @@ final class NativeGuidedJoinStore {
             try saveDeparture(departure)
         }
         if !departure.removed {
-            if let prepareV2Removal {
-                try await prepareV2Removal(departure.record)
-            } else {
-                try enrollment.preparePushRemoval(for: departure.record)
-                await removePushBeforeDeparture?(departure.record)
-            }
+            try await prepareV2Removal?(departure.record)
             let material = try enrollment.material(from: record)
             guard let url = URL(string: "https://\(record.host):\(record.enrollmentPort)/device/remove") else {
                 throw NativeJoinError.invalidResponse
@@ -668,11 +661,8 @@ final class NativeGuidedJoinStore {
                 if try enrollment.load().map({ sameInstallation($0, record) }) ?? true {
                     try enrollment.clearV2APNsToken()
                 }
-            } else if let finishLegacyPushDeparture {
-                try finishLegacyPushDeparture(record)
-            } else {
-                try enrollment.finishPushDeparture(for: record)
             }
+            try enrollment.discardLegacyPushDeparture(for: record)
             try enrollment.retireDeviceIdentity(record)
         }
         if let attempt = try loadAttempt(), attempt.deviceID == record.deviceID {

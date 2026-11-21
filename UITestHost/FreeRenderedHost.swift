@@ -125,12 +125,47 @@ private final class FreeRenderedFixture {
     }
 
     private func setView(_ data: Data) throws {
-        let wire = try InboxPagingWire(profile: ProfileContext(identity: context.identity, transportMode: .relay))
-        guard case let .updated(view) = wire.decodeViewGet(data, ref: "free-pair-view") else {
-            throw InboxPagingWireError.invalidFrame
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let capture = try decoder.decode(CapturedView.self, from: data)
+        func request(_ row: CapturedView.Row) -> RequestKey {
+            RequestKey(accountScope: context.identity.personID, senderID: ExactText(row.senderId),
+                       messageID: ExactText(row.messageId))
         }
+        let items = try capture.listItems.map { row in
+            guard let kind = row.kind else { throw CocoaError(.fileReadCorruptFile) }
+            return InboxViewListItem(kind: kind, key: request(row), conversationSequence: row.conversationSeq,
+                openAtConversationSequence: row.openAtConversationSeq, unseenCount: row.unseenCount,
+                freeSection: row.freeSection)
+        }
+        let replies = capture.replies?.compactMap { row -> InboxViewReply? in
+            row.conversationSeq.map { InboxViewReply(key: request(row), conversationSequence: $0) }
+        }
+        let view = InboxView(revision: ExactText(capture.viewRev), algorithm: capture.algorithm.map(ExactText.init),
+            basis: capture.basis.map(ExactText.init), entries: capture.entries.map { InboxViewEntry(key: request($0)) },
+            replies: replies, listItems: items, freeOrderVersion: capture.freeOrderVersion)
         precondition(InboxFreeOrder.isSupported(version: view.freeOrderVersion, items: view.listItems))
         try domain.setFixtureInboxView(view, context: context)
+    }
+
+    private struct CapturedView: Decodable {
+        struct Row: Decodable {
+            let senderId: String
+            let messageId: String
+            let kind: InboxViewListItemKind?
+            let conversationSeq: UInt64?
+            let openAtConversationSeq: UInt64?
+            let unseenCount: Int?
+            let freeSection: InboxFreeSection?
+        }
+
+        let viewRev: String
+        let algorithm: String?
+        let basis: String?
+        let entries: [Row]
+        let replies: [Row]?
+        let listItems: [Row]
+        let freeOrderVersion: Int
     }
 
     private func setCapturedView(_ name: String) throws {

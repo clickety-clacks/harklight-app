@@ -39,7 +39,7 @@ final class V2PushPermissionTests: XCTestCase {
         let connection = try ClientAPIv2Connection(transport: transport, repository: repository, context: context,
                                                     directory: nil, errors: NoopErrorLog(), foregroundOnlyWrites: true)
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        let lifecycle = NativeRelayLifecycle(clientAPIV2Enabled: true,
+        let lifecycle = NativeRelayLifecycle(
             v2NotificationPermission: NativeNotificationPermission(status: { .denied },
                                                                    request: { false }, register: {}),
             enrollment: enrollment, v2LegacyAddressStore: { DevelopmentAPNsAddressStore(directory: folder) })
@@ -80,7 +80,7 @@ final class V2PushPermissionTests: XCTestCase {
                                                     directory: nil, errors: NoopErrorLog(), foregroundOnlyWrites: true)
         var permission = UNAuthorizationStatus.notDetermined
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        let lifecycle = NativeRelayLifecycle(clientAPIV2Enabled: true,
+        let lifecycle = NativeRelayLifecycle(
             v2NotificationPermission: NativeNotificationPermission(status: { permission },
                                                                    request: { false }, register: {}),
             enrollment: enrollment, v2LegacyAddressStore: { DevelopmentAPNsAddressStore(directory: folder) })

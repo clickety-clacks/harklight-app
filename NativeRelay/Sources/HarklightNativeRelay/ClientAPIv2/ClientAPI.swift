@@ -254,6 +254,6 @@ extension ErrorLogReason {
         if let error = error as? APIError {
             return error.token == .other ? .app("http_\(error.status)") : .serverReason(error.token.rawValue)
         }
-        return .relay(error)
+        return .client(error)
     }
 }

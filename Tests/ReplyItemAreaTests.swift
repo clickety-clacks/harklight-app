@@ -4,19 +4,31 @@ import XCTest
 @testable import Harklight
 
 final class ReplyItemAreaTests: XCTestCase {
-    private func reopenWithServerCache(_ domain: ClientRepository, context: ProfileContext,
+    private func reopenWithServerCache(_ source: ClientRepository, context: ProfileContext,
                                        persistence: MemoryPendingActionPersistence) async throws -> ClientRepository {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let url = directory.appendingPathComponent("server-cache.json")
-        let cache = FileServerStateCache(identity: context.identity, fileURL: url)
-        try await cache.save(ServerStateCacheSnapshot.make(identity: context.identity,
-            from: domain.snapshot(context: context), conversations: domain.conversationSnapshot(context: context)))
-        let cached = try await FileServerStateCache(identity: context.identity, fileURL: url).load()
+        let inbox = try source.snapshot(context: context)
+        let conversations = try source.conversationSnapshot(context: context)
+        let serverThreads = conversations.threads.mapValues { original in
+            var thread = original
+            thread.drafts.removeAll()
+            thread.answerDrafts = nil
+            thread.uploadGroups = nil
+            thread.uploadCleanups = nil
+            thread.queuedMessages = nil
+            if conversations.chatReadPositionSupport == true {
+                thread.accountReadThroughConversationSequence =
+                    conversations.chatReadPositions?[thread.request] ?? 0
+            }
+            return thread
+        }
         let restored = try ClientRepository(context: context, persistence: persistence)
-        XCTAssertTrue(try restored.conversationSnapshot(context: context).threads.isEmpty)
-        try restored.restoreCachedServerState(try XCTUnwrap(cached).attentionDomainState(for: context.identity),
-                                              context: context)
+        try restored.restoreCachedServerState(CachedAttentionServerState(
+            identity: context.identity, requests: inbox.requests, remoteStates: inbox.remoteStates,
+            cursor: inbox.cursor, conversationCursor: conversations.cursor, conversations: serverThreads,
+            inboxView: inbox.inboxView, currentRequestKeys: inbox.inboxCandidate?.currentKeys ?? inbox.inboxCurrentKeys,
+            chatReadPositions: conversations.chatReadPositions, pendingRelayOverlays: inbox.pendingRelayOverlays,
+            inboxReferences: inbox.inboxReferences, conversationEvents: conversations.heldEvents,
+            priorityLevels: inbox.priorityLevels.confirmedLevels), context: context)
         return restored
     }
     private let baselineDate = Date(timeIntervalSince1970: 1_800_000_000)

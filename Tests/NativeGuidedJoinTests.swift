@@ -50,7 +50,7 @@ final class NativeGuidedJoinTests: XCTestCase {
         let pendingKey = UUID()
         _ = try await connection.outbox.submit(target: "item:i", operation: "mark_seen",
             write: FrozenWrite(method: .post, path: "/v2/items/i/seen"), idempotencyKey: pendingKey)
-        let lifecycle = NativeRelayLifecycle(clientAPIV2Enabled: true, v2FocusReporter: NativeFocusReporter())
+        let lifecycle = NativeRelayLifecycle(v2FocusReporter: NativeFocusReporter())
         let attempt = UUID()
         lifecycle.installV2Connection(connection, context: context, attempt: attempt)
         lifecycle.installV2FocusChannel(ClientAPIFocusChannel(transport: connection.access, errors: NoopErrorLog()) { _, _ in },
@@ -116,7 +116,7 @@ final class NativeGuidedJoinTests: XCTestCase {
         let context = try enrollment.material(from: record).context
         let repository = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
         let presentation = try LivePresentationStore(store: repository, context: context)
-        let lifecycle = NativeRelayLifecycle(clientAPIV2Enabled: true, v2FocusReporter: NativeFocusReporter())
+        let lifecycle = NativeRelayLifecycle(v2FocusReporter: NativeFocusReporter())
         let oldConnection = try ClientAPIv2Connection(transport: SignOutFocusTransport(), repository: repository,
             context: context, directory: nil, errors: NoopErrorLog())
         lifecycle.installV2Connection(oldConnection, context: context)
@@ -170,47 +170,6 @@ final class NativeGuidedJoinTests: XCTestCase {
         guard case .disconnected = launch.state else { return XCTFail("A confirmed retry must disconnect") }
     }
 
-    func testConfirmedLegacyRemovalResumesFailedPushCleanupAfterRelaunch() async throws {
-        let fixture = try Fixture()
-        defer { fixture.cleanup() }
-        let wire = FakeTransport()
-        let join = NativeGuidedJoinStore(namespace: fixture.namespace, transport: wire)
-        let request = try join.prepare(fixture.invitation, deviceLabel: "My phone")
-        fixture.retainForCleanup(request)
-        wire.handler = { _, _, _ in
-            try response(["state": "approved", "person_id": fixture.invitation.personID,
-                          "device_id": request.deviceID])
-        }
-        _ = try await join.checkApproval()
-        let record = try XCTUnwrap(join.approvedRecord())
-        var removalRequests = 0
-        wire.removalHandler = { _, _, _, _ in
-            removalRequests += 1
-            return try response(["state": "removed", "person_id": fixture.invitation.personID,
-                                 "device_id": request.deviceID, "enrollment_revision": 2])
-        }
-        join.finishLegacyPushDeparture = { _ in throw NativeEnrollmentError.identityStorage }
-        do {
-            try await join.removeCurrentAccount(record)
-            XCTFail("Expected the injected cleanup error")
-        } catch NativeEnrollmentError.identityStorage {}
-        XCTAssertEqual(try join.departure()?.cleanupPending, true)
-        XCTAssertEqual(try join.approvedRecord(), record)
-
-        let reopened = NativeGuidedJoinStore(namespace: fixture.namespace, transport: wire)
-        var cleanups = 0
-        reopened.finishLegacyPushDeparture = { retired in
-            XCTAssertEqual(retired.deviceID, request.deviceID)
-            cleanups += 1
-        }
-        let restored = NativeGuidedJoinCoordinator(store: reopened, deviceName: "My phone")
-        await restored.restore()
-        XCTAssertEqual(cleanups, 1)
-        XCTAssertEqual(removalRequests, 1)
-        XCTAssertEqual(try reopened.departure()?.removed, true)
-        XCTAssertNil(try reopened.departure()?.cleanupPending)
-        XCTAssertNil(try reopened.approvedRecord())
-    }
 
     func testLostJoinReplyRestoresAndRetriesTheSameDeviceRequest() async throws {
         let fixture = try Fixture()
@@ -987,38 +946,6 @@ final class NativeGuidedJoinTests: XCTestCase {
         XCTAssertThrowsError(try NativeJoinInvitation.decodePayload(JSONSerialization.data(withJSONObject: fields)))
     }
 
-    func testSystemTimeoutDuringFirstConnectionKeepsWaitingWithoutAnError() async throws {
-        let fixture = try Fixture()
-        defer { fixture.cleanup() }
-        let transport = FakeTransport()
-        let store = NativeGuidedJoinStore(namespace: fixture.namespace, transport: transport)
-        let prepared = try store.prepare(fixture.invitation, deviceLabel: "My phone")
-        fixture.retainForCleanup(prepared)
-        transport.handler = { _, _, _ in
-            try response(["state": "approved", "person_id": fixture.invitation.personID,
-                          "device_id": prepared.deviceID])
-        }
-        _ = try await store.checkApproval()
-        let flow = NativeGuidedJoinCoordinator(store: store, deviceName: "My phone")
-        let (started, start) = AsyncStream<Void>.makeStream()
-        let (released, release) = AsyncStream<Void>.makeStream()
-        flow.connectApproved = { _ in
-            XCTAssertTrue(NativeRelayLifecycle.shouldReconnectAfterConnectionError(
-                URLError(.timedOut), awaitingFirstConnection: true))
-            start.yield()
-            for await _ in released { break }
-            return true
-        }
-        let connecting = Task { await flow.restore() }
-        for await _ in started { break }
-        XCTAssertEqual(flow.screen, .approvedFinishing)
-        XCTAssertTrue(flow.isShowing)
-        XCTAssertTrue(flow.isApprovedConnectBusy)
-        XCTAssertNil(flow.message, "A system timeout must keep reconnecting without showing a join error")
-        release.yield()
-        await connecting.value
-        XCTAssertEqual(flow.screen, .connected)
-    }
 
     func testConnectedScreenWaitsForOwnerApprovalAndRelayProgress() async throws {
         let fixture = try Fixture()

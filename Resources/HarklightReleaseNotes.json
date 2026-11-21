@@ -186,9 +186,15 @@
     },
     {
       "id": "post-215-saved-data-connection-fix",
-      "marketingVersion": "0.1.0",
+      "marketingVersion": "0.2.0",
       "testFlightBuildNumber": null,
       "highlights": [
+        {
+          "id": "protocol-0-2-compatibility",
+          "symbol": "arrow.triangle.2.circlepath",
+          "title": "Harklight protocol 0.2",
+          "detail": "This release uses protocol 0.2 with Harklight Server 0.2.0, Harklight App 0.2.0, Harklight Web 0.2.0, and Harklight Agent 0.2.0. Update the Server and connected clients together."
+        },
         {
           "id": "ipad-list-search",
           "symbol": "magnifyingglass",
