@@ -1323,6 +1323,12 @@ final class NativeRelayLifecycle {
         }
     }
 
+    func checkAcceptedV2Reply(_ key: RequestKey, expected: ProfileContext) async {
+        guard sceneIsActive, let connection = v2Connection, context == expected,
+              key.accountScope == expected.identity.personID else { return }
+        await connection.checkAcceptedReply(itemID: key.messageID)
+    }
+
     func v2LocatorForPush(_ payload: JSONValue) async -> NativeNotificationLocator? {
         guard clientAPIV2Enabled, let connection = v2Connection, let context,
               let record = try? enrollment.load(),

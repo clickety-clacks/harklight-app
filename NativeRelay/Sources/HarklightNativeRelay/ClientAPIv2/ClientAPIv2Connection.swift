@@ -39,6 +39,9 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
     private let meURL: URL?
     private let onPublished: @Sendable () -> Void
     private let meWaitBeforeRetry: @Sendable (Int) async throws -> Void
+    private let replyWaitBeforeRetry: @Sendable (Int) async throws -> Void
+    private var replySignal: AsyncStream<Void>.Continuation?
+    private var checkingReplyItems: Set<ExactText> = []
     private let lock = NSLock()
 
     /// `directory` holds the model, outbox and last `/v2/me` for this
@@ -48,6 +51,7 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
                 waitBeforeRetry: @escaping @Sendable (Int) async throws -> Void = ChangeFeedSync.backoff,
                 outboxWaitBeforeRetry: @escaping @Sendable (Int, TimeInterval?) async throws -> Void = ActionOutbox.backoff,
                 meWaitBeforeRetry: @escaping @Sendable (Int) async throws -> Void = ChangeFeedSync.backoff,
+                replyWaitBeforeRetry: @escaping @Sendable (Int) async throws -> Void = ChangeFeedSync.backoff,
                 onLiveState: @escaping @Sendable (ChangeFeedSync.LiveState) -> Void = { _ in },
                 onRejected: @escaping @Sendable (OutboxEntry, APIError) async -> Void = { _, _ in },
                 onPublished: @escaping @Sendable () -> Void = {}) throws {
@@ -67,6 +71,7 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
         self.errors = errors
         self.onPublished = onPublished
         self.meWaitBeforeRetry = meWaitBeforeRetry
+        self.replyWaitBeforeRetry = replyWaitBeforeRetry
         let persistence: any OutboxPersisting = directory.map {
             FileOutboxPersistence(url: $0.appendingPathComponent("outbox-v2.json"))
         } ?? MemoryOutbox()
@@ -79,7 +84,8 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
             await onRejected(entry, error)
         }, onAcceptedResult: { entry, result in
             if let responseEntry = result.entry {
-                await relay.connection?.reconcileAcceptedReply(entry, responseEntry: responseEntry)
+                relay.connection?.recordReply(entry, disposition: .acceptedPendingReplay(
+                    operation: entry.id, turn: responseEntry.entryID))
             }
         }), publish: { relay.connection?.publishModel() })
         self.outbox = try ActionOutbox(persistence: persistence, transport: transport, outcomes: outcomes,
@@ -90,6 +96,7 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
                                        if state == .live, !foregroundOnlyWrites {
                                            relay.connection?.sendSavedWrites()
                                        }
+                                       if state == .live { relay.connection?.signalAcceptedReplyCheck() }
                                        onLiveState(state)
                                    })
         relay.connection = self
@@ -144,10 +151,18 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
     /// Foreground: shows the saved model at once, reads `/v2/me`, then
     /// follows the change feed until cancelled or stopped by the server.
     public func runForeground() async {
+        let (signals, continuation) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        lock.withLock { replySignal = continuation }
+        defer {
+            lock.withLock { replySignal = nil }
+            continuation.finish()
+        }
         publishModel()
+        continuation.yield(())
         await outbox.resumeSending()
         await withTaskGroup(of: Void.self) { group in
             group.addTask { await self.readMeUntilRead() }
+            group.addTask { await self.reconcileAcceptedRepliesWhileForeground(signals) }
             group.addTask {
                 await self.recoverQueuedReplies()
                 await self.outbox.flush()
@@ -174,15 +189,55 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
         return model.heldCursor != before
     }
 
-    private func reconcileAcceptedReply(_ entry: OutboxEntry, responseEntry: APIEntry) async {
-        guard entry.operation == "reply" else { return }
-        recordReply(entry, disposition: .acceptedPendingReplay(operation: entry.id, turn: responseEntry.entryID))
+    private func missingAcceptedReplyItems() -> Set<ExactText> {
         let snapshot = model.snapshot
-        guard snapshot.items[responseEntry.itemID] != nil,
-              snapshot.entries[responseEntry.itemID]?[responseEntry.entryID] == nil else { return }
-        // The receipt is valid even when its resource projection was fenced.
-        // Fetch fresh entries in the current generation to settle the overlay.
-        try? await modelWriter.loadEntries(of: responseEntry.itemID)
+        guard let queued = try? repository.queuedChatMessages(context: context) else { return [] }
+        return Set(queued.compactMap { message in
+            guard case let .acceptedPendingReplay(_, turn) = message.disposition else { return nil }
+            let item = message.binding.request.messageID
+            guard snapshot.items[item] != nil, snapshot.entries[item]?[turn] == nil else { return nil }
+            return item
+        })
+    }
+
+    private func signalAcceptedReplyCheck() {
+        lock.withLock { _ = replySignal?.yield(()) }
+    }
+
+    private func reconcileAcceptedRepliesWhileForeground(_ signals: AsyncStream<Void>) async {
+        for await _ in signals {
+            var attempt = 0
+            while !Task.isCancelled {
+                let items = missingAcceptedReplyItems()
+                guard !items.isEmpty else { break }
+                for item in items { await checkAcceptedReply(itemID: item) }
+                guard !missingAcceptedReplyItems().isEmpty else { break }
+                attempt += 1
+                do { try await replyWaitBeforeRetry(attempt) } catch { return }
+            }
+        }
+    }
+
+    public func checkAcceptedReply(itemID: ExactText) async {
+        guard !Task.isCancelled, missingAcceptedReplyItems().contains(itemID),
+              lock.withLock({ checkingReplyItems.insert(itemID).inserted }) else { return }
+        defer { lock.withLock { _ = checkingReplyItems.remove(itemID) } }
+        do {
+            try await modelWriter.loadEntries(of: itemID)
+            publishModel()
+            if missingAcceptedReplyItems().isEmpty {
+                errors.resolve(concern: .snapshot, operation: "confirm_reply")
+            }
+        } catch is CancellationError {
+            return
+        } catch {
+            let api = error as? APIError
+            errors.report(ErrorLogReport(concern: .snapshot, connectionRole: .request,
+                operation: "confirm_reply", phase: "entries", reason: .api(error),
+                initiator: .forFailure(error), retryable: true,
+                correlation: ErrorLogCorrelation(requestID: api?.requestID, resourceID: itemID.rawValue),
+                httpStatus: api?.status))
+        }
     }
 
     private func recordReply(_ entry: OutboxEntry, disposition: ConversationDraft.Disposition) {
@@ -255,6 +310,7 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
             }
         }
         onPublished()
+        signalAcceptedReplyCheck()
     }
 }
 
