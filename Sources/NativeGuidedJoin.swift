@@ -1,3 +1,4 @@
+import AttentionDomain
 import CryptoKit
 import Foundation
 import HarklightNativeRelay
