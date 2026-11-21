@@ -476,6 +476,7 @@ private struct ConversationHistoryContent: View, Equatable {
                                 if pending.isQueued { store.editQueuedChatMessage(pending.id, for: key) }
                                 else { store.editRejectedDiscussion(for: key, revision: pending.revision) }
                             },
+                            checkAgain: { await store.checkAcceptedDiscussion(for: key) },
                             inspect: { file in inspect(file, pending.revision) })
                         .id(pending.id)
                     }
@@ -689,6 +690,7 @@ private struct ConversationPendingSubmissionView: View {
     let editEnabled: Bool
     let retry: () -> Void
     let edit: () -> Void
+    let checkAgain: () async -> Void
     let inspect: (ConversationFile) -> Void
 
     var body: some View {
@@ -705,7 +707,13 @@ private struct ConversationPendingSubmissionView: View {
                 }
                 .buttonStyle(.plain)
             }
-            ConversationDraftStatus(disposition: submission.disposition)
+            if submission.isQueued, case .acceptedPendingReplay = submission.disposition {
+                Text("Confirming delivery").font(.caption).foregroundStyle(.hkSecondary)
+                Button("Check again") { Task { await checkAgain() } }
+                    .accessibilityIdentifier("conversation-pending-check-again")
+            } else {
+                ConversationDraftStatus(disposition: submission.disposition)
+            }
             if case let .rejected(reason) = submission.disposition, !isClosed {
                 HStack {
                     Button("Retry", action: retry)

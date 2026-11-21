@@ -2304,6 +2304,11 @@ final class LivePresentationStore {
         return conversationThreads[key]?.uploadGroups?[operation]?.cleanupID != nil
     }
 
+    func checkAcceptedDiscussion(for key: RequestKey) async {
+        guard permitsDelivery else { return }
+        await NativeRelayLifecycle.shared.checkAcceptedV2Reply(key, expected: profileContext)
+    }
+
     func loadDiscussionOnOpen(_ key: RequestKey) async -> Bool {
         guard permitsDelivery else { return true }
         return await NativeRelayLifecycle.shared.loadV2EntriesOnOpen(key, expected: profileContext)

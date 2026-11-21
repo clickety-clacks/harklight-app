@@ -47,6 +47,11 @@ final class FakeClientAPIServer: ClientAPITransport, @unchecked Sendable {
         set { lock.withLock { _holdWrites = newValue } }
     }
 
+    private var _nextEntriesFailure: APIError?
+    var nextEntriesFailure: APIError? {
+        get { lock.withLock { _nextEntriesFailure } }
+        set { lock.withLock { _nextEntriesFailure = newValue } }
+    }
     var holdInbox: AsyncGate?
     var meBody: String?
     var replyEntry: (@Sendable (Rev) -> String)?
@@ -123,6 +128,12 @@ final class FakeClientAPIServer: ClientAPITransport, @unchecked Sendable {
             }
             if request.path == "/v2/inbox", let holdInbox { await holdInbox.wait() }
             if request.path.hasSuffix("/entries"), replyEntry != nil {
+                let failure = lock.withLock {
+                    let first = _nextEntriesFailure
+                    _nextEntriesFailure = nil
+                    return first
+                }
+                if let failure { throw failure }
                 let entries = lock.withLock {
                     log.filter { $0.kind == .entry }.map { String(decoding: $0.data, as: UTF8.self) }
                 }.joined(separator: ",")

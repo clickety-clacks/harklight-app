@@ -62,7 +62,12 @@ final class ChatMessageQueueTests: XCTestCase {
         try await assertReplyRecovery(cold: true, acceptBeforeBaseline: true)
     }
 
-    private func assertReplyRecovery(cold: Bool, acceptBeforeBaseline: Bool = false) async throws {
+    func testAcceptedReplyConfirmationRetriesFailedReadWithoutResending() async throws {
+        try await assertReplyRecovery(cold: true, acceptBeforeBaseline: true, failFirstEntries: true)
+    }
+
+    private func assertReplyRecovery(cold: Bool, acceptBeforeBaseline: Bool = false,
+                                     failFirstEntries: Bool = false) async throws {
         let persistence = MemoryPendingActionPersistence()
         let (first, context, binding) = try repository(v2: true, persistence: persistence)
         try type("saved before handoff", first, binding, context)
@@ -87,10 +92,16 @@ final class ChatMessageQueueTests: XCTestCase {
         server.replyEntry = { rev in
             #"{"entry_id":"accepted","item_id":"i","rev":\#(rev),"position":1,"kind":"reply","author":"person","request_revision":1,"text":"saved before handoff","files":[]}"#
         }
+        let errors = RecordingErrorLogV2()
+        let retryGate = AsyncGate()
+        if failFirstEntries {
+            server.nextEntriesFailure = APIError(status: 503, token: .storageUnavailable, retryable: true,
+                                                 requestID: "req-entries")
+        }
         let connection = try ClientAPIv2Connection(transport: server, repository: reopened,
-            context: context, directory: nil, errors: RecordingErrorLogV2())
+            context: context, directory: nil, errors: errors, replyWaitBeforeRetry: { _ in await retryGate.wait() })
         let foreground = Task { await connection.runForeground() }
-        defer { inboxGate.release(); writeGate.release(); foreground.cancel() }
+        defer { inboxGate.release(); writeGate.release(); retryGate.release(); foreground.cancel() }
 
         let deadline = ContinuousClock.now + .seconds(2)
         while !server.received.contains(where: { $0.idempotencyKey == operation }),
@@ -123,6 +134,22 @@ final class ChatMessageQueueTests: XCTestCase {
         }
         XCTAssertEqual(server.openFeedCount, 1)
         writeGate.release()
+        if failFirstEntries {
+            let reportDeadline = ContinuousClock.now + .seconds(2)
+            while errors.reports.first(where: { $0.operation == "confirm_reply" }) == nil,
+                  ContinuousClock.now < reportDeadline {
+                try await Task.sleep(for: .milliseconds(5))
+            }
+            let report = try XCTUnwrap(errors.reports.first { $0.operation == "confirm_reply" })
+            XCTAssertEqual(report.correlation.resourceID, "i")
+            XCTAssertEqual(report.correlation.requestID, "req-entries")
+            XCTAssertEqual(report.httpStatus, 503)
+            let receipt = ConversationDraft.Disposition.acceptedPendingReplay(
+                operation: operation, turn: ExactText("accepted"))
+            XCTAssertEqual(try reopened.queuedChatMessages(context: context).first?.disposition, receipt)
+            XCTAssertEqual(server.received.filter { $0.path.hasSuffix("/entries") }.count, 1)
+            retryGate.release()
+        }
         let overlayDeadline = ContinuousClock.now + .seconds(2)
         while !(try reopened.queuedChatMessages(context: context)).isEmpty,
               ContinuousClock.now < overlayDeadline {
@@ -131,6 +158,10 @@ final class ChatMessageQueueTests: XCTestCase {
         XCTAssertTrue(try reopened.queuedChatMessages(context: context).isEmpty)
         let accepted = try reopened.conversationSnapshot(context: context).threads[binding.request]
         XCTAssertTrue(accepted?.turns.contains { $0.id == ExactText("accepted") } == true)
+        if failFirstEntries {
+            XCTAssertEqual(server.received.filter { $0.path.hasSuffix("/entries") }.count, 2)
+            XCTAssertEqual(connection.model.heldCursor, 1, "The read retry does not advance the cursor.")
+        }
         XCTAssertEqual(server.received.filter { $0.idempotencyKey == operation }.count, 1)
     }
 
