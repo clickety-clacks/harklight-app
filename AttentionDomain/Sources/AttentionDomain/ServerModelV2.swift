@@ -14,9 +14,10 @@ public struct ServerModelV2: Equatable, Codable, Sendable {
     /// Items whose entries were read (the person opened them). Feed entries
     /// of other items are not kept; opening an item reads its entries.
     public internal(set) var loadedEntryItems: Set<ExactText> = []
-    /// Each item's arrival number, assigned once when the item is first held
+    /// Each held item's arrival number, assigned when the item is first held
     /// and never reused, so the new-messages area can compare it with a
-    /// remembered high-water mark even after other items are removed.
+    /// remembered high-water mark even after other items are removed. A
+    /// removed item's number is dropped; if it comes back, it gets a new one.
     public internal(set) var arrivalOrder: [ExactText: UInt64] = [:]
     public internal(set) var lastArrival: UInt64 = 0
 
@@ -88,6 +89,7 @@ public struct ServerModelV2: Equatable, Codable, Sendable {
     mutating func remove(_ itemID: ExactText, rev: UInt64, at now: Date) -> Bool {
         guard gate.admitRemoval(Self.itemKey(itemID), rev: rev, at: now) else { return false }
         items[itemID] = nil
+        arrivalOrder[itemID] = nil
         for entryID in (entries[itemID] ?? [:]).keys { forgetEntry(entryID) }
         entries[itemID] = nil
         loadedEntryItems.remove(itemID)
@@ -135,6 +137,9 @@ public struct ServerModelV2: Equatable, Codable, Sendable {
             items[itemID] = nil
             gate.forget(Self.itemKey(itemID))
         }
+        // Arrival numbers are kept only for held items (review L-18);
+        // `lastArrival` never goes back, so a number is never reused.
+        arrivalOrder = arrivalOrder.filter { items[$0.key] != nil }
         for (_, byID) in entries { for entryID in byID.keys { forgetEntry(entryID) } }
         entries = [:]
         loadedEntryItems = []
@@ -269,10 +274,19 @@ public final class ServerModelV2Store: @unchecked Sendable {
     /// A page with an unreadable entry leaves the item not loaded, so its
     /// entries are read again when it is next opened.
     public func apply(_ page: APIEntriesPage, of itemID: ExactText) throws {
+        try apply([page], of: itemID, complete: true)
+    }
+
+    /// Every page read for an item, in one save. The item counts as loaded
+    /// only when the pages reach its oldest entry (`complete`) and none of
+    /// them held an unreadable entry.
+    public func apply(_ pages: [APIEntriesPage], of itemID: ExactText, complete: Bool) throws {
         try mutate { model in
             model.loadedEntryItems.insert(itemID)
-            for entry in page.entries { model.put(entry) }
-            if !page.unreadable.isEmpty { model.loadedEntryItems.remove(itemID) }
+            for page in pages { for entry in page.entries { model.put(entry) } }
+            if !complete || pages.contains(where: { !$0.unreadable.isEmpty }) {
+                model.loadedEntryItems.remove(itemID)
+            }
         }
     }
 

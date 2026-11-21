@@ -41,6 +41,11 @@ public struct OutboxEntry: Codable, Equatable, Sendable, Identifiable {
 
     public var id: UUID { idempotencyKey }
 
+    /// The item an `item:<id>` target is about, for the Error Log.
+    var resourceID: String? {
+        target.hasPrefix("item:") ? String(target.dropFirst("item:".count)) : nil
+    }
+
     var request: APIRequest {
         APIRequest(method: write.method, path: write.path, body: write.body, contentType: write.contentType,
                    idempotencyKey: idempotencyKey, ifMatch: write.ifMatch)
@@ -109,8 +114,16 @@ public actor ActionOutbox {
 
     /// Removes a failed write once the app has shown or replaced it.
     public func discardFailed(_ key: UUID) {
-        guard entries.contains(where: { $0.id == key && $0.failure != nil }) else { return }
+        guard let discarded = entries.first(where: { $0.id == key && $0.failure != nil }) else { return }
         remove(key)
+        resolveIfNoFailedWrite(discarded.operation, resolvedBy: "discarded")
+    }
+
+    /// A refusal stays unresolved in the Error Log while any write of that
+    /// operation is still held as failed (review L-17).
+    private func resolveIfNoFailedWrite(_ operation: String, resolvedBy: String? = nil) {
+        guard !entries.contains(where: { $0.operation == operation && $0.failure != nil }) else { return }
+        errors.resolve(concern: .actions, operation: operation, resolvedBy: resolvedBy)
     }
 
     /// Records the intent durably, minting its key once, and sends it. If the
@@ -191,7 +204,7 @@ public actor ActionOutbox {
             let response = try await transport.send(entry.request)
             await outcomes.accepted(entry, response: response)
             remove(entry.idempotencyKey)
-            errors.resolve(concern: .actions, operation: entry.operation)
+            resolveIfNoFailedWrite(entry.operation)
             return true
         } catch let error as APIError where error.token == .accountPaused {
             // Kept until the pause ends; nothing is refused or dropped.
@@ -281,7 +294,9 @@ public actor ActionOutbox {
                         retryable: Bool) {
         errors.report(ErrorLogReport(concern: .actions, connectionRole: .request, operation: entry.operation,
             phase: phase, reason: .api(error), initiator: initiator, retryable: retryable,
-            correlation: .request((error as? APIError)?.requestID, operationID: entry.idempotencyKey),
+            correlation: ErrorLogCorrelation(clientOperationID: entry.idempotencyKey,
+                                             requestID: (error as? APIError)?.requestID,
+                                             resourceID: entry.resourceID),
             httpStatus: (error as? APIError)?.status))
     }
 }

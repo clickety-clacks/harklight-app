@@ -94,6 +94,48 @@ public final class ServerModelSyncWriter: SyncModelWriting, @unchecked Sendable 
         }
         return first.position
     }
+
+    /// Reads an opened item's entries, newest page first and then each older
+    /// page, and saves them together. An entry that cannot be read is
+    /// reported with its id and the page's position and skipped; the item
+    /// then stays not loaded, so its entries are read again when it is next
+    /// opened (review L-16).
+    public func loadEntries(of itemID: ExactText) async throws {
+        var pages: [APIEntriesPage] = []
+        var before: ExactText?
+        var seen: Set<ExactText> = []
+        var complete = false
+        let path = "/v2/items/\(Self.pathSegment(itemID))/entries"
+        while true {
+            var query = ["limit": String(pageLimit)]
+            if let before {
+                // A repeated cursor would loop forever.
+                guard seen.insert(before).inserted else { throw FeedDecodingError.outOfOrder }
+                query["before"] = before.rawValue
+            }
+            let response = try await transport.send(.get(path, query: query))
+            let page = try APIEntriesPage(json: JSONValue.parse(response.body))
+            pages.append(page)
+            for resource in page.unreadable {
+                errors.report(ErrorLogReport(concern: .sync, connectionRole: .request, operation: "load_entries",
+                    phase: "entry", reason: .app("decode_failed"), initiator: .unknown, retryable: false,
+                    correlation: ErrorLogCorrelation(resourceID: (resource.id ?? itemID).rawValue,
+                                                     rev: page.position)))
+            }
+            guard page.older else { complete = true; break }
+            // The next page is below this page's oldest readable entry. With
+            // none readable, the rest cannot be reached now.
+            guard let oldest = page.entries.min(by: { $0.position < $1.position }) else { break }
+            before = oldest.entryID
+        }
+        try store.apply(pages, of: itemID, complete: complete)
+    }
+
+    private static func pathSegment(_ id: ExactText) -> String {
+        var allowed = CharacterSet.urlPathAllowed
+        allowed.remove(charactersIn: "/")
+        return id.rawValue.addingPercentEncoding(withAllowedCharacters: allowed) ?? id.rawValue
+    }
 }
 
 /// Applies each write's response to the v2 local model at once, so the
