@@ -54,20 +54,25 @@ final class ClientAPIAccessTests: XCTestCase {
         let key = UUID()
         try await connection.outbox.submit(target: write.target, operation: write.operation, write: write.write,
                                            idempotencyKey: key)
+        let reopened = try self.connection(server, directory: directory)
+        XCTAssertEqual(reopened.access.state, .paused, "A feed pause survives relaunch before another /me read.")
+        XCTAssertEqual(reopened.model.persistedCursor(), held)
+        XCTAssertNotNil(reopened.model.snapshot.items[ExactText("i")])
         let before = server.received.count
         server.meBody = #"{"account":{"state":"paused"},"features":{},"limits":{}}"#
-        await connection.runForeground()
+        await reopened.runForeground()
         XCTAssertEqual(Array(server.received.dropFirst(before)).map(\.path), ["/v2/me"])
-        let pending = await connection.outbox.pending
+        let pending = await reopened.outbox.pending
         XCTAssertEqual(pending.map(\.id), [key])
 
         server.meBody = #"{"account":{"state":"active"},"features":{},"limits":{}}"#
-        let resumed = Task { await connection.runForeground() }
+        let resumed = Task { await reopened.runForeground() }
         defer { resumed.cancel() }
         await eventually("recovery sends the saved operation under its original key") {
             server.received.contains { $0.idempotencyKey == key }
         }
-        XCTAssertEqual(connection.access.state, .available)
+        XCTAssertEqual(reopened.access.state, .available)
+        XCTAssertNil(reopened.model.snapshot.accountPaused)
         XCTAssertEqual(server.received.filter { $0.idempotencyKey == key }.count, 1)
     }
 

@@ -17,6 +17,7 @@ public struct ServerModelV2: Equatable, Codable, Sendable {
     public var routablePushBindingID: ExactText? {
         pushRoutingDisabled == true ? nil : settings?.push?.bindingID
     }
+    public internal(set) var accountPaused: Bool?
     public internal(set) var gate = RevGate()
     /// Items whose entries were read (the person opened them). Feed entries
     /// of other items are not kept; opening an item reads its entries.
@@ -213,6 +214,10 @@ public final class ServerModelV2Store: @unchecked Sendable {
     }
 
     public var snapshot: ServerModelV2 { lock.withLock { model } }
+
+    public func saveAccountPause(_ paused: Bool) throws {
+        try mutate { $0.accountPaused = paused ? true : nil }
+    }
     public var heldCursor: UInt64? { lock.withLock { cursor } }
 
     public var syncPosition: (revision: UInt64?, generation: UInt64) {

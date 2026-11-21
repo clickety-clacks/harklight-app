@@ -1,3 +1,4 @@
+import AttentionDomain
 import Foundation
 
 public enum ClientAPIAccessState: Equatable, Sendable {
@@ -14,6 +15,8 @@ public final class ClientAPIAccess: ClientAPITransport, @unchecked Sendable {
     private let lock = NSLock()
     private var current: ClientAPIAccessState = .available
     private var generation = 0
+    private var model: ServerModelV2Store?
+    private var errors: any ErrorLogging = NoopErrorLog()
 
     public init(transport: any ClientAPITransport,
                 onChanged: @escaping @Sendable (ClientAPIAccessState) -> Void = { _ in }) {
@@ -24,19 +27,36 @@ public final class ClientAPIAccess: ClientAPITransport, @unchecked Sendable {
     public var state: ClientAPIAccessState { lock.withLock { current } }
     var checkGeneration: Int { lock.withLock { generation } }
 
+    func restorePause(from model: ServerModelV2Store, savedMePaused: Bool, errors: any ErrorLogging) {
+        lock.withLock {
+            self.model = model
+            self.errors = errors
+        }
+        if model.snapshot.accountPaused == true || savedMePaused { pause() }
+    }
+
     func pause() { update(.paused) }
     func revoke() { update(.revoked) }
     func confirmAvailable(checkedAt generation: Int) { update(.available, checkedAt: generation) }
 
     private func update(_ next: ClientAPIAccessState, checkedAt expected: Int? = nil) {
-        let changed = lock.withLock {
+        let result: (changed: Bool, saveError: (any Error)?, errors: any ErrorLogging) = lock.withLock {
             guard current != .revoked, current != next,
-                  expected == nil || expected == generation else { return false }
+                  expected == nil || expected == generation else { return (false, nil, errors) }
             current = next
             generation += 1
-            return true
+            do {
+                if next != .revoked { try model?.saveAccountPause(next == .paused) }
+                return (true, nil, errors)
+            } catch {
+                return (true, error, errors)
+            }
         }
-        if changed { onChanged(next) }
+        if let error = result.saveError {
+            result.errors.report(ErrorLogReport(concern: .snapshot, connectionRole: .request,
+                operation: "account_pause_save", phase: "save", reason: .from(error: error), retryable: true))
+        }
+        if result.changed { onChanged(next) }
     }
 
     private func check(allowPaused: Bool = false) throws {

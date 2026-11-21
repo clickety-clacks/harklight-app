@@ -140,7 +140,7 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
                                        onLiveState(state)
                                    }, onShow: onShow)
         relay.connection = self
-        if savedMe?.accountState == "paused" { access.pause() }
+        access.restorePause(from: model, savedMePaused: savedMe?.accountState == "paused", errors: errors)
     }
 
     /// Reads `GET /v2/me` (answerable even while the account is paused),

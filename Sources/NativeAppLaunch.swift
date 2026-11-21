@@ -437,7 +437,9 @@ final class NativeAppLaunch {
     }
 
     func receiveInvitation(_ url: URL) async {
-        if case .reenrolmentRequired = state { return }
+        if case .reenrolmentRequired = state {
+            guard (try? NativeJoinInvitation.decode(url)) != nil, beginV2Reenrolment() else { return }
+        }
         if NativeMessageDeepLink.recognizes(url) {
             notificationRouter.consumed()
             guard let deepLink = NativeMessageDeepLink(url: url) else {
@@ -1044,16 +1046,19 @@ final class NativeAppLaunch {
         }
     }
 
-    func beginV2Reenrolment() {
-        guard case let .reenrolmentRequired(record) = state, !guidedJoin.busy else { return }
+    @discardableResult
+    func beginV2Reenrolment() -> Bool {
+        guard case let .reenrolmentRequired(record) = state, !guidedJoin.busy else { return false }
         do {
             try enrollment.markV2Revoked(record)
             try guidedJoinStore.forgetRevokedInstallation(record)
             enrollmentMessage = nil
             state = .enrollmentRequired
             guidedJoin.beginReconnect()
+            return true
         } catch {
             enrollmentMessage = "The app could not clear this device's saved enrolment. Try again."
+            return false
         }
     }
 
