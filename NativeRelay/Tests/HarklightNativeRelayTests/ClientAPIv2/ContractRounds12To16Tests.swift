@@ -30,8 +30,8 @@ private final class ScriptedBatches: ClientAPITransport, @unchecked Sendable {
     }
 }
 
-/// Contract rounds 12, 13 and 15 as the client sees them.
-final class ContractRounds12To15Tests: XCTestCase {
+/// Contract rounds 12 to 16 as the client sees them.
+final class ContractRounds12To16Tests: XCTestCase {
     private let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
                                            personID: ExactText("person-A"), deviceID: ExactText("installation-A"))
 
@@ -110,5 +110,63 @@ final class ContractRounds12To15Tests: XCTestCase {
                        .choice(id: ExactText("approve"), label: ExactText("Approve")))
         XCTAssertNil(cached.remoteStates[key("bare")]?.accountAnswerOutcome,
                      "A choice without its option shows no outcome, as an unmatched answer does today.")
+    }
+
+    /// Round 15: a level-only item, with no score, still shows its mark.
+    func testALevelOnlyItemStillShowsItsMark() throws {
+        let item = V2Fixture.item("l", rev: 1, rankKey: "a")
+            .replacingOccurrences(of: #""score":0.930,"#, with: "")
+            .replacingOccurrences(of: #""section":"current"}"#, with: #""section":"current","level":"high"}"#)
+        let entry = try XCTUnwrap(try projected([item]).inboxView?.entries.first)
+        XCTAssertNil(entry.score)
+        XCTAssertEqual(entry.priority, .high)
+    }
+
+    /// Round 13: a conversation whose agent is not listening keeps its
+    /// composer open; not listening is information only.
+    func testAConversationWhoseAgentIsNotListeningKeepsItsComposer() throws {
+        let item = V2Fixture.item("q", rev: 1, rankKey: "a", chat: #"{"available":true,"started":true}"#)
+        XCTAssertTrue(item.contains(#""state":"not_listening""#))
+        let thread = try XCTUnwrap(try projected([item]).conversations[key("q")])
+        XCTAssertTrue(thread.isComposerOpen)
+        XCTAssertTrue(thread.allowsDiscussion)
+    }
+
+    private func outcome(_ answer: String) throws -> AccountAnswerOutcome? {
+        try projected([V2Fixture.item("r", rev: 1, rankKey: "a",
+                                      terminal: #"{"state":"answered","at_ms":9,"answer":\#(answer)}"#)])
+            .remoteStates[key("r")]?.accountAnswerOutcome
+    }
+
+    /// Round 16: kind `result` carries any JSON value, null included; the
+    /// kind decides, never the value's shape.
+    func testAResultAnswerCarriesAnyJSONValueNullIncluded() throws {
+        for literal in [#"{"a":1}"#, #"[1,"two"]"#, #""yes""#, "42", "true", "null"] {
+            XCTAssertEqual(try outcome(#"{"kind":"result","value":"# + literal + "}"),
+                           .result(try JSONValue.parse(Data(literal.utf8))), literal)
+        }
+        XCTAssertNil(try outcome(#"{"kind":"result"}"#), "A result with no value shows no outcome.")
+        XCTAssertEqual(try outcome(#"{"kind":"reply","text":"\"yes\""}"#), .reply(ExactText(#""yes""#)),
+                       "A string that looks like JSON is still a reply.")
+    }
+
+    func testAPresentNullValueSurvivesSavingTheModel() throws {
+        let store = ServerModelV2Store(fileURL: nil)
+        try store.apply(kind: "item", rev: 1, data: V2Fixture.json(V2Fixture.item("r", rev: 1, rankKey: "a",
+            terminal: #"{"state":"answered","at_ms":9,"answer":{"kind":"result","value":null}}"#)))
+        try store.apply(kind: "item", rev: 2, data: V2Fixture.json(V2Fixture.item("d", rev: 2, rankKey: "b",
+            terminal: #"{"state":"answered","at_ms":9,"answer":{"kind":"default","text":"Ok"}}"#)))
+        let decoded = try JSONDecoder().decode(ServerModelV2.self, from: JSONEncoder().encode(store.snapshot))
+        XCTAssertEqual(decoded.items[ExactText("r")]?.terminal?.answer?.value, .some(.null), "Present null is kept.")
+        XCTAssertNil(decoded.items[ExactText("d")]?.terminal?.answer?.value, "Absent stays absent.")
+    }
+
+    /// Round 14 item 4: a Seen answer reads the same with or without the
+    /// server's `{kind: seen}`, until the server fix lands.
+    func testASeenAnswerIsReadWithOrWithoutItsKind() throws {
+        XCTAssertEqual(try outcome(#"{"kind":"seen"}"#), .seen)
+        let bare = try projected([V2Fixture.item("s", rev: 1, rankKey: "a", terminal: #"{"state":"answered","at_ms":9}"#)])
+        XCTAssertEqual(bare.remoteStates[key("s")]?.state, .answered)
+        XCTAssertNil(bare.remoteStates[key("s")]?.accountAnswerOutcome)
     }
 }

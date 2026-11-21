@@ -59,6 +59,9 @@ enum AnswerConfirmationText {
             return nil
         case let .some(.choice(_, label)):
             return label.rawValue
+        case .some(.result):
+            // Shown as today's answered-with-result: the answer given here, if any.
+            break
         case .some(.noComment), .some(.seen):
             return nil
         case .none:

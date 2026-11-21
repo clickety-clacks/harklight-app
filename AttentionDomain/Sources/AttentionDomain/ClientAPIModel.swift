@@ -54,9 +54,10 @@ public struct APIAvailability: Equatable, Codable, Sendable {
 /// The person-facing answer outcome, shown on every client of the person
 /// (round 4 item 3). `value` is present only for `default`.
 public struct APIAnswer: Equatable, Codable, Sendable {
-    /// seen, reply, default, no_comment or choice.
+    /// seen, reply, default, no_comment, choice or result.
     public let kind: String
     public let text: ExactText?
+    /// Any JSON. Nil when absent; a present `null` is `.null` (round 16).
     public let value: JSONValue?
     /// For `choice` (round 15): the matched action's id and label.
     public let id: ExactText?
@@ -230,6 +231,9 @@ fileprivate struct Reader {
 
     func raw(_ name: String) -> JSONValue? { member(name) }
 
+    /// A member as sent, `null` included: nil only when it is absent.
+    func present(_ name: String) -> JSONValue? { value.uniqueValue(named: name) }
+
     func array(_ name: String) throws -> [JSONValue] {
         guard let found = member(name) else { return [] }
         guard let values = found.arrayValues else { throw ClientAPIModelError.invalid("\(context).\(name)") }
@@ -275,7 +279,7 @@ extension APIAnswer {
     fileprivate init(_ reader: Reader) throws {
         kind = try reader.string("kind").rawValue
         text = try reader.optionalString("text")
-        value = reader.raw("value")
+        value = reader.present("value")
         id = try reader.optionalString("id")
         label = try reader.optionalString("label")
     }

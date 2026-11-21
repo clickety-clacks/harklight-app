@@ -97,6 +97,10 @@ public enum ServerModelV2Projection {
         case "choice":
             guard let id = answer.id, let label = answer.label else { return nil }
             return .choice(id: id, label: label)
+        case "result":
+            // Chosen by the screen, never by the value's shape; null is a value.
+            guard let value = answer.value else { return nil }
+            return .result(value)
         default: return nil
         }
     }
