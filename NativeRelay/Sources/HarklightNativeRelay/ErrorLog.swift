@@ -245,7 +245,7 @@ public enum ErrorLogRedactor {
     /// Reason tokens the server may send. Anything else is stored as `other`.
     public static let allowedServerReasons: Set<String> = [
         "unreachable", "timeout", "unauthorized", "server_error", "decode_failed", "unsupported",
-        "wrong_connection_role", "retry_later", "stale_revision", "cursor_expired", "storage_unavailable",
+        "wrong_connection_role", "retry_later", "internal_error", "stale_revision", "cursor_expired", "storage_unavailable",
         "superseded_by_new_stream", "device_revoked", "rejected", "unresolved", "ack_refused",
         "apply_failed", "stream_closed", "superseded", "not_found", "invalid_request", "rate_limited",
         "internal_error", "unavailable", "forbidden", "conflict",

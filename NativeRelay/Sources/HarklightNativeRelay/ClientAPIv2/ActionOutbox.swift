@@ -41,6 +41,10 @@ public struct OutboxEntry: Codable, Equatable, Sendable, Identifiable {
     /// The repository's stable answer intent, distinct from the HTTP key.
     public internal(set) var answerIntentID: UUID? = nil
 
+    /// The server may already have committed this write. Wait for an explicit
+    /// retry or a foreground transition, keeping this exact request and key.
+    public internal(set) var waitsForInternalErrorRetry: Bool? = nil
+
     public var id: UUID { idempotencyKey }
 
     /// Seen and read-position reports are independently monotonic facts. A
@@ -148,7 +152,9 @@ public actor ActionOutbox {
     /// A refusal stays unresolved in the Error Log while any write of that
     /// operation is still held as failed (review L-17).
     private func resolveIfNoFailedWrite(_ operation: String, resolvedBy: String? = nil) {
-        guard !entries.contains(where: { $0.operation == operation && $0.failure != nil }) else { return }
+        guard !entries.contains(where: {
+            $0.operation == operation && ($0.failure != nil || $0.waitsForInternalErrorRetry == true)
+        }) else { return }
         errors.resolve(concern: .actions, operation: operation, resolvedBy: resolvedBy)
     }
 
@@ -166,11 +172,13 @@ public actor ActionOutbox {
             // Handing a pending write over again queues it once. Handing over
             // a refused one is the person's Retry: the server stores only
             // successes, so the same key is evaluated again.
-            guard retryRefused, existing.failure != nil else { return existing }
+            guard retryRefused, existing.failure != nil || existing.waitsForInternalErrorRetry == true
+            else { return existing }
             var next = entries
             guard let index = next.firstIndex(where: { $0.id == existing.id }) else { return existing }
             next[index].failure = nil
             next[index].outsideContractFailures = nil
+            next[index].waitsForInternalErrorRetry = nil
             try persistence.save(next)
             entries = next
             startSending(existing.sendingLane)
@@ -191,6 +199,17 @@ public actor ActionOutbox {
     /// and returns once every target has stopped (empty or waiting to retry).
     public func flush() async {
         let tasks = Set(pending.map(\.sendingLane)).compactMap { startSending($0) }
+        for task in tasks { await task.value }
+    }
+
+    public func retryInternalErrors(operation: String? = nil) async {
+        var retryLanes = Set<String>()
+        for entry in entries where entry.waitsForInternalErrorRetry == true &&
+            (operation == nil || entry.operation == operation) {
+            update(entry.id) { $0.waitsForInternalErrorRetry = nil }
+            retryLanes.insert(entry.sendingLane)
+        }
+        let tasks = retryLanes.compactMap { startSending($0) }
         for task in tasks { await task.value }
     }
 
@@ -261,7 +280,7 @@ public actor ActionOutbox {
             resendRequested.remove(target)
             while !sendingPaused, !Task.isCancelled,
                   let entry = entries.first(where: { $0.sendingLane == target && $0.failure == nil }) {
-                guard canSend(entry) else { return }
+                guard entry.waitsForInternalErrorRetry != true, canSend(entry) else { return }
                 guard await sendOne(entry).continueDraining else { return }
             }
         } while resendRequested.contains(target)
@@ -278,6 +297,13 @@ public actor ActionOutbox {
             remove(entry.idempotencyKey)
             resolveIfNoFailedWrite(entry.operation)
             return (true, .success(response))
+        } catch let error as APIError where error.token == .internalError {
+            update(entry.idempotencyKey) {
+                $0.waitsForInternalErrorRetry = true
+                $0.outcomeUnknown = true
+            }
+            report(entry, phase: "send", error: error, initiator: .serverClosed, retryable: false)
+            return (false, .failure(error))
         } catch let error as APIError where error.token == .accountPaused {
             // Kept until the pause ends; nothing is refused or dropped.
             unauthorized = true

@@ -170,6 +170,14 @@ struct ErrorLogDetailsContent: View {
                 }
                 .accessibilityIdentifier("error-log-copy-details")
             }
+            if record.code == APIErrorToken.internalError.rawValue, !record.isResolved {
+                ToolbarItem(placement: .secondaryAction) {
+                    Button("Try again") {
+                        Task { await NativeRelayLifecycle.shared.retryV2InternalError(record) }
+                        dismiss()
+                    }
+                }
+            }
             if showsDone {
                 ToolbarItem(placement: .confirmationAction) { HarklightDoneButton { dismiss() } }
             }

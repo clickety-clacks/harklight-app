@@ -54,6 +54,11 @@ final class FakeClientAPIServer: ClientAPITransport, @unchecked Sendable {
     }
     var holdInbox: AsyncGate?
     var meBody: String?
+    var nextMeFailure: APIError? {
+        get { lock.withLock { _nextMeFailure } }
+        set { lock.withLock { _nextMeFailure = newValue } }
+    }
+    private var _nextMeFailure: APIError?
     var replyEntry: (@Sendable (Rev) -> String)?
 
     var head: Rev { lock.withLock { log.last?.rev ?? retainedFrom } }
@@ -124,6 +129,11 @@ final class FakeClientAPIServer: ClientAPITransport, @unchecked Sendable {
         }
         if request.method == .get {
             if request.path == "/v2/me", let meBody {
+                let failure = lock.withLock {
+                    defer { _nextMeFailure = nil }
+                    return _nextMeFailure
+                }
+                if let failure { throw failure }
                 return APIResponse(status: 200, requestID: nextRequestID(), body: Data(meBody.utf8))
             }
             if request.path == "/v2/inbox", let holdInbox { await holdInbox.wait() }
@@ -210,9 +220,19 @@ final class FakeClientAPIServer: ClientAPITransport, @unchecked Sendable {
     private var _batchPositions: [Rev] = []
     var batchPositions: [Rev] { lock.withLock { _batchPositions } }
 
+    var nextBatchFailure: APIError? {
+        get { lock.withLock { _nextBatchFailure } }
+        set { lock.withLock { _nextBatchFailure = newValue } }
+    }
+    private var _nextBatchFailure: APIError?
+
     func changeBatch(after: Rev) async throws -> FeedBatch {
         try lock.withLock {
             _batchPositions.append(after)
+            if let failure = _nextBatchFailure {
+                _nextBatchFailure = nil
+                throw failure
+            }
             guard after >= retainedFrom else {
                 throw APIError(status: 410, token: .cursorExpired, retryable: false, requestID: "req-batch")
             }

@@ -49,10 +49,13 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
     private var replySignal: AsyncStream<Void>.Continuation?
     private var queuedReplySignal: AsyncStream<Void>.Continuation?
     private var checkingReplyItems: Set<ExactText> = []
+    private var pausedReplyChecks: Set<ExactText> = []
+    private var pausedReplyUploads: Set<UUID> = []
     private var priorityLevelsETag: (value: String, revision: UInt64, generation: UInt64)?
     private var priorityLevelsEnabledFromServer = false
     private var settingsSignal: AsyncStream<Void>.Continuation?
     private var settingsReadID: UUID?
+    private var pausedPriorityLevelsRead = false
     private let lock = NSLock()
 
     /// `directory` holds the model, outbox and last `/v2/me` for this
@@ -151,7 +154,15 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
     @discardableResult
     public func refreshMe() async throws -> APIMe {
         let check = access.beginMeCheck()
-        let response = try await transport.send(.get("/v2/me"))
+        let response: APIResponse
+        do {
+            response = try await transport.send(.get("/v2/me"))
+        } catch let error as APIError where error.token == .internalError {
+            errors.report(ErrorLogReport(concern: .snapshot, connectionRole: .request, operation: "me",
+                phase: "read", reason: .api(error), initiator: .serverClosed, retryable: false,
+                correlation: .request(error.requestID), httpStatus: error.status))
+            throw error
+        }
         try Task.checkCancellation()
         let me = try APIMe(json: JSONValue.parse(response.body))
         let update: (editingEnabled: Bool, resumed: Bool)? = lock.withLock {
@@ -208,7 +219,7 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
             do {
                 try await refreshMe()
                 return
-            } catch where Task.isCancelled {
+            } catch where Task.isCancelled || (error as? APIError)?.token == .internalError {
                 return
             } catch {
                 errors.report(ErrorLogReport(concern: .snapshot, connectionRole: .request, operation: "me",
@@ -243,6 +254,9 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
             replySignal = continuation
             settingsSignal = settingsContinuation
             queuedReplySignal = queuedContinuation
+            pausedReplyChecks.removeAll()
+            pausedReplyUploads.removeAll()
+            pausedPriorityLevelsRead = false
             priorityLevelsEnabledFromServer = false
         }
         defer {
@@ -264,10 +278,13 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
             group.addTask { await self.readMeUntilRead() }
             group.addTask { await self.reconcileAcceptedRepliesWhileForeground(signals) }
             group.addTask {
-                for await _ in settings { await self.refreshPriorityLevels() }
+                for await _ in settings { await self.refreshPriorityLevels(userInitiated: false) }
             }
             group.addTask { await self.sendQueuedRepliesWhileForeground(queued) }
-            group.addTask { await self.outbox.flush() }
+            group.addTask {
+                await self.outbox.retryInternalErrors()
+                await self.outbox.flush()
+            }
             await sync.runForeground()
             group.cancelAll()
             if foregroundOnlyWrites || access.state != .available { await outbox.pauseSending() }
@@ -275,9 +292,9 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
     }
 
     /// Push or background refresh: applies every batch from the cursor.
-    public func catchUp() async throws {
+    public func catchUp(userInitiated: Bool = false) async throws {
         if !foregroundOnlyWrites { sendSavedWrites() }
-        try await sync.catchUp()
+        try await sync.catchUp(userInitiated: userInitiated)
     }
 
     /// Applies a push's change batch only when its revision is newer than
@@ -344,30 +361,36 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
         for await _ in signals {
             var attempt = 0
             while !Task.isCancelled {
-                let items = missingAcceptedReplyItems()
+                let items = missingAcceptedReplyItems().subtracting(lock.withLock { pausedReplyChecks })
                 guard !items.isEmpty else { break }
-                for item in items { await checkAcceptedReply(itemID: item) }
-                guard !missingAcceptedReplyItems().isEmpty else { break }
+                for item in items { await checkAcceptedReply(itemID: item, userInitiated: false) }
+                guard !missingAcceptedReplyItems().subtracting(lock.withLock { pausedReplyChecks }).isEmpty else { break }
                 attempt += 1
                 do { try await replyWaitBeforeRetry(attempt) } catch { return }
             }
         }
     }
 
-    public func checkAcceptedReply(itemID: ExactText) async {
+    public func checkAcceptedReply(itemID: ExactText, userInitiated: Bool = true) async {
         guard !Task.isCancelled, missingAcceptedReplyItems().contains(itemID),
-              lock.withLock({ checkingReplyItems.insert(itemID).inserted }) else { return }
+              lock.withLock({
+                  guard userInitiated || !pausedReplyChecks.contains(itemID) else { return false }
+                  return checkingReplyItems.insert(itemID).inserted
+              }) else { return }
         defer { lock.withLock { _ = checkingReplyItems.remove(itemID) } }
         do {
             try await modelWriter.loadEntries(of: itemID)
+            lock.withLock { _ = pausedReplyChecks.remove(itemID) }
             publishModel()
         } catch where Task.isCancelled || error is CancellationError {
             return
         } catch {
             let api = error as? APIError
+            let waitsForRetry = api?.token == .internalError
+            if waitsForRetry { lock.withLock { _ = pausedReplyChecks.insert(itemID) } }
             errors.report(ErrorLogReport(concern: .snapshot, connectionRole: .request,
                 operation: "confirm_reply", phase: "entries", reason: .api(error),
-                initiator: .forFailure(error), retryable: true,
+                initiator: .forFailure(error), retryable: !waitsForRetry,
                 correlation: ErrorLogCorrelation(requestID: api?.requestID, resourceID: itemID.rawValue),
                 httpStatus: api?.status))
         }
@@ -476,6 +499,7 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
                 guard let operation = message.operationID else { continue }
                 switch message.disposition {
                 case .submitting, .outcomeUnknown:
+                    if lock.withLock({ pausedReplyUploads.contains(operation) }) { return false }
                     if !message.files.isEmpty, !presentation.hasRules {
                         // Reading /me wakes this item when its rules are available.
                         return false
@@ -485,6 +509,10 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
                     } catch ConversationError.missingRequest {
                         // A local cancellation retired this saved intent.
                     } catch where Task.isCancelled {
+                        return false
+                    } catch let error as APIError where error.token == .internalError {
+                        lock.withLock { _ = pausedReplyUploads.insert(operation) }
+                        reportUpload(error, operation: "stage_reply_upload", item: item, retryable: false)
                         return false
                     } catch {
                         let permanent = error is ConversationError || error is QueuedReplyError ||
@@ -612,11 +640,15 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
         (try? repository.snapshot(context: context).priorityLevels.editorWasOpened) == true
     }
 
-    public func refreshPriorityLevels() async {
+    public func refreshPriorityLevels(userInitiated: Bool = true) async {
         guard priorityLevelsEditingEnabled, !Task.isCancelled else { return }
         let readID = UUID()
         let generation = model.syncPosition.generation
-        lock.withLock { settingsReadID = readID }
+        guard lock.withLock({
+            guard userInitiated || !pausedPriorityLevelsRead else { return false }
+            settingsReadID = readID
+            return true
+        }) else { return }
         var response: APIResponse?
         do {
             let read = try await transport.send(.get("/v2/settings"))
@@ -634,6 +666,7 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
                 guard position.generation == generation, position.revision == settings.rev else { return false }
                 try repository.recordPriorityLevelsRead(levels, context: context)
                 priorityLevelsETag = (tag, settings.rev, generation)
+                pausedPriorityLevelsRead = false
                 return true
             }
             if current {
@@ -646,9 +679,14 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
             return
         } catch {
             let api = error as? APIError
+            if api?.token == .internalError {
+                lock.withLock {
+                    if settingsReadID == readID { pausedPriorityLevelsRead = true }
+                }
+            }
             errors.report(ErrorLogReport(concern: .snapshot, connectionRole: .request,
                 operation: "priority_levels", phase: "read", reason: .api(error),
-                initiator: .forFailure(error), retryable: true,
+                initiator: .forFailure(error), retryable: api?.token != .internalError,
                 correlation: .request(api?.requestID ?? response?.requestID),
                 httpStatus: api?.status ?? response?.status))
         }
@@ -756,6 +794,34 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
               !model.snapshot.loadedEntryItems.contains(itemID) else { return }
         try await modelWriter.loadEntries(of: itemID)
         publishModel()
+    }
+
+    public func retryInternalError(_ record: ErrorLogRecord) async throws {
+        switch (record.concern, record.operation) {
+        case (.snapshot, "me"):
+            try await refreshMe()
+        case (.snapshot, "confirm_reply"):
+            if let resource = record.correlation.resourceID {
+                await checkAcceptedReply(itemID: ExactText(resource))
+            }
+        case (.snapshot, "load_entries"):
+            if let resource = record.correlation.resourceID {
+                try await loadEntriesIfNeeded(itemID: ExactText(resource))
+                errors.resolve(concern: .snapshot, operation: record.operation)
+            }
+        case (.snapshot, "priority_levels"):
+            await refreshPriorityLevels()
+        case (.actions, "stage_reply_upload"):
+            lock.withLock { pausedReplyUploads.removeAll() }
+            signalQueuedReplies()
+        case (.actions, _):
+            await outbox.resumeSending()
+            await outbox.retryInternalErrors(operation: record.operation)
+        case (.sync, _):
+            try await catchUp(userInitiated: true)
+        default:
+            break
+        }
     }
 
     /// Publishes the model into the repository when it holds a full

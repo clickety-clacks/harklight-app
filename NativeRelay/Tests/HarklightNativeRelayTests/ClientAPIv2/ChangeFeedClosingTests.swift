@@ -97,6 +97,74 @@ final class ChangeFeedClosingTests: XCTestCase {
         }
     }
 
+    func testInternalErrorBatchAndClosingPauseAtTheCursorUntilUserRetry() async throws {
+        for framed in [false, true] {
+            let server = FakeClientAPIServer()
+            let cursor = MemoryRevCursor(0)
+            let model = RecordingSyncModel(snapshotRev: { 0 })
+            let errors = RecordingErrorLogV2()
+            let sync = ChangeFeedSync(transport: server, model: model.using(cursor), errors: errors,
+                                      waitBeforeRetry: { _ in
+                XCTFail("Internal error must not reconnect automatically")
+                throw CancellationError()
+            })
+            if !framed {
+                server.commit("item", "{}")
+                server.nextBatchFailure = APIError(status: 500, token: .internalError,
+                                                    retryable: false, requestID: "req-render-batch")
+            }
+            let run = Task { await sync.runForeground() }
+            defer { run.cancel() }
+            if framed {
+                await until("feed opened") { server.openFeedCount == 1 }
+                server.closeFeeds(reason: "internal_error")
+                await until("paused") { await sync.liveState == .paused(.serverClosed) }
+                server.commit("item", "{}")
+            }
+            await run.value
+            let state = await sync.liveState
+            XCTAssertEqual(state, .paused(.serverClosed))
+            XCTAssertEqual(try cursor.load(), 0)
+            XCTAssertTrue(model.applied.isEmpty)
+            XCTAssertEqual(errors.reports.first?.reason, .serverReason("internal_error"))
+            XCTAssertEqual(errors.reports.first?.retryable, false)
+            XCTAssertEqual(errors.reports.first?.phase, framed ? "closing" : "batch")
+            if framed {
+                XCTAssertNotNil(errors.reports.first?.correlation.requestID)
+            } else {
+                XCTAssertEqual(errors.reports.first?.correlation.requestID, "req-render-batch")
+            }
+            do {
+                try await sync.catchUp()
+                XCTFail("An automatic catch-up must leave the pause in place.")
+            } catch let api as APIError {
+                XCTAssertEqual(api.token, .internalError)
+            }
+            XCTAssertEqual(server.batchPositions, [0])
+
+            try await sync.catchUp(userInitiated: true)
+            XCTAssertEqual(server.batchPositions, [0, 0])
+            XCTAssertEqual(try cursor.load(), 1)
+            XCTAssertEqual(model.applied, [1])
+        }
+    }
+
+    func testTransientBatch503StillBacksOffAndAppliesTheMissingEntry() async throws {
+        let server = FakeClientAPIServer()
+        server.commit("item", "{}")
+        server.nextBatchFailure = APIError(status: 503, token: .retryLater, retryable: true, requestID: "req-busy")
+        let model = RecordingSyncModel(snapshotRev: { 0 })
+        let errors = RecordingErrorLogV2()
+        let attempts = Attempts()
+        let (_, run) = start(server, model, errors, attempts)
+        defer { run.cancel() }
+        await until("the recovered batch applied") { model.applied == [1] && server.openFeedCount == 1 }
+        XCTAssertEqual(attempts.all, [1])
+        XCTAssertEqual(server.batchPositions, [0, 0])
+        XCTAssertEqual(errors.reports.first?.reason, .serverReason("retry_later"))
+        XCTAssertEqual(errors.reports.first?.retryable, true)
+    }
+
     func testADropWithoutAClosingEventIsTheNetworksOrUnknown() async throws {
         let server = FakeClientAPIServer()
         let errors = RecordingErrorLogV2()
