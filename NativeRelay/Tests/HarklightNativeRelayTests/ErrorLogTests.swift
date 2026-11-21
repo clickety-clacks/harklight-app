@@ -591,6 +591,31 @@ final class ErrorLogTests: XCTestCase {
         XCTAssertTrue(ErrorLogDetails.text(for: store.records).contains("request_id: \(longest)"))
     }
 
+    /// A skipped v2 change is recorded with the item and change-log position
+    /// it is about; failures about different items stay separate records.
+    func testResourceAndRevAreRecordedCopiedAndKeepRecordsApart() throws {
+        let clock = Clock(Date(timeIntervalSince1970: 1_000_000))
+        let store = makeStore(clock: clock)
+        func skipped(_ item: String, rev: UInt64) -> ErrorLogReport {
+            ErrorLogReport(concern: .sync, connectionRole: .stream, operation: "apply_change", phase: "entry",
+                           reason: .app("decode_failed"), retryable: false,
+                           correlation: ErrorLogCorrelation(resourceID: item, rev: rev))
+        }
+        store.report(skipped("itm_01HZX9", rev: 41))
+        store.report(skipped("itm_01HZX9", rev: 44))
+        store.report(skipped("itm_02ABCD", rev: 45))
+        XCTAssertEqual(store.records.count, 2, "One record per item; repeats for the same item coalesce.")
+        let first = try XCTUnwrap(store.records.first { $0.correlation.resourceID == "itm_01HZX9" })
+        XCTAssertEqual(first.count, 2)
+        XCTAssertEqual(first.correlation.rev, 44, "The newest occurrence's position is kept.")
+        let lines = ErrorLogDetails.text(for: first).split(separator: "\n").map(String.init)
+        XCTAssertTrue(lines.contains("resource_id: itm_01HZX9"))
+        XCTAssertTrue(lines.contains("rev: 44"))
+        store.flush()
+        XCTAssertEqual(ErrorLogStore(fileURL: fileURL, build: build).records, store.records)
+        XCTAssertNil(ErrorLogCorrelation(resourceID: "has space").resourceID, "Unsafe ids are dropped.")
+    }
+
     func testUnsafeRequestIDAndImpossibleStatusAreDropped() {
         XCTAssertNil(ErrorLogCorrelation(requestID: "a@b.invalid").requestID)
         XCTAssertNil(ErrorLogCorrelation(requestID: "id#frag").requestID)
