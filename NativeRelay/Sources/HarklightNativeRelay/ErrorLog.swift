@@ -33,7 +33,8 @@ public enum ErrorLogInitiator: String, Codable, Sendable, CaseIterable {
     case unknown
 
     /// Maps a server close-reason token to an initiator: the change feed's
-    /// `closing` reasons (`revoked`, `server_shutdown`, `idle_timeout`) and the
+    /// `closing` reasons (round 17: `revoked`, `account_paused`,
+    /// `server_shutdown`, `cursor_expired`, `storage_unavailable`) and the
     /// earlier stream-close tokens. Anything unrecognised is `serverClosed`.
     /// The token itself is kept separately as `ErrorLogReason.serverReason`.
     public init(serverCloseReason token: String) {

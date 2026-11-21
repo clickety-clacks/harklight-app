@@ -72,7 +72,10 @@ public actor ChangeFeedSync {
     public func runForeground() async {
         var attempt = 0
         while !Task.isCancelled {
+            openedThisRound = false
             let end = await followFeedOnce()
+            // A feed that opened counts as a success: the backoff starts over.
+            if openedThisRound { attempt = 0 }
             switch end {
             case .revoked:
                 liveState = .stopped
@@ -165,6 +168,7 @@ public actor ChangeFeedSync {
             for try await event in transport.changeFeed(after: caughtUp) {
                 switch event {
                 case let .opened(requestID):
+                    openedThisRound = true
                     feedRequestID = requestID
                     liveState = .live
                     errors.resolve(concern: .sync, operation: Self.feedOperation)
@@ -181,9 +185,29 @@ public actor ChangeFeedSync {
                         operation: Self.feedOperation, phase: "closing", reason: .serverReason(reason),
                         initiator: initiator, retryable: initiator != .deviceRevoked,
                         correlation: .request(feedRequestID)))
-                    if initiator == .deviceRevoked { return .revoked }
-                    if reason == "account_paused" { return .accountPaused }
-                    return .dropped(initiator, retryPromptly: true)
+                    // Round 17: each ruled reason has one handling.
+                    switch reason {
+                    case "revoked":
+                        return .revoked
+                    case "account_paused":
+                        return .accountPaused
+                    case "cursor_expired":
+                        // Rebaseline now (every inbox page, the first page's
+                        // position as the cursor), then reopen the feed.
+                        do {
+                            _ = try await rebaseline()
+                        } catch {
+                            report(Self.feedOperation, phase: "rebaseline", error: error,
+                                   initiator: .forFailure(error))
+                            return .dropped(.forFailure(error), retryPromptly: false)
+                        }
+                        return .dropped(initiator, retryPromptly: true)
+                    default:
+                        // server_shutdown, storage_unavailable or a reason this
+                        // client does not know: reconnect from the cursor after
+                        // a bounded backoff, never giving up.
+                        return .dropped(initiator, retryPromptly: false)
+                    }
                 }
             }
             if Task.isCancelled { return .cancelled }
@@ -252,6 +276,8 @@ public actor ChangeFeedSync {
 
     /// The open feed's Request-Id, which correlates every report about it.
     private var feedRequestID: String?
+    /// The server accepted the feed in the current attempt.
+    private var openedThisRound = false
 
     private func report(_ operation: String, phase: String, error: any Error, initiator: ErrorLogInitiator) {
         let apiError = error as? APIError
@@ -267,8 +293,9 @@ public actor ChangeFeedSync {
             correlation: .request(feedRequestID)))
     }
 
-    /// The server never ends a feed for idleness; it closes only on revoke,
-    /// a paused account or shutdown, with a `closing` event first.
+    /// Round 17: the server ends a feed only with a `closing` event first,
+    /// for exactly `revoked`, `account_paused`, `server_shutdown`,
+    /// `cursor_expired` or `storage_unavailable`; never for idleness.
     static func initiator(forClosingReason reason: String) -> ErrorLogInitiator {
         reason == "revoked" ? .deviceRevoked : .serverClosed
     }

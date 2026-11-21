@@ -205,6 +205,14 @@ extension ErrorLogInitiator {
         let value = error as NSError
         if value.domain == NSURLErrorDomain, value.code == NSURLErrorTimedOut { return .timeout }
         if value.domain == NSPOSIXErrorDomain, value.code == Int(POSIXErrorCode.ETIMEDOUT.rawValue) { return .timeout }
+        // The system reported the network itself going away.
+        if value.domain == NSURLErrorDomain, [NSURLErrorNetworkConnectionLost, NSURLErrorNotConnectedToInternet,
+            NSURLErrorDataNotAllowed, NSURLErrorInternationalRoamingOff, NSURLErrorCallIsActive].contains(value.code) {
+            return .osNetwork
+        }
+        if value.domain == NSPOSIXErrorDomain, [ENETDOWN, ENETUNREACH, ENETRESET].map(Int.init).contains(value.code) {
+            return .osNetwork
+        }
         return .unknown
     }
 }
