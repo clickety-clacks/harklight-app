@@ -19,17 +19,22 @@ public struct APIRequest: Equatable, Sendable {
     public var query: [String: String]
     public var body: Data?
     public var contentType: String?
+    public var contentDisposition: String?
+    public var accept: String?
     /// Minted once at user intent and persisted with the frozen request.
     public var idempotencyKey: UUID?
     public var ifMatch: String?
 
     public init(method: Method, path: String, query: [String: String] = [:], body: Data? = nil,
-                contentType: String? = nil, idempotencyKey: UUID? = nil, ifMatch: String? = nil) {
+                contentType: String? = nil, idempotencyKey: UUID? = nil, ifMatch: String? = nil,
+                contentDisposition: String? = nil, accept: String? = nil) {
         self.method = method
         self.path = path
         self.query = query
         self.body = body
         self.contentType = contentType ?? (body == nil ? nil : "application/json")
+        self.contentDisposition = contentDisposition
+        self.accept = accept
         self.idempotencyKey = idempotencyKey
         self.ifMatch = ifMatch
     }
@@ -79,6 +84,7 @@ public enum APIErrorToken: String, Equatable, Sendable, CaseIterable {
     case staleRequest = "stale_request"
     case alreadyAnswered = "already_answered"
     case alreadyRetracted = "already_retracted"
+    case alreadyClosed = "already_closed"
     case idempotencyConflict = "idempotency_conflict"
     case preconditionFailed = "precondition_failed"
     case cursorExpired = "cursor_expired"
