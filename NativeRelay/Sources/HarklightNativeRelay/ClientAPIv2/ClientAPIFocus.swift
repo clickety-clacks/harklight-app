@@ -125,7 +125,8 @@ public actor ClientAPIFocusChannel {
     /// the reply of the write that superseded it.
     @discardableResult
     public func report(_ report: FocusReport) async -> FocusReportReply {
-        await withCheckedContinuation { continuation in
+        guard pausedForInternalError != report else { return .rejected }
+        return await withCheckedContinuation { continuation in
             waiters.append(continuation)
             enqueue(report)
         }
@@ -145,6 +146,8 @@ public actor ClientAPIFocusChannel {
 
     /// Queues the latest screen without waiting for the current HTTP write.
     public func enqueue(_ report: FocusReport) {
+        guard pausedForInternalError != report else { return }
+        pausedForInternalError = nil
         latest = report
         renewal?.cancel()
         renewal = nil
@@ -154,6 +157,13 @@ public actor ClientAPIFocusChannel {
         queue(report)
     }
 
+    public func retryInternalError() {
+        guard let report = pausedForInternalError else { return }
+        pausedForInternalError = nil
+        enqueue(report)
+    }
+
+    private var pausedForInternalError: FocusReport?
     private var waiting: FocusReport?
     private var waiters: [CheckedContinuation<FocusReportReply, Never>] = []
 
@@ -170,7 +180,7 @@ public actor ClientAPIFocusChannel {
             waiting = nil
             reply = await send(current)
             if current.screen == .notInFront, current == latest, waiting == nil, !Task.isCancelled {
-                if reply == .rejected {
+                if reply == .rejected, pausedForInternalError != current {
                     scheduleBackgroundRetry(of: current)
                 } else {
                     backgroundFailures = 0
@@ -181,7 +191,9 @@ public actor ClientAPIFocusChannel {
         let done = waiters
         waiters = []
         done.forEach { $0.resume(returning: reply) }
-        if let latest, Self.isInFront(latest), renewal == nil { scheduleRenewal(of: latest) }
+        if let latest, latest != pausedForInternalError, Self.isInFront(latest), renewal == nil {
+            scheduleRenewal(of: latest)
+        }
     }
 
     private func scheduleBackgroundRetry(of report: FocusReport) {
@@ -213,6 +225,7 @@ public actor ClientAPIFocusChannel {
 
     /// Stops renewing, for sign-out or when the connection is torn down.
     public func stop() {
+        pausedForInternalError = nil
         latest = nil
         waiting = nil
         renewal?.cancel()
@@ -238,9 +251,17 @@ public actor ClientAPIFocusChannel {
         } catch where Task.isCancelled {
             return .rejected
         } catch {
+            let api = error as? APIError
+            let internalError = api?.token == .internalError
+            if internalError, latest == report {
+                pausedForInternalError = report
+                renewal?.cancel()
+                renewal = nil
+                if waiting == report { waiting = nil }
+            }
             errors.report(ErrorLogReport(concern: .actions, connectionRole: .request, operation: "focus",
                 phase: "send", reason: .api(error), initiator: .forFailure(error),
-                retryable: !((error as? APIError)?.isPermanent ?? false),
+                retryable: !internalError && api?.isPermanent != true,
                 correlation: .request((error as? APIError)?.requestID),
                 httpStatus: (error as? APIError)?.status))
             return .rejected
@@ -260,7 +281,7 @@ public actor ClientAPIFocusChannel {
     }
 
     private func queueRenewal(_ report: FocusReport) -> Bool {
-        guard !Task.isCancelled, latest == report else { return false }
+        guard !Task.isCancelled, latest == report, pausedForInternalError != report else { return false }
         queue(report)
         return true
     }

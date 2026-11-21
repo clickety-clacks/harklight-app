@@ -95,7 +95,8 @@ struct ErrorLogContextBanner: View {
             VStack(alignment: .leading, spacing: 2) {
                 switch status {
                 case .failing:
-                    Text(record.concern.failureTitle).font(.callout.weight(.semibold))
+                    Text(record.concern == .actions && record.code == APIErrorToken.internalError.rawValue
+                         ? "Delivery unconfirmed" : record.concern.failureTitle).font(.callout.weight(.semibold))
                     Text("\(record.domain) \(record.code) · \(errorLogTime(record.lastAt)) · Tap for details")
                         .font(.footnote).foregroundStyle(.hkSecondary)
                 case .resolved:
@@ -169,6 +170,14 @@ struct ErrorLogDetailsContent: View {
                     UIPasteboard.general.string = ErrorLogDetails.text(for: record)
                 }
                 .accessibilityIdentifier("error-log-copy-details")
+            }
+            if record.code == APIErrorToken.internalError.rawValue, !record.isResolved {
+                ToolbarItem(placement: .secondaryAction) {
+                    Button("Try again") {
+                        Task { await NativeRelayLifecycle.shared.retryV2InternalError(record) }
+                        dismiss()
+                    }
+                }
             }
             if showsDone {
                 ToolbarItem(placement: .confirmationAction) { HarklightDoneButton { dismiss() } }

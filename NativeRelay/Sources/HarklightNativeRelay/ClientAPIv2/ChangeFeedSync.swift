@@ -47,6 +47,7 @@ public actor ChangeFeedSync {
     static let catchUpOperation = "catch_up"
 
     private var foregroundAttempt: Task<FeedEnd, Never>?
+    private var internalError: APIError?
     private let transport: any ClientAPITransport
     private let model: any SyncModelWriting
     private let errors: any ErrorLogging
@@ -79,8 +80,9 @@ public actor ChangeFeedSync {
     /// Holds the foreground feed open, resuming from the cursor after every
     /// drop, until the task is cancelled or the device loses access.
     public func runForeground() async {
+        internalError = nil
         var attempt = 0
-        while !Task.isCancelled {
+        while !Task.isCancelled, internalError == nil {
             openedThisRound = false
             let attemptTask = Task { await followFeedOnce() }
             foregroundAttempt = attemptTask
@@ -101,6 +103,8 @@ public actor ChangeFeedSync {
             case .accountPaused:
                 liveState = .accountPaused
                 return
+            case .internalError:
+                return
             case .cancelled:
                 return
             case let .dropped(initiator, retryPromptly):
@@ -113,7 +117,9 @@ public actor ChangeFeedSync {
 
     /// Push or background refresh: applies every batch from the cursor without
     /// holding a stream.
-    public func catchUp() async throws {
+    public func catchUp(userInitiated: Bool = false) async throws {
+        if userInitiated { internalError = nil }
+        if let internalError { throw internalError }
         do {
             let start = try await startingPosition()
             do {
@@ -126,6 +132,10 @@ public actor ChangeFeedSync {
             let cause = (error as? ApplyFailure)?.underlying ?? error
             report(Self.catchUpOperation, phase: error is ApplyFailure ? "apply" : "batch", error: cause,
                    initiator: .forFailure(cause))
+            if let api = cause as? APIError, api.token == .internalError {
+                _ = pauseForInternalError(api)
+                foregroundAttempt?.cancel()
+            }
             throw cause
         }
     }
@@ -173,6 +183,7 @@ public actor ChangeFeedSync {
 
     private enum FeedEnd {
         case superseded
+        case internalError
         case dropped(ErrorLogInitiator, retryPromptly: Bool)
         case revoked
         case accountPaused
@@ -180,17 +191,16 @@ public actor ChangeFeedSync {
     }
 
     private func followFeedOnce() async -> FeedEnd {
+        feedRequestID = nil
         let after: Position
         do {
             after = try await startingPosition()
         } catch where Task.isCancelled {
             return .cancelled
         } catch {
-            report(Self.feedOperation, phase: "rebaseline", error: error, initiator: .forFailure(error))
-            return .dropped(.forFailure(error), retryPromptly: false)
+            return endAfterRequestFailure(error, phase: "rebaseline")
         }
         liveState = .catchingUp
-        feedRequestID = nil
         var generation = after.generation
         var followingFeed = false
         do {
@@ -223,7 +233,7 @@ public actor ChangeFeedSync {
                     let initiator = Self.initiator(forClosingReason: reason)
                     errors.report(ErrorLogReport(concern: .sync, connectionRole: .stream,
                         operation: Self.feedOperation, phase: "closing", reason: .serverReason(reason),
-                        initiator: initiator, retryable: initiator != .deviceRevoked,
+                        initiator: initiator, retryable: initiator != .deviceRevoked && reason != APIErrorToken.internalError.rawValue,
                         correlation: .request(feedRequestID)))
                     // Round 17: each ruled reason has one handling.
                     switch reason {
@@ -231,15 +241,16 @@ public actor ChangeFeedSync {
                         return .revoked
                     case "account_paused":
                         return .accountPaused
+                    case APIErrorToken.internalError.rawValue:
+                        return pauseForInternalError(APIError(status: 200, token: .internalError,
+                                                              retryable: false, requestID: feedRequestID))
                     case "cursor_expired":
                         // Rebaseline now (every inbox page, the first page's
                         // position as the cursor), then reopen the feed.
                         do {
                             _ = try await rebaseline()
                         } catch {
-                            report(Self.feedOperation, phase: "rebaseline", error: error,
-                                   initiator: .forFailure(error))
-                            return .dropped(.forFailure(error), retryPromptly: false)
+                            return endAfterRequestFailure(error, phase: "rebaseline")
                         }
                         return .dropped(initiator, retryPromptly: true)
                     default:
@@ -264,9 +275,10 @@ public actor ChangeFeedSync {
                 _ = try await rebaseline()
                 return .dropped(.unknown, retryPromptly: true)
             } catch {
-                report(Self.feedOperation, phase: "rebaseline", error: error, initiator: .forFailure(error))
-                return .dropped(.forFailure(error), retryPromptly: false)
+                return endAfterRequestFailure(error, phase: "rebaseline")
             }
+        } catch let error as APIError where error.token == .internalError {
+            return endAfterRequestFailure(error, phase: followingFeed ? "stream" : "batch")
         } catch let error as APIError where error.token == .accountPaused {
             report(Self.feedOperation, phase: "open", error: error, initiator: .serverClosed)
             return .accountPaused
@@ -280,8 +292,7 @@ public actor ChangeFeedSync {
                 _ = try await rebaseline()
                 return .dropped(.unknown, retryPromptly: true)
             } catch {
-                report(Self.feedOperation, phase: "rebaseline", error: error, initiator: .forFailure(error))
-                return .dropped(.forFailure(error), retryPromptly: false)
+                return endAfterRequestFailure(error, phase: "rebaseline")
             }
         } catch let error as ApplyFailure {
             report(Self.feedOperation, phase: "apply", error: error.underlying, initiator: .unknown)
@@ -297,6 +308,22 @@ public actor ChangeFeedSync {
             report(Self.feedOperation, phase: followingFeed ? "stream" : "batch", error: error, initiator: initiator)
             return .dropped(initiator, retryPromptly: false)
         }
+    }
+
+    private func pauseForInternalError(_ error: APIError) -> FeedEnd {
+        internalError = error
+        liveState = .paused(.serverClosed)
+        return .internalError
+    }
+
+    private func endAfterRequestFailure(_ error: any Error, phase: String) -> FeedEnd {
+        if let api = error as? APIError, api.token == .internalError {
+            report(Self.feedOperation, phase: phase, error: api, initiator: .serverClosed)
+            return pauseForInternalError(api)
+        }
+        let initiator = ErrorLogInitiator.forFailure(error)
+        report(Self.feedOperation, phase: phase, error: error, initiator: initiator)
+        return .dropped(initiator, retryPromptly: false)
     }
 
     // MARK: Cursor

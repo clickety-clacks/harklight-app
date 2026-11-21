@@ -106,6 +106,7 @@ public enum APIErrorToken: String, Equatable, Sendable, CaseIterable {
     case forbidden
     /// The account is paused. Not retryable; what the client holds stays readable.
     case accountPaused = "account_paused"
+    case internalError = "internal_error"
     case retryLater = "retry_later"
     case storageUnavailable = "storage_unavailable"
     case payloadTooLarge = "payload_too_large"
@@ -125,9 +126,9 @@ public struct APIError: Error, Equatable, Sendable {
                 retryAfter: TimeInterval? = nil) {
         self.status = status
         self.token = token
-        self.retryable = retryable
+        self.retryable = token == .internalError ? false : retryable
         self.requestID = requestID
-        self.retryAfter = retryAfter
+        self.retryAfter = token == .internalError ? nil : retryAfter
     }
 
     /// Reads `{error, retryable, request_id}`. A body that is missing or

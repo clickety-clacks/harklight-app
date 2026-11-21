@@ -938,6 +938,7 @@ final class NativeRelayLifecycle {
     let clientAPIV2Enabled: Bool
     private var v2Connection: ClientAPIv2Connection?
     private var v2FocusChannel: ClientAPIFocusChannel?
+    private var v2PushWaitsForInternalError = false
     private var v2ShowLookup: Task<Void, Never>?
     private var pendingV2Show: (show: ClientAPIShow, receivedAt: Date)?
     private let v2FocusReporter: NativeFocusReporter
@@ -952,6 +953,9 @@ final class NativeRelayLifecycle {
     private let v2LegacyAddressStore: @MainActor () throws -> DevelopmentAPNsAddressStore
     var onV2AccountAccessChanged: ((ClientAPIAccessState, ProfileContext) -> Void)?
     var v2AccountAccess: ClientAPIAccessState? { v2Connection?.access.state }
+    var shouldPollV2PausedAccount: Bool {
+        v2Connection?.access.state == .paused && v2Connection?.canPollMe == true
+    }
     private var sceneIsActive = false
 
     var usesClientAPIV2: Bool { v2Connection != nil }
@@ -1030,6 +1034,7 @@ final class NativeRelayLifecycle {
         guard clientAPIV2Enabled else { return }
         sceneIsActive = isActive
         if isActive {
+            v2PushWaitsForInternalError = false
             startV2Foreground()
             _ = requestV2PushRegistration()
         } else {
@@ -1049,6 +1054,23 @@ final class NativeRelayLifecycle {
             // A foreground transition may arrive before the cancelled feed exits.
             if Task.isCancelled { self.startV2Foreground() }
         }
+    }
+
+    func retryV2InternalError(_ record: ErrorLogRecord) async {
+        guard sceneIsActive, let connection = v2Connection, v2DepartureTask == nil else { return }
+        if ["push_registration", "register_push", "remove_push"].contains(record.operation) {
+            v2PushWaitsForInternalError = false
+            _ = requestV2PushRegistration()
+            return
+        }
+        if record.operation == "focus" {
+            await v2FocusChannel?.retryInternalError()
+            return
+        }
+        do { try await connection.retryInternalError(record) }
+        catch { return }
+        guard record.concern == .sync, v2Connection === connection else { return }
+        startV2Foreground()
     }
 
     static func v2Directory(for identity: ProfileIdentity) throws -> URL {
@@ -1337,8 +1359,10 @@ final class NativeRelayLifecycle {
                 Task { @MainActor [weak self] in
                     guard let self, self.activeTransportAttemptID == attempt else { return }
                     self.confirmedRelayContext = context
-                    if self.v2Connection?.priorityLevelsEditorWasOpened == true {
-                        await self.refreshPriorityLevels(expected: context)
+                    if let connection = self.v2Connection, connection.priorityLevelsEditorWasOpened {
+                        await connection.refreshPriorityLevels(userInitiated: false)
+                        guard self.activeTransportAttemptID == attempt else { return }
+                        self.publishPriorityLevelsUpdate(for: context)
                     }
                 }
             }, onShow: { data in
@@ -1462,11 +1486,6 @@ final class NativeRelayLifecycle {
         } catch is CancellationError {
             return false
         } catch {
-            let reason: ErrorLogReason = error is ServerModelV2Store.SupersededGeneration
-                ? .app("snapshot_superseded") : .from(error: error)
-            errorLog.report(ErrorLogReport(concern: .snapshot, connectionRole: .request,
-                operation: "load_entries", phase: "read", reason: reason,
-                initiator: .unknown, retryable: true))
             return false
         }
     }
@@ -1531,7 +1550,7 @@ final class NativeRelayLifecycle {
 
     @discardableResult
     private func requestV2PushRegistration() -> Task<Bool, Never>? {
-        guard sceneIsActive, v2DepartureTask == nil, let connection = v2Connection,
+        guard sceneIsActive, !v2PushWaitsForInternalError, v2DepartureTask == nil, let connection = v2Connection,
               connection.access.state == .available, let context else { return nil }
         v2PushRegistrationRequested = true
         v2PushRetryTask?.cancel()
@@ -1572,7 +1591,8 @@ final class NativeRelayLifecycle {
                 do {
                     hasBinding = try await connection.push.status().bindingID != nil
                 } catch {
-                    if !Task.isCancelled, v2Connection === connection { scheduleV2PushRetry(connection: connection) }
+                    if (error as? APIError)?.token != .internalError,
+                       !Task.isCancelled, v2Connection === connection { scheduleV2PushRetry(connection: connection) }
                     throw error
                 }
                 let latestPermission = await v2NotificationPermission.status()
@@ -1598,7 +1618,8 @@ final class NativeRelayLifecycle {
                     }
                     cancelV2PushRetry()
                 } catch {
-                    if !Task.isCancelled, v2Connection === connection { scheduleV2PushRetry(connection: connection) }
+                    if (error as? APIError)?.token != .internalError,
+                       !Task.isCancelled, v2Connection === connection { scheduleV2PushRetry(connection: connection) }
                     throw error
                 }
                 // Permission may have changed while the DELETE was in flight.
@@ -1642,7 +1663,14 @@ final class NativeRelayLifecycle {
             if !stillAllowed { v2PushRegistrationRequested = true }
             return stillAllowed
         } catch {
-            if !Task.isCancelled, v2Connection === connection { recordPushRegistrationFailure(error) }
+            if !Task.isCancelled, v2Connection === connection {
+                if (error as? APIError)?.token == .internalError {
+                    v2PushWaitsForInternalError = true
+                    v2PushRegistrationRequested = false
+                    cancelV2PushRetry()
+                }
+                recordPushRegistrationFailure(error)
+            }
             return false
         }
     }
@@ -1724,6 +1752,7 @@ final class NativeRelayLifecycle {
         pushRegistration?.cancel()
         let focus = v2FocusChannel
         v2FocusChannel = nil
+        v2PushWaitsForInternalError = false
         v2ShowLookup?.cancel()
         v2ShowLookup = nil
         pendingV2Show = nil
@@ -1790,7 +1819,9 @@ final class NativeRelayLifecycle {
         if let connection = v2Connection, let context {
             let attempt = activeTransportAttemptID
             do {
-                if connection.access.state == .paused { try await connection.refreshMe() }
+                if connection.access.state == .paused {
+                    try await connection.refreshMe(userInitiated: checkBlockedPush)
+                }
                 guard v2Connection === connection, connection.access.state == .available else { return .unavailable }
                 try await connection.catchUp()
                 guard v2Connection === connection else { return .unavailable }
@@ -1836,7 +1867,7 @@ final class NativeRelayLifecycle {
     func refreshPriorityLevels(expected: ProfileContext) async {
         if let connection = v2Connection {
             guard context == expected, sceneIsActive, priorityLevelsFeatureEnabled else { return }
-            await connection.refreshPriorityLevels()
+            await connection.refreshPriorityLevels(userInitiated: true)
             return
         }
         guard featureFlags.isEnabled(.priorityLevelEditing),

@@ -724,6 +724,12 @@ private struct ConversationPendingSubmissionView: View {
                 Button("Cancel upload") { Task { await cancelUpload() } }
                     .accessibilityIdentifier("conversation-pending-cancel-upload")
             }
+            if submission.isQueued, case .outcomeUnknown = submission.disposition {
+                ErrorLogContextBanner(surface: .item(clientOperationID: submission.id))
+                Button("Retry", action: retry)
+                    .disabled(!retryEnabled || isClosed)
+                    .accessibilityIdentifier("conversation-pending-retry")
+            }
             if case let .rejected(reason) = submission.disposition, !isClosed {
                 HStack {
                     Button("Retry", action: retry)

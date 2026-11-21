@@ -2731,9 +2731,11 @@ final class LivePresentationStore {
     func canRetryQueuedChatMessage(_ operation: UUID, for key: RequestKey) -> Bool {
         guard canSendToCurrentServer, !isReadOnly, let thread = conversationThreads[key],
               thread.isComposerOpen,
-              let message = thread.queuedMessages?.first(where: { $0.operationID == operation }),
-              case .rejected = message.disposition else { return false }
-        return true
+              let message = thread.queuedMessages?.first(where: { $0.operationID == operation }) else { return false }
+        switch message.disposition {
+        case .rejected, .outcomeUnknown: return true
+        default: return false
+        }
     }
 
     func retryQueuedChatMessage(_ operation: UUID, for key: RequestKey) {

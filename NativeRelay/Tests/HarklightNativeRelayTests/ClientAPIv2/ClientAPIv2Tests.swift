@@ -30,6 +30,49 @@ final class ClientAPIAccessTests: XCTestCase {
             directory: directory, errors: RecordingErrorLogV2(), foregroundOnlyWrites: true)
     }
 
+    func testInternalErrorOnSnapshotReadRequiresActionAndKeepsCopyableDetails() async throws {
+        let server = FakeClientAPIServer()
+        server.meBody = #"{"account":{"state":"active"},"features":{},"limits":{}}"#
+        let body = Data(#"{"error":"internal_error","retryable":false,"message":"do not copy me"}"#.utf8)
+        let failure = APIError(status: 500, body: body, requestID: "req-render-me", retryAfter: 4)
+        XCTAssertEqual(failure.token, .internalError)
+        XCTAssertFalse(failure.retryable)
+        XCTAssertFalse(failure.isPermanent)
+        XCTAssertNil(failure.retryAfter)
+        server.nextMeFailure = failure
+
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                                       personID: ExactText("person"), deviceID: ExactText("device"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let repository = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let logURL = directory.appendingPathComponent("error-log.json")
+        let build = ErrorLogBuild(version: "0.2.0", build: "1", commit: "f536273")
+        let errors = ErrorLogStore(fileURL: logURL, build: build)
+        let connection = try ClientAPIv2Connection(transport: server, repository: repository, context: context,
+            directory: nil, errors: errors, meWaitBeforeRetry: { _ in XCTFail("Automatic retry scheduled") })
+
+        await connection.readMeUntilRead()
+        XCTAssertEqual(server.received.map(\.path), ["/v2/me"])
+        let failureRecord = try XCTUnwrap(errors.records.first)
+        XCTAssertEqual(failureRecord.code, "internal_error")
+        XCTAssertFalse(failureRecord.retryable)
+        XCTAssertEqual(failureRecord.httpStatus, 500)
+        let details = ErrorLogDetails.text(for: failureRecord)
+        XCTAssertTrue(details.contains("request_id: req-render-me"))
+        XCTAssertTrue(details.contains("operation: me"))
+        XCTAssertFalse(details.contains("do not copy me"))
+
+        try await connection.retryInternalError(failureRecord)
+        XCTAssertEqual(server.received.map(\.path), ["/v2/me", "/v2/me"])
+        errors.flush()
+        let reopened = ErrorLogStore(fileURL: logURL, build: build)
+        XCTAssertEqual(reopened.records.first?.correlation.requestID, "req-render-me")
+        XCTAssertEqual(reopened.records.first?.isResolved, true)
+    }
+
     func testPushSettingsAndWritesUseTheAccountAccessGate() async throws {
         let server = FakeClientAPIServer()
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -680,6 +723,38 @@ final class ActionOutboxTests: XCTestCase {
         } catch {}
         await box.flush()
         XCTAssertTrue(server.received.isEmpty)
+    }
+
+    func testInternalErrorAfterACommittedReplyRetainsTextAndReplaysOnlyOnAction() async throws {
+        let server = FakeClientAPIServer()
+        server.nextWriteFailures = [CommittedThenLost(error: APIError(status: 500, token: .internalError,
+            retryable: false, requestID: "req-render-reply"))]
+        let sent = ClientAPIWrites.reply(itemID: ExactText("a"), text: ExactText("Preserved reply"))
+        let persistence = MemoryOutboxPersistence()
+        let outcomes = RecordingOutcomes()
+        let errors = RecordingErrorLogV2()
+        let box = try outbox(server, persistence, outcomes, errors: errors, wait: { _, _ in
+            XCTFail("Automatic write retry scheduled")
+        })
+        let entry = try await box.submit(target: sent.target, operation: sent.operation, write: sent.write)
+        await eventually("the 500 is recorded") { errors.reports.first?.httpStatus == 500 }
+        let saved = try XCTUnwrap(try persistence.load().first)
+        XCTAssertTrue(saved.outcomeUnknown)
+        XCTAssertEqual(saved.waitsForInternalErrorRetry, true)
+        XCTAssertEqual(saved.write.body, sent.write.body)
+        XCTAssertEqual(saved.id, entry.id)
+        XCTAssertEqual(errors.reports.first?.correlation.requestID, "req-render-reply")
+        XCTAssertEqual(errors.reports.first?.retryable, false)
+        XCTAssertTrue(outcomes.rejected.isEmpty)
+
+        let reopened = try outbox(server, persistence, outcomes, errors: errors)
+        await reopened.flush()
+        XCTAssertEqual(server.received.count, 1)
+        await reopened.retryInternalErrors(operation: "reply")
+        XCTAssertEqual(server.received.map(\.idempotencyKey), [entry.id, entry.id])
+        XCTAssertEqual(outcomes.accepted.first?.1.replayed, true)
+        XCTAssertEqual(server.head, 1)
+        XCTAssertTrue(persistence.keys.isEmpty)
     }
 
     func testAnUnknownOutcomeIsResentWithTheSameKeyAndTheReplayCountsAsTheOriginal() async throws {
