@@ -87,7 +87,9 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
         self.sync = ChangeFeedSync(transport: transport, model: writer, errors: errors,
                                    waitBeforeRetry: waitBeforeRetry, onLiveState: { state in
                                        // Each time the feed is live again, send what the outbox holds.
-                                       if state == .live { relay.connection?.sendSavedWrites() }
+                                       if state == .live, !foregroundOnlyWrites {
+                                           relay.connection?.sendSavedWrites()
+                                       }
                                        onLiveState(state)
                                    })
         relay.connection = self
