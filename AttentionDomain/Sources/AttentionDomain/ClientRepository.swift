@@ -317,7 +317,8 @@ public final class ClientRepository: @unchecked Sendable {
     /// Replaces the disposable server cache. Pending user requests stay in the
     /// separate queue and cannot supply a missing server request or revision.
     public func restoreCachedServerState(_ cached: CachedAttentionServerState,
-                                         context suppliedContext: ProfileContext) throws {
+                                         context suppliedContext: ProfileContext,
+                                         mergePriorityLevels: Bool = false) throws {
         writerLock.lock()
         defer { writerLock.unlock() }
         lock.lock()
@@ -353,7 +354,11 @@ public final class ClientRepository: @unchecked Sendable {
         next.pendingRelayOverlays = cached.pendingRelayOverlays
         next.inboxReferences = cached.inboxReferences
         var priorityLevels = next.priorityLevels ?? .empty
-        priorityLevels.confirmedLevels = cached.priorityLevels
+        if mergePriorityLevels {
+            if let table = cached.priorityLevels { Self.applyPriorityLevelsRead(table, to: &priorityLevels) }
+        } else {
+            priorityLevels.confirmedLevels = cached.priorityLevels
+        }
         next.priorityLevels = priorityLevels
 
         var conversation = ConversationState()
@@ -1051,7 +1056,8 @@ public final class ClientRepository: @unchecked Sendable {
     }
 
     public func beginPriorityLevelsSave(_ table: [PriorityLevel],
-                                        context suppliedContext: ProfileContext) throws -> PendingPriorityLevelsSave {
+                                        context suppliedContext: ProfileContext,
+                                        ifMatch: String? = nil) throws -> PendingPriorityLevelsSave {
         writerLock.lock()
         defer { writerLock.unlock() }
         lock.lock()
@@ -1064,7 +1070,8 @@ public final class ClientRepository: @unchecked Sendable {
         }
         var levels = state.priorityLevels ?? .empty
         guard levels.pendingSave == nil else { throw AttentionStoreError.invalidSubmission }
-        let operation = PendingPriorityLevelsSave(levels: table, sourceDraftRevision: levels.draftRevision)
+        let operation = PendingPriorityLevelsSave(levels: table, sourceDraftRevision: levels.draftRevision,
+                                                  ifMatch: ifMatch)
         levels.pendingSave = operation
         levels.failureReason = nil
         var next = state
@@ -1132,6 +1139,13 @@ public final class ClientRepository: @unchecked Sendable {
             throw AttentionStoreError.invalidProjection
         }
         var levels = state.priorityLevels ?? .empty
+        Self.applyPriorityLevelsRead(table, to: &levels)
+        var next = state
+        next.priorityLevels = levels
+        try commit(next)
+    }
+
+    private static func applyPriorityLevelsRead(_ table: [PriorityLevel], to levels: inout PriorityLevelsStoreState) {
         let draftMatchesLastConfirmed: Bool
         if let draftRows = levels.draftRows {
             if draftRows.isEmpty {
@@ -1155,7 +1169,8 @@ public final class ClientRepository: @unchecked Sendable {
         } else {
             draftMatchesRead = false
         }
-        if levels.pendingSave == nil && draftMatchesLastConfirmed && !draftMatchesRead {
+        if levels.failureReason != "precondition_failed" &&
+            levels.pendingSave == nil && draftMatchesLastConfirmed && !draftMatchesRead {
             levels.draftRows = table.map(PriorityLevelDraftRow.init(level:))
         }
         if levels.pendingSave == nil,
@@ -1163,9 +1178,6 @@ public final class ClientRepository: @unchecked Sendable {
             levels.failureReason == "forbidden") {
             levels.failureReason = nil
         }
-        var next = state
-        next.priorityLevels = levels
-        try commit(next)
     }
 
     public func recordPriorityLevelsFailure(_ reason: String,

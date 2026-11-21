@@ -425,6 +425,27 @@ extension APISettings {
         rev = try reader.unsigned("rev")
         body = json
     }
+
+    /// A malformed or missing table leaves the other settings usable.
+    public var priorityLevels: [PriorityLevel]? {
+        guard let rows = body.uniqueValue(named: "priority_levels")?.arrayValues else { return nil }
+        if rows.isEmpty { return [] }
+        var drafts: [PriorityLevelDraftRow] = []
+        for row in rows {
+            guard row.hasUniqueObjectKeys, let name = row.uniqueValue(named: "name")?.stringValue,
+                  case let .number(bound)? = row.uniqueValue(named: "lower_bound"),
+                  let bounce = row.uniqueValue(named: "bounce_after_days") else { return nil }
+            let days: String
+            switch bounce {
+            case .null: days = ""
+            case let .number(value): days = value.lexeme
+            default: return nil
+            }
+            drafts.append(PriorityLevelDraftRow(name: name.rawValue, lowerBound: bound.lexeme,
+                                                bounceAfterDays: days))
+        }
+        return PriorityLevelsTableValidation.levels(from: drafts)
+    }
 }
 
 /// `{rev, items, counts, next_page?}`

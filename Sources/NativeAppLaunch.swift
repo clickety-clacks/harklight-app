@@ -1908,10 +1908,15 @@ final class LivePresentationStore {
         guard canSavePriorityLevels,
               let table = PriorityLevelsTableValidation.levels(from: priorityLevelsDraftRows) else { return }
         do {
-            _ = try attentionStore.beginPriorityLevelsSave(table, context: profileContext)
             priorityLevelsLocalError = nil
-            refreshPriorityLevelsProjection()
-            await NativeRelayLifecycle.shared.sendPendingPriorityLevelsSave(expected: profileContext)
+            let lifecycle = NativeRelayLifecycle.shared
+            if lifecycle.usesClientAPIV2 {
+                try await lifecycle.saveV2PriorityLevels(table, expected: profileContext)
+            } else {
+                _ = try attentionStore.beginPriorityLevelsSave(table, context: profileContext)
+                refreshPriorityLevelsProjection()
+                await lifecycle.sendPendingPriorityLevelsSave(expected: profileContext)
+            }
             refreshPriorityLevelsProjection()
         } catch {
             priorityLevelsLocalError = "This save could not be started. Your local edits are unchanged."

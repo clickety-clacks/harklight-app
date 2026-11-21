@@ -2772,7 +2772,7 @@ public actor NativeRelayCore {
             let initialState = try store.snapshot(context: context).priorityLevels
             let shouldSendSave = priorityLevelsSaveRequested
             priorityLevelsSaveRequested = false
-            if shouldSendSave, let pendingSave = initialState.pendingSave {
+            if shouldSendSave, let pendingSave = initialState.pendingSave, pendingSave.ifMatch == nil {
                 let response: Data
                 do {
                     response = try await pagingSession.inboxRequest(

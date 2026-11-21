@@ -245,6 +245,11 @@ public final class ServerModelV2Store: @unchecked Sendable {
     /// passed to `onUnreadable` as `ClientAPIModelError.unknownKind`.
     public static let knownKinds: Set<String> = ["item", "item_removed", "entry", "counts", "settings"]
 
+    /// Settings revision and history generation from the same model snapshot.
+    public var settingsPosition: (revision: UInt64?, generation: UInt64) {
+        lock.withLock { (model.settings?.rev, generation) }
+    }
+
     /// Applies feed changes and records `cursor`, in one save. A change that
     /// cannot be read is passed to `onUnreadable`: returning skips it, and
     /// throwing abandons the whole batch, which saves nothing.

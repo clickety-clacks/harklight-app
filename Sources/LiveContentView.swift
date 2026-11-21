@@ -1105,6 +1105,8 @@ private struct PriorityLevelsSettingsSection: View {
                 return "The Server rejected this table. Correct the values and save again; the previous applied table remains in place."
             case "operation_conflict":
                 return "The Server rejected this save because its operation conflicted. Your draft remains here; another save will use a new operation."
+            case "precondition_failed":
+                return "Priority levels changed on the Server. Your draft is still here. Compare it with the confirmed table before saving again."
             default:
                 if store.priorityLevelsState.pendingSave != nil {
                     return "The Server did not confirm this save. The same operation will retry after reconnection; later edits stay separate."
