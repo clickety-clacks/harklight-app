@@ -1,3 +1,4 @@
+import AttentionDomain
 import Foundation
 @testable import HarklightNativeRelay
 import XCTest
@@ -74,7 +75,7 @@ final class ChangeFeedSyncTests: XCTestCase {
         server.commit("item", "{}")
         let model = RecordingSyncModel(snapshotRev: { server.head })
         let cursor = MemoryRevCursor()
-        let sync = ChangeFeedSync(transport: server, cursor: cursor, model: model,
+        let sync = ChangeFeedSync(transport: server, model: model.using(cursor),
                                   errors: RecordingErrorLogV2(), waitBeforeRetry: noWait)
         let run = Task { await sync.runForeground() }
         await eventually("the feed is open") { server.openFeedCount == 1 }
@@ -98,7 +99,7 @@ final class ChangeFeedSyncTests: XCTestCase {
             XCTAssertLessThan((try? cursor.load()) ?? 0, change.rev)
         }
         let errors = RecordingErrorLogV2()
-        let sync = ChangeFeedSync(transport: server, cursor: cursor, model: model, errors: errors,
+        let sync = ChangeFeedSync(transport: server, model: model.using(cursor), errors: errors,
                                   waitBeforeRetry: noWait)
         server.commit("item", "{}")
         server.commit("item", "{}")
@@ -116,7 +117,7 @@ final class ChangeFeedSyncTests: XCTestCase {
         server.prune(through: 4)
         let model = RecordingSyncModel(snapshotRev: { server.head })
         let cursor = MemoryRevCursor(1)
-        let sync = ChangeFeedSync(transport: server, cursor: cursor, model: model,
+        let sync = ChangeFeedSync(transport: server, model: model.using(cursor),
                                   errors: RecordingErrorLogV2(), waitBeforeRetry: noWait)
         let run = Task { await sync.runForeground() }
         await eventually("the feed reopens from the snapshot") { server.openFeedCount == 1 }
@@ -131,7 +132,7 @@ final class ChangeFeedSyncTests: XCTestCase {
         let server = FakeClientAPIServer()
         let model = RecordingSyncModel(snapshotRev: { 0 })
         let errors = RecordingErrorLogV2()
-        let sync = ChangeFeedSync(transport: server, cursor: MemoryRevCursor(0), model: model, errors: errors,
+        let sync = ChangeFeedSync(transport: server, model: model.using(MemoryRevCursor(0)), errors: errors,
                                   waitBeforeRetry: noWait)
         let run = Task { await sync.runForeground() }
         await eventually("open") { server.openFeedCount == 1 }
@@ -155,7 +156,7 @@ final class ChangeFeedSyncTests: XCTestCase {
         let model = RecordingSyncModel(snapshotRev: { 0 })
         model.failApplyAt = 4
         let cursor = MemoryRevCursor(1)
-        let sync = ChangeFeedSync(transport: server, cursor: cursor, model: model,
+        let sync = ChangeFeedSync(transport: server, model: model.using(cursor),
                                   errors: RecordingErrorLogV2(), waitBeforeRetry: noWait)
         do { try await sync.catchUp(); XCTFail("The failed apply ends the catch-up.") } catch {}
         XCTAssertEqual(try cursor.load(), 3, "The first batch (2, 3) is kept; the failed change is not.")
@@ -171,7 +172,7 @@ final class ChangeFeedSyncTests: XCTestCase {
         server.commit("item", "{}")
         let model = RecordingSyncModel(snapshotRev: { server.head })
         let cursor = MemoryRevCursor(0)
-        let sync = ChangeFeedSync(transport: server, cursor: cursor, model: model,
+        let sync = ChangeFeedSync(transport: server, model: model.using(cursor),
                                   errors: RecordingErrorLogV2(), waitBeforeRetry: noWait)
         try await sync.catchUp()
         XCTAssertEqual(model.rebaselines, 1)
@@ -182,8 +183,7 @@ final class ChangeFeedSyncTests: XCTestCase {
         let server = FakeClientAPIServer()
         server.feedFailure = URLError(.clientCertificateRejected)
         let errors = RecordingErrorLogV2()
-        let sync = ChangeFeedSync(transport: server, cursor: MemoryRevCursor(0),
-                                  model: RecordingSyncModel(snapshotRev: { 0 }), errors: errors,
+        let sync = ChangeFeedSync(transport: server, model: RecordingSyncModel(snapshotRev: { 0 }).using(MemoryRevCursor(0)), errors: errors,
                                   waitBeforeRetry: noWait)
         await sync.runForeground()
         let state = await sync.liveState
@@ -195,7 +195,7 @@ final class ChangeFeedSyncTests: XCTestCase {
         let server = FakeClientAPIServer()
         let cursor = MemoryRevCursor(0)
         let model = RecordingSyncModel(snapshotRev: { 0 })
-        let sync = ChangeFeedSync(transport: server, cursor: cursor, model: model,
+        let sync = ChangeFeedSync(transport: server, model: model.using(cursor),
                                   errors: RecordingErrorLogV2(), waitBeforeRetry: noWait)
         let run = Task { await sync.runForeground() }
         await eventually("open") { server.openFeedCount == 1 }
@@ -216,11 +216,23 @@ final class ChangeFeedSyncTests: XCTestCase {
         // A snapshot that is itself already too old to resume from.
         let model = RecordingSyncModel(snapshotRev: { 1 })
         let errors = RecordingErrorLogV2()
-        let sync = ChangeFeedSync(transport: server, cursor: MemoryRevCursor(1), model: model, errors: errors,
+        let sync = ChangeFeedSync(transport: server, model: model.using(MemoryRevCursor(1)), errors: errors,
                                   waitBeforeRetry: noWait)
         do { try await sync.catchUp(); XCTFail("A second 410 ends the catch-up.") } catch {}
         XCTAssertEqual(model.rebaselines, 1, "No rebaseline loop.")
         XCTAssertEqual(errors.reports.first?.operation, "catch_up")
+    }
+
+    func testA401OnTheFeedStopsSyncLikeATLSRefusal() async throws {
+        let server = FakeClientAPIServer()
+        server.feedFailure = APIError(status: 401, token: .unauthorized, retryable: false, requestID: "r")
+        let errors = RecordingErrorLogV2()
+        let sync = ChangeFeedSync(transport: server, model: RecordingSyncModel(snapshotRev: { 0 }).using(MemoryRevCursor(0)),
+                                  errors: errors, waitBeforeRetry: noWait)
+        await sync.runForeground()
+        let state = await sync.liveState
+        XCTAssertEqual(state, .stopped)
+        XCTAssertEqual(errors.reports.map(\.initiator), [.deviceRevoked])
     }
 
     func testPushCatchUpAppliesEveryBatchFromTheCursor() async throws {
@@ -228,7 +240,7 @@ final class ChangeFeedSyncTests: XCTestCase {
         for _ in 0..<5 { server.commit("item", "{}") }
         let model = RecordingSyncModel(snapshotRev: { 0 })
         let cursor = MemoryRevCursor(1)
-        let sync = ChangeFeedSync(transport: server, cursor: cursor, model: model,
+        let sync = ChangeFeedSync(transport: server, model: model.using(cursor),
                                   errors: RecordingErrorLogV2(), waitBeforeRetry: noWait)
         try await sync.catchUp()
         XCTAssertEqual(model.applied, [2, 3, 4, 5])
@@ -373,6 +385,33 @@ final class ActionOutboxTests: XCTestCase {
         XCTAssertEqual(outcomes.accepted.map(\.0), [entry.idempotencyKey])
     }
 
+    func testA401OnAnOpenConnectionHoldsTheOutboxLikeATLSRefusal() async throws {
+        let server = FakeClientAPIServer()
+        server.nextWriteFailures = [APIError(status: 401, token: .unauthorized, retryable: false, requestID: "r")]
+        let persistence = MemoryOutboxPersistence()
+        let outcomes = RecordingOutcomes()
+        let box = try outbox(server, persistence, outcomes)
+        let entry = try await box.submit(target: "a", operation: "mark_seen", write: seen)
+        await eventually("held") { await box.unauthorized }
+        XCTAssertTrue(outcomes.rejected.isEmpty)
+        XCTAssertEqual(persistence.keys, [entry.idempotencyKey], "Kept for review after re-enrolment.")
+    }
+
+    func testA4xxOutsideTheContractIsGivenUpAfterAFewTries() async throws {
+        let outside = APIError(status: 404, body: Data("<html>not here</html>".utf8), requestID: nil, retryAfter: nil)
+        XCTAssertTrue(outside.isOutsideContractClientError)
+        let server = FakeClientAPIServer()
+        server.nextWriteFailures = [outside, outside, outside]
+        let outcomes = RecordingOutcomes()
+        let box = try outbox(server, MemoryOutboxPersistence(), outcomes)
+        try await box.submit(target: "a", operation: "mark_seen", write: seen)
+        await eventually("first try") { server.received.count == 1 }
+        await box.flush()
+        await box.flush()
+        XCTAssertEqual(server.received.count, 3)
+        XCTAssertEqual(outcomes.rejected.count, 1, "It no longer blocks the item's later writes.")
+    }
+
     func testAForbiddenWriteIsADefinitiveRefusal() async throws {
         let server = FakeClientAPIServer()
         server.nextWriteFailures = [APIError(status: 403, body: Data(#"{"error":"forbidden","retryable":false,"request_id":"r"}"#.utf8),
@@ -410,8 +449,7 @@ final class ClientAPIIsolationTests: XCTestCase {
         let server = FakeClientAPIServer()
         server.feedFailure = failure
         let errors = RecordingErrorLogV2()
-        let sync = ChangeFeedSync(transport: server, cursor: MemoryRevCursor(0),
-                                  model: RecordingSyncModel(snapshotRev: { 0 }), errors: errors,
+        let sync = ChangeFeedSync(transport: server, model: RecordingSyncModel(snapshotRev: { 0 }).using(MemoryRevCursor(0)), errors: errors,
                                   waitBeforeRetry: noWait)
         let run = Task { await sync.runForeground() }
         await eventually("the feed failure was reported") { errors.reports.contains { $0.concern == .sync } }

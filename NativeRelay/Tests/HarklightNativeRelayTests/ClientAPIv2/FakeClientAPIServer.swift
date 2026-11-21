@@ -1,3 +1,4 @@
+import AttentionDomain
 import Foundation
 @testable import HarklightNativeRelay
 
@@ -23,6 +24,8 @@ final class FakeClientAPIServer: ClientAPITransport, @unchecked Sendable {
     var feedFailure: (any Error)?
     /// Queued answers for writes, consumed in order; nil means accept.
     var nextWriteFailures: [(any Error)?] = []
+    /// Item JSON served by GET /v2/inbox.
+    var inboxItems: [String] = []
     /// Suspends a write to `path` until released.
     var holdWrites: [String: AsyncGate] = [:]
 
@@ -88,7 +91,10 @@ final class FakeClientAPIServer: ClientAPITransport, @unchecked Sendable {
             if request.method != .get { keysPersistedAtSend.append(persisted) }
         }
         if request.method == .get {
-            return APIResponse(status: 200, requestID: nextRequestID(), body: Data(#"{"rev":\#(head)}"#.utf8))
+            // The inbox as a snapshot: the items the fake serves, at its head.
+            let items = lock.withLock { inboxItems.joined(separator: ",") }
+            return APIResponse(status: 200, requestID: nextRequestID(),
+                               body: Data(#"{"rev":\#(head),"items":[\#(items)],"counts":{"unresolved":0}}"#.utf8))
         }
         if let gate = lock.withLock({ holdWrites[request.path] }) { await gate.wait() }
         let digest = (request.path + request.method.rawValue).data(using: .utf8)! + (request.body ?? Data())
@@ -180,39 +186,56 @@ final class AsyncGate: @unchecked Sendable {
 }
 
 /// A local model that records what Sync applied, through the version gate.
+/// A local model that records what Sync applied, through the version gate,
+/// and holds Sync's cursor with it.
 final class RecordingSyncModel: SyncModelWriting, @unchecked Sendable {
     private let lock = NSLock()
     private var gate = RevGate()
     private(set) var applied: [Rev] = []
     private(set) var rebaselines = 0
+    private(set) var batches: [[Rev]] = []
+    var cursor = MemoryRevCursor()
     var snapshotRev: () -> Rev
     var failApplyAt: Rev?
     var onApply: ((FeedChange) -> Void)?
 
     init(snapshotRev: @escaping () -> Rev) { self.snapshotRev = snapshotRev }
 
-    func apply(_ change: FeedChange) async throws {
+    /// Starts from a held cursor (nil means first run).
+    func using(_ cursor: MemoryRevCursor) -> Self {
+        self.cursor = cursor
+        return self
+    }
+
+    func heldCursor() throws -> Rev? { try cursor.load() }
+
+    func apply(_ changes: [FeedChange], cursor rev: Rev) async throws {
+        for change in changes { onApply?(change) }
         try lock.withLock {
-            if failApplyAt == change.rev {
-                failApplyAt = nil
+            if let failApplyAt, changes.contains(where: { $0.rev == failApplyAt }) {
+                self.failApplyAt = nil
                 throw CocoaError(.fileWriteUnknown)
             }
-            if gate.admit("log", rev: change.rev) { applied.append(change.rev) }
+            batches.append(changes.map(\.rev))
+            for change in changes where gate.admit("log", rev: change.rev) { applied.append(change.rev) }
         }
-        onApply?(change)
+        try cursor.save(max((try cursor.load()) ?? 0, rev))
     }
 
     func rebaseline() async throws -> Rev {
-        lock.withLock {
+        let rev = lock.withLock { () -> Rev in
             rebaselines += 1
             let rev = snapshotRev()
             _ = gate.admit("log", rev: rev)
             return rev
         }
+        try cursor.save(rev)
+        return rev
     }
 }
 
-final class MemoryRevCursor: RevCursorStore, @unchecked Sendable {
+/// Sync's cursor as the test model holds it.
+final class MemoryRevCursor: @unchecked Sendable {
     private let lock = NSLock()
     private var value: Rev?
     private(set) var saves: [Rev] = []

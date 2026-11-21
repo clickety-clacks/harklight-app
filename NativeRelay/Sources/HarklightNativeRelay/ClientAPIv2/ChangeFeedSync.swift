@@ -1,20 +1,28 @@
 import Foundation
 
-/// Durable home of Sync's one cursor: the last applied `rev`.
-public protocol RevCursorStore: Sendable {
-    func load() throws -> Rev?
-    func save(_ rev: Rev) throws
+/// The local model as Sync writes it. The model holds Sync's one cursor (the
+/// last applied `rev`) with its data, so the two are saved together and a
+/// model that is discarded takes its cursor with it.
+///
+/// Every write goes through the version gate (a change or snapshot older
+/// than what is held is a no-op), so order relative to reads and writes
+/// never matters.
+public protocol SyncModelWriting: Sendable {
+    /// The cursor saved with the model; nil before the first snapshot or
+    /// after the model was discarded, which makes Sync take a snapshot.
+    func heldCursor() throws -> Rev?
+    /// Applies `changes` (in `rev` order) and records `cursor`, in one
+    /// durable write. A change the writer cannot read is reported and skipped
+    /// by the writer, never retried; a failed save throws and applies nothing.
+    func apply(_ changes: [FeedChange], cursor: Rev) async throws
+    /// Takes one inbox snapshot and records its position as the cursor.
+    func rebaseline() async throws -> Rev
 }
 
-/// Writes the local model for Sync. Both calls persist durably before they
-/// return, and both go through the version gate (a change or snapshot older
-/// than what is held is a no-op), so their order relative to reads and
-/// writes never matters.
-public protocol SyncModelWriting: Sendable {
-    func apply(_ change: FeedChange) async throws
-    /// Takes one inbox snapshot through the Snapshot Reader and returns the
-    /// `rev` it reflects, the starting point for the feed.
-    func rebaseline() async throws -> Rev
+/// Thrown by a model writer that met a change it cannot read but should not
+/// skip: Sync rebaselines from a full snapshot and continues.
+public struct SyncNeedsRebaseline: Error, Equatable {
+    public init() {}
 }
 
 /// Sync (design section 3) over the r2 change feed. It owns the only feed
@@ -34,7 +42,6 @@ public actor ChangeFeedSync {
     static let catchUpOperation = "catch_up"
 
     private let transport: any ClientAPITransport
-    private let cursor: any RevCursorStore
     private let model: any SyncModelWriting
     private let errors: any ErrorLogging
     private let waitBeforeRetry: @Sendable (_ attempt: Int) async throws -> Void
@@ -43,12 +50,11 @@ public actor ChangeFeedSync {
         didSet { if liveState != oldValue { onLiveState(liveState) } }
     }
 
-    public init(transport: any ClientAPITransport, cursor: any RevCursorStore, model: any SyncModelWriting,
+    public init(transport: any ClientAPITransport, model: any SyncModelWriting,
                 errors: any ErrorLogging,
                 waitBeforeRetry: @escaping @Sendable (_ attempt: Int) async throws -> Void = ChangeFeedSync.backoff,
                 onLiveState: @escaping @Sendable (LiveState) -> Void = { _ in }) {
         self.transport = transport
-        self.cursor = cursor
         self.model = model
         self.errors = errors
         self.waitBeforeRetry = waitBeforeRetry
@@ -88,37 +94,47 @@ public actor ChangeFeedSync {
     /// holding a stream.
     public func catchUp() async throws {
         do {
-            var after = try await startingRev()
-            var rebaselined = false
-            while true {
-                let batch: FeedBatch
+            _ = try await drainBatches(from: startingRev())
+            errors.resolve(concern: .sync, operation: Self.catchUpOperation)
+        } catch {
+            let cause = (error as? ApplyFailure)?.underlying ?? error
+            report(Self.catchUpOperation, phase: error is ApplyFailure ? "apply" : "batch", error: cause,
+                   initiator: .forFailure(cause))
+            throw cause
+        }
+    }
+
+    /// Applies JSON batches from `after` until none is left, one durable
+    /// write per batch, and returns the new cursor. Rebaselines at most once.
+    private func drainBatches(from start: Rev) async throws -> Rev {
+        var after = start
+        var rebaselined = false
+        while true {
+            let batch: FeedBatch
+            do {
+                batch = try await transport.changeBatch(after: after)
+            } catch let error as APIError where error.token == .cursorExpired && !rebaselined {
+                // One rebaseline per drain; a second 410 is reported.
+                rebaselined = true
+                after = try await rebaseline()
+                continue
+            }
+            let fresh = batch.changes.filter { $0.rev > after }
+            // Every batch is gap-free and reflects the log through its `rev`.
+            let through = max(batch.rev, fresh.last?.rev ?? after)
+            if through > after {
                 do {
-                    batch = try await transport.changeBatch(after: after)
-                } catch let error as APIError where error.token == .cursorExpired && !rebaselined {
-                    // One rebaseline per catch-up; a second 410 is reported.
+                    try await apply(fresh, cursor: through)
+                } catch let failure as ApplyFailure where failure.underlying is SyncNeedsRebaseline && !rebaselined {
                     rebaselined = true
                     after = try await rebaseline()
                     continue
                 }
-                let before = after
-                for change in batch.changes where change.rev > after {
-                    try await apply(change)
-                    after = change.rev
-                }
-                // Every batch is gap-free and reflects the log through its
-                // `rev`, so the cursor advances per batch.
-                if batch.rev > after {
-                    try advance(to: batch.rev)
-                    after = batch.rev
-                }
-                guard batch.more else { break }
-                // `more` without progress would loop; stop and report it.
-                guard after > before else { throw FeedDecodingError.outOfOrder }
             }
-            errors.resolve(concern: .sync, operation: Self.catchUpOperation)
-        } catch {
-            report(Self.catchUpOperation, phase: "batch", error: error, initiator: .forFailure(error))
-            throw error
+            guard batch.more else { return max(after, through) }
+            // `more` without progress would loop; stop and report it.
+            guard through > after else { throw FeedDecodingError.outOfOrder }
+            after = through
         }
     }
 
@@ -140,10 +156,13 @@ public actor ChangeFeedSync {
             return .dropped(.forFailure(error), retryPromptly: false)
         }
         liveState = .catchingUp
-        var last = after
         feedRequestID = nil
         do {
-            for try await event in transport.changeFeed(after: after) {
+            // The backlog comes by batch (one write per batch); the stream
+            // then carries only live changes.
+            let caughtUp = try await drainBatches(from: after)
+            var last = caughtUp
+            for try await event in transport.changeFeed(after: caughtUp) {
                 switch event {
                 case let .opened(requestID):
                     feedRequestID = requestID
@@ -154,7 +173,7 @@ public actor ChangeFeedSync {
                     continue
                 case let .change(change):
                     guard change.rev > last else { continue }
-                    try await apply(change)
+                    try await apply([change], cursor: change.rev)
                     last = change.rev
                 case let .closing(reason):
                     let initiator = Self.initiator(forClosingReason: reason)
@@ -188,6 +207,14 @@ public actor ChangeFeedSync {
             return .revoked
         } catch is CancellationError {
             return .cancelled
+        } catch let error as ApplyFailure where error.underlying is SyncNeedsRebaseline {
+            do {
+                _ = try await rebaseline()
+                return .dropped(.unknown, retryPromptly: true)
+            } catch {
+                report(Self.feedOperation, phase: "rebaseline", error: error, initiator: .forFailure(error))
+                return .dropped(.forFailure(error), retryPromptly: false)
+            }
         } catch let error as ApplyFailure {
             report(Self.feedOperation, phase: "apply", error: error.underlying, initiator: .unknown)
             return .dropped(.unknown, retryPromptly: false)
@@ -204,31 +231,23 @@ public actor ChangeFeedSync {
 
     /// The cursor, or a fresh snapshot's `rev` on first run.
     private func startingRev() async throws -> Rev {
-        if let held = try cursor.load() { return held }
+        if let held = try model.heldCursor() { return held }
         return try await rebaseline()
     }
 
+    /// A rebaseline replaces the cursor, even with a lower value: the
+    /// server's log may have started over.
     private func rebaseline() async throws -> Rev {
-        let rev = try await model.rebaseline()
-        // A rebaseline replaces the cursor, even with a lower value: the
-        // server's log may have started over.
-        try cursor.save(rev)
-        return rev
+        try await model.rebaseline()
     }
 
-    /// The cursor moves to a change's `rev` only after the model holds it.
-    private func apply(_ change: FeedChange) async throws {
+    /// The cursor moves only with the changes, in the same durable write.
+    private func apply(_ changes: [FeedChange], cursor: Rev) async throws {
         do {
-            try await model.apply(change)
+            try await model.apply(changes, cursor: cursor)
         } catch {
             throw ApplyFailure(underlying: error)
         }
-        try advance(to: change.rev)
-    }
-
-    private func advance(to rev: Rev) throws {
-        if let held = try cursor.load(), held >= rev { return }
-        try cursor.save(rev)
     }
 
     /// The open feed's Request-Id, which correlates every report about it.
@@ -261,29 +280,5 @@ public actor ChangeFeedSync {
         let value = error as NSError
         return value.domain == NSURLErrorDomain &&
             (value.code == NSURLErrorClientCertificateRejected || value.code == NSURLErrorClientCertificateRequired)
-    }
-}
-
-/// The durable cursor in a small file of its own, written atomically.
-public final class FileRevCursorStore: RevCursorStore, @unchecked Sendable {
-    private let url: URL
-    private let lock = NSLock()
-
-    public init(url: URL) { self.url = url }
-
-    public func load() throws -> Rev? {
-        lock.lock(); defer { lock.unlock() }
-        guard let data = try? Data(contentsOf: url) else { return nil }
-        guard let text = String(data: data, encoding: .utf8), let rev = Rev(text) else {
-            throw FeedDecodingError.missingRev
-        }
-        return rev
-    }
-
-    public func save(_ rev: Rev) throws {
-        lock.lock(); defer { lock.unlock() }
-        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
-                                                withIntermediateDirectories: true)
-        try Data(String(rev).utf8).write(to: url, options: [.atomic])
     }
 }

@@ -166,7 +166,11 @@ public actor ActionOutbox {
             unauthorized = true
             report(entry, phase: "send", error: error, initiator: .deviceRevoked, retryable: false)
             return false
-        } catch let error as APIError where error.isPermanent {
+        } catch let error as APIError where error.isPermanent || (error.isOutsideContractClientError &&
+                    attempts(of: entry.idempotencyKey) >= Self.outsideContractAttempts) {
+            // A contract refusal is definitive at once. A 4xx outside the
+            // contract (no contract body) is retried a few times, then given
+            // up, so it cannot block that item's later writes forever.
             await outcomes.rejected(entry, error: error)
             remove(entry.idempotencyKey)
             report(entry, phase: "send", error: error, initiator: .unknown, retryable: false)
@@ -199,6 +203,13 @@ public actor ActionOutbox {
         guard retryTasks[target]?.id == id else { return false }
         retryTasks[target] = nil
         return true
+    }
+
+    /// Tries before a 4xx answer outside the contract counts as a refusal.
+    static let outsideContractAttempts = 3
+
+    private func attempts(of key: UUID) -> Int {
+        entries.first { $0.id == key }?.attempts ?? 0
     }
 
     private func noteAttempt(_ key: UUID) {
@@ -252,50 +263,5 @@ public final class FileOutboxPersistence: OutboxPersisting, @unchecked Sendable 
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
                                                 withIntermediateDirectories: true)
         try JSONEncoder().encode(entries).write(to: url, options: [.atomic])
-    }
-}
-
-/// The one write rule for the local model (design section 3.2): a snapshot
-/// item or a change is applied only if its `rev` is newer than the held one.
-/// A removal is a tombstone at its `rev`, kept for the change log's retention
-/// window, so an older snapshot cannot bring the item back.
-public struct RevGate: Codable, Equatable, Sendable {
-    public static let tombstoneRetention: TimeInterval = 30 * 24 * 3600
-
-    public private(set) var held: [String: Rev] = [:]
-    public private(set) var removedAt: [String: Date] = [:]
-
-    public init() {}
-
-    /// True when `rev` is newer than what is held for `resource`; it is then
-    /// recorded as held (and any tombstone is cleared).
-    public mutating func admit(_ resource: String, rev: Rev) -> Bool {
-        if let current = held[resource], current >= rev { return false }
-        held[resource] = rev
-        removedAt[resource] = nil
-        return true
-    }
-
-    /// Records a removal at `rev`. Returns false when a newer write is held.
-    public mutating func admitRemoval(_ resource: String, rev: Rev, at now: Date) -> Bool {
-        if let current = held[resource], current >= rev { return false }
-        held[resource] = rev
-        removedAt[resource] = now
-        return true
-    }
-
-    public func isRemoved(_ resource: String) -> Bool { removedAt[resource] != nil }
-
-    public func holds(_ resource: String, atLeast rev: Rev) -> Bool {
-        (held[resource] ?? 0) >= rev
-    }
-
-    /// Forgets tombstones older than the retention window; past it, the
-    /// server answers `410` and the client rebaselines anyway.
-    public mutating func pruneTombstones(now: Date) {
-        for (resource, at) in removedAt where now.timeIntervalSince(at) > Self.tombstoneRetention {
-            removedAt[resource] = nil
-            held[resource] = nil
-        }
     }
 }
