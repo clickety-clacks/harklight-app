@@ -251,7 +251,7 @@ public enum ErrorLogRedactor {
         "internal_error", "unavailable", "forbidden", "conflict",
         // Client API error tokens.
         "not_found", "invalid_field", "stale_request", "already_answered", "already_retracted",
-        "idempotency_conflict", "precondition_failed", "payload_too_large",
+        "already_closed", "idempotency_conflict", "precondition_failed", "payload_too_large",
         // Change-feed `closing` reasons.
         "revoked", "server_shutdown", "idle_timeout", "account_paused"
     ]

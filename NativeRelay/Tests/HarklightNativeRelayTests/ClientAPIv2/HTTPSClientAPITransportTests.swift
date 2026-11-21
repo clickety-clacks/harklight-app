@@ -163,6 +163,7 @@ final class HTTPSClientAPITransportTests: XCTestCase {
         } catch let error as APIError {
             XCTAssertEqual(error.status, 409)
             XCTAssertEqual(error.token, .alreadyClosed)
+            XCTAssertEqual(ErrorLogReason.api(error).code, "already_closed")
         }
         do {
             _ = try await api.send(APIRequest(method: write.write.method, path: write.write.path,
