@@ -1,0 +1,26 @@
+name: B4 iOS install-over proof
+
+on:
+  push:
+    branches: [test/b4-install-over]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: b4-install-over
+  cancel-in-progress: true
+
+jobs:
+  install-over:
+    runs-on: xcode-27
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install build tools
+        run: brew install elixir openssl@3 xcodegen
+      - name: Compare enrollment across an in-place update
+        run: bash Scripts/B4Upgrade/run.sh "$RUNNER_TEMP"
