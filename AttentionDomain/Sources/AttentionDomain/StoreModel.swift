@@ -477,6 +477,8 @@ public enum AccountAnswerOutcome: Equatable, Codable, Sendable {
     case reply(ExactText)
     case noComment
     case defaultAnswer(value: JSONValue?, text: ExactText?)
+    /// A value action chosen, shown by its label (client API v2 round 15).
+    case choice(id: ExactText, label: ExactText)
 }
 
 public struct RemoteRequestState: Equatable, Codable, Sendable {

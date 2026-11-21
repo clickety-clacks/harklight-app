@@ -54,10 +54,13 @@ public struct APIAvailability: Equatable, Codable, Sendable {
 /// The person-facing answer outcome, shown on every client of the person
 /// (round 4 item 3). `value` is present only for `default`.
 public struct APIAnswer: Equatable, Codable, Sendable {
-    /// seen, reply, default or no_comment.
+    /// seen, reply, default, no_comment or choice.
     public let kind: String
     public let text: ExactText?
     public let value: JSONValue?
+    /// For `choice` (round 15): the matched action's id and label.
+    public let id: ExactText?
+    public let label: ExactText?
 }
 
 public struct APITerminal: Equatable, Codable, Sendable {
@@ -87,6 +90,9 @@ public struct APIRank: Equatable, Codable, Sendable {
     /// common or earlier_messages, for current items in free order; common
     /// has no heading.
     public let group: String?
+    /// now, high, normal or low (round 15): the urgency the marks are drawn
+    /// from in every order. Always present for current items.
+    public var level: String? = nil
 }
 
 public struct APIItem: Equatable, Codable, Sendable {
@@ -270,6 +276,8 @@ extension APIAnswer {
         kind = try reader.string("kind").rawValue
         text = try reader.optionalString("text")
         value = reader.raw("value")
+        id = try reader.optionalString("id")
+        label = try reader.optionalString("label")
     }
 }
 
@@ -321,7 +329,8 @@ extension APIItem {
         self.rank = APIRank(key: try rank.string("key"), score: score,
                             dueAtMs: try rank.optionalUnsigned("due_at_ms"),
                             section: try rank.optionalString("section")?.rawValue,
-                            group: try rank.optionalString("group")?.rawValue)
+                            group: try rank.optionalString("group")?.rawValue,
+                            level: try rank.optionalString("level")?.rawValue)
         createdAtMs = try reader.optionalUnsigned("created_at_ms")
         arrival = try reader.optionalUnsigned("arrival")
         guard rev >= 1 else { throw ClientAPIModelError.invalid("item.rev") }

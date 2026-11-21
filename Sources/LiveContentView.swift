@@ -57,6 +57,8 @@ enum AnswerConfirmationText {
                 return action.label.rawValue
             }
             return nil
+        case let .some(.choice(_, label)):
+            return label.rawValue
         case .some(.noComment), .some(.seen):
             return nil
         case .none:
