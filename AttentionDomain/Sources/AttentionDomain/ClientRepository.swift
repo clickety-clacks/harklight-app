@@ -3672,7 +3672,7 @@ public final class ClientRepository: @unchecked Sendable {
             pending = nil
         } else {
             pending = conversation.prepareReadPosition(for: request, operationID: UUID(),
-                position: turn.conversationSequence ?? 0)
+                position: turn.conversationSequence ?? 0, entryID: turn.id)
         }
         if conversation == (state.conversation ?? ConversationState()) {
             return ConversationReadUpdate(pendingPosition: pending,

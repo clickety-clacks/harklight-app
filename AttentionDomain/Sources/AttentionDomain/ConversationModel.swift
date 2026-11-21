@@ -727,11 +727,14 @@ public struct PendingConversationReadPosition: Equatable, Codable, Sendable {
     public let request: RequestKey
     public let operationID: UUID
     public let readThroughConversationSequence: UInt64
+    public let entryID: ExactText?
 
-    public init(request: RequestKey, operationID: UUID, readThroughConversationSequence: UInt64) {
+    public init(request: RequestKey, operationID: UUID, readThroughConversationSequence: UInt64,
+                entryID: ExactText? = nil) {
         self.request = request
         self.operationID = operationID
         self.readThroughConversationSequence = readThroughConversationSequence
+        self.entryID = entryID
     }
 }
 
@@ -1012,7 +1015,8 @@ struct ConversationState: Codable, Equatable {
 
     mutating func prepareReadPosition(for request: RequestKey,
                                       operationID: UUID,
-                                      position: UInt64) -> PendingConversationReadPosition? {
+                                      position: UInt64,
+                                      entryID: ExactText? = nil) -> PendingConversationReadPosition? {
         guard chatReadPositionSupport == true, position > 0 else { return nil }
         let positions = chatReadPositions ?? [:]
         let current = positions[request] ?? 0
@@ -1028,7 +1032,7 @@ struct ConversationState: Codable, Equatable {
             return previous
         }
         let saved = PendingConversationReadPosition(request: request, operationID: operationID,
-            readThroughConversationSequence: position)
+            readThroughConversationSequence: position, entryID: entryID)
         pending[request] = saved
         pendingChatReadPositions = pending
         return saved

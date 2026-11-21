@@ -38,6 +38,8 @@ public struct OutboxEntry: Codable, Equatable, Sendable, Identifiable {
     /// Set when the server refused the write. The write stays in the outbox,
     /// shown as failed, until the app discards it; it is never dropped silently.
     public internal(set) var failure: OutboxFailure? = nil
+    /// The repository's stable answer intent, distinct from the HTTP key.
+    public internal(set) var answerIntentID: UUID? = nil
 
     public var id: UUID { idempotencyKey }
 
@@ -146,7 +148,8 @@ public actor ActionOutbox {
     /// the app already saved one (for example a queued chat message).
     public func submit(target: String, operation: String, write: FrozenWrite,
                        idempotencyKey: UUID = UUID(), now: Date = Date(),
-                       retryRefused: Bool = true) async throws -> OutboxEntry {
+                       retryRefused: Bool = true, answerIntentID: UUID? = nil,
+                       stillPending: @Sendable () throws -> Bool = { true }) async throws -> OutboxEntry {
         if let existing = entries.first(where: { $0.idempotencyKey == idempotencyKey }) {
             // Handing a pending write over again queues it once. Handing over
             // a refused one is the person's Retry: the server stores only
@@ -161,8 +164,9 @@ public actor ActionOutbox {
             startSending(existing.target)
             return next[index]
         }
+        guard try stillPending() else { throw CancellationError() }
         let entry = OutboxEntry(idempotencyKey: idempotencyKey, target: target, operation: operation, write: write,
-                                createdAt: now, outcomeUnknown: false, attempts: 0)
+                                createdAt: now, outcomeUnknown: false, attempts: 0, answerIntentID: answerIntentID)
         var next = entries
         next.append(entry)
         try persistence.save(next)

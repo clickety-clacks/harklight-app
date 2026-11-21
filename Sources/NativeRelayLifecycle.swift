@@ -1817,6 +1817,10 @@ final class NativeRelayLifecycle {
     /// relay session. With no active session, the store keeps them for the
     /// ordinary reconnect drain.
     func sendPendingMessageOpens() async {
+        if let v2Connection {
+            await v2Connection.sendSavedContentOpens()
+            return
+        }
         _ = await core?.sendPendingMessageOpens()
     }
 
@@ -2175,9 +2179,19 @@ final class NativeRelayLifecycle {
                                          expected: ProfileContext,
                                          onSendCallStateChange: @escaping @MainActor @Sendable (Bool) -> Void = { _ in },
                                          onSendCallCompleted: @MainActor () -> Void = {}) async throws {
-        guard context == expected, let configuration else {
+        guard context == expected else {
             throw NativeRelayCoreError.inactive
         }
+        if let v2Connection {
+            onSendCallStateChange(true)
+            defer {
+                onSendCallStateChange(false)
+                onSendCallCompleted()
+            }
+            try await v2Connection.sendSavedAnswer(intentID)
+            return
+        }
+        guard let configuration else { throw NativeRelayCoreError.inactive }
         if let existing = answerFlights[intentID] {
             try await existing.task.value
             onSendCallCompleted()
@@ -2345,7 +2359,12 @@ final class NativeRelayLifecycle {
     }
 
     func sendPendingConversationReadPositions(expected: ProfileContext) async {
-        guard context == expected, let core else { return }
+        guard context == expected else { return }
+        if let v2Connection {
+            await v2Connection.sendSavedConversationReads()
+            return
+        }
+        guard let core else { return }
         await core.sendPendingConversationReadPositions()
         guard context == expected else { return }
     }

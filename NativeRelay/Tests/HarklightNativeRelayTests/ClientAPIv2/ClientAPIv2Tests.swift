@@ -164,6 +164,59 @@ private actor HeldMeTransport: ClientAPITransport {
     }
 }
 
+final class SavedV2ItemActionTests: XCTestCase {
+    func testForegroundRecoversSavedSeenReadAndAnswerAndSettlesTheirKeys() async throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                                       personID: ExactText("person"), deviceID: ExactText("device"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let persistence = MemoryPendingActionPersistence()
+        let first = try ClientRepository(context: context, persistence: persistence)
+        let model = ServerModelV2Store(fileURL: nil)
+        let message = #"{"title":"Question","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"ok","label":"OK","kind":"value","value":true}]}}"#
+        let item = V2Fixture.item("i", rev: 1, rankKey: "a", message: message)
+        try model.apply(kind: "item", rev: 1, data: V2Fixture.json(item))
+        try model.open("i")
+        try model.apply(kind: "entry", rev: 2,
+                        data: V2Fixture.json(V2Fixture.entry("entry-first", item: "i", rev: 2, position: 4)))
+        try first.restoreCachedServerState(ServerModelV2Projection.cachedState(model.snapshot, identity: identity),
+                                           context: context)
+        let key = RequestKey(accountScope: identity.personID, senderID: ExactText("agent-app"), messageID: ExactText("i"))
+        let seen = try first.enqueueMessageOpen(key, requestRevision: 1, context: context)
+        let read = try XCTUnwrap(first.markConversationRead(key, through: ExactText("entry-first"), context: context))
+        let port = AttentionDomainPort(store: first)
+        let selector = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first?.selector)
+        let receipt = try port.submit(SubmitIntent(context: port.context, selector: selector, intentID: UUID(),
+            inputs: [.compatibilityValue(action: ExactText("ok"))]))
+        let answer = try XCTUnwrap(first.lookupIntent(receipt.intentID, context: context))
+
+        let reopened = try ClientRepository(context: context, persistence: persistence)
+        XCTAssertEqual(try reopened.conversationSnapshot(context: context).pendingChatReadPositions.first?.entryID,
+                       ExactText("entry-first"))
+        let server = FakeClientAPIServer()
+        server.inboxItems = [V2Fixture.item("i", rev: 3, rankKey: "a")
+            .replacingOccurrences(of: #""request_revision":1"#, with: #""request_revision":2"#)]
+        server.meBody = #"{"account":{"state":"active"},"features":{},"limits":{}}"#
+        let connection = try ClientAPIv2Connection(transport: server, repository: reopened, context: context,
+            directory: nil, errors: RecordingErrorLogV2(), foregroundOnlyWrites: true)
+        let run = Task { await connection.runForeground() }
+        defer { run.cancel() }
+        let keys = [seen.operationID, read.operationID, answer.operationID]
+        await eventually("each operation settles in the repository") {
+            guard let live = try? reopened.lookupIntent(answer.intentID, context: context),
+                  case .accepted = live.disposition else { return false }
+            return (try? reopened.snapshot(context: context).pendingMessageOpens.isEmpty) == true &&
+                (try? reopened.conversationSnapshot(context: context).pendingChatReadPositions.isEmpty) == true
+        }
+        let writes = server.received.filter { $0.idempotencyKey != nil }
+        XCTAssertEqual(writes.compactMap(\.idempotencyKey), keys)
+        XCTAssertEqual(writes.map(\.path), ["/v2/items/i/seen", "/v2/items/i/read-position", "/v2/items/i/answer"])
+        XCTAssertEqual(writes.map { String(decoding: $0.body ?? Data(), as: UTF8.self) },
+                       ["{}", #"{"entry_id":"entry-first"}"#, #"{"request_revision":1,"choice":"ok"}"#])
+        run.cancel()
+        await run.value
+    }
+}
+
 final class ServerSentEventParserTests: XCTestCase {
     private func events(_ lines: [String]) -> [ServerSentEvent] {
         var parser = ServerSentEventParser()
