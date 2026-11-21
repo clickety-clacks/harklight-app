@@ -182,6 +182,10 @@ final class ChatMessageQueueTests: XCTestCase {
         let operation = try XCTUnwrap(message.operationID)
         let server = FakeClientAPIServer()
         server.nextWriteFailures = [URLError(.networkConnectionLost)]
+        server.inboxItems = [V2Fixture.item("i", rev: 1, rankKey: "a")]
+        server.replyEntry = { revision in
+            #"{"entry_id":"accepted","item_id":"i","rev":\#(revision),"position":1,"kind":"reply","author":"person","request_revision":1,"text":"keep the same key","files":[]}"#
+        }
         let connection = try ClientAPIv2Connection(transport: server, repository: repository,
             context: context, directory: nil, errors: RecordingErrorLogV2(), foregroundOnlyWrites: true,
             outboxWaitBeforeRetry: { _, _ in try await Task.sleep(for: .seconds(3600)) })
@@ -204,10 +208,14 @@ final class ChatMessageQueueTests: XCTestCase {
         let second = Task { await connection.runForeground() }
         defer { second.cancel() }
         let resumed = ContinuousClock.now + .seconds(2)
-        while server.received.filter({ $0.idempotencyKey == operation }).count < 2,
-              ContinuousClock.now < resumed {
+        while try !repository.queuedChatMessages(context: context).isEmpty, ContinuousClock.now < resumed {
             try await Task.sleep(for: .milliseconds(5))
         }
+        second.cancel()
+        await second.value
+        XCTAssertTrue(try repository.queuedChatMessages(context: context).isEmpty)
+        let accepted = try repository.conversationSnapshot(context: context).threads[binding.request]
+        XCTAssertTrue(accepted?.turns.contains { $0.id == ExactText("accepted") } == true)
         XCTAssertEqual(server.received.filter { $0.idempotencyKey == operation }.count, 2)
     }
 
