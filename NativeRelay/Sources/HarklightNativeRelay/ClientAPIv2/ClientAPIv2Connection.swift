@@ -148,6 +148,16 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
         try await sync.catchUp()
     }
 
+    /// Applies a push's change batch only when its revision is newer than
+    /// the durable position. The push revision is a hint, never a cursor.
+    @discardableResult
+    public func catchUp(forPushRevision revision: Rev) async throws -> Bool {
+        let before = model.heldCursor
+        if let before, before >= revision { return false }
+        try await catchUp()
+        return model.heldCursor != before
+    }
+
     /// Publishes the model into the repository when it holds a full
     /// baseline and the answer-screen rules are known.
     public func publishModel() {

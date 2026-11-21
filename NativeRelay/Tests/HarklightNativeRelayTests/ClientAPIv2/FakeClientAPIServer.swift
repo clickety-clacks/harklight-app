@@ -172,8 +172,12 @@ final class FakeClientAPIServer: ClientAPITransport, @unchecked Sendable {
         }
     }
 
+    private var _batchPositions: [Rev] = []
+    var batchPositions: [Rev] { lock.withLock { _batchPositions } }
+
     func changeBatch(after: Rev) async throws -> FeedBatch {
         try lock.withLock {
+            _batchPositions.append(after)
             guard after >= retainedFrom else {
                 throw APIError(status: 410, token: .cursorExpired, retryable: false, requestID: "req-batch")
             }

@@ -100,6 +100,29 @@ final class ClientAPIv2ConnectionTests: XCTestCase {
         run.cancel()
     }
 
+    func testPushCatchesUpFromTheDurablePositionAndSkipsOlderRevisions() async throws {
+        let server = FakeClientAPIServer()
+        let repository = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        let v2 = try connection(WithMe(server, me: me), repository)
+        try await v2.refreshMe()
+        try await v2.catchUp()
+        let baseline = try XCTUnwrap(v2.model.heldCursor)
+        let initialBatchCount = server.batchPositions.count
+        let revision = server.commit("item", V2Fixture.item("push", rev: Int(baseline) + 1, rankKey: "a"))
+
+        let atCursor = try await v2.catchUp(forPushRevision: baseline)
+        XCTAssertFalse(atCursor)
+        XCTAssertEqual(server.batchPositions.count, initialBatchCount)
+        let newer = try await v2.catchUp(forPushRevision: revision)
+        XCTAssertTrue(newer)
+        XCTAssertEqual(server.batchPositions.last, baseline)
+        XCTAssertEqual(v2.model.heldCursor, revision)
+        XCTAssertEqual(try itemIDs(repository), ["push"])
+        let older = try await v2.catchUp(forPushRevision: baseline)
+        XCTAssertFalse(older)
+        XCTAssertEqual(server.batchPositions.count, initialBatchCount + 1)
+    }
+
     func testNothingIsPublishedUntilTheRulesAreRead() async throws {
         let server = FakeClientAPIServer()
         server.inboxItems = [V2Fixture.item("a", rev: 1, rankKey: "a")]
