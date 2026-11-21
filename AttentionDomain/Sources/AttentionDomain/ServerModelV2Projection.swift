@@ -1,0 +1,190 @@
+import Foundation
+
+/// Projects the client API v2 model onto the store's existing server-state
+/// shape (`CachedAttentionServerState`), so the app's presentation and UI read
+/// v2 data through the same path they use today. Only the sync bookkeeping is
+/// replaced; the product content is carried as the server sent it.
+///
+/// - An item is keyed by its opaque `item_id` (in `RequestKey.messageID`); the
+///   sender is display data.
+/// - Arrival order (`acceptanceOrder`) follows `Item.created_at_ms`.
+/// - The inbox view follows `Rank.key` byte-wise, with today's sections from
+///   `Rank.section`/`Rank.group` and unread-reply rows from `Chat.reply_group`
+///   and `Chat.reply_rank_key`.
+/// - Conversation turns are entries ordered by `Entry.position`, which also
+///   serves as each turn's conversation sequence within its item.
+public enum ServerModelV2Projection {
+    public static func key(for itemID: ExactText, sender: ExactText, identity: ProfileIdentity) -> RequestKey {
+        RequestKey(accountScope: identity.personID, senderID: sender, messageID: itemID)
+    }
+
+    public static func cachedState(_ model: ServerModelV2, identity: ProfileIdentity) -> CachedAttentionServerState {
+        let ordered = model.orderedItems
+        let keys = Dictionary(uniqueKeysWithValues: ordered.map {
+            ($0.itemID, key(for: $0.itemID, sender: $0.sender, identity: identity))
+        })
+
+        // Arrival order: first seen first, ties by item id.
+        let byArrival = ordered.sorted {
+            let lhs = $0.createdAtMs ?? 0, rhs = $1.createdAtMs ?? 0
+            if lhs != rhs { return lhs < rhs }
+            return Array($0.itemID.rawValue.utf8).lexicographicallyPrecedes(Array($1.itemID.rawValue.utf8))
+        }
+        var requests: [RequestKey: StoredRequest] = [:]
+        for (index, item) in byArrival.enumerated() {
+            guard let key = keys[item.itemID] else { continue }
+            requests[key] = StoredRequest(key: key, originalPayload: item.message)
+                .assigningAcceptanceOrder(UInt64(index + 1))
+        }
+
+        var remoteStates: [RequestKey: RemoteRequestState] = [:]
+        var conversations: [RequestKey: ConversationThread] = [:]
+        var readPositions: [RequestKey: UInt64] = [:]
+        for item in ordered {
+            guard let key = keys[item.itemID] else { continue }
+            remoteStates[key] = RemoteRequestState(state: terminalState(item.terminal),
+                                                   accountAnswerOutcome: answerOutcome(item.terminal?.answer))
+            let entries = model.orderedEntries(of: item.itemID)
+            conversations[key] = thread(for: item, key: key, entries: entries)
+            if let read = item.chat.readPosition,
+               let position = entries.first(where: { $0.entryID == read })?.position {
+                readPositions[key] = position
+            }
+        }
+
+        return CachedAttentionServerState(
+            identity: identity, requests: requests, remoteStates: remoteStates,
+            cursor: 0, conversationCursor: 0, conversations: conversations,
+            inboxView: inboxView(ordered, keys: keys, model: model),
+            currentRequestKeys: Set(keys.values),
+            chatReadPositions: readPositions)
+    }
+
+    // MARK: Terminal and answer
+
+    static func terminalState(_ terminal: APITerminal?) -> TerminalState? {
+        guard let terminal else { return nil }
+        switch terminal.state {
+        case "answered": return terminal.isNoComment ? .noComment : .answered
+        case "cleared": return .cleared
+        case "expired": return .expired
+        case "superseded": return .superseded
+        // Shown as retracted on the thread; the answer flow is closed.
+        case "retracted": return .cleared
+        default: return nil
+        }
+    }
+
+    static func answerOutcome(_ answer: APIAnswer?) -> AccountAnswerOutcome? {
+        guard let answer else { return nil }
+        switch answer.kind {
+        case "seen": return .seen
+        case "reply": return .reply(answer.text ?? ExactText(""))
+        case "no_comment": return .noComment
+        case "default": return .defaultAnswer(value: answer.value, text: answer.text)
+        default: return nil
+        }
+    }
+
+    // MARK: Conversation
+
+    static func thread(for item: APIItem, key: RequestKey, entries: [APIEntry]) -> ConversationThread {
+        var thread = ConversationThread(request: key, sessionHandle: item.itemID,
+                                        revision: item.requestRevision, payload: item.message)
+        thread.terminal = terminalState(item.terminal)
+        if item.terminal?.state == "retracted" {
+            thread.reportedRetractedAtMilliseconds = item.terminal?.atMs
+        }
+        if let availability = item.availability {
+            thread.availability = Self.availability(availability)
+        }
+        for entry in entries {
+            guard let kind = turnKind(entry) else { continue }
+            let author: ConversationAuthor = switch entry.author {
+            case "person": .person
+            case "origin": .origin
+            default: .server
+            }
+            let turn = ConversationTurn(
+                id: entry.entryID,
+                binding: ConversationBinding(request: key, revision: entry.requestRevision),
+                author: author, sessionHandle: item.itemID, text: entry.text ?? ExactText(""),
+                inReplyTo: entry.inReplyTo, files: entry.files.map(file),
+                contentRedacted: entry.state == "retracted" || entry.state == "withdrawn" ? true : nil,
+                kind: kind, conversationSequence: entry.position)
+            thread.turns.append(turn)
+            if let delivery = entry.delivery {
+                var facts = ConversationTurnFacts(acceptedAtMilliseconds: entry.atMs)
+                facts.delivered = delivery.delivered ?? false
+                if delivery.acted == true { facts.actedBy = item.sender }
+                thread.facts[entry.entryID] = facts
+            }
+        }
+        if let read = item.chat.readPosition,
+           let position = entries.first(where: { $0.entryID == read })?.position {
+            thread.accountReadThroughConversationSequence = position
+        }
+        return thread
+    }
+
+    /// Replies are chat turns (the person's are discussions); revision entries
+    /// mark a new request revision. Lifecycle and availability entries are
+    /// carried on the item instead.
+    static func turnKind(_ entry: APIEntry) -> ConversationTurn.Kind? {
+        switch entry.kind {
+        case "reply": entry.author == "person" ? .discussion : .reply
+        case "revision": .revision
+        default: nil
+        }
+    }
+
+    static func availability(_ availability: APIAvailability) -> ConversationAvailability {
+        switch availability.state {
+        case "listening": .listening
+        case "not_listening": .notListening(lastDetachedAt: availability.lastDetachedAtMs.map { ExactText(String($0)) })
+        case "gone": .gone
+        default: .unsupported(reason: ExactText("Not supported"))
+        }
+    }
+
+    static func file(_ file: APIFileRef) -> ConversationFile {
+        ConversationFile(id: file.fileID, name: file.name, byteCount: file.size,
+                         sha256: ExactText(file.sha256), content: .uploaded(file.fileID))
+    }
+
+    // MARK: Inbox view
+
+    static func inboxView(_ ordered: [APIItem], keys: [ExactText: RequestKey], model: ServerModelV2) -> InboxView {
+        let entries = ordered.compactMap { item -> InboxViewEntry? in
+            guard let key = keys[item.itemID] else { return nil }
+            return InboxViewEntry(key: key, score: item.rank.score.flatMap { Double($0.lexeme) },
+                                  dueAtMilliseconds: item.rank.dueAtMs.map { Int($0) })
+        }
+        // Item rows and unread-reply rows share Rank.key's space.
+        var rows: [(sortKey: [UInt8], item: InboxViewListItem)] = []
+        for item in ordered {
+            guard let key = keys[item.itemID] else { continue }
+            let state: InboxFreeSection.State = item.rank.section == "resolved" ? .history : .active
+            let group: InboxFreeSection.Group = item.rank.group == "earlier_messages" ? .earlierMessages : .common
+            rows.append((Array(item.rank.key.rawValue.utf8),
+                         InboxViewListItem(kind: .message, key: key,
+                                           score: item.rank.score.flatMap { Double($0.lexeme) },
+                                           freeSection: InboxFreeSection(state: state, group: group))))
+            if let replyKey = item.chat.replyRankKey, let unread = item.chat.unreadReplies, unread > 0 {
+                let replyGroup: InboxFreeSection.Group = item.chat.replyGroup == "earlier_chat_replies_unknown"
+                    ? .earlierChatRepliesUnknown : .earlierChatReplies
+                let lastReply = item.chat.lastOriginReply.flatMap { last in
+                    model.orderedEntries(of: item.itemID).first { $0.entryID == last }?.position
+                }
+                rows.append((Array(replyKey.rawValue.utf8),
+                             InboxViewListItem(kind: .reply, key: key, conversationSequence: lastReply,
+                                               unseenCount: unread,
+                                               freeSection: InboxFreeSection(state: .active, group: replyGroup))))
+            }
+        }
+        let listItems = rows.sorted { $0.sortKey.lexicographicallyPrecedes($1.sortKey) }.map(\.item)
+        let freeOrder = ordered.contains { $0.rank.group != nil } || listItems.contains { $0.kind == .reply }
+        return InboxView(revision: ExactText("v2"), entries: entries, listItems: listItems,
+                         freeOrderVersion: freeOrder ? 1 : nil)
+    }
+}
