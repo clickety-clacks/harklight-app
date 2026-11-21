@@ -950,6 +950,8 @@ final class NativeRelayLifecycle {
     private var v2PushRetryAttempt = 0
     private let v2NotificationPermission: NativeNotificationPermission
     private let v2LegacyAddressStore: @MainActor () throws -> DevelopmentAPNsAddressStore
+    var onV2AccountAccessChanged: ((ClientAPIAccessState, ProfileContext) -> Void)?
+    var v2AccountAccess: ClientAPIAccessState? { v2Connection?.access.state }
     private var sceneIsActive = false
 
     var usesClientAPIV2: Bool { v2Connection != nil }
@@ -1038,7 +1040,8 @@ final class NativeRelayLifecycle {
     }
 
     private func startV2Foreground() {
-        guard sceneIsActive, let connection = v2Connection, v2ForegroundTask == nil else { return }
+        guard sceneIsActive, let connection = v2Connection, connection.access.state == .available,
+              v2ForegroundTask == nil else { return }
         v2ForegroundTask = Task { [weak self] in
             await connection.runForeground()
             guard let self, self.v2Connection === connection else { return }
@@ -1293,10 +1296,27 @@ final class NativeRelayLifecycle {
             clientIdentity: TrustedKeychainIdentity(clientIdentity), trustedRootDER: trustedRootDER)
         let retainedFiles = try ConversationFileStorage(identity: context.identity)
         let attempt = UUID()
-        let focus = ClientAPIFocusChannel(transport: transport, errors: errorLog) { [weak self] show, receivedAt in
+        let access = ClientAPIAccess(transport: transport) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, self.activeTransportAttemptID == attempt, let state = self.v2AccountAccess else {
+                    return
+                }
+                if state == .available {
+                    self.startV2Foreground()
+                    self.requestV2PushRegistration()
+                } else {
+                    self.v2ForegroundTask?.cancel()
+                    self.v2PushRegistrationTask?.cancel()
+                    self.cancelV2PushRetry()
+                    self.confirmedRelayContext = nil
+                }
+                self.onV2AccountAccessChanged?(state, context)
+            }
+        }
+        let focus = ClientAPIFocusChannel(transport: access, errors: errorLog) { [weak self] show, receivedAt in
             await self?.receiveV2Show(show, receivedAt: receivedAt, attempt: attempt)
         }
-        let connection = try ClientAPIv2Connection(transport: transport, repository: store, context: context,
+        let connection = try ClientAPIv2Connection(transport: access, repository: store, context: context,
             directory: Self.v2Directory(for: context.identity), errors: errorLog, foregroundOnlyWrites: true,
             retainedUploadURL: { try retainedFiles.verifiedUploadURL(for: $0) },
             onLiveState: { [weak self] state in
@@ -1470,7 +1490,7 @@ final class NativeRelayLifecycle {
 
     private func allowsV2PushRouting(_ connection: ClientAPIv2Connection) async -> Bool {
         let permission = await v2NotificationPermission.status()
-        guard !Task.isCancelled, v2Connection === connection else { return false }
+        guard !Task.isCancelled, v2Connection === connection, connection.access.state == .available else { return false }
         guard NativeNotificationPermission.allowed(permission) else {
             try? connection.model.setPushRoutingEnabled(false)
             requestV2PushRegistration()
@@ -1499,7 +1519,7 @@ final class NativeRelayLifecycle {
     @discardableResult
     private func requestV2PushRegistration() -> Task<Bool, Never>? {
         guard sceneIsActive, v2PushRemovalTask == nil, let connection = v2Connection,
-              let context else { return nil }
+              connection.access.state == .available, let context else { return nil }
         v2PushRegistrationRequested = true
         v2PushRetryTask?.cancel()
         v2PushRetryTask = nil
@@ -1709,6 +1729,7 @@ final class NativeRelayLifecycle {
         v2ShowLookup = nil
         pendingV2Show = nil
         v2ForegroundTask = nil
+        onV2AccountAccessChanged = nil
         v2Connection = nil
         v2Task?.cancel()
         featureFlags.reset()
@@ -1770,6 +1791,8 @@ final class NativeRelayLifecycle {
         if let connection = v2Connection, let context {
             let attempt = activeTransportAttemptID
             do {
+                if connection.access.state == .paused { try await connection.refreshMe() }
+                guard v2Connection === connection, connection.access.state == .available else { return .unavailable }
                 try await connection.catchUp()
                 guard v2Connection === connection else { return .unavailable }
                 confirmedRelayContext = context

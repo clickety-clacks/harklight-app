@@ -32,6 +32,7 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
     public let sync: ChangeFeedSync
     public let files: ClientAPIFiles
     public let push: ClientAPIPush
+    public let access: ClientAPIAccess
     private let transport: any ClientAPITransport
     private let foregroundOnlyWrites: Bool
     private let modelWriter: ServerModelSyncWriter
@@ -76,6 +77,9 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
         meURL = directory?.appendingPathComponent("me-v2.json")
         let savedMe = meURL.flatMap { try? Data(contentsOf: $0) }
             .flatMap { try? JSONValue.parse($0) }.flatMap { try? APIMe(json: $0) }
+        let access = (transport as? ClientAPIAccess) ?? ClientAPIAccess(transport: transport)
+        self.access = access
+        let transport = access
         self.model = model
         self.presentation = ServerModelV2Presentation(savedMe: savedMe)
         self.transport = transport
@@ -118,10 +122,13 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
         }), publish: { relay.connection?.publishModel() })
         self.outbox = try ActionOutbox(persistence: persistence, transport: transport, outcomes: outcomes,
             errors: errors, startsPaused: foregroundOnlyWrites, canSend: { entry in
-                entry.operation != "priority_levels" || relay.connection?.priorityLevelsEditingEnabled == true
+                access.state == .available &&
+                    (entry.operation != "priority_levels" || relay.connection?.priorityLevelsEditingEnabled == true)
             }, waitBeforeRetry: outboxWaitBeforeRetry)
         self.sync = ChangeFeedSync(transport: transport, model: writer, errors: errors,
                                    waitBeforeRetry: waitBeforeRetry, onLiveState: { state in
+                                       if state == .accountPaused { access.pause() }
+                                       if state == .stopped { access.revoke() }
                                        // Each time the feed is live again, send what the outbox holds.
                                        if state == .live, !foregroundOnlyWrites {
                                            relay.connection?.sendSavedWrites()
@@ -133,47 +140,55 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
                                        onLiveState(state)
                                    }, onShow: onShow)
         relay.connection = self
+        access.restorePause(from: model, savedMePaused: savedMe?.accountState == "paused", errors: errors)
     }
 
     /// Reads `GET /v2/me` (answerable even while the account is paused),
     /// saves it with the model and puts its rules in force.
     @discardableResult
     public func refreshMe() async throws -> APIMe {
+        let check = access.beginMeCheck()
         let response = try await transport.send(.get("/v2/me"))
         try Task.checkCancellation()
         let me = try APIMe(json: JSONValue.parse(response.body))
-        let principal = me.pushPrincipal.flatMap {
-            $0.personID == context.identity.personID && $0.deviceID == context.identity.deviceID ? $0 : nil
-        }
-        do {
-            try model.savePushPrincipal(principal)
-            errors.resolve(concern: .snapshot, operation: "push_identity")
-        } catch {
-            errors.report(ErrorLogReport(concern: .snapshot, connectionRole: .request,
-                operation: "push_identity", phase: "save", reason: .api(error),
-                initiator: .unknown, retryable: true, correlation: .request(response.requestID)))
-        }
-        if let meURL {
-            do {
-                try response.body.write(to: meURL, options: .atomic)
-                errors.resolve(concern: .snapshot, operation: "me_save")
-            } catch {
-                errors.report(ErrorLogReport(concern: .snapshot, connectionRole: .request, operation: "me_save",
-                    phase: "save", reason: .from(error: error), initiator: .unknown, retryable: true))
+        let update: (editingEnabled: Bool, resumed: Bool)? = lock.withLock {
+            let wasPaused = access.state == .paused
+            guard access.applyMeAccountState(me.accountState, check: check) else { return nil }
+            let principal = me.pushPrincipal.flatMap {
+                $0.personID == context.identity.personID && $0.deviceID == context.identity.deviceID ? $0 : nil
             }
-        }
-        presentation.apply(me)
-        let editingEnabled = me.features["priority_level_editing"] == true
-        lock.withLock {
+            do {
+                try model.savePushPrincipal(principal)
+                errors.resolve(concern: .snapshot, operation: "push_identity")
+            } catch {
+                errors.report(ErrorLogReport(concern: .snapshot, connectionRole: .request,
+                    operation: "push_identity", phase: "save", reason: .api(error),
+                    initiator: .unknown, retryable: true, correlation: .request(response.requestID)))
+            }
+            if let meURL {
+                do {
+                    try response.body.write(to: meURL, options: .atomic)
+                    errors.resolve(concern: .snapshot, operation: "me_save")
+                } catch {
+                    errors.report(ErrorLogReport(concern: .snapshot, connectionRole: .request, operation: "me_save",
+                        phase: "save", reason: .from(error: error), initiator: .unknown, retryable: true))
+                }
+            }
+            presentation.apply(me)
+            let available = access.state == .available
+            let editingEnabled = available && me.features["priority_level_editing"] == true
             priorityLevelsEnabledFromServer = editingEnabled
             if !editingEnabled {
                 priorityLevelsETag = nil
                 settingsReadID = nil
             }
+            return (editingEnabled, wasPaused && available)
         }
+        guard let update else { return me }
+        if update.resumed, access.state == .available { await outbox.resumeAfterReenrolment() }
         onMe(me)
         signalQueuedReplies()
-        if editingEnabled {
+        if update.editingEnabled {
             await recoverPendingPriorityLevels()
             await outbox.wake(operation: "priority_levels")
         }
@@ -197,6 +212,7 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
                     phase: "read", reason: .api(error), initiator: .forFailure(error),
                     retryable: !((error as? APIError)?.isPermanent ?? false),
                     correlation: .request((error as? APIError)?.requestID), httpStatus: (error as? APIError)?.status))
+                if access.state == .revoked { return }
                 attempt += 1
                 do { try await meWaitBeforeRetry(attempt) } catch { return }
             }
@@ -212,6 +228,11 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
     /// Foreground: shows the saved model at once, reads `/v2/me`, then
     /// follows the change feed until cancelled or stopped by the server.
     public func runForeground() async {
+        guard access.state != .revoked else { return }
+        if access.state == .paused {
+            await readMeUntilRead()
+            guard access.state == .available, !Task.isCancelled else { return }
+        }
         let (signals, continuation) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
         let (settings, settingsContinuation) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
         let (queued, queuedContinuation) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
@@ -246,7 +267,7 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
             group.addTask { await self.outbox.flush() }
             await sync.runForeground()
             group.cancelAll()
-            if foregroundOnlyWrites { await outbox.pauseSending() }
+            if foregroundOnlyWrites || access.state != .available { await outbox.pauseSending() }
         }
     }
 

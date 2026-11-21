@@ -630,12 +630,13 @@ struct LiveContentView: View {
 
     var body: some View {
         let progress = launch?.foregroundConnectProgress
-        let showsRecovery = !store.isReadOnly && (progress.map { $0.outcome != .confirmed } ?? false)
+        let showsRecovery = !store.isReadOnly && !store.v2AccountPaused &&
+            (progress.map { $0.outcome != .confirmed } ?? false)
         let failureKey = launch?.foregroundConnectFailureKey
         let diagnostic = launch?.foregroundConnectDiagnostic
         let connectionStatus = showsRecovery ? progress?.userFacingMessage : store.connectionWarning
         let connectionWarning = showsRecovery ? progress?.userFacingMessage : store.connectionWarning
-        let presentsFailureDetails = !store.isReadOnly && diagnostic != nil &&
+        let presentsFailureDetails = !store.isReadOnly && !store.v2AccountPaused && diagnostic != nil &&
             (failureKey.map { launch?.shouldPresentForegroundConnectFailure($0) ?? false } ?? false)
         let failureAlertPresented = Binding<Bool>(
             get: { presentsFailureDetails && !replyEditorFocused },
@@ -955,6 +956,11 @@ struct LiveInboxSettings: View {
                                           systemImage: "lock")
                                 }
                                 .accessibilityHint("Open this account’s saved messages and discussion read-only")
+                                if departure.record.v2Revoked == true {
+                                    NavigationLink("Unsent from your previous device") {
+                                        PreviousDeviceUnsentTextView { try launch.recoveredUnsentText(for: departure) }
+                                    }
+                                }
                             }
                         }
                     }

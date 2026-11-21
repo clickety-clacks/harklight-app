@@ -20,6 +20,150 @@ private let noOutboxWait: @Sendable (Int, TimeInterval?) async throws -> Void = 
     try await Task.sleep(for: .seconds(3600))
 }
 
+final class ClientAPIAccessTests: XCTestCase {
+    private func connection(_ server: any ClientAPITransport, directory: URL) throws -> ClientAPIv2Connection {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                                       personID: ExactText("person"), deviceID: ExactText("device"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let repository = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        return try ClientAPIv2Connection(transport: server, repository: repository, context: context,
+            directory: directory, errors: RecordingErrorLogV2(), foregroundOnlyWrites: true)
+    }
+
+    func testPushSettingsAndWritesUseTheAccountAccessGate() async throws {
+        let server = FakeClientAPIServer()
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let connection = try connection(server, directory: directory)
+        connection.access.pause()
+        do {
+            _ = try await connection.push.status()
+            XCTFail("A paused account must not fetch push settings.")
+        } catch let error as APIError {
+            XCTAssertEqual(error.token, .accountPaused)
+        }
+        connection.access.revoke()
+        do {
+            _ = try await connection.push.remove(idempotencyKey: UUID())
+            XCTFail("A revoked device must not send a push DELETE.")
+        } catch let error as APIError {
+            XCTAssertEqual(error.token, .unauthorized)
+        }
+        XCTAssertTrue(server.received.isEmpty)
+    }
+
+    func testAnOlderPausedMeCannotUndoANewerActiveMeOrItsSavedState() async throws {
+        let server = HeldMeTransport()
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let connection = try connection(server, directory: directory)
+        connection.access.pause()
+        let older = Task { try await connection.refreshMe() }
+        defer { server.releaseOldResponse.release() }
+        await eventually("the old request is held") { await server.meReads == 1 }
+        _ = try await connection.refreshMe()
+        XCTAssertEqual(connection.access.state, .available)
+        server.releaseOldResponse.release()
+        _ = try await older.value
+        XCTAssertEqual(connection.access.state, .available)
+        XCTAssertNil(connection.model.snapshot.accountPaused)
+        let reopened = try self.connection(server, directory: directory)
+        XCTAssertEqual(reopened.access.state, .available)
+    }
+
+    func testPausedFeedKeepsTheCacheAndSavedWritesUntilMeConfirmsRecovery() async throws {
+        let server = FakeClientAPIServer()
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        server.inboxItems = [V2Fixture.item("i", rev: 1, rankKey: "a")]
+        server.meBody = #"{"account":{"state":"active"},"features":{},"limits":{}}"#
+        let connection = try connection(server, directory: directory)
+        let initial = Task { await connection.runForeground() }
+        defer { initial.cancel() }
+        await eventually("the held inbox and feed") {
+            server.openFeedCount == 1 && connection.model.snapshot.items[ExactText("i")] != nil &&
+                server.received.contains { $0.path == "/v2/me" }
+        }
+        let held = connection.model.heldCursor
+        server.closeFeeds(reason: "account_paused")
+        await initial.value
+        XCTAssertEqual(connection.access.state, .paused)
+        XCTAssertEqual(connection.model.persistedCursor(), held)
+        XCTAssertNotNil(connection.model.snapshot.items[ExactText("i")])
+
+        let write = ClientAPIWrites.reply(itemID: ExactText("i"), text: ExactText("saved while paused"))
+        let key = UUID()
+        try await connection.outbox.submit(target: write.target, operation: write.operation, write: write.write,
+                                           idempotencyKey: key)
+        let reopened = try self.connection(server, directory: directory)
+        XCTAssertEqual(reopened.access.state, .paused, "A feed pause survives relaunch before another /me read.")
+        XCTAssertEqual(reopened.model.persistedCursor(), held)
+        XCTAssertNotNil(reopened.model.snapshot.items[ExactText("i")])
+        let before = server.received.count
+        server.meBody = #"{"account":{"state":"paused"},"features":{},"limits":{}}"#
+        await reopened.runForeground()
+        XCTAssertEqual(Array(server.received.dropFirst(before)).map(\.path), ["/v2/me"])
+        let pending = await reopened.outbox.pending
+        XCTAssertEqual(pending.map(\.id), [key])
+
+        server.meBody = #"{"account":{"state":"active"},"features":{},"limits":{}}"#
+        let resumed = Task { await reopened.runForeground() }
+        defer { resumed.cancel() }
+        await eventually("recovery sends the saved operation under its original key") {
+            server.received.contains { $0.idempotencyKey == key }
+        }
+        XCTAssertEqual(reopened.access.state, .available)
+        XCTAssertNil(reopened.model.snapshot.accountPaused)
+        XCTAssertEqual(server.received.filter { $0.idempotencyKey == key }.count, 1)
+    }
+
+    func testRevokedFeedBlocksSubsequentConnectionAndIndependentRequests() async throws {
+        let server = FakeClientAPIServer()
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let connection = try connection(server, directory: directory)
+        let initial = Task { await connection.runForeground() }
+        defer { initial.cancel() }
+        await eventually("the stream is open") { server.openFeedCount == 1 }
+        server.closeFeeds(reason: "revoked")
+        await initial.value
+        XCTAssertEqual(connection.access.state, .revoked)
+        let before = server.received.count
+        await connection.runForeground()
+        do {
+            _ = try await connection.access.send(.get("/v2/me"))
+            XCTFail("The revoked connection must not make another request.")
+        } catch let error as APIError {
+            XCTAssertEqual(error.token, .unauthorized)
+        }
+        XCTAssertEqual(server.received.count, before)
+        XCTAssertEqual(server.openFeedCount, 0)
+    }
+}
+
+private actor HeldMeTransport: ClientAPITransport {
+    private(set) var meReads = 0
+    nonisolated let releaseOldResponse = AsyncGate()
+
+    func send(_ request: APIRequest) async throws -> APIResponse {
+        guard request.path == "/v2/me" else { throw URLError(.unsupportedURL) }
+        meReads += 1
+        let first = meReads == 1
+        if first { await releaseOldResponse.wait() }
+        let state = first ? "paused" : "active"
+        let body = #"{"account":{"state":"\#(state)"},"features":{},"limits":{}}"#
+        return APIResponse(status: 200, requestID: "me", body: Data(body.utf8))
+    }
+
+    nonisolated func changeFeed(after: Rev) -> AsyncThrowingStream<FeedEvent, any Error> {
+        AsyncThrowingStream { $0.finish() }
+    }
+
+    func changeBatch(after: Rev) async throws -> FeedBatch {
+        FeedBatch(changes: [], rev: after, more: false)
+    }
+}
+
 final class ServerSentEventParserTests: XCTestCase {
     private func events(_ lines: [String]) -> [ServerSentEvent] {
         var parser = ServerSentEventParser()

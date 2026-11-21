@@ -69,6 +69,7 @@ struct NativeEnrollmentRecord: Codable, Equatable {
     let expiresAt: Int64?
     let statusExpiresAt: Int64?
     var personID: String?
+    var v2Revoked: Bool? = nil
     var pushBinding: NativePushBinding? = nil
     var pushRegistrationRevisionFloor: UInt64? = nil
     var v2PushRegistration: ClientAPIPushRegistrationState? = nil
@@ -449,6 +450,15 @@ struct NativeEnrollmentStore {
             try save(record)
         }
         return result
+    }
+
+    @MainActor func markV2Revoked(_ expected: NativeEnrollmentRecord) throws {
+        guard var record = try load(), record.sameNotificationProfile(as: expected) else {
+            throw NativeJoinError.superseded
+        }
+        guard record.v2Revoked != true else { return }
+        record.v2Revoked = true
+        try save(record)
     }
 
     /// Persist the exact registration operation before sending it. Repeated
