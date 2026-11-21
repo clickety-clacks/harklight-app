@@ -87,9 +87,9 @@ final class HarklightTests: XCTestCase {
         let lifecycle = NativeRelayLifecycle(clientAPIV2Enabled: true)
         lifecycle.installV2Connection(connection, context: context)
         let item = Data(#"{"item_id":"item","rev":1,"sender":"sender","request_revision":1,"message":{"title":"Attachment"},"files":[],"seen":false,"rank":{"key":"a","section":"current"},"chat":{"available":true,"started":true}}"#.utf8)
-        let entry = Data(#"{"entry_id":"entry","item_id":"item","rev":2,"position":1,"kind":"reply","author":"origin","request_revision":1,"files":[{"file_id":"download/1","name":"file.txt","size":3,"sha256":"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"}]}"#.utf8)
-        try connection.model.apply([.init(rev: 1, kind: "item", data: item),
-                                    .init(rev: 2, kind: "entry", data: entry)], cursor: 2)
+        let page = Data(#"{"rev":2,"older":false,"entries":[{"entry_id":"entry","item_id":"item","rev":2,"position":1,"kind":"reply","author":"origin","request_revision":1,"files":[{"file_id":"download/1","name":"file.txt","size":3,"sha256":"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"}]}]}"#.utf8)
+        try connection.model.apply([.init(rev: 1, kind: "item", data: item)], cursor: 1)
+        try connection.model.apply(APIEntriesPage(json: JSONValue.parse(page)), of: ExactText("item"))
         let projection = ServerModelV2Projection.cachedState(connection.model.snapshot, identity: identity)
         let key = RequestKey(accountScope: identity.personID, senderID: ExactText("sender"), messageID: ExactText("item"))
         let attachment = try XCTUnwrap(projection.conversations[key]?.turns.first?.files.first)
