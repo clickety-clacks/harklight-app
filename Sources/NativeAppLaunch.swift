@@ -2294,9 +2294,9 @@ final class LivePresentationStore {
         return conversationThreads[key]?.uploadGroups?[operation]?.cleanupID != nil
     }
 
-    func loadDiscussionOnOpen(_ key: RequestKey) async {
-        guard permitsDelivery else { return }
-        await NativeRelayLifecycle.shared.loadV2EntriesOnOpen(key, expected: profileContext)
+    func loadDiscussionOnOpen(_ key: RequestKey) async -> Bool {
+        guard permitsDelivery else { return true }
+        return await NativeRelayLifecycle.shared.loadV2EntriesOnOpen(key, expected: profileContext)
     }
 
     func refreshDiscussionHistory() async {
@@ -2361,6 +2361,10 @@ final class LivePresentationStore {
         catch { diagnose(.localStore, .projectionRefresh, .failed, error: error, request: key) }
     }
 
+    var allowsDiscussionAttachments: Bool {
+        isLocalExample || !NativeRelayLifecycle.shared.clientAPIV2Enabled
+    }
+
     func sendDiscussion(for key: RequestKey, revision: UInt64,
                         onQueued: (() -> Void)? = nil,
                         onResult: ((Bool) -> Void)? = nil) {
@@ -2381,6 +2385,10 @@ final class LivePresentationStore {
             }
             let binding = ConversationBinding(request: key, revision: revision)
             if thread.chatNeverCloses == true {
+                guard thread.drafts[revision]?.files.isEmpty != false else {
+                    conversationError = "Remove the attachments to send this message. Your draft is saved."
+                    return
+                }
                 // Client API v2 (APP-07): each message is its own operation.
                 // It is saved with its id, the composer empties and stays
                 // enabled, and the message is handed to the outbox; nothing

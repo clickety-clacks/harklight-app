@@ -134,8 +134,10 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
     /// Sends every saved write that is still pending, once, under its saved
     /// key; refused ones stay failed until the person retries.
     func sendSavedWrites() {
-        let outbox = self.outbox
-        Task { await outbox.flush() }
+        Task {
+            await recoverQueuedReplies()
+            await outbox.flush()
+        }
     }
 
     /// Foreground: shows the saved model at once, reads `/v2/me`, then
@@ -180,12 +182,38 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
         }
     }
 
-    public func submitQueuedReply(_ message: ConversationDraft) async throws {
-        guard let operation = message.operationID, message.files.isEmpty,
+    private func recoverQueuedReplies() async {
+        do {
+            let threads = try repository.conversationSnapshot(context: context).threads
+            let messages = threads.values.flatMap { $0.queuedMessages ?? [] }
+                .sorted { ($0.submittedAt ?? .distantPast) < ($1.submittedAt ?? .distantPast) }
+            for message in messages {
+                try Task.checkCancellation()
+                switch message.disposition {
+                case .submitting, .outcomeUnknown:
+                    try await submitQueuedReply(message, retryRefused: false)
+                case .saved, .acceptedPendingReplay, .rejected:
+                    continue
+                }
+            }
+        } catch is CancellationError {
+            return
+        } catch {
+            errors.report(ErrorLogReport(concern: .actions, connectionRole: .request,
+                operation: "reply", phase: "restore", reason: .from(error: error),
+                initiator: .unknown, retryable: true))
+        }
+    }
+
+    public enum QueuedReplyError: Error { case attachmentsUnavailable }
+
+    public func submitQueuedReply(_ message: ConversationDraft, retryRefused: Bool = true) async throws {
+        guard let operation = message.operationID,
               message.binding.request.accountScope == context.identity.personID else { return }
+        guard message.files.isEmpty else { throw QueuedReplyError.attachmentsUnavailable }
         let reply = ClientAPIWrites.reply(itemID: message.binding.request.messageID, text: message.text)
         try await outbox.submit(target: reply.target, operation: reply.operation, write: reply.write,
-                                idempotencyKey: operation)
+                                idempotencyKey: operation, retryRefused: retryRefused)
     }
 
     public func loadEntriesIfNeeded(itemID: ExactText) async throws {

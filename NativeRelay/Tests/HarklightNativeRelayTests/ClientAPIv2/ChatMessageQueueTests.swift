@@ -48,6 +48,29 @@ final class ChatMessageQueueTests: XCTestCase {
         XCTAssertEqual(thread.queuedMessages?.compactMap(\.operationID), ids, "Saved before anything is sent.")
     }
 
+    func testAReplySavedBeforeOutboxHandoffIsRecoveredUnderItsSavedKey() async throws {
+        let (repository, context, binding) = try repository(v2: true)
+        try type("saved before handoff", repository, binding, context)
+        let message = try repository.queueChatMessage(binding, context: context)
+        let operation = try XCTUnwrap(message.operationID)
+        let server = FakeClientAPIServer()
+        let connection = try ClientAPIv2Connection(transport: server, repository: repository,
+            context: context, directory: nil, errors: RecordingErrorLogV2())
+        let initial = await connection.outbox.pending
+        XCTAssertTrue(initial.isEmpty)
+        let foreground = Task { await connection.runForeground() }
+        defer { foreground.cancel() }
+        let deadline = ContinuousClock.now + .seconds(2)
+        while !server.received.contains(where: { $0.idempotencyKey == operation }),
+              ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        let sent = server.received.filter { $0.idempotencyKey == operation }
+        XCTAssertEqual(sent.count, 1)
+        XCTAssertEqual(sent.first?.path, "/v2/items/i/replies")
+        XCTAssertEqual(sent.first?.body, Data(#"{"text":"saved before handoff"}"#.utf8))
+    }
+
     func testOneMessagesOutcomeLeavesTheOthersAlone() throws {
         let (repository, context, binding) = try repository(v2: true)
         var ids: [UUID] = []

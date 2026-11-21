@@ -996,6 +996,7 @@ final class NativeRelayLifecycle {
     }
 
     func sceneActivityChanged(isActive: Bool) {
+        guard clientAPIV2Enabled else { return }
         sceneIsActive = isActive
         if isActive {
             startV2Foreground()
@@ -1290,17 +1291,22 @@ final class NativeRelayLifecycle {
         }
     }
 
-    func loadV2EntriesOnOpen(_ key: RequestKey, expected: ProfileContext) async {
+    @discardableResult
+    func loadV2EntriesOnOpen(_ key: RequestKey, expected: ProfileContext) async -> Bool {
         guard let connection = v2Connection, context == expected,
-              key.accountScope == expected.identity.personID else { return }
+              key.accountScope == expected.identity.personID else { return true }
         do {
             try await connection.loadEntriesIfNeeded(itemID: key.messageID)
-        } catch is ServerModelV2Store.SupersededGeneration {
-            // A reset during the read leaves the thread unloaded for its next open.
+            return true
+        } catch is CancellationError {
+            return false
         } catch {
+            let reason: ErrorLogReason = error is ServerModelV2Store.SupersededGeneration
+                ? .app("snapshot_superseded") : .from(error: error)
             errorLog.report(ErrorLogReport(concern: .snapshot, connectionRole: .request,
-                operation: "load_entries", phase: "read", reason: .from(error: error),
+                operation: "load_entries", phase: "read", reason: reason,
                 initiator: .unknown, retryable: true))
+            return false
         }
     }
 

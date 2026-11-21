@@ -146,7 +146,9 @@ struct HarklightApp: App {
             }
             .onOpenURL { url in Task { await launch.receiveInvitation(url) } }
             .task(id: scenePhase) {
-                NativeRelayLifecycle.shared.sceneActivityChanged(isActive: scenePhase == .active)
+                if NativeRelayLifecycle.shared.clientAPIV2Enabled {
+                    NativeRelayLifecycle.shared.sceneActivityChanged(isActive: scenePhase == .active)
+                }
                 launch.guidedJoin.invalidateApprovalObservation()
                 guard scenePhase == .active else { return }
                 var isActivationRefresh = true
