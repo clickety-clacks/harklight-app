@@ -1321,6 +1321,7 @@ final class NativeRelayLifecycle {
         guard activeTransportAttemptID == attempt, let connection = v2Connection,
               context?.identity.deviceID.rawValue == show.deviceID else { return }
         v2ShowLookup?.cancel()
+        v2ShowCoordinator.supersedePendingShow()
         pendingV2Show = (show, receivedAt)
         if connection.model.snapshot.items[ExactText(show.itemID)] != nil {
             deliverV2ShowIfHydrated(attempt: attempt)
@@ -1341,7 +1342,7 @@ final class NativeRelayLifecycle {
                 self.deliverV2ShowIfHydrated(attempt: attempt)
             } else {
                 if notFound { self.pendingV2Show = nil }
-                self.v2ShowCoordinator.receive(.clientAPIUnavailable(show, notFound: notFound),
+                self.v2ShowCoordinator.receiveV2(.clientAPIUnavailable(show, notFound: notFound),
                     elapsedSinceReceipt: max(0, Date().timeIntervalSince(receivedAt)))
             }
         }
@@ -1351,7 +1352,7 @@ final class NativeRelayLifecycle {
         guard activeTransportAttemptID == attempt, let pending = pendingV2Show,
               let item = v2Connection?.model.snapshot.items[ExactText(pending.show.itemID)] else { return }
         pendingV2Show = nil
-        v2ShowCoordinator.receive(.clientAPI(pending.show, senderID: item.sender.rawValue),
+        v2ShowCoordinator.receiveV2(.clientAPI(pending.show, senderID: item.sender.rawValue),
             elapsedSinceReceipt: max(0, Date().timeIntervalSince(pending.receivedAt)))
     }
 
