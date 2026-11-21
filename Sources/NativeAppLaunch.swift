@@ -1518,7 +1518,7 @@ final class LivePresentationStore {
     }
     func canEditDiscussionDraft(for key: RequestKey) -> Bool {
         guard !isReadOnly, let thread = conversationThreads[key] else { return false }
-        return thread.terminal == nil && thread.allowsDiscussion
+        return thread.isComposerOpen
     }
 
     /// Only the current authenticated projection can establish listening.
@@ -1550,8 +1550,11 @@ final class LivePresentationStore {
     func canSendDiscussion(for key: RequestKey) -> Bool {
         guard (canSendToCurrentServer || isLocalExample) && !isReadOnly,
               let thread = conversationThreads[key],
-              thread.terminal == nil, thread.allowsDiscussion else { return false }
-        guard isLocalExample || discussionAvailability(in: thread)?.state == .listening else { return false }
+              thread.isComposerOpen else { return false }
+        // Under the v2 chat rules an agent that is not listening is shown as
+        // information; the server holds the reply until it next reads.
+        guard isLocalExample || thread.chatNeverCloses == true ||
+                discussionAvailability(in: thread)?.state == .listening else { return false }
         return thread.drafts[thread.currentRevision]?.isPermanentlyRefused != true
     }
     @ObservationIgnored var notificationProjectionDidChange: (() -> Void)?
@@ -2185,7 +2188,7 @@ final class LivePresentationStore {
             guard var thread = try attentionStore.conversationSnapshot(context: profileContext).threads[key] else {
                 throw ConversationError.missingRequest
             }
-            guard thread.terminal == nil, thread.allowsDiscussion else { throw ConversationError.closed }
+            guard thread.isComposerOpen else { throw ConversationError.closed }
             if let text, files == nil {
                 let binding = ConversationBinding(request: key, revision: revision)
                 let updated = try port.updateConversationDraftText(ExactText(text), for: binding,
@@ -2353,9 +2356,11 @@ final class LivePresentationStore {
                   let thread = try attentionStore.conversationSnapshot(context: profileContext).threads[key] else {
                 throw ConversationError.missingRequest
             }
-            guard thread.terminal == nil, thread.allowsDiscussion,
+            guard thread.isComposerOpen,
                   thread.drafts[revision]?.isPermanentlyRefused != true else { throw ConversationError.closed }
-            guard isLocalExample || discussionAvailability(in: thread)?.state == .listening else {
+            // Under the v2 chat rules, 'not listening' is information only.
+            guard isLocalExample || thread.chatNeverCloses == true ||
+                    discussionAvailability(in: thread)?.state == .listening else {
                 conversationError = "The agent is not listening on this conversation. Your text and files are saved."
                 try refreshFromDurableStore()
                 return
@@ -2437,7 +2442,7 @@ final class LivePresentationStore {
         guard !isReadOnly else { return }
         do {
             guard let thread = try attentionStore.conversationSnapshot(context: profileContext).threads[key],
-                  thread.terminal == nil, thread.allowsDiscussion else { throw ConversationError.closed }
+                  thread.isComposerOpen else { throw ConversationError.closed }
             var draft = thread.drafts[revision] ?? ConversationDraft(binding: ConversationBinding(request: key, revision: revision))
             guard case .rejected = draft.disposition else { return }
             let rejectedOperation = draft.operationID

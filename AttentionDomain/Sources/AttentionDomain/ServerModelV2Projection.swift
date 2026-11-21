@@ -104,6 +104,7 @@ public enum ServerModelV2Projection {
         var thread = ConversationThread(request: key, sessionHandle: item.itemID,
                                         revision: item.requestRevision, payload: item.message)
         thread.terminal = terminalState(item.terminal)
+        thread.chatNeverCloses = true
         if item.terminal?.state == "retracted" {
             thread.reportedRetractedAtMilliseconds = item.terminal?.atMs
         }

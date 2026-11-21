@@ -193,3 +193,39 @@ final class ServerModelV2ProjectionTests: XCTestCase {
         XCTAssertEqual(snapshot.inboxView?.entries.count, 2)
     }
 }
+
+/// Product rulings APP-06 and APP-05 under the v2 chat rules, and today's rules
+/// unchanged without them.
+final class ChatRulesTests: XCTestCase {
+    private let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                                           personID: ExactText("person-A"), deviceID: ExactText("installation-A"))
+
+    private func thread(terminal: String?) throws -> ConversationThread {
+        let store = ServerModelV2Store(fileURL: nil)
+        let item = V2Fixture.item("i", rev: 1, rankKey: "a",
+                                  terminal: terminal.map { #"{"state":"\#($0)","at_ms":5}"# })
+        try store.apply(kind: "item", rev: 1, data: V2Fixture.json(item))
+        let cached = ServerModelV2Projection.cachedState(store.snapshot, identity: identity)
+        return try XCTUnwrap(cached.conversations.values.first)
+    }
+
+    func testChatStaysOpenAfterEveryTerminalOutcomeUnderTheV2Rules() throws {
+        for terminal in [nil, "answered", "expired", "cleared", "superseded", "retracted"] {
+            let thread = try thread(terminal: terminal)
+            XCTAssertTrue(thread.isComposerOpen, "Composer open for \(terminal ?? "open")")
+            XCTAssertTrue(thread.allowsDiscussion)
+        }
+    }
+
+    func testTodaysRulesStillCloseChatWithoutTheV2Rules() throws {
+        var expired = try thread(terminal: "expired")
+        expired.chatNeverCloses = nil
+        XCTAssertFalse(expired.isComposerOpen, "The current protocol keeps today's closed chat.")
+        var answered = try thread(terminal: "answered")
+        answered.chatNeverCloses = nil
+        XCTAssertFalse(answered.isComposerOpen, "Today the composer closes once the request is answered.")
+        var open = try thread(terminal: nil)
+        open.chatNeverCloses = nil
+        XCTAssertTrue(open.isComposerOpen)
+    }
+}

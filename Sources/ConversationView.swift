@@ -161,7 +161,7 @@ struct ConversationPanel: View {
                 if let error = store.conversationError(for: key, revision: revision) {
                     Text(error).font(.caption).foregroundStyle(.hkSecondary).padding(.horizontal)
                 }
-                if thread.terminal != nil || !thread.allowsDiscussion {
+                if !thread.isComposerOpen {
                     ConversationRetainedTextRecovery(store: store, key: key)
                     // A closed chat offers no composer, so its never-sent discussion
                     // stays readable here instead (chat messaging spec R4).
@@ -177,7 +177,7 @@ struct ConversationPanel: View {
                             .padding(verticalSizeClass == .compact ? 4 : 12)
                     }
                 }
-                if thread.terminal == nil && thread.allowsDiscussion {
+                if thread.isComposerOpen {
                     if let message = store.conversationUnavailableMessage {
                         Text(message)
                             .font(.callout)
@@ -426,7 +426,7 @@ private struct ConversationHistoryContent: View, Equatable {
                     }
                     ForEach(pendingSubmissions) { pending in
                         ConversationPendingSubmissionView(submission: pending,
-                            isClosed: thread.terminal != nil || !thread.allowsDiscussion,
+                            isClosed: !thread.isComposerOpen,
                             retryEnabled: store.canSendDiscussion(for: key) && !store.isSendingDiscussion(for: key, revision: pending.revision),
                             editEnabled: store.canEditDiscussionDraft(for: key),
                             retry: { store.sendDiscussion(for: key, revision: pending.revision) },
