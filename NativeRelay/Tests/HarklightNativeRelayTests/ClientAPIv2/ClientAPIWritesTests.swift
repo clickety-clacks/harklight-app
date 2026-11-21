@@ -37,7 +37,7 @@ final class ClientAPIWritesTests: XCTestCase {
     func testAnFYISeenTapIsAnAnswerWithTheSeenChoice() throws {
         let submission = try submit(message: #"{"title":"Deployed","answer_ui":\#(seenUI)}"#,
                                     inputs: [.compatibilityValue(action: ExactText("seen"))])
-        let write = try ClientAPIWrites.answer(submission)
+        let write = try ClientAPIWrites.answer(submission, answerUI: try json(seenUI))
         XCTAssertEqual(write.write.method, .post)
         XCTAssertEqual(write.write.path, "/v2/items/item-1/answer")
         XCTAssertEqual(body(write), #"{"request_revision":1,"choice":"seen"}"#)
@@ -48,7 +48,8 @@ final class ClientAPIWritesTests: XCTestCase {
     func testATextActionReplyIsAComment() throws {
         let submission = try submit(message: #"{"title":"Question","answer_ui":\#(replyUI)}"#,
                                     inputs: [.compatibilityText(action: ExactText("reply"), text: ExactText("Ship it"))])
-        XCTAssertEqual(body(try ClientAPIWrites.answer(submission)), #"{"request_revision":1,"comment":"Ship it"}"#)
+        XCTAssertEqual(body(try ClientAPIWrites.answer(submission, answerUI: try json(replyUI))),
+                       #"{"request_revision":1,"comment":"Ship it"}"#)
     }
 
     func testThePlainReplyOfAnUnshowableScreenIsAComment() throws {
@@ -59,7 +60,8 @@ final class ClientAPIWritesTests: XCTestCase {
         let unknown = #"{"schema":"attention-client.future/9","anything":true}"#
         let submission = try submit(message: #"{"title":"Question","answer_ui":\#(unknown)}"#,
                                     inputs: [.compatibilityText(action: ExactText("reply"), text: ExactText("Later"))])
-        XCTAssertEqual(body(try ClientAPIWrites.answer(submission)), #"{"request_revision":1,"comment":"Later"}"#)
+        XCTAssertEqual(body(try ClientAPIWrites.answer(submission, answerUI: try json(unknown))),
+                       #"{"request_revision":1,"comment":"Later"}"#)
     }
 
     private func submission(inputs: [TypedInputRecord], answer: JSONValue, kind: SubmissionAnswerKind? = nil,
@@ -70,30 +72,76 @@ final class ClientAPIWritesTests: XCTestCase {
                    typedInputs: inputs, descriptorFingerprint: "", contentFingerprint: "", requestRevision: revision)
     }
 
+    private let uiScreen = #"{"schema":"attention-client.ui/1","requires":["scene/1","result/1"],"illustrations":[],"inputs":[],"open":{"kind":"text","text":"Ready?","style":"body"},"resolved":{"kind":"text","text":"Done","style":"body"},"submission":{"label":"Done","result":{"kind":"literal","value":null}}}"#
+
+    private func json(_ text: String) throws -> JSONValue { try JSONValue.parse(Data(text.utf8)) }
+
     func testAUI1ScreenSendsItsBuiltResult() throws {
-        let result = try JSONValue.parse(Data(#"{"approve":true,"note":"ok","weight":1.50}"#.utf8))
+        let result = try json(#"{"approve":true,"note":"ok","weight":1.50}"#)
         let write = try ClientAPIWrites.answer(submission(inputs: [.text(input: ExactText("note"), text: ExactText("ok"))],
-                                                          answer: result))
+                                                          answer: result), answerUI: try json(uiScreen))
         XCTAssertEqual(body(write), #"{"request_revision":3,"result":{"approve":true,"note":"ok","weight":1.50}}"#,
                        "The result is sent exactly as built.")
     }
 
+    /// #386 review B-8 and round 16: a UI/1 screen with no inputs (a confirm
+    /// button with a literal result) is answerable, through the same port a tap uses.
+    func testAUI1ScreenWithNoInputsIsAnsweredWithItsLiteralResultEvenNull() throws {
+        let submission = try submit(message: #"{"title":"Confirm","answer_ui":\#(uiScreen)}"#, inputs: [])
+        let write = try ClientAPIWrites.answer(submission, answerUI: try json(uiScreen))
+        XCTAssertEqual(body(write), #"{"request_revision":1,"result":null}"#,
+                       "A null result is present: a structured answer whose value is null.")
+    }
+
+    /// Round 16: the result may be any JSON value; the screen decides, not the value's shape.
+    func testAUI1ResultMayBeAnyJSONValue() throws {
+        for literal in [#"{"a":1}"#, #"[1,"two"]"#, #""yes""#, "42", "1.50", "true", "false", "null"] {
+            let write = try ClientAPIWrites.answer(submission(inputs: [], answer: try json(literal)),
+                                                   answerUI: try json(uiScreen))
+            XCTAssertEqual(body(write), #"{"request_revision":3,"result":"# + literal + "}")
+        }
+    }
+
+    func testAPlainReplyOnAUI1ItemIsStillAComment() throws {
+        let write = try ClientAPIWrites.answer(
+            submission(inputs: [.compatibilityText(action: ExactText("reply"), text: ExactText("Later"))],
+                       answer: .null), answerUI: try json(uiScreen))
+        XCTAssertEqual(body(write), #"{"request_revision":3,"comment":"Later"}"#)
+    }
+
     func testNoCommentSendsOnlyTheRevision() throws {
-        let write = try ClientAPIWrites.answer(submission(inputs: [], answer: .null, kind: .noComment))
+        let write = try ClientAPIWrites.answer(submission(inputs: [], answer: .null, kind: .noComment),
+                                               answerUI: try json(uiScreen))
         XCTAssertEqual(body(write), #"{"request_revision":3}"#)
     }
 
-    func testAnAnswerWithNoV2FormIsRefused() {
-        XCTAssertThrowsError(try ClientAPIWrites.answer(submission(inputs: [], answer: .null))) {
+    func testAnAnswerWithNoV2FormIsRefused() throws {
+        XCTAssertThrowsError(try ClientAPIWrites.answer(submission(inputs: [], answer: .null), answerUI: try json(replyUI))) {
             XCTAssertEqual($0 as? ClientAPIWrites.BuildError, .unsupportedAnswer)
         }
+        XCTAssertThrowsError(try ClientAPIWrites.answer(
+            submission(inputs: [.text(input: ExactText("note"), text: ExactText("ok"))], answer: .null),
+            answerUI: try json(replyUI)), "A result only goes to a UI/1 screen.")
         XCTAssertThrowsError(try ClientAPIWrites.answer(submission(inputs: [.compatibilityValue(action: ExactText("a")),
                                                                             .compatibilityValue(action: ExactText("b"))],
-                                                                   answer: .null)))
+                                                                   answer: .null), answerUI: try json(seenUI)))
         XCTAssertThrowsError(try ClientAPIWrites.answer(submission(inputs: [.compatibilityValue(action: ExactText("a"))],
-                                                                   answer: .null, revision: nil))) {
+                                                                   answer: .null, revision: nil), answerUI: nil)) {
             XCTAssertEqual($0 as? ClientAPIWrites.BuildError, .missingRequestRevision)
         }
+    }
+
+    /// #386 review L-31: an id is percent-encoded once, by the builder; the
+    /// transport sends the path as it is.
+    func testTheTransportDoesNotEncodeTheIdAgain() throws {
+        let transport = HTTPSClientAPITransport(baseURL: try XCTUnwrap(URL(string: "https://server.example:8443")),
+                                                configuration: .ephemeral, delegate: nil)
+        let write = ClientAPIWrites.seen(itemID: ExactText("a b/c"))
+        let request = transport.urlRequest(for: APIRequest(method: write.write.method, path: write.write.path,
+                                                           body: write.write.body))
+        XCTAssertEqual(request.url?.absoluteString, "https://server.example:8443/v2/items/a%20b%2Fc/seen")
+        let listed = transport.urlRequest(for: .get("/v2/inbox", query: ["limit": "200"]))
+        XCTAssertEqual(listed.url?.absoluteString, "https://server.example:8443/v2/inbox?limit=200")
     }
 
     func testSeenReadPositionAndReplyRequests() {

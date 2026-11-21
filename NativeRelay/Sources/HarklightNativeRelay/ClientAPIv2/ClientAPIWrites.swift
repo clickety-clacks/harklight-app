@@ -39,25 +39,29 @@ public enum ClientAPIWrites {
     }
 
     /// `POST /v2/items/{item_id}/answer` for an answer the person submitted.
+    /// `answerUI` is the request's `answer_ui` for the submission's revision.
     ///
     /// - No comment sends only `request_revision`.
     /// - A value action, including an FYI's Seen (contract round 10), sends
     ///   `choice` with the action id.
     /// - A text action, and the plain reply an unshowable answer screen
     ///   degrades to, sends `comment`.
-    /// - An `attention-client.ui/1` screen sends its built result as `result`.
-    public static func answer(_ submission: Submission) throws -> ClientAPIWrite {
+    /// - An answer made on an `attention-client.ui/1` screen sends its built
+    ///   result as `result`, whatever JSON it is, `null` included, and also
+    ///   when the screen has no inputs (round 16). The screen's schema
+    ///   decides, never the inputs or the value's shape.
+    public static func answer(_ submission: Submission, answerUI: JSONValue?) throws -> ClientAPIWrite {
         guard let revision = submission.requestRevision, revision >= 1 else {
             throw BuildError.missingRequestRevision
         }
         var members = [JSONMember("request_revision", .number(JSONNumber(lexeme: String(revision))))]
         if !submission.isNoComment {
-            members.append(try answerMember(submission))
+            members.append(try answerMember(submission, answerUI: answerUI))
         }
         return write(submission.requestKey.messageID, "answer", .post, "answer", body: .object(members))
     }
 
-    private static func answerMember(_ submission: Submission) throws -> JSONMember {
+    private static func answerMember(_ submission: Submission, answerUI: JSONValue?) throws -> JSONMember {
         let inputs = submission.typedInputs
         if inputs.count == 1, let only = inputs.first {
             switch only {
@@ -69,13 +73,15 @@ public enum ClientAPIWrites {
                 break
             }
         }
-        let senderInputs = !inputs.isEmpty && inputs.allSatisfy {
+        let senderScreen = answerUI?.uniqueValue(named: "schema")?.stringValue?.rawValue == "attention-client.ui/1"
+        let senderInputs = inputs.allSatisfy {
             switch $0 {
             case .responseValue, .responseText, .text, .point: return true
             case .compatibilityValue, .compatibilityText: return false
             }
         }
-        guard senderInputs, case .object = submission.answer else { throw BuildError.unsupportedAnswer }
+        guard senderScreen, senderInputs else { throw BuildError.unsupportedAnswer }
+        // Present, so `null` is a structured answer whose value is null.
         return JSONMember("result", submission.answer)
     }
 
@@ -86,7 +92,8 @@ public enum ClientAPIWrites {
                                           body: Data(body.jsonString.utf8)))
     }
 
-    private static func component(_ id: ExactText) -> String {
+    /// One percent-encoded path segment; the transport does not encode again.
+    static func component(_ id: ExactText) -> String {
         var allowed = CharacterSet.urlPathAllowed
         allowed.remove(charactersIn: "/")
         return id.rawValue.addingPercentEncoding(withAllowedCharacters: allowed) ?? id.rawValue

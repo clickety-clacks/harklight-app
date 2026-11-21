@@ -44,8 +44,12 @@ public final class HTTPSClientAPITransport: ClientAPITransport, @unchecked Senda
     }
 
     func urlRequest(for request: APIRequest, accept: String = "application/json") -> URLRequest {
-        var components = URLComponents(url: baseURL.appendingPathComponent(request.path),
-                                       resolvingAgainstBaseURL: false)!
+        // The path is already percent-encoded (ids are encoded once, where the
+        // request is built); appending it as a component would encode it again.
+        var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false)!
+        let basePath = components.percentEncodedPath
+        components.percentEncodedPath = (basePath.hasSuffix("/") ? String(basePath.dropLast()) : basePath)
+            + request.path
         if !request.query.isEmpty {
             components.queryItems = request.query.sorted { $0.key < $1.key }
                 .map { URLQueryItem(name: $0.key, value: $0.value) }
