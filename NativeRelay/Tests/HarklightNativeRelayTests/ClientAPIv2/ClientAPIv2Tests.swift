@@ -722,13 +722,31 @@ final class ActionOutboxTests: XCTestCase {
         XCTAssertFalse(unknown.isPermanent)
         let server = FakeClientAPIServer()
         server.nextWriteFailures = [unknown]
+        let responseGate = AsyncGate()
+        let retryGate = AsyncGate()
+        defer { responseGate.release(); retryGate.release() }
+        server.holdWrites[seen.path] = responseGate
         let persistence = MemoryOutboxPersistence()
         let outcomes = RecordingOutcomes()
-        let box = try outbox(server, persistence, outcomes)
+        let errors = RecordingErrorLogV2()
+        let box = try outbox(server, persistence, outcomes, errors: errors, wait: { _, _ in
+            await retryGate.wait()
+        })
         let entry = try await box.submit(target: "a", operation: "mark_seen", write: seen)
-        await eventually("held") { server.received.count == 1 }
-        await box.flush()
+        await eventually("the first request is held") { server.received.count == 1 }
+        XCTAssertTrue(outcomes.accepted.isEmpty)
+        XCTAssertEqual(persistence.keys, [entry.idempotencyKey])
+
+        responseGate.release()
+        await eventually("the 502 is recorded before retry") { errors.reports.first?.httpStatus == 502 }
+        XCTAssertEqual(persistence.keys, [entry.idempotencyKey])
         XCTAssertTrue(outcomes.rejected.isEmpty)
+
+        retryGate.release()
+        await eventually("the retry is accepted and the record settles") {
+            outcomes.accepted.count == 1 && persistence.keys.isEmpty
+        }
+        XCTAssertEqual(server.received.map(\.idempotencyKey), [entry.idempotencyKey, entry.idempotencyKey])
         XCTAssertEqual(outcomes.accepted.map(\.0), [entry.idempotencyKey])
     }
 
