@@ -53,6 +53,7 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
                 meWaitBeforeRetry: @escaping @Sendable (Int) async throws -> Void = ChangeFeedSync.backoff,
                 replyWaitBeforeRetry: @escaping @Sendable (Int) async throws -> Void = ChangeFeedSync.backoff,
                 onLiveState: @escaping @Sendable (ChangeFeedSync.LiveState) -> Void = { _ in },
+                onShow: @escaping @Sendable (Data) async -> Void = { _ in },
                 onRejected: @escaping @Sendable (OutboxEntry, APIError) async -> Void = { _, _ in },
                 onPublished: @escaping @Sendable () -> Void = {}) throws {
         if let directory {
@@ -98,7 +99,7 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
                                        }
                                        if state == .live { relay.connection?.signalAcceptedReplyCheck() }
                                        onLiveState(state)
-                                   })
+                                   }, onShow: onShow)
         relay.connection = self
     }
 

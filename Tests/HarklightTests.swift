@@ -9,6 +9,9 @@ private final class V2ScenePushTransport: ClientAPITransport, @unchecked Sendabl
     private var closed = 0
     private var batches = 0
     private var entryReads = 0
+    private var focusScreens: [String] = []
+
+    var reportedFocusScreens: [String] { lock.withLock { focusScreens } }
 
     var counts: (opened: Int, closed: Int, batches: Int, entryReads: Int) {
         lock.withLock { (opened, closed, batches, entryReads) }
@@ -17,6 +20,12 @@ private final class V2ScenePushTransport: ClientAPITransport, @unchecked Sendabl
     func send(_ request: APIRequest) async throws -> APIResponse {
         let body: String
         switch request.path {
+        case "/v2/devices/me/focus":
+            if let data = request.body, let json = try? JSONValue.parse(data),
+               let screen = json.uniqueValue(named: "screen")?.stringValue?.rawValue {
+                lock.withLock { focusScreens.append(screen) }
+            }
+            body = "{}"
         case "/v2/me":
             body = #"{"account":{"state":"active"},"features":{},"limits":{}}"#
         case "/v2/items/item/entries":
@@ -109,6 +118,39 @@ final class HarklightTests: XCTestCase {
         await lifecycle.loadV2EntriesOnOpen(key, expected: context)
         XCTAssertEqual(transport.counts.entryReads, 2)
         XCTAssertTrue(connection.model.snapshot.loadedEntryItems.contains(key.messageID))
+        await lifecycle.deactivate()
+    }
+
+    @MainActor
+    func testV2FocusReportsBackgroundReadinessAndSceneTransitions() async throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                                       personID: ExactText("person"), deviceID: ExactText("device"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let repository = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        let transport = V2ScenePushTransport()
+        let connection = try ClientAPIv2Connection(transport: transport, repository: repository,
+                                                    context: context, directory: nil, errors: NoopErrorLog())
+        let reporter = NativeFocusReporter()
+        let lifecycle = NativeRelayLifecycle(clientAPIV2Enabled: true, v2FocusReporter: reporter)
+        let attempt = UUID()
+        let focus = ClientAPIFocusChannel(transport: transport, errors: NoopErrorLog()) { _, _ in }
+        func expect(_ screens: [String]) async throws {
+            let deadline = ContinuousClock.now + .seconds(2)
+            while transport.reportedFocusScreens.count < screens.count, ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(5))
+            }
+            XCTAssertEqual(transport.reportedFocusScreens, screens)
+        }
+        lifecycle.v2FocusScenePhaseChanged(.background)
+        lifecycle.installV2Connection(connection, context: context, attempt: attempt)
+        lifecycle.installV2FocusChannel(focus, attempt: attempt)
+        try await expect(["not_in_front"])
+        lifecycle.v2FocusScenePhaseChanged(.active)
+        try await expect(["not_in_front", "inbox"])
+        reporter.selectionChanged(to: .settings)
+        try await expect(["not_in_front", "inbox", "settings"])
+        lifecycle.v2FocusScenePhaseChanged(.background)
+        try await expect(["not_in_front", "inbox", "settings", "not_in_front"])
         await lifecycle.deactivate()
     }
 

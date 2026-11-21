@@ -5,6 +5,7 @@ import HarklightNativeRelay
 import Security
 import Observation
 import Network
+import enum SwiftUI.ScenePhase
 
 /// Shareable error details deliberately exclude response bodies, decoder context,
 /// persistence messages and NSError userInfo, all of which may contain message text.
@@ -935,6 +936,9 @@ final class NativeRelayLifecycle {
     // client_api_v2 is a release gate. B4 removes it with the relay.
     let clientAPIV2Enabled: Bool
     private var v2Connection: ClientAPIv2Connection?
+    private var v2FocusChannel: ClientAPIFocusChannel?
+    private var pendingV2Show: (show: ClientAPIShow, receivedAt: Date)?
+    private let v2FocusReporter: NativeFocusReporter
     private var v2ForegroundTask: Task<Void, Never>?
     private var sceneIsActive = false
 
@@ -991,8 +995,14 @@ final class NativeRelayLifecycle {
     }
     private let enrollment = NativeEnrollmentStore()
 
-    init(clientAPIV2Enabled: Bool = false) {
+    init(clientAPIV2Enabled: Bool = false, v2FocusReporter: NativeFocusReporter = .shared) {
         self.clientAPIV2Enabled = clientAPIV2Enabled
+        self.v2FocusReporter = v2FocusReporter
+    }
+
+    func v2FocusScenePhaseChanged(_ phase: ScenePhase) {
+        guard clientAPIV2Enabled else { return }
+        v2FocusReporter.scenePhaseChanged(phase)
     }
 
     func sceneActivityChanged(isActive: Bool) {
@@ -1260,6 +1270,9 @@ final class NativeRelayLifecycle {
         let transport = try HTTPSClientAPITransport(baseURL: baseURL,
             clientIdentity: TrustedKeychainIdentity(clientIdentity), trustedRootDER: trustedRootDER)
         let attempt = UUID()
+        let focus = ClientAPIFocusChannel(transport: transport, errors: errorLog) { [weak self] show, receivedAt in
+            await self?.receiveV2Show(show, receivedAt: receivedAt, attempt: attempt)
+        }
         let connection = try ClientAPIv2Connection(transport: transport, repository: store, context: context,
             directory: Self.v2Directory(for: context.identity), errors: errorLog, foregroundOnlyWrites: true,
             onLiveState: { [weak self] state in
@@ -1268,8 +1281,13 @@ final class NativeRelayLifecycle {
                     guard let self, self.activeTransportAttemptID == attempt else { return }
                     self.confirmedRelayContext = context
                 }
+            }, onShow: { data in
+                await focus.received(feedShow: data)
+            }, onPublished: { [weak self] in
+                Task { @MainActor [weak self] in self?.deliverV2ShowIfHydrated(attempt: attempt) }
             })
         installV2Connection(connection, context: context, attempt: attempt)
+        installV2FocusChannel(focus, attempt: attempt)
     }
 
     func installV2Connection(_ connection: ClientAPIv2Connection, context: ProfileContext, attempt: UUID = UUID()) {
@@ -1278,6 +1296,32 @@ final class NativeRelayLifecycle {
         activeTransportAttemptID = attempt
         v2Connection = connection
         startV2Foreground()
+    }
+
+    func installV2FocusChannel(_ focus: ClientAPIFocusChannel, attempt: UUID) {
+        guard clientAPIV2Enabled, activeTransportAttemptID == attempt, v2Connection != nil else { return }
+        v2FocusChannel = focus
+        v2FocusReporter.installReportHandler(for: attempt) { report in
+            // The channel may return the last drained reply, so this sender
+            // does not treat a reply as acknowledgement of an individual write.
+            _ = await focus.report(report)
+        }
+        v2FocusReporter.relaySessionBecameReady(attempt)
+    }
+
+    private func receiveV2Show(_ show: ClientAPIShow, receivedAt: Date, attempt: UUID) {
+        guard activeTransportAttemptID == attempt,
+              context?.identity.deviceID.rawValue == show.deviceID else { return }
+        pendingV2Show = (show, receivedAt)
+        deliverV2ShowIfHydrated(attempt: attempt)
+    }
+
+    private func deliverV2ShowIfHydrated(attempt: UUID) {
+        guard activeTransportAttemptID == attempt, let pending = pendingV2Show,
+              let item = v2Connection?.model.snapshot.items[ExactText(pending.show.itemID)] else { return }
+        pendingV2Show = nil
+        NativePushedViewCoordinator.shared.receive(.clientAPI(pending.show, senderID: item.sender.rawValue),
+            elapsedSinceReceipt: max(0, Date().timeIntervalSince(pending.receivedAt)))
     }
 
     func sendV2QueuedReply(_ message: ConversationDraft, expected: ProfileContext) async {
@@ -1379,6 +1423,9 @@ final class NativeRelayLifecycle {
 
     func deactivate() async {
         let v2Task = v2ForegroundTask
+        let focus = v2FocusChannel
+        v2FocusChannel = nil
+        pendingV2Show = nil
         v2ForegroundTask = nil
         v2Connection = nil
         v2Task?.cancel()
@@ -1395,7 +1442,12 @@ final class NativeRelayLifecycle {
         refreshFlights.reset()
         let priorCore = core
         let priorTransport = transport
-        await NativeFocusReporter.shared.accountConnectionWillBeRemoved()
+        if let focus {
+            await v2FocusReporter.accountConnectionWillBeRemoved()
+            await focus.stop()
+        } else {
+            await NativeFocusReporter.shared.accountConnectionWillBeRemoved()
+        }
         core = nil
         transport = nil
         context = nil
