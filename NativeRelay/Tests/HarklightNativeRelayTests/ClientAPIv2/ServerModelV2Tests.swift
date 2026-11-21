@@ -321,3 +321,49 @@ final class ServerModelV2RobustnessTests: XCTestCase {
         XCTAssertEqual(store.snapshot.orderedEntries(of: ExactText("i")).map(\.entryID.rawValue), ["e2"])
     }
 }
+
+/// Review items N-1 and N-2 of #371: unreadable resources never stop a page or
+/// a rebaseline, and a skipped change never leaves something looking complete.
+final class ServerModelV2UnreadableResourceTests: XCTestCase {
+    func testAnUnreadableItemInAnInboxPageIsSkippedAndTheRebaselineStillCompletes() async throws {
+        let store = ServerModelV2Store(fileURL: nil)
+        try store.apply(kind: "item", rev: 2, data: V2Fixture.json(V2Fixture.item("odd", rev: 2, rankKey: "z")))
+        let transport = InboxPagesTransport()
+        let broken = #"{"item_id":"odd","rev":9,"sender":7}"#
+        transport.pages[nil] = #"{"rev":12,"items":[\#(V2Fixture.item("a", rev: 3, rankKey: "a")),\#(broken)],"counts":{"unresolved":1}}"#
+        let errors = RecordingErrorLogV2()
+
+        let position = try await ServerModelSyncWriter(store: store, transport: transport, errors: errors).rebaseline()
+
+        XCTAssertEqual(position, 12, "One bad item does not stop the rebaseline, so Sync can start.")
+        XCTAssertEqual(Set(store.snapshot.items.keys.map(\.rawValue)), ["a", "odd"],
+                       "The unreadable item keeps its last-known copy rather than vanishing.")
+        XCTAssertEqual(errors.reports.map(\.operation), ["rebaseline"])
+    }
+
+    func testAnEntriesPageWithAnUnreadableEntryLeavesTheItemToBeReadAgain() throws {
+        let store = ServerModelV2Store(fileURL: nil)
+        try store.apply(kind: "item", rev: 2, data: V2Fixture.json(V2Fixture.item("i", rev: 2, rankKey: "a")))
+        let page = try APIEntriesPage(json: V2Fixture.json(#"{"rev":5,"older":false,"entries":[\#(V2Fixture.entry("e1", item: "i", rev: 3, position: 1)),{"entry_id":"e2","item_id":"i","rev":4}]}"#))
+        XCTAssertEqual(page.entries.count, 1)
+        XCTAssertEqual(page.unreadable.map(\.id), [ExactText("e2")])
+        try store.apply(page, of: ExactText("i"))
+        XCTAssertEqual(store.snapshot.orderedEntries(of: ExactText("i")).map(\.entryID.rawValue), ["e1"])
+        XCTAssertFalse(store.snapshot.loadedEntryItems.contains(ExactText("i")),
+                       "Not marked complete, so opening the item reads its entries again.")
+    }
+
+    func testASkippedFeedEntryMarksItsItemToBeReadAgain() throws {
+        let store = ServerModelV2Store(fileURL: nil)
+        try store.apply(kind: "item", rev: 2, data: V2Fixture.json(V2Fixture.item("i", rev: 2, rankKey: "a")))
+        try store.open("i")
+        try store.apply([ServerModelV2Store.Change(rev: 3, kind: "entry", data: Data(#"{"entry_id":"e1","item_id":"i","rev":3}"#.utf8))],
+                        cursor: 3)
+        XCTAssertFalse(store.snapshot.loadedEntryItems.contains(ExactText("i")),
+                       "A gap after a skipped entry is never kept as if complete.")
+        try store.apply(kind: "entry", rev: 4, data: V2Fixture.json(V2Fixture.entry("e2", item: "i", rev: 4, position: 2)))
+        XCTAssertTrue(store.snapshot.orderedEntries(of: ExactText("i")).isEmpty,
+                      "Later feed entries wait for the full read on open.")
+    }
+
+}

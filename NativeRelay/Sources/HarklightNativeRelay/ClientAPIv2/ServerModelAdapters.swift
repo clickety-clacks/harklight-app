@@ -60,6 +60,7 @@ public final class ServerModelSyncWriter: SyncModelWriting, @unchecked Sendable 
     /// delivers those again, harmlessly.
     public func rebaseline() async throws -> Rev {
         var items: [APIItem] = []
+        var unreadable: Set<ExactText> = []
         var first: APIInboxPage?
         var page: String?
         var seenPages: Set<String> = []
@@ -74,10 +75,16 @@ public final class ServerModelSyncWriter: SyncModelWriting, @unchecked Sendable 
             let decoded = try APIInboxPage(json: JSONValue.parse(response.body))
             if first == nil { first = decoded }
             items += decoded.items
+            for resource in decoded.unreadable {
+                // Reported and skipped; its last-known copy, if any, stays.
+                errors.report(ErrorLogReport(concern: .sync, connectionRole: .request, operation: "rebaseline",
+                    phase: "item", reason: .app("decode_failed"), initiator: .unknown, retryable: false))
+                if let id = resource.id { unreadable.insert(id) }
+            }
             page = decoded.nextPage?.rawValue
         } while page != nil
         guard let first else { throw FeedDecodingError.invalidBatch }
-        try store.rebaseline(items: items, counts: first.counts, position: first.position)
+        try store.rebaseline(items: items, keeping: unreadable, counts: first.counts, position: first.position)
         return first.position
     }
 }

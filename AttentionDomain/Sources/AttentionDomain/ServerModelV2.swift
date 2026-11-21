@@ -47,6 +47,7 @@ public struct ServerModelV2: Equatable, Codable, Sendable {
     // MARK: Writes through the gate
 
     private static func itemKey(_ id: ExactText) -> String { "item:\(id.rawValue)" }
+    static func itemGateKey(_ id: ExactText) -> String { itemKey(id) }
     private static func entryKey(_ id: ExactText) -> String { "entry:\(id.rawValue)" }
 
     @discardableResult
@@ -95,8 +96,11 @@ public struct ServerModelV2: Equatable, Codable, Sendable {
     /// After `410`: the full inbox (every page) at its first page's position.
     /// Items it does not list are gone; all cached entries are dropped and are
     /// fetched again when an item is opened.
-    mutating func rebaseline(items fresh: [APIItem], counts: APICounts, position: UInt64, at now: Date) {
-        let listed = Set(fresh.map(\.itemID))
+    /// `keeping` lists items the inbox named but the client could not read:
+    /// their last-known copy stays rather than disappearing.
+    mutating func rebaseline(items fresh: [APIItem], keeping unreadable: Set<ExactText> = [], counts: APICounts,
+                             position: UInt64, at now: Date) {
+        let listed = Set(fresh.map(\.itemID)).union(unreadable)
         for itemID in Array(items.keys) where !listed.contains(itemID) {
             items[itemID] = nil
             gate.forget(Self.itemKey(itemID))
@@ -185,8 +189,22 @@ public final class ServerModelV2Store: @unchecked Sendable {
                     try Self.apply(change, to: &model, now: now())
                 } catch {
                     try onUnreadable(change, error)
+                    Self.degrade(after: change, in: &model)
                 }
             }
+        }
+    }
+
+    /// After an unreadable change is skipped, nothing may look complete that is
+    /// not: an item whose entry was skipped is read again on open, and an
+    /// unreadable removal leaves a later snapshot of that item free to apply.
+    private static func degrade(after change: Change, in model: inout ServerModelV2) {
+        guard let value = try? JSONValue.parse(change.data),
+              let itemID = value.uniqueValue(named: "item_id")?.stringValue else { return }
+        switch change.kind {
+        case "entry": model.loadedEntryItems.remove(itemID)
+        case "item_removed": model.gate.forget(ServerModelV2.itemGateKey(itemID))
+        default: break
         }
     }
 
@@ -214,10 +232,13 @@ public final class ServerModelV2Store: @unchecked Sendable {
     }
 
     /// Entries read for an item; its later feed entries are kept from now on.
+    /// A page with an unreadable entry leaves the item not loaded, so its
+    /// entries are read again when it is next opened.
     public func apply(_ page: APIEntriesPage, of itemID: ExactText) throws {
         try mutate { model in
             model.loadedEntryItems.insert(itemID)
             for entry in page.entries { model.put(entry) }
+            if !page.unreadable.isEmpty { model.loadedEntryItems.remove(itemID) }
         }
     }
 
@@ -231,9 +252,10 @@ public final class ServerModelV2Store: @unchecked Sendable {
 
     /// Replaces the model from a full inbox and records its position as the
     /// cursor, in one save.
-    public func rebaseline(items: [APIItem], counts: APICounts, position: UInt64) throws {
+    public func rebaseline(items: [APIItem], keeping unreadable: Set<ExactText> = [], counts: APICounts,
+                           position: UInt64) throws {
         try mutate(cursor: position, replacingCursor: true) { model in
-            model.rebaseline(items: items, counts: counts, position: position, at: now())
+            model.rebaseline(items: items, keeping: unreadable, counts: counts, position: position, at: now())
         }
     }
 
