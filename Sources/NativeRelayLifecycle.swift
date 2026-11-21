@@ -1419,12 +1419,10 @@ final class NativeRelayLifecycle {
         }
     }
 
-    func refreshV2ForPush(_ payload: JSONValue, enrollment: NativeEnrollmentRecord) async -> Bool {
-        guard clientAPIV2Enabled, let connection = v2Connection, let context,
-              let revision = NativeV2PushWake.revision(payload, enrollment: enrollment,
-                                                       identity: context.identity) else { return false }
+    func refreshV2ForPush(_ payload: JSONValue) async -> Bool {
+        guard clientAPIV2Enabled, let connection = v2Connection else { return false }
         do {
-            let changed = try await connection.catchUp(forPushRevision: revision)
+            let changed = try await connection.catchUp(forPush: payload)
             return v2Connection === connection && changed
         } catch {
             // Sync records transport failures with its Request-Id.
@@ -1440,24 +1438,19 @@ final class NativeRelayLifecycle {
 
     func v2LocatorForPush(_ payload: JSONValue) async -> NativeNotificationLocator? {
         guard clientAPIV2Enabled, let connection = v2Connection, let context,
-              let record = try? enrollment.load(),
-              NativeV2PushWake.revision(payload, enrollment: record, identity: context.identity) != nil,
-              let server = record.serverID,
-              let locator = payload.uniqueValue(named: "attention")?.uniqueValue(named: "locator"),
-              let itemID = locator.uniqueValue(named: "item_id")?.stringValue,
-              let binding = locator.uniqueValue(named: "binding_id")?.stringValue else { return nil }
-        _ = await refreshV2ForPush(payload, enrollment: record)
-        guard v2Connection === connection, let item = connection.model.snapshot.items[itemID] else { return nil }
-        let request = ServerModelV2Projection.key(for: itemID, sender: item.sender, identity: context.identity)
-        return NativeNotificationLocator(v2Request: request, bindingID: binding,
-            deviceID: context.identity.deviceID, serverID: server,
-            target: locator.uniqueValue(named: "target")?.stringValue?.rawValue)
+              let hint = connection.matchPush(payload) else { return nil }
+        _ = try? await connection.catchUp(forPushRevision: hint.revision)
+        guard v2Connection === connection, connection.matchPush(payload) == hint,
+              let item = connection.model.snapshot.items[hint.itemID] else { return nil }
+        let request = ServerModelV2Projection.key(for: hint.itemID, sender: item.sender, identity: context.identity)
+        return NativeNotificationLocator(v2Request: request, bindingID: hint.bindingID,
+            deviceID: hint.deviceID, serverID: hint.serverID.rawValue, target: hint.target)
     }
 
     func refreshForRemotePush(_ payload: JSONValue?) async -> Bool {
         if !clientAPIV2Enabled { return await refreshFromTrustedRelay() }
-        guard let payload, let record = try? enrollment.load() else { return false }
-        return await refreshV2ForPush(payload, enrollment: record)
+        guard let payload else { return false }
+        return await refreshV2ForPush(payload)
     }
 
     private func stopMutationFlights() async {

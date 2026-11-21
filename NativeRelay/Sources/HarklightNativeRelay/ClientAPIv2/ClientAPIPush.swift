@@ -6,9 +6,14 @@ import Foundation
 /// settings read and a new registration intent.
 public struct ClientAPIPush: Sendable {
     private let transport: any ClientAPITransport
+    private let model: ServerModelV2Store?
+    private let onSettingsChanged: @Sendable () -> Void
 
-    public init(transport: any ClientAPITransport) {
+    public init(transport: any ClientAPITransport, model: ServerModelV2Store? = nil,
+                onSettingsChanged: @escaping @Sendable () -> Void = {}) {
         self.transport = transport
+        self.model = model
+        self.onSettingsChanged = onSettingsChanged
     }
 
     public func status() async throws -> APIPushStatus {
@@ -33,9 +38,26 @@ public struct ClientAPIPush: Sendable {
     }
 
     private func request(_ request: APIRequest) async throws -> APIPushStatus {
+        let generation = model?.syncPosition.generation
         let reply = try await transport.send(request)
+        try Task.checkCancellation()
         let response = try APIWriteResult(json: JSONValue.parse(reply.body))
         guard let status = response.settings?.push else { throw ClientAPIModelError.invalid("settings.push") }
+        if let model {
+            try model.apply(response, generation: generation)
+            onSettingsChanged()
+        }
         return status
     }
+}
+
+/// A push already matched to the saved v2 authority. Its revision is a hint.
+public struct ClientAPIPushHint: Equatable, Sendable {
+    public let serverID: ExactText
+    public let personID: ExactText
+    public let deviceID: ExactText
+    public let bindingID: ExactText
+    public let itemID: ExactText
+    public let revision: Rev
+    public let target: String?
 }

@@ -46,16 +46,98 @@ final class ClientAPIPushTests: XCTestCase {
         XCTAssertEqual(body.uniqueValue(named: "environment")?.stringValue?.rawValue, "sandbox")
         XCTAssertEqual(body.uniqueValue(named: "revision")?.integerValue, 5)
     }
+
+    func testOnlyThePersistedAuthenticatedAuthorityCanUseTheCursorGate() async throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                                       personID: ExactText("person"), deviceID: ExactText("device"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let transport = PushSettingsTransport()
+        let errors = RecordingErrorLogV2()
+        let repository = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        let connection = try ClientAPIv2Connection(transport: transport, repository: repository,
+            context: context, directory: directory, errors: errors, foregroundOnlyWrites: true)
+        try connection.model.rebaseline(items: [], counts: APICounts(unresolved: 0), position: 3)
+        try await connection.refreshMe()
+        let configured = try await connection.push.status()
+        let old = try XCTUnwrap(configured.bindingID)
+
+        let reopened = try ClientAPIv2Connection(transport: transport, repository: repository,
+            context: context, directory: directory, errors: errors, foregroundOnlyWrites: true)
+        let baseRequests = await transport.requests.count
+        for mismatch in [
+            payload(server: "other-server", binding: old),
+            payload(person: "other-person", binding: old),
+            payload(device: "other-device", binding: old),
+            payload(binding: ExactText("old-binding"))
+        ] {
+            let changed = try await reopened.catchUp(forPush: mismatch)
+            XCTAssertFalse(changed)
+        }
+        let batchesAfterMismatches = await transport.batches
+        let requestsAfterMismatches = await transport.requests.count
+        XCTAssertTrue(batchesAfterMismatches.isEmpty)
+        XCTAssertEqual(requestsAfterMismatches, baseRequests)
+        XCTAssertEqual(reopened.model.persistedCursor(), 3)
+        let unmatched = errors.reports.filter { $0.operation == "push_wake" }
+        XCTAssertEqual(unmatched.count, 4)
+        XCTAssertTrue(unmatched.allSatisfy {
+            $0.reason == .app("push_identity_mismatch") && $0.correlation.resourceID == "device"
+        })
+
+        _ = try await reopened.catchUp(forPush: payload(binding: old, revision: 3))
+        let covered = await transport.batches
+        XCTAssertTrue(covered.isEmpty)
+        _ = try await reopened.push.remove(idempotencyKey: UUID())
+        _ = try await reopened.catchUp(forPush: payload(binding: old))
+        let afterDelete = await transport.batches
+        XCTAssertTrue(afterDelete.isEmpty)
+        XCTAssertNil(reopened.model.snapshot.settings?.push?.bindingID)
+
+        let new = try await reopened.push.register(token: ExactText(String(repeating: "b", count: 64)),
+            environment: .sandbox, revision: 6, idempotencyKey: UUID())
+        let binding = try XCTUnwrap(new.bindingID)
+        XCTAssertNotEqual(binding, old)
+        _ = try await reopened.catchUp(forPush: payload(binding: old))
+        _ = try await reopened.catchUp(forPush: payload(binding: binding))
+        let from = await transport.batches
+        XCTAssertEqual(from, [3])
+        XCTAssertEqual(reopened.model.persistedCursor(), 3, "Push revision is never taken as the cursor.")
+        XCTAssertEqual(errors.reports.filter { $0.operation == "push_wake" }.count, 6)
+    }
+
+    private func payload(server: String = "server", person: String = "person", device: String = "device",
+                         binding: ExactText, revision: UInt64 = 10) -> JSONValue {
+        let locator = JSONValue.object([
+            JSONMember("v", .number(JSONNumber(lexeme: "2"))),
+            JSONMember("person_id", .string(ExactText(person))),
+            JSONMember("device_id", .string(ExactText(device))),
+            JSONMember("binding_id", .string(binding)),
+            JSONMember("item_id", .string(ExactText("item"))),
+            JSONMember("rev", .number(JSONNumber(lexeme: String(revision))))
+        ])
+        return .object([JSONMember("attention", .object([
+            JSONMember("v", .number(JSONNumber(lexeme: "2"))),
+            JSONMember("type", .string(ExactText("sync"))),
+            JSONMember("server", .string(ExactText(server))),
+            JSONMember("locator", locator)
+        ]))])
+    }
 }
 
 private actor PushSettingsTransport: ClientAPITransport {
     private(set) var requests: [APIRequest] = []
+    private(set) var batches: [Rev] = []
     private var revision = 4
     private var environment: String? = "production"
 
     func send(_ request: APIRequest) async throws -> APIResponse {
         requests.append(request)
         switch (request.method, request.path) {
+        case (.get, "/v2/me"):
+            let body = #"{"account":{"state":"active"},"features":{},"limits":{},"server":{"id":"server"},"principal":{"person_id":"person","device_id":"device"}}"#
+            return APIResponse(status: 200, requestID: "me", body: Data(body.utf8))
         case (.get, "/v2/settings"): break
         case (.put, "/v2/devices/me/push"):
             let body = try JSONValue.parse(XCTUnwrap(request.body))
@@ -71,9 +153,9 @@ private actor PushSettingsTransport: ClientAPITransport {
         default:
             throw URLError(.unsupportedURL)
         }
-        let push = environment.map { #"{"state":"ready","revision":\#(revision),"environment":"\#($0)"}"# }
+        let push = environment.map { #"{"state":"ready","revision":\#(revision),"environment":"\#($0)","binding_id":"binding-\#(revision)"}"# }
             ?? #"{"state":"canceled","revision":\#(revision)}"#
-        let body = #"{"rev":20,"settings":{"rev":19,"priority_levels":[],"push":\#(push)}}"#
+        let body = #"{"rev":\#(revision),"settings":{"rev":\#(revision),"priority_levels":[],"push":\#(push)}}"#
         return APIResponse(status: 200, requestID: "push", body: Data(body.utf8))
     }
 
@@ -82,6 +164,7 @@ private actor PushSettingsTransport: ClientAPITransport {
     }
 
     func changeBatch(after: Rev) async throws -> FeedBatch {
-        FeedBatch(changes: [], rev: after, more: false)
+        batches.append(after)
+        return FeedBatch(changes: [], rev: after, more: false)
     }
 }

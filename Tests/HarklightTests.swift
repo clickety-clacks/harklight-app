@@ -37,7 +37,9 @@ private final class V2ScenePushTransport: ClientAPITransport, @unchecked Sendabl
             }
             body = "{}"
         case "/v2/me":
-            body = #"{"account":{"state":"active"},"features":{},"limits":{}}"#
+            body = #"{"account":{"state":"active"},"features":{},"limits":{},"server":{"id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"principal":{"person_id":"person","device_id":"device"}}"#
+        case "/v2/settings":
+            body = #"{"rev":1,"settings":{"rev":1,"priority_levels":[],"push":{"state":"ready","revision":1,"environment":"sandbox","binding_id":"00000000-0000-0000-0000-000000000001"}}}"#
         case "/v2/items/later":
             throw URLError(.networkConnectionLost)
         case "/v2/items/newest":
@@ -138,8 +140,7 @@ final class HarklightTests: XCTestCase {
             host: "relay.example", enrollmentPort: 18444, relayPort: 18443,
             trustedRootDER: Data([1]), identityLabel: "test", deviceID: "device",
             approvalCode: "TEST", statusSecret: "test", expiresAt: nil, statusExpiresAt: nil,
-            personID: "person", serverID: server,
-            notificationBindings: [NativeNotificationBinding(bindingID: binding, operationID: UUID(), revision: 1)])
+            personID: "person")
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText(record.profileAuthority),
                                        personID: ExactText("person"), deviceID: ExactText("device"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
@@ -147,6 +148,8 @@ final class HarklightTests: XCTestCase {
         let store = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
         let connection = try ClientAPIv2Connection(transport: transport, repository: store, context: context,
                                                     directory: nil, errors: NoopErrorLog())
+        try await connection.refreshMe()
+        _ = try await connection.push.status()
         func payload(person: String, serverID: String = server) throws -> JSONValue {
             try JSONValue.parse(Data(#"{"attention":{"v":2,"type":"sync","server":"\#(serverID)","locator":{"v":2,"binding_id":"\#(binding.rawValue)","person_id":"\#(person)","device_id":"device","item_id":"item","rev":1}}}"#.utf8))
         }
@@ -154,19 +157,19 @@ final class HarklightTests: XCTestCase {
         let off = NativeRelayLifecycle()
         off.installV2Connection(connection, context: context)
         off.sceneActivityChanged(isActive: true)
-        _ = await off.refreshV2ForPush(try payload(person: "person"), enrollment: record)
+        _ = await off.refreshV2ForPush(try payload(person: "person"))
         XCTAssertFalse(off.usesClientAPIV2)
         XCTAssertEqual(transport.counts.batches, 0)
         XCTAssertEqual(transport.counts.opened, 0)
 
         let on = NativeRelayLifecycle(clientAPIV2Enabled: true)
         on.installV2Connection(connection, context: context)
-        let otherAccount = await on.refreshV2ForPush(try payload(person: "other"), enrollment: record)
-        let otherServer = await on.refreshV2ForPush(try payload(person: "person", serverID: String(repeating: "b", count: 32)), enrollment: record)
+        let otherAccount = await on.refreshV2ForPush(try payload(person: "other"))
+        let otherServer = await on.refreshV2ForPush(try payload(person: "person", serverID: String(repeating: "b", count: 32)))
         XCTAssertFalse(otherAccount)
         XCTAssertFalse(otherServer)
         XCTAssertEqual(transport.counts.batches, 0)
-        _ = await on.refreshV2ForPush(try payload(person: "person"), enrollment: record)
+        _ = await on.refreshV2ForPush(try payload(person: "person"))
         XCTAssertEqual(transport.counts.batches, 1)
         XCTAssertEqual(transport.counts.opened, 0, "A background push fetches a batch without opening a feed.")
         await on.deactivate()

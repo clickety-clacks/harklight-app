@@ -205,6 +205,14 @@ public struct APIPushStatus: Equatable, Sendable {
     public let state: String
     public let revision: UInt64
     public let environment: APIPushEnvironment?
+    public let bindingID: ExactText?
+}
+
+/// Notification identity from authenticated GET /v2/me.
+public struct APIPushPrincipal: Codable, Equatable, Sendable {
+    public let serverID: ExactText
+    public let personID: ExactText
+    public let deviceID: ExactText?
 }
 
 // MARK: Decoding
@@ -469,6 +477,7 @@ extension APIPushStatus {
         let reader = try Reader(json, "settings.push")
         state = try reader.string("state").rawValue
         revision = try reader.unsigned("revision")
+        bindingID = try reader.optionalString("binding_id")
         if let value = try reader.optionalString("environment") {
             guard let known = APIPushEnvironment(rawValue: value.rawValue) else {
                 throw ClientAPIModelError.invalid("settings.push.environment")
@@ -592,6 +601,15 @@ public struct APIMe: Equatable, Sendable {
     /// Nil while the server has not supplied a usable file limit.
     public let uploadCap: APIUploadCap?
     public let body: JSONValue
+
+    public var pushPrincipal: APIPushPrincipal? {
+        guard let server = body.uniqueValue(named: "server")?.uniqueValue(named: "id")?.stringValue,
+              let principal = body.uniqueValue(named: "principal"),
+              let person = principal.uniqueValue(named: "person_id")?.stringValue,
+              !server.rawValue.isEmpty, !person.rawValue.isEmpty else { return nil }
+        return APIPushPrincipal(serverID: server, personID: person,
+                                deviceID: principal.uniqueValue(named: "device_id")?.stringValue)
+    }
 
     public init(json: JSONValue) throws {
         let reader = try Reader(json, "me")

@@ -10,6 +10,7 @@ public struct ServerModelV2: Equatable, Codable, Sendable {
     public internal(set) var entries: [ExactText: [ExactText: APIEntry]] = [:]
     public internal(set) var counts: APICounts?
     public internal(set) var settings: APISettings?
+    public internal(set) var pushPrincipal: APIPushPrincipal?
     public internal(set) var gate = RevGate()
     /// Items whose entries were read (the person opened them). Feed entries
     /// of other items are not kept; opening an item reads its entries.
@@ -248,6 +249,10 @@ public final class ServerModelV2Store: @unchecked Sendable {
     /// Settings revision and history generation from the same model snapshot.
     public var settingsPosition: (revision: UInt64?, generation: UInt64) {
         lock.withLock { (model.settings?.rev, generation) }
+    }
+
+    public func savePushPrincipal(_ principal: APIPushPrincipal?) throws {
+        try mutate { $0.pushPrincipal = principal }
     }
 
     /// Applies feed changes and records `cursor`, in one save. A change that

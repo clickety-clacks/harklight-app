@@ -1090,8 +1090,30 @@ final class NativeAppLaunch {
         guard didFinishRestoring else { return }
         if NativeRelayLifecycle.shared.clientAPIV2Enabled, let payload = notificationRouter.pendingV2Tap {
             notificationRouter.pendingV2Tap = nil
-            guard let locator = await NativeRelayLifecycle.shared.v2LocatorForPush(payload) else { return }
+            let lifecycle = NativeRelayLifecycle.shared
+            guard let locator = await lifecycle.v2LocatorForPush(payload),
+                  case let .live(presentation) = state,
+                  !presentation.isReadOnly, !presentation.isLocalExample,
+                  lifecycle.isActive(for: presentation.notificationContext) else { return }
+            do {
+                try presentation.refreshFromDurableStore()
+            } catch {
+                notificationNavigationMessage = "Could not load this notification."
+                return
+            }
             notificationRouter.receive(locator: locator)
+            guard let intent = notificationRouter.intent else { return }
+            handledNotificationSerial = intent.serial
+            pendingMessageDeepLink = nil
+            selectedArchivedAccount = nil
+            selectedArchivedPresentation = nil
+            isShowingDisconnectedArchive = false
+            presentation.selectRequest(locator.request)
+            notificationNavigation = NativeInboxNavigation(serial: intent.serial, request: locator.request,
+                                                             opensChat: locator.target == "chat")
+            notificationNavigationMessage = nil
+            notificationRouter.consumed()
+            return
         }
         guard let intent = notificationRouter.intent,
               handledNotificationSerial != intent.serial else { return }
