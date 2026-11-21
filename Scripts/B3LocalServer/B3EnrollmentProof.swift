@@ -95,7 +95,7 @@ final class B3EnrollmentProof: XCTestCase {
         XCTAssertTrue(confirmation.waitForExistence(timeout: 6))
         confirmation.tap()
         let retry = app.buttons["Retry removal"].firstMatch
-        XCTAssertTrue(retry.waitForExistence(timeout: 16), "Unconfirmed removal should remain retryable.")
+        waitForRemovalRetry(retry, in: app)
         XCTAssertTrue(app.staticTexts["This phone is registered to this account."].exists)
         try signal("offline-removal-kept-account", at: signals)
 
@@ -110,6 +110,7 @@ final class B3EnrollmentProof: XCTestCase {
         app.terminate()
         app.launch()
         openSettings(app)
+        waitForRemovalRetry(retry, in: app)
         tapVisible(retry, in: app)
         let readOnlyText = app.buttons["View unsent text"].firstMatch
         if !readOnlyText.waitForExistence(timeout: 15) { openSettings(app) }
@@ -141,7 +142,7 @@ final class B3EnrollmentProof: XCTestCase {
             let safari = XCUIApplication(bundleIdentifier: "com.apple.mobilesafari")
             guard let url = control.link else { throw CocoaError(.fileReadCorruptFile) }
             safari.open(url)
-            let bridge = safari.descendants(matching: .any)["Open in Harklight"].firstMatch
+            let bridge = safari.links["Open in Harklight"].firstMatch
             XCTAssertTrue(bridge.waitForExistence(timeout: 35), "The dashboard should resolve the short invitation.")
             try signal("bridge-resolved", at: signals)
             tapVisible(bridge, in: safari)
@@ -207,6 +208,18 @@ final class B3EnrollmentProof: XCTestCase {
         XCTAssertTrue(settings.waitForExistence(timeout: 20))
         settings.tap()
         XCTAssertTrue(features.waitForExistence(timeout: 8))
+    }
+
+    private func waitForRemovalRetry(_ retry: XCUIElement, in app: XCUIApplication) {
+        // The account section may be inside a lazily rendered Settings form.
+        // Scroll it into view while the sign-out attempt closes and reopens the transport.
+        let form = app.collectionViews.firstMatch
+        for _ in 0..<3 {
+            if retry.isHittable { return }
+            if form.isHittable { form.swipeUp() }
+            if retry.waitForExistence(timeout: 4), retry.isHittable { return }
+        }
+        XCTAssertTrue(retry.waitForExistence(timeout: 30), "Unconfirmed removal should remain retryable.")
     }
 
     private func tapVisible(_ element: XCUIElement, in app: XCUIApplication, timeout: TimeInterval = 8) {
