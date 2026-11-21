@@ -193,6 +193,7 @@ public final class ServerModelV2Store: @unchecked Sendable {
     private var model: ServerModelV2
     private var cursor: UInt64?
     private var generation: UInt64 = 0
+    private var sealed = false
     private let now: @Sendable () -> Date
     /// Saves made so far; tests use it to check one write per batch.
     public private(set) var saveCount = 0
@@ -214,6 +215,8 @@ public final class ServerModelV2Store: @unchecked Sendable {
     }
 
     public var snapshot: ServerModelV2 { lock.withLock { model } }
+
+    public func seal() { lock.withLock { sealed = true } }
 
     public func saveAccountPause(_ paused: Bool) throws {
         try mutate { $0.accountPaused = paused ? true : nil }
@@ -394,6 +397,7 @@ public final class ServerModelV2Store: @unchecked Sendable {
 
     private func mutateLocked(cursor newCursor: UInt64?, replacingCursor: Bool,
                               _ change: (inout ServerModelV2) throws -> Void) throws {
+        guard !sealed else { throw CancellationError() }
         var next = model
         try change(&next)
         var nextCursor = cursor

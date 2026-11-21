@@ -47,6 +47,9 @@ struct NativeAccountDeparture: Codable {
     let replacement: NativeJoinInvitation?
     var removed: Bool
     var stagedRevokedText: [ExactText]? = nil
+    var v2SignOut: Bool? = nil
+
+    var hasV2TextRecovery: Bool { v2SignOut == true || record.v2Revoked == true }
 
     /// Stable within the local account authority, even after a transport
     /// hostname migration changes the enrollment endpoint.
@@ -126,6 +129,7 @@ final class NativeGuidedJoinStore {
     private let enrollment: NativeEnrollmentStore
     private var confirmedRemovalIDs: Set<String> = []
     var removePushBeforeDeparture: ((NativeEnrollmentRecord) async -> Void)?
+    var prepareV2Removal: ((NativeEnrollmentRecord) async throws -> Void)?
 
     init(namespace: String = "co.clicketyclacks.Harklight.native-enrollment",
          transport: any NativeJoinTransport = PinnedNativeJoinTransport()) {
@@ -485,7 +489,8 @@ final class NativeGuidedJoinStore {
     private func retainConfirmedDeparture(_ departure: NativeAccountDeparture) throws {
         guard departure.removed else { throw NativeJoinError.superseded }
         try savePriorDeparture(NativeAccountDeparture(record: departure.record,
-                                                      replacement: nil, removed: true))
+            replacement: nil, removed: true, stagedRevokedText: departure.stagedRevokedText,
+            v2SignOut: departure.v2SignOut))
     }
 
     private func retainPendingStandaloneDeparture(_ departure: NativeAccountDeparture) throws {
@@ -508,9 +513,18 @@ final class NativeGuidedJoinStore {
             try saveData(JSONEncoder().encode(departure), account: "guided-departure")
         } else {
             try savePriorDeparture(NativeAccountDeparture(record: departure.record,
-                                                          replacement: nil,
-                                                          removed: departure.removed))
+                replacement: nil, removed: departure.removed, stagedRevokedText: departure.stagedRevokedText,
+                v2SignOut: departure.v2SignOut))
         }
+    }
+
+    func markV2Departure(_ record: NativeEnrollmentRecord, stagedText: [ExactText]) throws {
+        guard var departure = try savedDeparture(for: record), !departure.removed,
+              sameInstallation(departure.record, record) else { throw NativeJoinError.superseded }
+        let retained = Set((departure.stagedRevokedText ?? []) + stagedText).sorted { $0.rawValue < $1.rawValue }
+        departure.stagedRevokedText = retained.isEmpty ? nil : retained
+        departure.v2SignOut = true
+        try saveDeparture(departure)
     }
 
     /// Writes the exact original installation before local transport is stopped
@@ -528,9 +542,8 @@ final class NativeGuidedJoinStore {
             if sameInstallation(saved.record, record) {
                 if saved.removed, saved.replacement == replacement { return saved }
                 if !saved.removed {
-                    let updated = NativeAccountDeparture(record: record,
-                                                        replacement: replacement,
-                                                        removed: false)
+                    let updated = NativeAccountDeparture(record: record, replacement: replacement, removed: false,
+                        stagedRevokedText: saved.stagedRevokedText, v2SignOut: saved.v2SignOut)
                     try saveData(JSONEncoder().encode(updated), account: "guided-departure")
                     return updated
                 }
@@ -541,8 +554,8 @@ final class NativeGuidedJoinStore {
                 try deleteData(account: "guided-departure")
             } else {
                 try retainPendingStandaloneDeparture(NativeAccountDeparture(record: saved.record,
-                                                                            replacement: nil,
-                                                                            removed: false))
+                    replacement: nil, removed: false, stagedRevokedText: saved.stagedRevokedText,
+                    v2SignOut: saved.v2SignOut))
                 try deleteData(account: "guided-departure")
             }
         }
@@ -572,9 +585,17 @@ final class NativeGuidedJoinStore {
             departure = try prepareAccountDeparture(record, replacement: replacement)
         }
         guard departure.replacement == replacement else { throw NativeJoinError.superseded }
+        if !departure.removed, confirmedRemovalIDs.contains(departure.archiveID) {
+            departure.removed = true
+            try saveDeparture(departure)
+        }
         if !departure.removed {
-            try enrollment.preparePushRemoval(for: departure.record)
-            await removePushBeforeDeparture?(departure.record)
+            if let prepareV2Removal {
+                try await prepareV2Removal(departure.record)
+            } else {
+                try enrollment.preparePushRemoval(for: departure.record)
+                await removePushBeforeDeparture?(departure.record)
+            }
             let material = try enrollment.material(from: record)
             guard let url = URL(string: "https://\(record.host):\(record.enrollmentPort)/device/remove") else {
                 throw NativeJoinError.invalidResponse
@@ -598,8 +619,8 @@ final class NativeGuidedJoinStore {
                 throw NativeJoinError.wrongApproval
             }
             confirmedRemovalIDs.insert(departure.archiveID)
-            try enrollment.finishPushDeparture(for: record)
-            var confirmedDeparture = try savedDeparture(for: record) ?? departure
+            if operation.v2SignOut != true { try enrollment.finishPushDeparture(for: record) }
+            var confirmedDeparture = operation
             confirmedDeparture.removed = true
             try saveDeparture(confirmedDeparture)
             departure = confirmedDeparture
@@ -620,6 +641,9 @@ final class NativeGuidedJoinStore {
             throw NativeJoinError.superseded
         }
         try retainConfirmedDeparture(departure)
+        if departure.v2SignOut == true {
+            try NativeRelayLifecycle.clearV2Storage(for: departure.record)
+        }
         if let attempt = try loadAttempt(), attempt.deviceID == departure.record.deviceID {
             try deleteData(account: "guided-request")
         }

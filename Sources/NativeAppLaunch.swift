@@ -79,8 +79,11 @@ final class NativeAppLaunch {
     let guidedJoin: NativeGuidedJoinCoordinator
     let diagnostics: NativeClientDiagnosticJournal
     /// Durable, redacted failure records that no component can clear.
-    let errorLog: ErrorLogStore
-    let errorLogModel: ErrorLogModel
+    private let legacyErrorLog: ErrorLogStore
+    private let legacyErrorLogModel: ErrorLogModel
+    private var v2ErrorLog: (store: ErrorLogStore, model: ErrorLogModel)?
+    var errorLog: ErrorLogStore { v2ErrorLog?.store ?? legacyErrorLog }
+    var errorLogModel: ErrorLogModel { v2ErrorLog?.model ?? legacyErrorLogModel }
     let notificationRouter: NativeNotificationRouter
     private(set) var notificationNavigation: NativeInboxNavigation?
     private(set) var notificationNavigationMessage: String?
@@ -137,8 +140,8 @@ final class NativeAppLaunch {
         self.diagnostics = diagnostics
         let errorLog = suppliedErrorLog ?? ErrorLogStore(
             fileURL: ErrorLogStore.defaultFileURL(), build: Self.errorLogBuild())
-        self.errorLog = errorLog
-        errorLogModel = ErrorLogModel(store: errorLog)
+        legacyErrorLog = errorLog
+        legacyErrorLogModel = ErrorLogModel(store: errorLog)
         self.notificationRouter = notificationRouter
         self.refreshOperation = refreshOperation
         self.fetchInboxPageOperation = fetchInboxPageOperation
@@ -228,6 +231,12 @@ final class NativeAppLaunch {
         guidedJoinStore.removePushBeforeDeparture = { [weak self] record in
             guard let self else { return }
             await NativeRelayLifecycle.shared.removePushBeforeDeparture(for: record, enrollment: self.enrollment)
+        }
+        if NativeRelayLifecycle.shared.clientAPIV2Enabled {
+            guidedJoinStore.prepareV2Removal = { [weak self] record in
+                guard let self else { throw NativeJoinError.superseded }
+                try await self.prepareV2Removal(record)
+            }
         }
         guidedJoin.didKeepCurrentAccount = { [weak self] record in
             let lifecycle = NativeRelayLifecycle.shared
@@ -330,10 +339,12 @@ final class NativeAppLaunch {
         disconnectMessage = nil
         do {
             try guidedJoin.prepareStandaloneRemoval(record)
-            try enrollment.preparePushRemoval(for: record)
-            // Keep the authenticated relay until push removal has had its send
-            // opportunity. An offline attempt remains durable for reconnect.
-            await guidedJoinStore.removePushBeforeDeparture?(record)
+            if NativeRelayLifecycle.shared.clientAPIV2Enabled {
+                try await prepareV2Removal(record)
+            } else {
+                try enrollment.preparePushRemoval(for: record)
+                await guidedJoinStore.removePushBeforeDeparture?(record)
+            }
             refreshArchivedAccounts()
             let departure = try guidedJoinStore.departure() ??
                 NativeAccountDeparture(record: record, replacement: nil, removed: false)
@@ -859,6 +870,7 @@ final class NativeAppLaunch {
         state = .enrollmentRequired
         await NativeRelayLifecycle.shared.deactivate()
         guard activationGeneration == generation else { return }
+        closeV2ErrorLog()
         let context = installation.context
         let usesV2 = NativeRelayLifecycle.shared.clientAPIV2Enabled
         let (store, fileStorage, serverStateCache) = try await Task.detached(priority: .userInitiated) {
@@ -896,6 +908,12 @@ final class NativeAppLaunch {
             newMessageAreaDefaults: .standard, conversationFiles: fileStorage)
         guard activationGeneration == generation else { return }
         let presentation = activation.presentation
+        if usesV2 {
+            let directory = try NativeRelayLifecycle.v2Directory(for: context.identity)
+            let log = ErrorLogStore(fileURL: directory.appendingPathComponent("error-log-v2.json"),
+                                    build: Self.errorLogBuild())
+            v2ErrorLog = (log, ErrorLogModel(store: log))
+        }
         NativeRelayLifecycle.shared.errorLog = errorLog
         if usesV2 {
             NativeRelayLifecycle.shared.onV2AccountAccessChanged = { [weak self] access, context in
@@ -993,7 +1011,28 @@ final class NativeAppLaunch {
         if case let .live(previous) = state { previous.stopObserving() }
         state = .enrollmentRequired
         await NativeRelayLifecycle.shared.deactivate()
+        closeV2ErrorLog()
         clearForegroundConnectionDetails()
+    }
+
+    private func closeV2ErrorLog() {
+        v2ErrorLog?.store.close()
+        v2ErrorLog = nil
+    }
+
+    private func prepareV2Removal(_ record: NativeEnrollmentRecord) async throws {
+        let current = activeEnrollmentRecord?.sameNotificationProfile(as: record) == true
+        let staged: [ExactText]
+        if current, case let .live(presentation) = state {
+            staged = presentation.prepareRevokedTextRecovery().staged
+        } else {
+            staged = []
+        }
+        try guidedJoinStore.markV2Departure(record, stagedText: staged)
+        await NativeRelayLifecycle.shared.prepareV2SignOut(for: record)
+        if current, activeEnrollmentRecord?.sameNotificationProfile(as: record) == true {
+            closeV2ErrorLog()
+        }
     }
 
     private func clearForegroundConnectionDetails() {

@@ -1051,7 +1051,7 @@ final class NativeRelayLifecycle {
         }
     }
 
-    private static func v2Directory(for identity: ProfileIdentity) throws -> URL {
+    static func v2Directory(for identity: ProfileIdentity) throws -> URL {
         let root = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask,
                                                appropriateFor: nil, create: true)
         let key = [identity.trustedRelayAuthority.rawValue, identity.personID.rawValue, identity.deviceID.rawValue]
@@ -1059,6 +1059,18 @@ final class NativeRelayLifecycle {
         let digest = SHA256.hash(data: Data(key.utf8)).map { String(format: "%02x", $0) }.joined()
         return root.appendingPathComponent("ClientAPIv2", isDirectory: true)
             .appendingPathComponent(digest, isDirectory: true)
+    }
+
+    static func clearV2Storage(for record: NativeEnrollmentRecord) throws {
+        guard let person = record.personID else { throw NativeEnrollmentError.invalidIdentity }
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText(record.profileAuthority),
+                                       personID: ExactText(person), deviceID: ExactText(record.deviceID))
+        let directory = try v2Directory(for: identity)
+        do {
+            try FileManager.default.removeItem(at: directory)
+        } catch let error as CocoaError where error.code == .fileNoSuchFile {
+            // A confirmed departure is also finished on relaunch.
+        }
     }
 
 
@@ -1298,7 +1310,8 @@ final class NativeRelayLifecycle {
         let attempt = UUID()
         let access = ClientAPIAccess(transport: transport) { [weak self] _ in
             Task { @MainActor [weak self] in
-                guard let self, self.activeTransportAttemptID == attempt, let state = self.v2AccountAccess else {
+                guard let self, self.activeTransportAttemptID == attempt, self.v2DepartureTask == nil,
+                      let state = self.v2AccountAccess else {
                     return
                 }
                 if state == .available {
@@ -1698,7 +1711,9 @@ final class NativeRelayLifecycle {
     func deactivate() async {
         let v2Task = v2ForegroundTask
         let pushRegistration = v2PushRegistrationTask
-        v2Connection?.access.close()
+        let priorV2 = v2Connection
+        priorV2?.access.close()
+        priorV2?.model.seal()
         cancelV2PushRetry()
         v2PushRegistrationTask = nil
         v2PushRegistrationRequested = false
@@ -1753,6 +1768,7 @@ final class NativeRelayLifecycle {
         diagnosticJournal = nil
         if let priorCore { await priorCore.deactivate() }
         if let priorTransport { await priorTransport.close() }
+        await priorV2?.outbox.close()
         await v2Task?.value
         _ = await pushRegistration?.value
     }
