@@ -211,15 +211,20 @@ final class RecordingSyncModel: SyncModelWriting, @unchecked Sendable {
 
     func apply(_ changes: [FeedChange], cursor rev: Rev) async throws {
         for change in changes { onApply?(change) }
-        try lock.withLock {
+        let admitted = try lock.withLock { () -> [Rev] in
             if let failApplyAt, changes.contains(where: { $0.rev == failApplyAt }) {
                 self.failApplyAt = nil
                 throw CocoaError(.fileWriteUnknown)
             }
-            batches.append(changes.map(\.rev))
-            for change in changes where gate.admit("log", rev: change.rev) { applied.append(change.rev) }
+            return changes.filter { gate.admit("log", rev: $0.rev) }.map(\.rev)
         }
+        // Like the real store, the changes and the cursor become visible
+        // together: a test that sees a change applied also sees its cursor.
         try cursor.save(max((try cursor.load()) ?? 0, rev))
+        lock.withLock {
+            batches.append(changes.map(\.rev))
+            applied += admitted
+        }
     }
 
     func rebaseline() async throws -> Rev {
