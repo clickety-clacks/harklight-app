@@ -454,6 +454,34 @@ final class ChangeFeedSyncTests: XCTestCase {
         run.cancel()
     }
 
+    func testUnframedFeedDropAndClientIdleDeadlineHaveDistinctAttribution() async throws {
+        let cases: [(any Error, ErrorLogInitiator)] = [
+            (NSError(domain: NSPOSIXErrorDomain, code: Int(POSIXErrorCode.ETIMEDOUT.rawValue)), .unknown),
+            (URLError(.timedOut), .unknown),
+            (URLError(.networkConnectionLost), .osNetwork),
+            (ChangeFeedIdleTimeout.expired, .timeout)
+        ]
+        for (error, expected) in cases {
+            let server = FakeClientAPIServer()
+            let cursor = MemoryRevCursor(0)
+            let model = RecordingSyncModel(snapshotRev: { 0 })
+            let errors = RecordingErrorLogV2()
+            let sync = ChangeFeedSync(transport: server, model: model.using(cursor), errors: errors,
+                                      waitBeforeRetry: { _ in throw CancellationError() })
+            let run = Task { await sync.runForeground() }
+            defer { run.cancel() }
+            await eventually("the feed is open") { server.openFeedCount == 1 }
+            guard server.openFeedCount == 1 else { return }
+            server.failFeeds(error)
+            await run.value
+            let report = try XCTUnwrap(errors.reports.first)
+            XCTAssertEqual(report.phase, "stream")
+            XCTAssertEqual(report.initiator, expected)
+            XCTAssertTrue(report.retryable)
+            XCTAssertEqual(try cursor.load(), 0)
+        }
+    }
+
     func testAnExpiredCursorRebaselinesAndResumesWithoutMissingLaterChanges() async throws {
         let server = FakeClientAPIServer()
         for _ in 0..<5 { server.commit("item", "{}") }

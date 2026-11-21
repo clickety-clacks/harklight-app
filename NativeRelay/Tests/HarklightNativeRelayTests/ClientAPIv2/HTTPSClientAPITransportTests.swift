@@ -10,6 +10,7 @@ private final class StubURLProtocol: URLProtocol, @unchecked Sendable {
         var status: Int
         var headers: [String: String] = [:]
         var chunks: [Data]
+        var staysOpen = false
     }
 
     nonisolated(unsafe) static var handler: ((URLRequest) -> Reply)?
@@ -32,14 +33,15 @@ private final class StubURLProtocol: URLProtocol, @unchecked Sendable {
         }
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         for chunk in reply.chunks { client?.urlProtocol(self, didLoad: chunk) }
-        client?.urlProtocolDidFinishLoading(self)
+        if !reply.staysOpen { client?.urlProtocolDidFinishLoading(self) }
     }
 
     override func stopLoading() {}
 }
 
 final class HTTPSClientAPITransportTests: XCTestCase {
-    private func transport(_ handler: @escaping (URLRequest) -> StubURLProtocol.Reply) -> HTTPSClientAPITransport {
+    private func transport(feedIdleInterval: Duration = .seconds(60),
+                           _ handler: @escaping (URLRequest) -> StubURLProtocol.Reply) -> HTTPSClientAPITransport {
         StubURLProtocol.lock.withLock {
             StubURLProtocol.handler = handler
             StubURLProtocol.seen = []
@@ -47,7 +49,7 @@ final class HTTPSClientAPITransportTests: XCTestCase {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [StubURLProtocol.self]
         return HTTPSClientAPITransport(baseURL: URL(string: "https://server.example:8443")!,
-                                       configuration: configuration, delegate: nil)
+                                       configuration: configuration, delegate: nil, feedIdleInterval: feedIdleInterval)
     }
 
     func testAWriteCarriesItsKeyAndPreconditionAndAReplayedAnswerIsMarked() async throws {
@@ -103,6 +105,22 @@ final class HTTPSClientAPITransportTests: XCTestCase {
         XCTAssertEqual(sent?.url?.query, "after=4")
         XCTAssertEqual(sent?.value(forHTTPHeaderField: "Accept"), "text/event-stream")
         XCTAssertEqual(sent?.value(forHTTPHeaderField: "Last-Event-ID"), "4", "The feed resumes by the standard header.")
+    }
+
+    func testAGenuinelyIdleFeedEndsWithTheClientDeadlineError() async throws {
+        let api = transport(feedIdleInterval: .milliseconds(250)) { _ in
+            StubURLProtocol.Reply(status: 200, headers: ["Content-Type": "text/event-stream"],
+                                  chunks: [], staysOpen: true)
+        }
+        var feed = api.changeFeed(after: 4).makeAsyncIterator()
+        let first = try await feed.next()
+        XCTAssertEqual(first, .opened(requestID: nil))
+        do {
+            _ = try await feed.next()
+            XCTFail("Expected the client's own idle timeout.")
+        } catch ChangeFeedIdleTimeout.expired {
+            // The response stayed open and sent no bytes.
+        }
     }
 
     func testAnExpiredFeedCursorIsReportedAsCursorExpired() async throws {

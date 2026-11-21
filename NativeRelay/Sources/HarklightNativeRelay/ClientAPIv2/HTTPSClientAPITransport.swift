@@ -7,6 +7,7 @@ import Security
 public final class HTTPSClientAPITransport: ClientAPITransport, @unchecked Sendable {
     private let baseURL: URL
     private let session: URLSession
+    private let feedIdleInterval: Duration
 
     /// `baseURL` is the device listener, for example `https://host:port`.
     public convenience init(baseURL: URL, clientIdentity: TrustedKeychainIdentity, trustedRootDER: Data) throws {
@@ -21,7 +22,6 @@ public final class HTTPSClientAPITransport: ClientAPITransport, @unchecked Senda
         configuration.httpCookieStorage = nil
         configuration.urlCredentialStorage = nil
         configuration.urlCache = nil
-        // The feed is held open for as long as the app is in the foreground.
         configuration.timeoutIntervalForRequest = 60
         configuration.timeoutIntervalForResource = .infinity
         self.init(baseURL: baseURL, configuration: configuration,
@@ -29,8 +29,10 @@ public final class HTTPSClientAPITransport: ClientAPITransport, @unchecked Senda
     }
 
     /// Tests supply a configuration with a stub protocol and no delegate.
-    init(baseURL: URL, configuration: URLSessionConfiguration, delegate: (any URLSessionDelegate)?) {
+    init(baseURL: URL, configuration: URLSessionConfiguration, delegate: (any URLSessionDelegate)?,
+         feedIdleInterval: Duration = .seconds(60)) {
         self.baseURL = baseURL
+        self.feedIdleInterval = feedIdleInterval
         session = URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
     }
 
@@ -117,38 +119,62 @@ public final class HTTPSClientAPITransport: ClientAPITransport, @unchecked Senda
                                      accept: "text/event-stream")
         // Standard SSE resume; it takes precedence over `after` on the server.
         feedRequest.setValue(String(after), forHTTPHeaderField: "Last-Event-ID")
+        // The client's 60-second idle deadline takes precedence over URLSession's timeout.
+        feedRequest.timeoutInterval = 120
         let request = feedRequest
-        let session = session
         return AsyncThrowingStream { continuation in
+            let idle = FeedIdleDeadline(interval: feedIdleInterval)
             let reading = Task {
-                do {
-                    let (bytes, response) = try await session.bytes(for: request)
-                    guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
-                    guard http.statusCode == 200 else {
-                        var body = Data()
-                        for try await byte in bytes {
-                            body.append(byte)
-                            if body.count >= 4096 { break }
+                await withTaskGroup(of: Void.self) { group in
+                    group.addTask {
+                        await self.readFeed(request, idle: idle, continuation: continuation)
+                    }
+                    group.addTask {
+                        do {
+                            try await idle.wait()
+                            continuation.finish(throwing: ChangeFeedIdleTimeout.expired)
+                        } catch {
+                            // The reader finished or the caller stopped the feed.
                         }
-                        _ = try Self.response(response, body: body)
-                        throw URLError(.badServerResponse)
                     }
-                    continuation.yield(.opened(requestID: http.value(forHTTPHeaderField: "Request-Id")))
-                    var parser = ServerSentEventParser()
-                    var lines = SSELineSplitter()
-                    for try await byte in bytes {
-                        guard let line = lines.append(byte) else { continue }
-                        guard let event = parser.feed(line: line) else { continue }
-                        let feedEvent = try FeedEvent(event)
-                        continuation.yield(feedEvent)
-                        if case .closing = feedEvent { break }
-                    }
-                    continuation.finish()
-                } catch {
-                    continuation.finish(throwing: error)
+                    _ = await group.next()
+                    group.cancelAll()
                 }
             }
             continuation.onTermination = { _ in reading.cancel() }
+        }
+    }
+
+    private func readFeed(_ request: URLRequest, idle: FeedIdleDeadline,
+                          continuation: AsyncThrowingStream<FeedEvent, any Error>.Continuation) async {
+        do {
+            let (bytes, response) = try await session.bytes(for: request)
+            idle.receivedBytes()
+            guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
+            guard http.statusCode == 200 else {
+                var body = Data()
+                for try await byte in bytes {
+                    idle.receivedBytes()
+                    body.append(byte)
+                    if body.count >= 4096 { break }
+                }
+                _ = try Self.response(response, body: body)
+                throw URLError(.badServerResponse)
+            }
+            continuation.yield(.opened(requestID: http.value(forHTTPHeaderField: "Request-Id")))
+            var parser = ServerSentEventParser()
+            var lines = SSELineSplitter()
+            for try await byte in bytes {
+                idle.receivedBytes()
+                guard let line = lines.append(byte) else { continue }
+                guard let event = parser.feed(line: line) else { continue }
+                let feedEvent = try FeedEvent(event)
+                continuation.yield(feedEvent)
+                if case .closing = feedEvent { break }
+            }
+            continuation.finish()
+        } catch {
+            continuation.finish(throwing: error)
         }
     }
 
@@ -173,6 +199,31 @@ public final class HTTPSClientAPITransport: ClientAPITransport, @unchecked Senda
             throw FeedDecodingError.outOfOrder
         }
         return FeedBatch(changes: decoded, rev: rev, more: (object["more"] as? Bool) ?? false)
+    }
+}
+
+private final class FeedIdleDeadline: @unchecked Sendable {
+    private let interval: Duration
+    private let clock = ContinuousClock()
+    private let lock = NSLock()
+    private var deadline: ContinuousClock.Instant
+
+    init(interval: Duration) {
+        self.interval = interval
+        deadline = ContinuousClock().now.advanced(by: interval)
+    }
+
+    func receivedBytes() {
+        lock.withLock { deadline = clock.now.advanced(by: interval) }
+    }
+
+    func wait() async throws {
+        while true {
+            let next = lock.withLock { deadline }
+            try await clock.sleep(until: next)
+            try Task.checkCancellation()
+            if lock.withLock({ clock.now >= deadline }) { return }
+        }
     }
 }
 
