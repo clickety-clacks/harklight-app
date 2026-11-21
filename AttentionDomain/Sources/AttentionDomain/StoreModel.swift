@@ -648,13 +648,26 @@ public struct StoredRequest: Equatable, Codable, Sendable {
         interface(deliveredFileNames: [])
     }
 
-    public func interface(deliveredFileNames: Set<ExactText>) -> RequestInterface {
+    public func interface(deliveredFileNames: Set<ExactText>,
+                          rules: AnswerScreenRules = .current) -> RequestInterface {
         guard let members = originalPayload.objectMembers?.filter({ $0.key == ExactText("answer_ui") }),
               members.count <= 1 else {
-            return .unsupported(.unfamiliar)
+            return rules.degradesUnshowableScreens ? .plainReply : .unsupported(.unfamiliar)
         }
         return RequestInterface.recognize(members.first?.value,
-                                          deliveredFileNames: deliveredFileNames)
+                                          deliveredFileNames: deliveredFileNames, rules: rules)
+    }
+
+    /// True when this request's answer screen is not shown and the plain reply
+    /// is offered in its place (client API v2 rules, APP-09/10).
+    public func customAnswerScreenNotShown(deliveredFileNames: Set<ExactText>,
+                                           rules: AnswerScreenRules = .current) -> Bool {
+        guard rules.degradesUnshowableScreens,
+              let members = originalPayload.objectMembers?.filter({ $0.key == ExactText("answer_ui") }),
+              !members.isEmpty else { return false }
+        guard members.count == 1 else { return true }
+        return RequestInterface.customScreenNotShown(members[0].value, deliveredFileNames: deliveredFileNames,
+                                                     rules: rules)
     }
 }
 

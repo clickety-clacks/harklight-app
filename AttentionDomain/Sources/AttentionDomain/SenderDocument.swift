@@ -6,23 +6,75 @@ public enum UnsupportedInterfaceReason: Equatable, Sendable {
     case unfamiliar
 }
 
+/// How this client shows sender answer screens. Today's client uses the
+/// built-in limits and shows an unshowable screen as unsupported. The client
+/// API v2 client (product rulings APP-09/10) renders up to the Server's
+/// published limits and degrades a screen it still cannot show to the plain
+/// reply, saying the custom screen is not shown. One setting for the client,
+/// since the limits are the Server's published set, not per item.
+public struct AnswerScreenRules: Equatable, Sendable {
+    public var limits: SenderDocumentLimits
+    public var degradesUnshowableScreens: Bool
+
+    public init(limits: SenderDocumentLimits, degradesUnshowableScreens: Bool) {
+        self.limits = limits
+        self.degradesUnshowableScreens = degradesUnshowableScreens
+    }
+
+    public static let today = AnswerScreenRules(limits: .builtIn, degradesUnshowableScreens: false)
+
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var currentValue = today
+
+    /// The rules in effect. The v2 lifecycle sets them from GET /v2/me.
+    public static var current: AnswerScreenRules {
+        get { lock.withLock { currentValue } }
+        set { lock.withLock { currentValue = newValue } }
+    }
+}
+
 public enum RequestInterface: Equatable, Sendable {
     case sender(SenderDocument)
     case compatibility(AnswerForm)
     case unsupported(UnsupportedInterfaceReason)
 
+    /// The app-owned deliberate text reply.
+    public static let plainReply = RequestInterface.compatibility(AnswerForm(actions: [
+        AnswerAction(id: ExactText("reply"), label: ExactText("Reply"), kind: .text, value: nil)
+    ]))
+
+    /// True when the sender sent an answer screen this client cannot show and
+    /// the rules degrade it to the plain reply: the person is told the custom
+    /// screen is not shown.
+    public static func customScreenNotShown(_ description: JSONValue?,
+                                            deliveredFileNames: Set<ExactText> = [],
+                                            rules: AnswerScreenRules = .current) -> Bool {
+        guard rules.degradesUnshowableScreens, description != nil else { return false }
+        if case .unsupported = recognizeAsSent(description, deliveredFileNames: deliveredFileNames,
+                                               limits: rules.limits) { return true }
+        return false
+    }
+
     public static func recognize(_ description: JSONValue?,
-                                 deliveredFileNames: Set<ExactText> = []) -> RequestInterface {
+                                 deliveredFileNames: Set<ExactText> = [],
+                                 rules: AnswerScreenRules = .current) -> RequestInterface {
+        let recognized = recognizeAsSent(description, deliveredFileNames: deliveredFileNames, limits: rules.limits)
+        if case .unsupported = recognized, rules.degradesUnshowableScreens {
+            // Unknown, over a published limit or malformed: the plain reply
+            // (with Seen and No comment where they apply), never a refusal.
+            return plainReply
+        }
+        return recognized
+    }
+
+    private static func recognizeAsSent(_ description: JSONValue?,
+                                        deliveredFileNames: Set<ExactText>,
+                                        limits: SenderDocumentLimits) -> RequestInterface {
         guard let description else {
             // A plain Harklight message has no sender-authored interface.
             // Give it one app-owned deliberate text reply whose answer is the
             // exact JSON string the sender can read from its origin receipt.
-            return .compatibility(AnswerForm(actions: [
-                AnswerAction(id: ExactText("reply"),
-                             label: ExactText("Reply"),
-                             kind: .text,
-                             value: nil)
-            ]))
+            return plainReply
         }
         guard description.hasUniqueObjectKeys,
               let schema = description.uniqueValue(named: "schema")?.stringValue else {
@@ -32,7 +84,8 @@ public enum RequestInterface: Equatable, Sendable {
         switch schema.rawValue {
         case "attention-client.ui/1":
             guard let document = try? SenderDocument.parse(description,
-                                                            deliveredFileNames: deliveredFileNames) else {
+                                                            deliveredFileNames: deliveredFileNames,
+                                                            limits: limits) else {
                 return .unsupported(.unfamiliar)
             }
             return .sender(document)
@@ -236,8 +289,9 @@ public struct SenderDocument: Equatable, Sendable {
     public let result: ResultConstructor
 
     public static func parse(_ root: JSONValue,
-                             deliveredFileNames: Set<ExactText> = []) throws -> SenderDocument {
-        var parser = SenderDocumentParser()
+                             deliveredFileNames: Set<ExactText> = [],
+                             limits: SenderDocumentLimits = .builtIn) throws -> SenderDocument {
+        var parser = SenderDocumentParser(limits: limits)
         return try parser.parse(root, deliveredFileNames: deliveredFileNames)
     }
 
@@ -367,7 +421,79 @@ public struct SenderDocument: Equatable, Sendable {
     }
 }
 
+/// The answer-screen (UI/1) limits a client renders up to, by the names the
+/// Server publishes in `GET /v2/me` `limits.answer_ui_limits`. The built-in
+/// values are today's; a client API v2 item carries the Server's published
+/// ones instead.
+public struct SenderDocumentLimits: Equatable, Codable, Sendable {
+    public var documentBytes: Int
+    public var requires: Int
+    public var illustrations: Int
+    public var primitivesPerIllustration: Int
+    public var primitivesTotal: Int
+    public var inputs: Int
+    public var actions: Int
+    public var sceneNodes: Int
+    public var sceneDepth: Int
+    public var resultNodes: Int
+    public var resultDepth: Int
+    public var resultPointPath: Int
+    public var arrayItems: Int
+    public var objectMembers: Int
+    public var identifierBytes: Int
+
+    public static let builtIn = SenderDocumentLimits(
+        documentBytes: 65_536, requires: 8, illustrations: 64, primitivesPerIllustration: 512,
+        primitivesTotal: 512, inputs: 16, actions: 64, sceneNodes: 128, sceneDepth: 16, resultNodes: 128,
+        resultDepth: 16, resultPointPath: 16, arrayItems: 128, objectMembers: 128, identifierBytes: 128)
+
+    public init(documentBytes: Int, requires: Int, illustrations: Int, primitivesPerIllustration: Int,
+                primitivesTotal: Int, inputs: Int, actions: Int, sceneNodes: Int, sceneDepth: Int,
+                resultNodes: Int, resultDepth: Int, resultPointPath: Int, arrayItems: Int,
+                objectMembers: Int, identifierBytes: Int) {
+        self.documentBytes = documentBytes
+        self.requires = requires
+        self.illustrations = illustrations
+        self.primitivesPerIllustration = primitivesPerIllustration
+        self.primitivesTotal = primitivesTotal
+        self.inputs = inputs
+        self.actions = actions
+        self.sceneNodes = sceneNodes
+        self.sceneDepth = sceneDepth
+        self.resultNodes = resultNodes
+        self.resultDepth = resultDepth
+        self.resultPointPath = resultPointPath
+        self.arrayItems = arrayItems
+        self.objectMembers = objectMembers
+        self.identifierBytes = identifierBytes
+    }
+
+    /// Reads `answer_ui_limits`; nil unless every published limit is present
+    /// and a non-negative integer.
+    public init?(answerUILimits value: JSONValue) {
+        func limit(_ name: String) -> Int? {
+            guard let integer = value.uniqueValue(named: name)?.integerValue, integer >= 0 else { return nil }
+            return integer
+        }
+        guard let documentBytes = limit("document_bytes"), let requires = limit("requires"),
+              let illustrations = limit("illustrations"),
+              let primitivesPerIllustration = limit("primitives_per_illustration"),
+              let primitivesTotal = limit("primitives_total"), let inputs = limit("inputs"),
+              let actions = limit("actions"), let sceneNodes = limit("scene_nodes"),
+              let sceneDepth = limit("scene_depth"), let resultNodes = limit("result_nodes"),
+              let resultDepth = limit("result_depth"), let resultPointPath = limit("result_point_path"),
+              let arrayItems = limit("array_items"), let objectMembers = limit("object_members"),
+              let identifierBytes = limit("identifier_bytes") else { return nil }
+        self.init(documentBytes: documentBytes, requires: requires, illustrations: illustrations,
+                  primitivesPerIllustration: primitivesPerIllustration, primitivesTotal: primitivesTotal,
+                  inputs: inputs, actions: actions, sceneNodes: sceneNodes, sceneDepth: sceneDepth,
+                  resultNodes: resultNodes, resultDepth: resultDepth, resultPointPath: resultPointPath,
+                  arrayItems: arrayItems, objectMembers: objectMembers, identifierBytes: identifierBytes)
+    }
+}
+
 private struct SenderDocumentParser {
+    let limits: SenderDocumentLimits
     private var illustrations: [SenderIllustration] = []
     private var inputs: [SenderInput] = []
     private var illustrationIDs = Set<ExactText>()
@@ -379,6 +505,8 @@ private struct SenderDocumentParser {
     private var usesResultPoint = false
     private var deliveredFileNames = Set<ExactText>()
 
+    init(limits: SenderDocumentLimits) { self.limits = limits }
+
     mutating func parse(_ root: JSONValue,
                         deliveredFileNames: Set<ExactText>) throws -> SenderDocument {
         self.deliveredFileNames = deliveredFileNames
@@ -386,9 +514,9 @@ private struct SenderDocumentParser {
                                   required: ["schema", "requires", "illustrations", "inputs", "open", "resolved", "submission"],
                                   optional: ["resolvedByState", "answeredWithResult"])
         guard try string(document["schema"], nonempty: true).rawValue == "attention-client.ui/1",
-              root.jsonString.utf8.count <= 65_536 else { throw SenderDocumentError.invalid }
+              root.jsonString.utf8.count <= limits.documentBytes else { throw SenderDocumentError.invalid }
 
-        let requiredCapabilities = try stringArray(document["requires"], nonempty: true, maximumCount: 8)
+        let requiredCapabilities = try stringArray(document["requires"], nonempty: true, maximumCount: limits.requires)
         guard Set(requiredCapabilities).count == requiredCapabilities.count else { throw SenderDocumentError.invalid }
 
         try parseIllustrations(document["illustrations"])
@@ -421,8 +549,8 @@ private struct SenderDocumentParser {
         let submissionLabel = try string(submission["label"], nonempty: true)
         let result = try parseConstructor(submission["result"], path: "result", depth: 1)
 
-        guard sceneNodeCount <= 128,
-              resultNodeCount <= 128,
+        guard sceneNodeCount <= limits.sceneNodes,
+              resultNodeCount <= limits.resultNodes,
               Set(inputs.map(\.id)) == Set(openInputCounts.keys),
               inputs.allSatisfy({ openInputCounts[$0.id] == 1 }),
               Set(inputs.map(\.id)).isSubset(of: constructorInputReferences(in: result)),
@@ -444,7 +572,7 @@ private struct SenderDocumentParser {
     }
 
     private mutating func parseIllustrations(_ raw: JSONValue?) throws {
-        guard let values = raw?.arrayValues, values.count <= 64 else { throw SenderDocumentError.invalid }
+        guard let values = raw?.arrayValues, values.count <= limits.illustrations else { throw SenderDocumentError.invalid }
         for value in values {
             let item = try fields(value, required: ["id", "label", "width", "height", "primitives"])
             let id = try identifier(item["id"])
@@ -453,11 +581,11 @@ private struct SenderDocumentParser {
             let width = try integer(item["width"], range: 1...4096)
             let height = try integer(item["height"], range: 1...4096)
             guard let primitives = item["primitives"]?.arrayValues,
-                  primitives.count <= 512 else { throw SenderDocumentError.invalid }
+                  primitives.count <= limits.primitivesPerIllustration else { throw SenderDocumentError.invalid }
             let parsed = try primitives.map(parsePrimitive)
             illustrations.append(SenderIllustration(id: id, label: label, width: width, height: height, primitives: parsed))
         }
-        guard illustrations.reduce(0, { $0 + $1.primitives.count }) <= 512 else { throw SenderDocumentError.invalid }
+        guard illustrations.reduce(0, { $0 + $1.primitives.count }) <= limits.primitivesTotal else { throw SenderDocumentError.invalid }
     }
 
     private func parsePrimitive(_ raw: JSONValue) throws -> GraphicPrimitive {
@@ -509,7 +637,7 @@ private struct SenderDocumentParser {
     }
 
     private mutating func parseInputs(_ raw: JSONValue?) throws {
-        guard let values = raw?.arrayValues, values.count <= 16 else { throw SenderDocumentError.invalid }
+        guard let values = raw?.arrayValues, values.count <= limits.inputs else { throw SenderDocumentError.invalid }
         for value in values {
             guard let kind = value.uniqueValue(named: "kind")?.stringValue?.rawValue else { throw SenderDocumentError.invalid }
             let input: SenderInput
@@ -519,7 +647,7 @@ private struct SenderDocumentParser {
                 let id = try identifier(item["id"])
                 let label = try string(item["label"], nonempty: true)
                 guard let rawActions = item["actions"]?.arrayValues,
-                      !rawActions.isEmpty, rawActions.count <= 64 else { throw SenderDocumentError.invalid }
+                      !rawActions.isEmpty, rawActions.count <= limits.actions else { throw SenderDocumentError.invalid }
                 var seen = Set<ExactText>()
                 var actions: [SenderAction] = []
                 for rawAction in rawActions {
@@ -582,10 +710,10 @@ private struct SenderDocumentParser {
     }
 
     private mutating func parseScene(_ raw: JSONValue?, path: String, depth: Int, terminal: Bool, resultBranch: Bool) throws -> SceneNode {
-        guard depth <= 16, let raw,
+        guard depth <= limits.sceneDepth, let raw,
               let kind = raw.uniqueValue(named: "kind")?.stringValue?.rawValue else { throw SenderDocumentError.invalid }
         sceneNodeCount += 1
-        guard sceneNodeCount <= 128 else { throw SenderDocumentError.invalid }
+        guard sceneNodeCount <= limits.sceneNodes else { throw SenderDocumentError.invalid }
 
         let node: SceneKind
         switch kind {
@@ -642,7 +770,7 @@ private struct SenderDocumentParser {
             let id = try identifier(item["id"])
             try requireIllustration(id)
             let label = try string(item["label"], nonempty: true)
-            guard let pathValues = item["path"]?.arrayValues, pathValues.count <= 16 else { throw SenderDocumentError.invalid }
+            guard let pathValues = item["path"]?.arrayValues, pathValues.count <= limits.resultPointPath else { throw SenderDocumentError.invalid }
             var resultPath: [ScenePathComponent] = []
             for value in pathValues {
                 if let key = value.stringValue {
@@ -662,10 +790,10 @@ private struct SenderDocumentParser {
     }
 
     private mutating func parseConstructor(_ raw: JSONValue?, path: String, depth: Int) throws -> ResultConstructor {
-        guard depth <= 16, let raw,
+        guard depth <= limits.resultDepth, let raw,
               let kind = raw.uniqueValue(named: "kind")?.stringValue?.rawValue else { throw SenderDocumentError.invalid }
         resultNodeCount += 1
-        guard resultNodeCount <= 128 else { throw SenderDocumentError.invalid }
+        guard resultNodeCount <= limits.resultNodes else { throw SenderDocumentError.invalid }
         switch kind {
         case "literal":
             let item = try fields(raw, required: ["kind", "value"])
@@ -678,7 +806,7 @@ private struct SenderDocumentParser {
             return .input(id)
         case "array":
             let item = try fields(raw, required: ["kind", "items"])
-            guard let values = item["items"]?.arrayValues, values.count <= 128 else { throw SenderDocumentError.invalid }
+            guard let values = item["items"]?.arrayValues, values.count <= limits.arrayItems else { throw SenderDocumentError.invalid }
             var constructors: [ResultConstructor] = []
             for (index, value) in values.enumerated() {
                 constructors.append(try parseConstructor(value, path: "\(path).\(index)", depth: depth + 1))
@@ -686,7 +814,7 @@ private struct SenderDocumentParser {
             return .array(constructors)
         case "object":
             let item = try fields(raw, required: ["kind", "members"])
-            guard let values = item["members"]?.arrayValues, values.count <= 128 else { throw SenderDocumentError.invalid }
+            guard let values = item["members"]?.arrayValues, values.count <= limits.objectMembers else { throw SenderDocumentError.invalid }
             var seen = Set<ExactText>()
             var members: [ResultMember] = []
             for (index, value) in values.enumerated() {
@@ -719,7 +847,7 @@ private struct SenderDocumentParser {
 
     private func identifier(_ raw: JSONValue?) throws -> ExactText {
         let value = try string(raw, nonempty: true)
-        guard value.rawValue.utf8.count <= 128 else { throw SenderDocumentError.invalid }
+        guard value.rawValue.utf8.count <= limits.identifierBytes else { throw SenderDocumentError.invalid }
         return value
     }
 
