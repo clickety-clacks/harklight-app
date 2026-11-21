@@ -78,8 +78,8 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
             relay.connection?.recordReply(entry, disposition: .rejected(ExactText(error.token.rawValue)))
             await onRejected(entry, error)
         }, onAcceptedResult: { entry, result in
-            if let turn = result.entry?.entryID {
-                relay.connection?.recordReply(entry, disposition: .acceptedPendingReplay(operation: entry.id, turn: turn))
+            if let responseEntry = result.entry {
+                await relay.connection?.reconcileAcceptedReply(entry, responseEntry: responseEntry)
             }
         }), publish: { relay.connection?.publishModel() })
         self.outbox = try ActionOutbox(persistence: persistence, transport: transport, outcomes: outcomes,
@@ -172,6 +172,17 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
         if let persisted = model.persistedCursor(), persisted >= revision { return false }
         try await catchUp()
         return model.heldCursor != before
+    }
+
+    private func reconcileAcceptedReply(_ entry: OutboxEntry, responseEntry: APIEntry) async {
+        guard entry.operation == "reply" else { return }
+        recordReply(entry, disposition: .acceptedPendingReplay(operation: entry.id, turn: responseEntry.entryID))
+        let snapshot = model.snapshot
+        guard snapshot.items[responseEntry.itemID] != nil,
+              snapshot.entries[responseEntry.itemID]?[responseEntry.entryID] == nil else { return }
+        // The receipt is valid even when its resource projection was fenced.
+        // Fetch fresh entries in the current generation to settle the overlay.
+        try? await modelWriter.loadEntries(of: responseEntry.itemID)
     }
 
     private func recordReply(_ entry: OutboxEntry, disposition: ConversationDraft.Disposition) {

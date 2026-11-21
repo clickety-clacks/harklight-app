@@ -122,6 +122,13 @@ final class FakeClientAPIServer: ClientAPITransport, @unchecked Sendable {
                 return APIResponse(status: 200, requestID: nextRequestID(), body: Data(meBody.utf8))
             }
             if request.path == "/v2/inbox", let holdInbox { await holdInbox.wait() }
+            if request.path.hasSuffix("/entries"), replyEntry != nil {
+                let entries = lock.withLock {
+                    log.filter { $0.kind == .entry }.map { String(decoding: $0.data, as: UTF8.self) }
+                }.joined(separator: ",")
+                return APIResponse(status: 200, requestID: nextRequestID(),
+                    body: Data(#"{"rev":\#(head),"entries":[\#(entries)],"older":false}"#.utf8))
+            }
             // The inbox as a snapshot: the items the fake serves, at its head.
             let items = lock.withLock { _inboxItems.joined(separator: ",") }
             return APIResponse(status: 200, requestID: nextRequestID(),

@@ -9,9 +9,10 @@ final class ChatMessageQueueTests: XCTestCase {
     private let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
                                            personID: ExactText("person-A"), deviceID: ExactText("installation-A"))
 
-    private func repository(v2: Bool, persistence: MemoryPendingActionPersistence = MemoryPendingActionPersistence())
+    private func repository(v2: Bool, persistence: MemoryPendingActionPersistence = MemoryPendingActionPersistence(),
+                            context suppliedContext: ProfileContext? = nil)
         throws -> (ClientRepository, ProfileContext, ConversationBinding) {
-        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let context = suppliedContext ?? ProfileContext(identity: identity, transportMode: .relay)
         let repository = try ClientRepository(context: context, persistence: persistence)
         let store = ServerModelV2Store(fileURL: nil)
         try store.apply(kind: "item", rev: 1, data: V2Fixture.json(V2Fixture.item("i", rev: 1, rankKey: "a")))
@@ -68,7 +69,7 @@ final class ChatMessageQueueTests: XCTestCase {
             reopened = try ClientRepository(context: context, persistence: persistence)
             XCTAssertTrue(try reopened.conversationSnapshot(context: context).threads.isEmpty)
         } else {
-            reopened = try repository(v2: true, persistence: persistence).0
+            reopened = try repository(v2: true, persistence: persistence, context: context).0
         }
         XCTAssertEqual(try reopened.queuedChatMessages(context: context).map(\.operationID), [operation])
 

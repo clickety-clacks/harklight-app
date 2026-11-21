@@ -148,12 +148,12 @@ public final class ServerModelSyncWriter: SyncModelWriting, @unchecked Sendable 
 public final class ServerModelOutboxOutcomes: OutboxOutcomeHandling, @unchecked Sendable {
     private let store: ServerModelV2Store
     private let onRejected: @Sendable (OutboxEntry, APIError) async -> Void
-    private let onAcceptedResult: @Sendable (OutboxEntry, APIWriteResult) -> Void
+    private let onAcceptedResult: @Sendable (OutboxEntry, APIWriteResult) async -> Void
     private let onUnreadableResponse: @Sendable (OutboxEntry, any Error) -> Void
 
     public init(store: ServerModelV2Store,
                 onRejected: @escaping @Sendable (OutboxEntry, APIError) async -> Void,
-                onAcceptedResult: @escaping @Sendable (OutboxEntry, APIWriteResult) -> Void = { _, _ in },
+                onAcceptedResult: @escaping @Sendable (OutboxEntry, APIWriteResult) async -> Void = { _, _ in },
                 onUnreadableResponse: @escaping @Sendable (OutboxEntry, any Error) -> Void = { _, _ in }) {
         self.store = store
         self.onRejected = onRejected
@@ -174,7 +174,7 @@ public final class ServerModelOutboxOutcomes: OutboxOutcomeHandling, @unchecked 
                 // The receipt settles the durable intent independently of the
                 // old resource projection, which still cannot enter the model.
             }
-            onAcceptedResult(entry, result)
+            await onAcceptedResult(entry, result)
         } catch {
             // The write took effect; the feed delivers its resources anyway.
             onUnreadableResponse(entry, error)
