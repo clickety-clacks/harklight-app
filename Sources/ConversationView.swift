@@ -8,12 +8,14 @@ import QuickLook
 private struct V2DiscussionOnOpen: ViewModifier {
     let store: LivePresentationStore
     let key: RequestKey
+    @Environment(\.scenePhase) private var scenePhase
     @State private var retry = 0
     @State private var loadFailed = false
 
     private struct Load: Equatable {
         let key: RequestKey
         let retry: Int
+        let isActive: Bool
     }
 
     func body(content: Content) -> some View {
@@ -27,7 +29,8 @@ private struct V2DiscussionOnOpen: ViewModifier {
                 }
                 content
             }
-            .task(id: Load(key: key, retry: retry)) {
+            .task(id: Load(key: key, retry: retry, isActive: scenePhase == .active)) {
+                guard scenePhase == .active else { return }
                 loadFailed = false
                 let loaded = await store.loadDiscussionOnOpen(key)
                 if !Task.isCancelled { loadFailed = !loaded }

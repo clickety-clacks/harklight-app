@@ -68,6 +68,7 @@ struct NativeNotificationLocator: Codable, Equatable {
     let deviceID: ExactText
     let request: RequestKey
     let acceptanceSequence: UInt64
+    let isV2: Bool?
     let target: String?
 
     init?(_ payload: JSONValue, serverMatchedRouting: Bool = false) {
@@ -96,7 +97,19 @@ struct NativeNotificationLocator: Codable, Equatable {
         deviceID = device
         request = RequestKey(accountScope: person, senderID: sender, messageID: message)
         acceptanceSequence = sequence
+        isV2 = nil
         target = locator.uniqueValue(named: "target")?.stringValue?.rawValue
+    }
+
+    init(v2Request: RequestKey, bindingID: ExactText, deviceID: ExactText, serverID: String, target: String?) {
+        self.serverID = serverID
+        hasInvalidServerID = false
+        self.bindingID = bindingID
+        self.deviceID = deviceID
+        request = v2Request
+        acceptanceSequence = 0
+        isV2 = true
+        self.target = target
     }
 
     func profile(in records: [NativeEnrollmentRecord], serverMatchedRouting: Bool = false) -> NativeNotificationProfile? {
@@ -104,7 +117,7 @@ struct NativeNotificationLocator: Codable, Equatable {
         let matches = records.filter { record in
             // A push from a server we have left must not open a message in a
             // different account. Missing identity preserves legacy resolution.
-            if serverMatchedRouting, let serverID, serverID != record.serverID { return false }
+            if serverMatchedRouting || isV2 == true, let serverID, serverID != record.serverID { return false }
             return (record.notificationBindings ?? []).contains { $0.bindingID == bindingID }
         }
         guard matches.count == 1, let record = matches.first,
@@ -202,11 +215,17 @@ final class NativeNotificationRouter {
         defaults.removeObject(forKey: key)
     }
 
+    var pendingV2Tap: JSONValue?
+
     func receive(_ payload: JSONValue, opened: Bool) {
         guard opened else { return }
+        receive(locator: NativeNotificationLocator(payload, serverMatchedRouting: featureFlags.isEnabled(.serverMatchedPushRouting)))
+    }
+
+    func receive(locator: NativeNotificationLocator?) {
         NativePushedViewCoordinator.shared.recordOwnOpen()
         let serial = UInt64(defaults.string(forKey: key + ".serial") ?? "0") ?? 0
-        intent = NativeNotificationIntent(serial: serial &+ 1, locator: NativeNotificationLocator(payload, serverMatchedRouting: featureFlags.isEnabled(.serverMatchedPushRouting)))
+        intent = NativeNotificationIntent(serial: serial &+ 1, locator: locator)
         foregroundChatIndicator = nil
         liveGeneration = nil
         defaults.set(String(serial &+ 1), forKey: key + ".serial")
@@ -221,6 +240,13 @@ final class NativeNotificationRouter {
         guard let locator = NativeNotificationLocator(payload, serverMatchedRouting: featureFlags.isEnabled(.serverMatchedPushRouting)), locator.target == "chat" else {
             return false
         }
+        return receiveForegroundNotification(payload, locator: locator, title: title, body: body)
+    }
+
+    @discardableResult
+    func receiveForegroundNotification(_ payload: JSONValue, locator: NativeNotificationLocator,
+                                       title: String, body: String) -> Bool {
+        guard locator.target == "chat" else { return false }
         guard visibleConversationKey != locator.request else {
             foregroundChatIndicator = nil
             return true
@@ -260,7 +286,7 @@ final class NativeNotificationRouter {
         intent = pending
         liveGeneration = context.generation
         guard synchronized, let request = requests.first(where: { $0.key == locator.request }),
-              request.acceptanceOrder == locator.acceptanceSequence else { return nil }
+              (locator.isV2 == true || request.acceptanceOrder == locator.acceptanceSequence) else { return nil }
         return request.key
     }
 

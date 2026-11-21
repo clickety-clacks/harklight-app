@@ -71,7 +71,7 @@ final class DevelopmentPushRegistration: NSObject, UIApplicationDelegate, UNUser
             actionIdentifier: actionIdentifier, userInfo: userInfo)
         Task { @MainActor in
             if NativeRelayLifecycle.shared.clientAPIV2Enabled {
-                Task { _ = await NativeRelayLifecycle.shared.refreshForRemotePush(navigationPayload) }
+                NativeNotificationRouter.shared.pendingV2Tap = navigationPayload
             } else {
                 Self.routeNotificationPayload(navigationPayload, to: .shared)
             }
@@ -87,33 +87,23 @@ final class DevelopmentPushRegistration: NSObject, UIApplicationDelegate, UNUser
         let payload = Self.notificationNavigationPayload(
             actionIdentifier: UNNotificationDefaultActionIdentifier,
             userInfo: content.userInfo)
-        guard let payload, NativeNotificationLocator(payload)?.target == "chat" else {
-            if let payload {
-                Task { @MainActor in
-                    if NativeRelayLifecycle.shared.clientAPIV2Enabled {
-                        _ = await NativeRelayLifecycle.shared.refreshForRemotePush(payload)
-                    }
-                }
-            }
-            // Foreground notifications were previously silent. Keep that behavior
-            // for request and all other notification kinds.
-            completionHandler([])
-            return
-        }
+        guard let payload else { completionHandler([]); return }
         let title = content.title
         let body = content.body
 
         Task { @MainActor in
+            completionHandler([])
             if NativeRelayLifecycle.shared.clientAPIV2Enabled {
-                completionHandler([])
-                _ = await NativeRelayLifecycle.shared.refreshForRemotePush(payload)
+                if let locator = await NativeRelayLifecycle.shared.v2LocatorForPush(payload) {
+                    NativeNotificationRouter.shared.receiveForegroundNotification(payload, locator: locator,
+                                                                                title: title, body: body)
+                }
                 return
             }
             let handled = NativeNotificationRouter.shared.receiveForegroundNotification(
                 payload, title: title, body: body)
             // Chat replies use the in-app indicator when another screen is open;
             // the matching visible chat needs no separate notification at all.
-            completionHandler([])
             if handled {
                 // The alert is only a wake hint; the authenticated relay supplies
                 // the reply text to an already-visible conversation.

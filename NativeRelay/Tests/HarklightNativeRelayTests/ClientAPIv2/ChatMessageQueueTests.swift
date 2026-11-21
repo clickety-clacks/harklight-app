@@ -71,6 +71,42 @@ final class ChatMessageQueueTests: XCTestCase {
         XCTAssertEqual(sent.first?.body, Data(#"{"text":"saved before handoff"}"#.utf8))
     }
 
+    func testForegroundOnlyWritesStopRetryingInTheBackgroundAndResumeByKey() async throws {
+        let (repository, context, binding) = try repository(v2: true)
+        try type("keep the same key", repository, binding, context)
+        let message = try repository.queueChatMessage(binding, context: context)
+        let operation = try XCTUnwrap(message.operationID)
+        let server = FakeClientAPIServer()
+        server.nextWriteFailures = [URLError(.networkConnectionLost)]
+        let connection = try ClientAPIv2Connection(transport: server, repository: repository,
+            context: context, directory: nil, errors: RecordingErrorLogV2(), foregroundOnlyWrites: true,
+            outboxWaitBeforeRetry: { _, _ in try await Task.sleep(for: .seconds(3600)) })
+        try await connection.submitQueuedReply(message)
+        XCTAssertTrue(server.received.isEmpty)
+        let first = Task { await connection.runForeground() }
+        defer { first.cancel() }
+        let deadline = ContinuousClock.now + .seconds(2)
+        while !server.received.contains(where: { $0.idempotencyKey == operation }),
+              ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        first.cancel()
+        await first.value
+
+        try await connection.catchUp()
+        XCTAssertEqual(server.received.filter { $0.idempotencyKey == operation }.count, 1)
+        let pending = await connection.outbox.pending
+        XCTAssertEqual(pending.map(\.id), [operation])
+        let second = Task { await connection.runForeground() }
+        defer { second.cancel() }
+        let resumed = ContinuousClock.now + .seconds(2)
+        while server.received.filter({ $0.idempotencyKey == operation }).count < 2,
+              ContinuousClock.now < resumed {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertEqual(server.received.filter { $0.idempotencyKey == operation }.count, 2)
+    }
+
     func testOneMessagesOutcomeLeavesTheOthersAlone() throws {
         let (repository, context, binding) = try repository(v2: true)
         var ids: [UUID] = []

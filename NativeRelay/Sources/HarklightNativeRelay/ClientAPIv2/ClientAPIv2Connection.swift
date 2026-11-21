@@ -31,6 +31,7 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
     public let outbox: ActionOutbox
     public let sync: ChangeFeedSync
     private let transport: any ClientAPITransport
+    private let foregroundOnlyWrites: Bool
     private let modelWriter: ServerModelSyncWriter
     private let repository: ClientRepository
     private let context: ProfileContext
@@ -43,7 +44,7 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
     /// `directory` holds the model, outbox and last `/v2/me` for this
     /// account; nil keeps everything in memory (tests and previews).
     public init(transport: any ClientAPITransport, repository: ClientRepository, context: ProfileContext,
-                directory: URL?, errors: any ErrorLogging,
+                directory: URL?, errors: any ErrorLogging, foregroundOnlyWrites: Bool = false,
                 waitBeforeRetry: @escaping @Sendable (Int) async throws -> Void = ChangeFeedSync.backoff,
                 outboxWaitBeforeRetry: @escaping @Sendable (Int, TimeInterval?) async throws -> Void = ActionOutbox.backoff,
                 meWaitBeforeRetry: @escaping @Sendable (Int) async throws -> Void = ChangeFeedSync.backoff,
@@ -60,6 +61,7 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
         self.model = model
         self.presentation = ServerModelV2Presentation(savedMe: savedMe)
         self.transport = transport
+        self.foregroundOnlyWrites = foregroundOnlyWrites
         self.repository = repository
         self.context = context
         self.errors = errors
@@ -81,7 +83,7 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
             }
         }), publish: { relay.connection?.publishModel() })
         self.outbox = try ActionOutbox(persistence: persistence, transport: transport, outcomes: outcomes,
-                                       errors: errors, waitBeforeRetry: outboxWaitBeforeRetry)
+                                       errors: errors, startsPaused: foregroundOnlyWrites, waitBeforeRetry: outboxWaitBeforeRetry)
         self.sync = ChangeFeedSync(transport: transport, model: writer, errors: errors,
                                    waitBeforeRetry: waitBeforeRetry, onLiveState: { state in
                                        // Each time the feed is live again, send what the outbox holds.
@@ -134,26 +136,29 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
     /// Sends every saved write that is still pending, once, under its saved
     /// key; refused ones stay failed until the person retries.
     func sendSavedWrites() {
-        Task {
-            await recoverQueuedReplies()
-            await outbox.flush()
-        }
+        Task { await outbox.flush() }
     }
 
     /// Foreground: shows the saved model at once, reads `/v2/me`, then
     /// follows the change feed until cancelled or stopped by the server.
     public func runForeground() async {
         publishModel()
-        sendSavedWrites()
-        // `/v2/me` is retried alongside the feed until it is read.
-        let me = Task { await readMeUntilRead() }
-        await sync.runForeground()
-        me.cancel()
+        await outbox.resumeSending()
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask { await self.readMeUntilRead() }
+            group.addTask {
+                await self.recoverQueuedReplies()
+                await self.outbox.flush()
+            }
+            await sync.runForeground()
+            group.cancelAll()
+            if foregroundOnlyWrites { await outbox.pauseSending() }
+        }
     }
 
     /// Push or background refresh: applies every batch from the cursor.
     public func catchUp() async throws {
-        sendSavedWrites()
+        if !foregroundOnlyWrites { sendSavedWrites() }
         try await sync.catchUp()
     }
 
@@ -189,6 +194,7 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
                 .sorted { ($0.submittedAt ?? .distantPast) < ($1.submittedAt ?? .distantPast) }
             for message in messages {
                 try Task.checkCancellation()
+                guard message.files.isEmpty else { continue }
                 switch message.disposition {
                 case .submitting, .outcomeUnknown:
                     try await submitQueuedReply(message, retryRefused: false)

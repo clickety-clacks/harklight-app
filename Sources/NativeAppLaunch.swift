@@ -1065,7 +1065,11 @@ final class NativeAppLaunch {
 
     func openForegroundChatIndicator(id: UUID) async {
         guard let indicator = notificationRouter.consumeForegroundChatIndicator(id: id) else { return }
-        notificationRouter.receive(indicator.payload, opened: true)
+        if NativeRelayLifecycle.shared.clientAPIV2Enabled {
+            notificationRouter.pendingV2Tap = indicator.payload
+        } else {
+            notificationRouter.receive(indicator.payload, opened: true)
+        }
         await handleNotification()
     }
 
@@ -1076,7 +1080,13 @@ final class NativeAppLaunch {
     }
 
     func handleNotification() async {
-        guard didFinishRestoring, let intent = notificationRouter.intent,
+        guard didFinishRestoring else { return }
+        if NativeRelayLifecycle.shared.clientAPIV2Enabled, let payload = notificationRouter.pendingV2Tap {
+            notificationRouter.pendingV2Tap = nil
+            guard let locator = await NativeRelayLifecycle.shared.v2LocatorForPush(payload) else { return }
+            notificationRouter.receive(locator: locator)
+        }
+        guard let intent = notificationRouter.intent,
               handledNotificationSerial != intent.serial else { return }
         handledNotificationSerial = intent.serial
         pendingMessageDeepLink = nil

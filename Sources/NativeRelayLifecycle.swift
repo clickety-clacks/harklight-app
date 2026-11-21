@@ -1261,7 +1261,7 @@ final class NativeRelayLifecycle {
             clientIdentity: TrustedKeychainIdentity(clientIdentity), trustedRootDER: trustedRootDER)
         let attempt = UUID()
         let connection = try ClientAPIv2Connection(transport: transport, repository: store, context: context,
-            directory: Self.v2Directory(for: context.identity), errors: errorLog,
+            directory: Self.v2Directory(for: context.identity), errors: errorLog, foregroundOnlyWrites: true,
             onLiveState: { [weak self] state in
                 guard state == .live else { return }
                 Task { @MainActor [weak self] in
@@ -1321,6 +1321,22 @@ final class NativeRelayLifecycle {
             // Sync records transport failures with its Request-Id.
             return false
         }
+    }
+
+    func v2LocatorForPush(_ payload: JSONValue) async -> NativeNotificationLocator? {
+        guard clientAPIV2Enabled, let connection = v2Connection, let context,
+              let record = try? enrollment.load(),
+              NativeV2PushWake.revision(payload, enrollment: record, identity: context.identity) != nil,
+              let server = record.serverID,
+              let locator = payload.uniqueValue(named: "attention")?.uniqueValue(named: "locator"),
+              let itemID = locator.uniqueValue(named: "item_id")?.stringValue,
+              let binding = locator.uniqueValue(named: "binding_id")?.stringValue else { return nil }
+        _ = await refreshV2ForPush(payload, enrollment: record)
+        guard v2Connection === connection, let item = connection.model.snapshot.items[itemID] else { return nil }
+        let request = ServerModelV2Projection.key(for: itemID, sender: item.sender, identity: context.identity)
+        return NativeNotificationLocator(v2Request: request, bindingID: binding,
+            deviceID: context.identity.deviceID, serverID: server,
+            target: locator.uniqueValue(named: "target")?.stringValue?.rawValue)
     }
 
     func refreshForRemotePush(_ payload: JSONValue?) async -> Bool {
