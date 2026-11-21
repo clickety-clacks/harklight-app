@@ -58,7 +58,11 @@ final class ChatMessageQueueTests: XCTestCase {
         try await assertReplyRecovery(cold: true)
     }
 
-    private func assertReplyRecovery(cold: Bool) async throws {
+    func testReplyAcceptedBeforeTheColdBaselineClearsTheOverlayWithoutResending() async throws {
+        try await assertReplyRecovery(cold: true, acceptBeforeBaseline: true)
+    }
+
+    private func assertReplyRecovery(cold: Bool, acceptBeforeBaseline: Bool = false) async throws {
         let persistence = MemoryPendingActionPersistence()
         let (first, context, binding) = try repository(v2: true, persistence: persistence)
         try type("saved before handoff", first, binding, context)
@@ -99,6 +103,19 @@ final class ChatMessageQueueTests: XCTestCase {
         XCTAssertEqual(sent.first?.body, Data(#"{"text":"saved before handoff"}"#.utf8))
         if cold { XCTAssertNil(connection.model.heldCursor, "The POST started before the inbox was unlocked.") }
 
+        if acceptBeforeBaseline {
+            writeGate.release()
+            let receipt = ConversationDraft.Disposition.acceptedPendingReplay(
+                operation: operation, turn: ExactText("accepted"))
+            let acceptanceDeadline = ContinuousClock.now + .seconds(2)
+            while try reopened.queuedChatMessages(context: context).first?.disposition != receipt,
+                  ContinuousClock.now < acceptanceDeadline {
+                try await Task.sleep(for: .milliseconds(5))
+            }
+            XCTAssertEqual(try reopened.queuedChatMessages(context: context).first?.disposition, receipt)
+            XCTAssertNil(connection.model.heldCursor, "The reply was accepted before the baseline.")
+            XCTAssertEqual(server.head, 1, "The baseline will include the accepted revision.")
+        }
         inboxGate.release()
         let feedDeadline = ContinuousClock.now + .seconds(2)
         while server.openFeedCount == 0, ContinuousClock.now < feedDeadline {

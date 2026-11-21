@@ -73,7 +73,8 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
         let relay = PublishRelay()
         let modelWriter = ServerModelSyncWriter(store: model, transport: transport, errors: errors)
         self.modelWriter = modelWriter
-        let writer = PublishingSyncWriter(inner: modelWriter, publish: { relay.connection?.publishModel() })
+        let writer = PublishingSyncWriter(inner: modelWriter, publish: { relay.connection?.publishModel() },
+            afterBaseline: { await relay.connection?.reconcileHydratedReplies() })
         let outcomes = PublishingOutcomes(inner: ServerModelOutboxOutcomes(store: model, onRejected: { entry, error in
             relay.connection?.recordReply(entry, disposition: .rejected(ExactText(error.token.rawValue)))
             await onRejected(entry, error)
@@ -150,6 +151,7 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
             group.addTask { await self.readMeUntilRead() }
             group.addTask {
                 await self.recoverQueuedReplies()
+                await self.reconcileHydratedReplies()
                 await self.outbox.flush()
             }
             await sync.runForeground()
@@ -183,6 +185,22 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
         // The receipt is valid even when its resource projection was fenced.
         // Fetch fresh entries in the current generation to settle the overlay.
         try? await modelWriter.loadEntries(of: responseEntry.itemID)
+    }
+
+    private func reconcileHydratedReplies() async {
+        let snapshot = model.snapshot
+        guard let queued = try? repository.queuedChatMessages(context: context) else { return }
+        let items = Set(queued.compactMap { message -> ExactText? in
+            guard case let .acceptedPendingReplay(_, turn) = message.disposition else { return nil }
+            let item = message.binding.request.messageID
+            guard snapshot.items[item] != nil, snapshot.entries[item]?[turn] == nil else { return nil }
+            return item
+        })
+        for item in items {
+            guard !Task.isCancelled else { return }
+            try? await modelWriter.loadEntries(of: item)
+        }
+        if !items.isEmpty { publishModel() }
     }
 
     private func recordReply(_ entry: OutboxEntry, disposition: ConversationDraft.Disposition) {
@@ -281,9 +299,12 @@ private final class PublishRelay: @unchecked Sendable {
 private final class PublishingSyncWriter: SyncModelWriting, @unchecked Sendable {
     private let inner: ServerModelSyncWriter
     private let publish: @Sendable () -> Void
-    init(inner: ServerModelSyncWriter, publish: @escaping @Sendable () -> Void) {
+    private let afterBaseline: @Sendable () async -> Void
+    init(inner: ServerModelSyncWriter, publish: @escaping @Sendable () -> Void,
+         afterBaseline: @escaping @Sendable () async -> Void) {
         self.inner = inner
         self.publish = publish
+        self.afterBaseline = afterBaseline
     }
     func syncPosition() throws -> (revision: Rev?, generation: UInt64) { try inner.syncPosition() }
     func apply(_ changes: [FeedChange], cursor: Rev, generation: UInt64) async throws {
@@ -293,6 +314,7 @@ private final class PublishingSyncWriter: SyncModelWriting, @unchecked Sendable 
     func rebaseline() async throws -> Rev {
         let rev = try await inner.rebaseline()
         publish()
+        await afterBaseline()
         return rev
     }
 }
