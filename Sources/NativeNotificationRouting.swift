@@ -37,6 +37,30 @@ extension NativeEnrollmentRecord {
     }
 }
 
+/// A push may wake Sync only for the installed account. Its position is
+/// a freshness hint; the connection reads changes from its saved cursor.
+enum NativeV2PushWake {
+    static func revision(_ payload: JSONValue, enrollment: NativeEnrollmentRecord,
+                         identity: ProfileIdentity) -> UInt64? {
+        guard enrollment.matchesNotificationIdentity(identity),
+              let expectedServer = enrollment.serverID,
+              let attention = payload.uniqueValue(named: "attention"),
+              attention.uniqueValue(named: "v")?.integerValue == 2,
+              attention.uniqueValue(named: "type")?.stringValue?.rawValue == "sync",
+              (try? RelayServerIdentity.read(from: attention)) == expectedServer,
+              let locator = attention.uniqueValue(named: "locator"),
+              locator.uniqueValue(named: "v")?.integerValue == 2,
+              let binding = locator.uniqueValue(named: "binding_id")?.stringValue,
+              enrollment.notificationBindings?.contains(where: { $0.bindingID == binding }) == true,
+              locator.uniqueValue(named: "person_id")?.stringValue == identity.personID,
+              locator.uniqueValue(named: "device_id")?.stringValue == identity.deviceID,
+              locator.uniqueValue(named: "item_id")?.stringValue?.rawValue.isEmpty == false,
+              case let .number(number)? = locator.uniqueValue(named: "rev"),
+              let revision = UInt64(number.lexeme), revision > 0 else { return nil }
+        return revision
+    }
+}
+
 struct NativeNotificationLocator: Codable, Equatable {
     let serverID: String?
     let hasInvalidServerID: Bool?

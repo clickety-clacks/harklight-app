@@ -1268,10 +1268,34 @@ final class NativeRelayLifecycle {
                     self.confirmedRelayContext = context
                 }
             })
+        installV2Connection(connection, context: context, attempt: attempt)
+    }
+
+    func installV2Connection(_ connection: ClientAPIv2Connection, context: ProfileContext, attempt: UUID = UUID()) {
+        guard clientAPIV2Enabled, v2Connection == nil else { return }
         self.context = context
         activeTransportAttemptID = attempt
         v2Connection = connection
         startV2Foreground()
+    }
+
+    func refreshV2ForPush(_ payload: JSONValue, enrollment: NativeEnrollmentRecord) async -> Bool {
+        guard clientAPIV2Enabled, let connection = v2Connection, let context,
+              let revision = NativeV2PushWake.revision(payload, enrollment: enrollment,
+                                                       identity: context.identity) else { return false }
+        do {
+            let changed = try await connection.catchUp(forPushRevision: revision)
+            return v2Connection === connection && changed
+        } catch {
+            // Sync records transport failures with its Request-Id.
+            return false
+        }
+    }
+
+    func refreshForRemotePush(_ payload: JSONValue?) async -> Bool {
+        if !clientAPIV2Enabled { return await refreshFromTrustedRelay() }
+        guard let payload, let record = try? enrollment.load() else { return false }
+        return await refreshV2ForPush(payload, enrollment: record)
     }
 
     private func stopMutationFlights() async {

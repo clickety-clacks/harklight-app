@@ -3,7 +3,112 @@ import XCTest
 import AttentionDomain
 import HarklightNativeRelay
 
+private final class V2ScenePushTransport: ClientAPITransport, @unchecked Sendable {
+    private let lock = NSLock()
+    private var opened = 0
+    private var closed = 0
+    private var batches = 0
+
+    var counts: (opened: Int, closed: Int, batches: Int) {
+        lock.withLock { (opened, closed, batches) }
+    }
+
+    func send(_ request: APIRequest) async throws -> APIResponse {
+        let body = request.path == "/v2/me"
+            ? #"{"account":{"state":"active"},"features":{},"limits":{}}"#
+            : #"{"rev":0,"items":[],"counts":{"unresolved":0}}"#
+        return APIResponse(status: 200, requestID: "test", body: Data(body.utf8))
+    }
+
+    func changeBatch(after: Rev) async throws -> FeedBatch {
+        lock.withLock { batches += 1 }
+        return FeedBatch(changes: [], rev: after, more: false)
+    }
+
+    func changeFeed(after: Rev) -> AsyncThrowingStream<FeedEvent, any Error> {
+        AsyncThrowingStream { continuation in
+            continuation.onTermination = { [weak self] _ in
+                guard let self else { return }
+                self.lock.withLock { self.closed += 1 }
+            }
+            lock.withLock { opened += 1 }
+            continuation.yield(.opened(requestID: "test"))
+        }
+    }
+}
+
 final class HarklightTests: XCTestCase {
+    @MainActor
+    func testV2PushWakeRequiresTheActiveAccountAndTheReleaseGate() async throws {
+        let server = String(repeating: "a", count: 32)
+        let binding = ExactText("00000000-0000-0000-0000-000000000001")
+        let record = NativeEnrollmentRecord(
+            host: "relay.example", enrollmentPort: 18444, relayPort: 18443,
+            trustedRootDER: Data([1]), identityLabel: "test", deviceID: "device",
+            approvalCode: "TEST", statusSecret: "test", expiresAt: nil, statusExpiresAt: nil,
+            personID: "person", serverID: server,
+            notificationBindings: [NativeNotificationBinding(bindingID: binding, operationID: UUID(), revision: 1)])
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText(record.profileAuthority),
+                                       personID: ExactText("person"), deviceID: ExactText("device"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let transport = V2ScenePushTransport()
+        let store = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        let connection = try ClientAPIv2Connection(transport: transport, repository: store, context: context,
+                                                    directory: nil, errors: NoopErrorLog())
+        func payload(person: String, serverID: String = server) throws -> JSONValue {
+            try JSONValue.parse(Data(#"{"attention":{"v":2,"type":"sync","server":"\#(serverID)","locator":{"v":2,"binding_id":"\#(binding.rawValue)","person_id":"\#(person)","device_id":"device","item_id":"item","rev":1}}}"#.utf8))
+        }
+
+        let off = NativeRelayLifecycle()
+        off.installV2Connection(connection, context: context)
+        off.sceneActivityChanged(isActive: true)
+        _ = await off.refreshV2ForPush(try payload(person: "person"), enrollment: record)
+        XCTAssertFalse(off.usesClientAPIV2)
+        XCTAssertEqual(transport.counts.batches, 0)
+        XCTAssertEqual(transport.counts.opened, 0)
+
+        let on = NativeRelayLifecycle(clientAPIV2Enabled: true)
+        on.installV2Connection(connection, context: context)
+        let otherAccount = await on.refreshV2ForPush(try payload(person: "other"), enrollment: record)
+        let otherServer = await on.refreshV2ForPush(try payload(person: "person", serverID: String(repeating: "b", count: 32)), enrollment: record)
+        XCTAssertFalse(otherAccount)
+        XCTAssertFalse(otherServer)
+        XCTAssertEqual(transport.counts.batches, 0)
+        _ = await on.refreshV2ForPush(try payload(person: "person"), enrollment: record)
+        XCTAssertEqual(transport.counts.batches, 1)
+        XCTAssertEqual(transport.counts.opened, 0, "A background push fetches a batch without opening a feed.")
+        await on.deactivate()
+    }
+
+    @MainActor
+    func testV2ConnectionFollowsSceneActivity() async throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                                       personID: ExactText("person"), deviceID: ExactText("device"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let transport = V2ScenePushTransport()
+        let store = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        let connection = try ClientAPIv2Connection(transport: transport, repository: store, context: context,
+                                                    directory: nil, errors: NoopErrorLog())
+        let lifecycle = NativeRelayLifecycle(clientAPIV2Enabled: true)
+        lifecycle.installV2Connection(connection, context: context)
+        XCTAssertEqual(transport.counts.opened, 0)
+
+        func until(_ condition: () -> Bool) async throws {
+            let deadline = ContinuousClock.now + .seconds(2)
+            while !condition(), ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(5))
+            }
+            XCTAssertTrue(condition())
+        }
+        lifecycle.sceneActivityChanged(isActive: true)
+        try await until { transport.counts.opened == 1 }
+        lifecycle.sceneActivityChanged(isActive: false)
+        lifecycle.sceneActivityChanged(isActive: true)
+        try await until { transport.counts.opened == 2 && transport.counts.closed == 1 }
+        await lifecycle.deactivate()
+        XCTAssertEqual(transport.counts.closed, 2)
+    }
+
     @MainActor
     func testSearchProjectionUsesOnlyMatchingRowsInTheSelectedMessageTab() {
         let inboxMatch = InboxRequestRow(
