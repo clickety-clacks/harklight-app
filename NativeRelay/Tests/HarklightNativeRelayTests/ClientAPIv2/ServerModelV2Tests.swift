@@ -202,7 +202,54 @@ private actor ResetBatchScript {
     }
 }
 
+private struct SuspendedCommitWriter: SyncModelWriting {
+    let inner: ServerModelSyncWriter
+    let commitStarted: AsyncGate
+    let releaseCommit: AsyncGate
+
+    func syncPosition() throws -> (revision: Rev?, generation: UInt64) { try inner.syncPosition() }
+    func rebaseline() async throws -> Rev { try await inner.rebaseline() }
+    func apply(_ changes: [FeedChange], cursor: Rev, generation: UInt64) async throws {
+        commitStarted.release()
+        await releaseCommit.wait()
+        try await inner.apply(changes, cursor: cursor, generation: generation)
+    }
+}
+
 final class ServerModelAdapterTests: XCTestCase {
+    func testCatchUpRestartsAfterTheStoreFencesAnAlreadyCheckedBatch() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let file = dir.appendingPathComponent("model.json")
+        let store = ServerModelV2Store(fileURL: file)
+        try store.rebaseline(items: [], counts: APICounts(unresolved: 0), position: 10)
+        let transport = InboxPagesTransport()
+        let commitStarted = AsyncGate()
+        let releaseCommit = AsyncGate()
+        let fetchedAfterReset = AsyncGate()
+        let late = FeedChange(rev: 11, kind: .item, data: Data(V2Fixture.item("old", rev: 11, rankKey: "a").utf8))
+        transport.onBatch = { after in
+            if after == 10 { return FeedBatch(changes: [late], rev: 11, more: false) }
+            XCTAssertEqual(after, 1)
+            fetchedAfterReset.release()
+            return FeedBatch(changes: [], rev: after, more: false)
+        }
+        let errors = RecordingErrorLogV2()
+        let inner = ServerModelSyncWriter(store: store, transport: transport, errors: errors)
+        let writer = SuspendedCommitWriter(inner: inner, commitStarted: commitStarted, releaseCommit: releaseCommit)
+        let sync = ChangeFeedSync(transport: transport, model: writer, errors: errors)
+        let catchUp = Task { try await sync.catchUp() }
+        defer { releaseCommit.release() }
+        await commitStarted.wait()
+
+        try store.rebaseline(items: [], counts: APICounts(unresolved: 0), position: 1)
+        releaseCommit.release()
+        try await catchUp.value
+        await fetchedAfterReset.wait()
+        XCTAssertEqual(ServerModelV2Store(fileURL: file).heldCursor, 1)
+        XCTAssertTrue(errors.reports.isEmpty)
+    }
+
     func testADelayedSnapshotCannotReplaceDurableLiveProgress() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }

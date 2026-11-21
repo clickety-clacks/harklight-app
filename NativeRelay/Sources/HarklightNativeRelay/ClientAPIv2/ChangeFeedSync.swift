@@ -341,7 +341,9 @@ public actor ChangeFeedSync {
     /// The cursor moves only with the changes, in the same durable write.
     private func apply(_ changes: [FeedChange], cursor: Rev, generation: UInt64) async throws {
         do {
-            try await model.apply(changes, cursor: cursor)
+            try await model.apply(changes, cursor: cursor, generation: generation)
+        } catch let error as ServerModelV2Store.SupersededGeneration {
+            throw error
         } catch {
             throw ApplyFailure(underlying: error)
         }
