@@ -1,3 +1,4 @@
+import AttentionDomain
 import Observation
 import SwiftUI
 import UIKit
@@ -9,6 +10,7 @@ struct HarklightApp: App {
     @Environment(\.scenePhase) private var scenePhase
     @State private var launch: NativeAppLaunch
     @State private var samples = SampleLibrary()
+    @State private var showsRevokedText = false
     @State private var releaseNotes: ReleaseNotesPresentation
 
     init() {
@@ -189,7 +191,42 @@ struct HarklightApp: App {
         } description: {
             Text(launch.enrollmentMessage ?? "Use a new server invitation to enrol this device again.")
         } actions: {
+            if !launch.revokedRecoveryText.isEmpty {
+                Button("View unsent text") { showsRevokedText = true }
+            }
             Button("Enrol again") { launch.beginV2Reenrolment() }
+        }
+        .sheet(isPresented: $showsRevokedText) {
+            NavigationStack {
+                PreviousDeviceUnsentTextView { launch.revokedRecoveryText }
+            }
+        }
+    }
+}
+
+struct PreviousDeviceUnsentTextView: View {
+    let load: @MainActor () throws -> [ExactText]
+    @State private var text: [ExactText] = []
+    @State private var loadFailed = false
+
+    var body: some View {
+        List {
+            if loadFailed {
+                Text("The saved text could not be opened.")
+            } else if text.isEmpty {
+                Text("There is no unsent text on this device.")
+            }
+            ForEach(Array(text.enumerated()), id: \.offset) { _, value in
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(value.rawValue).textSelection(.enabled)
+                    Button("Copy") { UIPasteboard.general.string = value.rawValue }
+                }
+            }
+        }
+        .navigationTitle("Unsent from your previous device")
+        .task {
+            do { text = try load() }
+            catch { loadFailed = true }
         }
     }
 }

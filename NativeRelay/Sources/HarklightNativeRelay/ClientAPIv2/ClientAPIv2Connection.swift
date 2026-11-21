@@ -147,47 +147,48 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
     /// saves it with the model and puts its rules in force.
     @discardableResult
     public func refreshMe() async throws -> APIMe {
-        let checkedAt = access.checkGeneration
+        let check = access.beginMeCheck()
         let response = try await transport.send(.get("/v2/me"))
         try Task.checkCancellation()
         let me = try APIMe(json: JSONValue.parse(response.body))
-        let principal = me.pushPrincipal.flatMap {
-            $0.personID == context.identity.personID && $0.deviceID == context.identity.deviceID ? $0 : nil
-        }
-        do {
-            try model.savePushPrincipal(principal)
-            errors.resolve(concern: .snapshot, operation: "push_identity")
-        } catch {
-            errors.report(ErrorLogReport(concern: .snapshot, connectionRole: .request,
-                operation: "push_identity", phase: "save", reason: .api(error),
-                initiator: .unknown, retryable: true, correlation: .request(response.requestID)))
-        }
-        if me.accountState == "paused" { access.pause() }
-        if me.accountState == "active", access.state == .paused {
-            access.confirmAvailable(checkedAt: checkedAt)
-            if access.state == .available { await outbox.resumeAfterReenrolment() }
-        }
-        if let meURL {
-            do {
-                try response.body.write(to: meURL, options: .atomic)
-                errors.resolve(concern: .snapshot, operation: "me_save")
-            } catch {
-                errors.report(ErrorLogReport(concern: .snapshot, connectionRole: .request, operation: "me_save",
-                    phase: "save", reason: .from(error: error), initiator: .unknown, retryable: true))
+        let update: (editingEnabled: Bool, resumed: Bool)? = lock.withLock {
+            let wasPaused = access.state == .paused
+            guard access.applyMeAccountState(me.accountState, check: check) else { return nil }
+            let principal = me.pushPrincipal.flatMap {
+                $0.personID == context.identity.personID && $0.deviceID == context.identity.deviceID ? $0 : nil
             }
-        }
-        presentation.apply(me)
-        let editingEnabled = access.state == .available && me.features["priority_level_editing"] == true
-        lock.withLock {
+            do {
+                try model.savePushPrincipal(principal)
+                errors.resolve(concern: .snapshot, operation: "push_identity")
+            } catch {
+                errors.report(ErrorLogReport(concern: .snapshot, connectionRole: .request,
+                    operation: "push_identity", phase: "save", reason: .api(error),
+                    initiator: .unknown, retryable: true, correlation: .request(response.requestID)))
+            }
+            if let meURL {
+                do {
+                    try response.body.write(to: meURL, options: .atomic)
+                    errors.resolve(concern: .snapshot, operation: "me_save")
+                } catch {
+                    errors.report(ErrorLogReport(concern: .snapshot, connectionRole: .request, operation: "me_save",
+                        phase: "save", reason: .from(error: error), initiator: .unknown, retryable: true))
+                }
+            }
+            presentation.apply(me)
+            let available = access.state == .available
+            let editingEnabled = available && me.features["priority_level_editing"] == true
             priorityLevelsEnabledFromServer = editingEnabled
             if !editingEnabled {
                 priorityLevelsETag = nil
                 settingsReadID = nil
             }
+            return (editingEnabled, wasPaused && available)
         }
+        guard let update else { return me }
+        if update.resumed, access.state == .available { await outbox.resumeAfterReenrolment() }
         onMe(me)
         signalQueuedReplies()
-        if editingEnabled {
+        if update.editingEnabled {
             await recoverPendingPriorityLevels()
             await outbox.wake(operation: "priority_levels")
         }

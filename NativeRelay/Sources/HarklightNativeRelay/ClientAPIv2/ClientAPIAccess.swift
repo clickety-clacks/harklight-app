@@ -15,6 +15,8 @@ public final class ClientAPIAccess: ClientAPITransport, @unchecked Sendable {
     private let lock = NSLock()
     private var current: ClientAPIAccessState = .available
     private var generation = 0
+    private var nextMeCheck = 0
+    private var latestMeCheck = 0
     private var model: ServerModelV2Store?
     private var errors: any ErrorLogging = NoopErrorLog()
 
@@ -25,7 +27,17 @@ public final class ClientAPIAccess: ClientAPITransport, @unchecked Sendable {
     }
 
     public var state: ClientAPIAccessState { lock.withLock { current } }
-    var checkGeneration: Int { lock.withLock { generation } }
+    struct MeCheck {
+        let number: Int
+        let generation: Int
+    }
+
+    func beginMeCheck() -> MeCheck {
+        lock.withLock {
+            nextMeCheck += 1
+            return MeCheck(number: nextMeCheck, generation: generation)
+        }
+    }
 
     func restorePause(from model: ServerModelV2Store, savedMePaused: Bool, errors: any ErrorLogging) {
         lock.withLock {
@@ -37,26 +49,40 @@ public final class ClientAPIAccess: ClientAPITransport, @unchecked Sendable {
 
     func pause() { update(.paused) }
     func revoke() { update(.revoked) }
-    func confirmAvailable(checkedAt generation: Int) { update(.available, checkedAt: generation) }
+    func applyMeAccountState(_ value: String?, check: MeCheck) -> Bool {
+        switch value {
+        case "active": return update(.available, meCheck: check)
+        case "paused": return update(.paused, meCheck: check)
+        default: return update(nil, meCheck: check)
+        }
+    }
 
-    private func update(_ next: ClientAPIAccessState, checkedAt expected: Int? = nil) {
-        let result: (changed: Bool, saveError: (any Error)?, errors: any ErrorLogging) = lock.withLock {
-            guard current != .revoked, current != next,
-                  expected == nil || expected == generation else { return (false, nil, errors) }
+    @discardableResult
+    private func update(_ next: ClientAPIAccessState?, meCheck: MeCheck? = nil) -> Bool {
+        let result: (accepted: Bool, changed: Bool, saveError: (any Error)?, errors: any ErrorLogging) = lock.withLock {
+            guard current != .revoked else { return (false, false, nil, errors) }
+            if let meCheck {
+                guard meCheck.generation == generation, meCheck.number > latestMeCheck else {
+                    return (false, false, nil, errors)
+                }
+                latestMeCheck = meCheck.number
+            }
+            guard let next, current != next else { return (true, false, nil, errors) }
             current = next
             generation += 1
             do {
                 if next != .revoked { try model?.saveAccountPause(next == .paused) }
-                return (true, nil, errors)
+                return (true, true, nil, errors)
             } catch {
-                return (true, error, errors)
+                return (true, true, error, errors)
             }
         }
         if let error = result.saveError {
             result.errors.report(ErrorLogReport(concern: .snapshot, connectionRole: .request,
                 operation: "account_pause_save", phase: "save", reason: .from(error: error), retryable: true))
         }
-        if result.changed { onChanged(next) }
+        if result.changed, let next { onChanged(next) }
+        return result.accepted
     }
 
     private func check(allowPaused: Bool = false) throws {

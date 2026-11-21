@@ -956,6 +956,11 @@ struct LiveInboxSettings: View {
                                           systemImage: "lock")
                                 }
                                 .accessibilityHint("Open this account’s saved messages and discussion read-only")
+                                if departure.record.v2Revoked == true {
+                                    NavigationLink("Unsent from your previous device") {
+                                        PreviousDeviceUnsentTextView { try launch.recoveredUnsentText(for: departure) }
+                                    }
+                                }
                             }
                         }
                     }

@@ -51,6 +51,8 @@ final class NativeAppLaunch {
 
     private(set) var state: State
     private(set) var enrollmentMessage: String?
+    private(set) var revokedRecoveryText: [ExactText] = []
+    @ObservationIgnored private var stagedRevokedText: [ExactText] = []
     private(set) var isEnrollmentBusy = false
     private(set) var isEnrollmentExpired = false
     private(set) var foregroundConnectProgress: NativeForegroundConnectProgress?
@@ -99,6 +101,7 @@ final class NativeAppLaunch {
     @ObservationIgnored private let notifications = NativeNotificationPermission.system
     @ObservationIgnored private var didRestore = false
     @ObservationIgnored private var activationGeneration = UUID()
+    @ObservationIgnored private let archivedPersistence: @MainActor () throws -> any PendingActionPersistence
 
     init(arguments: [String] = ProcessInfo.processInfo.arguments,
          enrollmentStore: NativeEnrollmentStore? = nil,
@@ -112,7 +115,10 @@ final class NativeAppLaunch {
                 checkBlockedPush: checkBlockedPush)
          },
          fetchInboxPageOperation: (@MainActor (LivePresentationStore) async -> Bool)? = nil,
-         errorLog suppliedErrorLog: ErrorLogStore? = nil) {
+         errorLog suppliedErrorLog: ErrorLogStore? = nil,
+         archivedPersistence: @escaping @MainActor () throws -> any PendingActionPersistence = {
+             try FilePendingActionPersistence.applicationSupport()
+         }) {
         #if DEBUG
         let failureSeed = SubmissionFailureTestSeed.requestedKind(in: arguments)
         let fixture = failureSeed != nil ||
@@ -123,6 +129,7 @@ final class NativeAppLaunch {
         let enrollment = enrollmentStore ?? NativeEnrollmentStore()
         let joinStore = suppliedJoinStore ?? NativeGuidedJoinStore()
         self.enrollment = enrollment
+        self.archivedPersistence = archivedPersistence
         guidedJoinStore = joinStore
         hasPriorAppState = fixture ? false : NativeInstallationHistory.hasPriorAppState(
             enrollment: enrollment, guidedJoin: joinStore)
@@ -262,6 +269,10 @@ final class NativeAppLaunch {
 #endif
         if NativeRelayLifecycle.shared.clientAPIV2Enabled, let record = try? enrollment.load(),
            record.v2Revoked == true {
+            refreshArchivedAccounts()
+            let archived = NativeAccountDeparture(record: record, replacement: nil, removed: true)
+            let source = archivedAccountDepartures.first { $0.archiveID == archived.archiveID } ?? archived
+            revokedRecoveryText = (try? recoveredUnsentText(for: source)) ?? source.stagedRevokedText ?? []
             activeEnrollmentRecord = nil
             state = .reenrolmentRequired(record)
             return
@@ -636,15 +647,26 @@ final class NativeAppLaunch {
     }
 
     private func makeDisconnectedPresentation(for departure: NativeAccountDeparture) throws -> LivePresentationStore {
-        guard let personID = departure.record.personID else { throw NativeEnrollmentError.invalidIdentity }
-        let context = ProfileContext(identity: ProfileIdentity(
-            trustedRelayAuthority: ExactText(departure.record.profileAuthority),
-            personID: ExactText(personID),
-            deviceID: ExactText(departure.record.deviceID)), transportMode: .relay)
-        let persistence = try FilePendingActionPersistence.applicationSupport()
-        let store = try ClientRepository(context: context, persistence: persistence)
+        let (store, context) = try reopenArchivedStore(for: departure.record)
         return try LivePresentationStore(disconnectedStore: store, context: context,
                                         newMessageAreaDefaults: .standard)
+    }
+
+    private func reopenArchivedStore(for record: NativeEnrollmentRecord) throws -> (ClientRepository, ProfileContext) {
+        guard let personID = record.personID else { throw NativeEnrollmentError.invalidIdentity }
+        let context = ProfileContext(identity: ProfileIdentity(
+            trustedRelayAuthority: ExactText(record.profileAuthority),
+            personID: ExactText(personID),
+            deviceID: ExactText(record.deviceID)), transportMode: .relay)
+        let persistence = try archivedPersistence()
+        let store = try ClientRepository(context: context, persistence: persistence)
+        return (store, context)
+    }
+
+    func recoveredUnsentText(for archive: NativeAccountDeparture) throws -> [ExactText] {
+        let (store, context) = try reopenArchivedStore(for: archive.record)
+        let saved = try store.unsentText(context: context)
+        return Set(saved + (archive.stagedRevokedText ?? [])).sorted { $0.rawValue < $1.rawValue }
     }
 
     private var disconnectedStore: LivePresentationStore? {
@@ -1021,13 +1043,18 @@ final class NativeAppLaunch {
         await refreshLive()
     }
 
-    private func applyV2AccountAccess(_ access: ClientAPIAccessState, for context: ProfileContext) {
+    func applyV2AccountAccess(_ access: ClientAPIAccessState, for context: ProfileContext) {
         guard case let .live(presentation) = state, presentation.notificationContext == context else { return }
         presentation.v2AccountPaused = access == .paused
         guard access == .revoked, let record = activeEnrollmentRecord,
               record.matchesNotificationIdentity(context.identity) else { return }
+        let recovery = presentation.prepareRevokedTextRecovery()
+        revokedRecoveryText = recovery.all
+        stagedRevokedText = recovery.staged
         do {
             try enrollment.markV2Revoked(record)
+            try guidedJoinStore.archiveRevokedInstallation(record, stagedText: stagedRevokedText)
+            refreshArchivedAccounts()
         } catch {
             diagnostics.record(area: .localStore, phase: .accountRemoval, transition: .failed, error: error)
         }
@@ -1051,7 +1078,9 @@ final class NativeAppLaunch {
         guard case let .reenrolmentRequired(record) = state, !guidedJoin.busy else { return false }
         do {
             try enrollment.markV2Revoked(record)
-            try guidedJoinStore.forgetRevokedInstallation(record)
+            try guidedJoinStore.archiveRevokedInstallation(record, stagedText: stagedRevokedText, clearActive: true)
+            refreshArchivedAccounts()
+            stagedRevokedText = []
             enrollmentMessage = nil
             state = .enrollmentRequired
             guidedJoin.beginReconnect()
@@ -3801,6 +3830,14 @@ final class LivePresentationStore {
         for bufferKey in Array(pendingDrafts.keys) {
             flushPendingDraft(for: bufferKey.request, requestRevision: bufferKey.revision)
         }
+    }
+
+    func prepareRevokedTextRecovery() -> (all: [ExactText], staged: [ExactText]) {
+        flushPendingDrafts()
+        let staged = pendingDrafts.values.flatMap(\.textContents) +
+            pendingConversationTextByBinding.values.filter { !$0.isEmpty }.map(ExactText.init)
+        let saved = (try? attentionStore.unsentText(context: profileContext)) ?? []
+        return (Set(saved + staged).sorted { $0.rawValue < $1.rawValue }, staged)
     }
 
     private func recordDraftSaveFailure(_ error: Error, for key: RequestKey) {

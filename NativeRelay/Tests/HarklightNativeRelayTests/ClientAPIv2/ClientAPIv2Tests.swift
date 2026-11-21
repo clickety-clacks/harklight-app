@@ -21,13 +21,32 @@ private let noOutboxWait: @Sendable (Int, TimeInterval?) async throws -> Void = 
 }
 
 final class ClientAPIAccessTests: XCTestCase {
-    private func connection(_ server: FakeClientAPIServer, directory: URL) throws -> ClientAPIv2Connection {
+    private func connection(_ server: any ClientAPITransport, directory: URL) throws -> ClientAPIv2Connection {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
                                        personID: ExactText("person"), deviceID: ExactText("device"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
         let repository = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
         return try ClientAPIv2Connection(transport: server, repository: repository, context: context,
             directory: directory, errors: RecordingErrorLogV2(), foregroundOnlyWrites: true)
+    }
+
+    func testAnOlderPausedMeCannotUndoANewerActiveMeOrItsSavedState() async throws {
+        let server = HeldMeTransport()
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let connection = try connection(server, directory: directory)
+        connection.access.pause()
+        let older = Task { try await connection.refreshMe() }
+        defer { server.releaseOldResponse.release() }
+        await eventually("the old request is held") { await server.meReads == 1 }
+        _ = try await connection.refreshMe()
+        XCTAssertEqual(connection.access.state, .available)
+        server.releaseOldResponse.release()
+        _ = try await older.value
+        XCTAssertEqual(connection.access.state, .available)
+        XCTAssertNil(connection.model.snapshot.accountPaused)
+        let reopened = try self.connection(server, directory: directory)
+        XCTAssertEqual(reopened.access.state, .available)
     }
 
     func testPausedFeedKeepsTheCacheAndSavedWritesUntilMeConfirmsRecovery() async throws {
@@ -97,6 +116,29 @@ final class ClientAPIAccessTests: XCTestCase {
         }
         XCTAssertEqual(server.received.count, before)
         XCTAssertEqual(server.openFeedCount, 0)
+    }
+}
+
+private actor HeldMeTransport: ClientAPITransport {
+    private(set) var meReads = 0
+    nonisolated let releaseOldResponse = AsyncGate()
+
+    func send(_ request: APIRequest) async throws -> APIResponse {
+        guard request.path == "/v2/me" else { throw URLError(.unsupportedURL) }
+        meReads += 1
+        let first = meReads == 1
+        if first { await releaseOldResponse.wait() }
+        let state = first ? "paused" : "active"
+        let body = #"{"account":{"state":"\#(state)"},"features":{},"limits":{}}"#
+        return APIResponse(status: 200, requestID: "me", body: Data(body.utf8))
+    }
+
+    nonisolated func changeFeed(after: Rev) -> AsyncThrowingStream<FeedEvent, any Error> {
+        AsyncThrowingStream { $0.finish() }
+    }
+
+    func changeBatch(after: Rev) async throws -> FeedBatch {
+        FeedBatch(changes: [], rev: after, more: false)
     }
 }
 

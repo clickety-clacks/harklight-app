@@ -45,6 +45,7 @@ struct NativeAccountDeparture: Codable {
     let record: NativeEnrollmentRecord
     let replacement: NativeJoinInvitation?
     var removed: Bool
+    var stagedRevokedText: [ExactText]? = nil
 
     /// Stable within the local account authority, even after a transport
     /// hostname migration changes the enrollment endpoint.
@@ -338,13 +339,22 @@ final class NativeGuidedJoinStore {
 
     func approvedRecord() throws -> NativeEnrollmentRecord? { try enrollment.load() }
 
-    func forgetRevokedInstallation(_ record: NativeEnrollmentRecord) throws {
+    @discardableResult
+    func archiveRevokedInstallation(_ record: NativeEnrollmentRecord, stagedText: [ExactText],
+                                    clearActive: Bool = false) throws -> NativeAccountDeparture {
         guard let current = try enrollment.load(), current.v2Revoked == true,
-              sameInstallation(current, record) else { throw NativeJoinError.superseded }
+              current.sameNotificationProfile(as: record) else { throw NativeJoinError.superseded }
+        var archive = NativeAccountDeparture(record: current, replacement: nil, removed: true)
+        let previous = try archivedDepartures().first { $0.archiveID == archive.archiveID }?.stagedRevokedText ?? []
+        let retained = Set(previous + stagedText).sorted { $0.rawValue < $1.rawValue }
+        archive.stagedRevokedText = retained.isEmpty ? nil : retained
+        try savePriorDeparture(archive)
+        guard clearActive else { return archive }
         if let attempt = try loadAttempt(), attempt.deviceID == record.deviceID {
             try deleteData(account: "guided-request")
         }
         try enrollment.clearAfterConfirmedRemoval(of: record)
+        return archive
     }
 
     func cancel() async throws -> NativeJoinAttempt {

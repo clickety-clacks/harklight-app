@@ -3193,6 +3193,24 @@ public final class ClientRepository: @unchecked Sendable {
         return state.pendingConversations.values.flatMap { $0.queuedMessages ?? [] }
     }
 
+    /// A read-only view of old-account text, even when no server projection
+    /// or conversation thread is currently hydrated.
+    public func unsentText(context suppliedContext: ProfileContext) throws -> [ExactText] {
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        var text = state.drafts.values.flatMap(\.textContents)
+        for pending in state.pendingConversations.values {
+            text.append(contentsOf: pending.retainedUnsentText?.values.map { $0 } ?? [])
+            text.append(contentsOf: pending.answerDrafts?.values.flatMap(\.textContents) ?? [])
+            for draft in Array(pending.drafts.values) + (pending.queuedMessages ?? []) {
+                if case .acceptedPendingReplay = draft.disposition { continue }
+                text.append(draft.text)
+            }
+        }
+        return Set(text.filter { !$0.rawValue.isEmpty }).sorted { $0.rawValue < $1.rawValue }
+    }
+
     public func conversationSnapshot(context suppliedContext: ProfileContext) throws -> ConversationSnapshot {
         lock.lock()
         defer { lock.unlock() }

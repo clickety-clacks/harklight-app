@@ -90,6 +90,15 @@ public struct RequestDraft: Equatable, Codable, Sendable {
                 draft.horizontalText != nil || draft.verticalText != nil
         }
     }
+
+    public var textContents: [ExactText] {
+        var text = Array(compatibility.textByActionID.values)
+        for input in inputs.values {
+            if let value = input.text { text.append(value) }
+            text.append(contentsOf: input.textByActionID.values)
+        }
+        return text.filter { !$0.rawValue.isEmpty }
+    }
 }
 
 public struct InputSubmission: Equatable, Codable, Sendable {
