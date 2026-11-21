@@ -57,8 +57,14 @@ public final class HTTPSClientAPITransport: ClientAPITransport, @unchecked Senda
         var urlRequest = URLRequest(url: components.url!)
         urlRequest.httpMethod = request.method.rawValue
         urlRequest.httpBody = request.body
-        urlRequest.setValue(accept, forHTTPHeaderField: "Accept")
+        urlRequest.setValue(request.accept ?? accept, forHTTPHeaderField: "Accept")
         if let contentType = request.contentType { urlRequest.setValue(contentType, forHTTPHeaderField: "Content-Type") }
+        if let disposition = request.contentDisposition {
+            urlRequest.setValue(disposition, forHTTPHeaderField: "Content-Disposition")
+            if let body = request.body {
+                urlRequest.setValue(String(body.count), forHTTPHeaderField: "Content-Length")
+            }
+        }
         if let key = request.idempotencyKey {
             urlRequest.setValue(key.uuidString.lowercased(), forHTTPHeaderField: "Idempotency-Key")
         }

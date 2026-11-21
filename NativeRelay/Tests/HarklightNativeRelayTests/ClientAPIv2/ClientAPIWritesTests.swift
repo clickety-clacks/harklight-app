@@ -144,7 +144,7 @@ final class ClientAPIWritesTests: XCTestCase {
         XCTAssertEqual(listed.url?.absoluteString, "https://server.example:8443/v2/inbox?limit=200")
     }
 
-    func testSeenReadPositionAndReplyRequests() {
+    func testSeenReadPositionAndReplyRequests() throws {
         let seen = ClientAPIWrites.seen(itemID: ExactText("a/b c"))
         XCTAssertEqual(seen.write.path, "/v2/items/a%2Fb%20c/seen", "The opaque id is one path segment.")
         XCTAssertEqual(body(seen), "{}")
@@ -156,7 +156,8 @@ final class ClientAPIWritesTests: XCTestCase {
         XCTAssertEqual(body(position), #"{"entry_id":"e9"}"#)
 
         XCTAssertEqual(body(ClientAPIWrites.reply(itemID: ExactText("i"), text: ExactText("hi"))), #"{"text":"hi"}"#)
-        let withFiles = ClientAPIWrites.reply(itemID: ExactText("i"), text: ExactText("see"), fileIDs: [ExactText("f1")])
+        let upload = try APIFileCreated(json: json(#"{"file_id":"f1","name":"photo.png","size":3,"sha256":"hash"}"#))
+        let withFiles = ClientAPIWrites.reply(itemID: ExactText("i"), text: ExactText("see"), fileIDs: [upload.handle])
         XCTAssertEqual(withFiles.write.path, "/v2/items/i/replies")
         XCTAssertEqual(body(withFiles), #"{"text":"see","file_ids":["f1"]}"#)
         XCTAssertEqual(withFiles.write.contentType, "application/json")

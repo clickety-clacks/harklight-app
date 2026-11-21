@@ -32,9 +32,11 @@ public enum ClientAPIWrites {
     }
 
     /// `POST /v2/items/{item_id}/replies`: one chat message.
-    public static func reply(itemID: ExactText, text: ExactText, fileIDs: [ExactText] = []) -> ClientAPIWrite {
+    public static func reply(itemID: ExactText, text: ExactText, fileIDs: [UploadHandle] = []) -> ClientAPIWrite {
         var members = [JSONMember("text", .string(text))]
-        if !fileIDs.isEmpty { members.append(JSONMember("file_ids", .array(fileIDs.map(JSONValue.string)))) }
+        if !fileIDs.isEmpty {
+            members.append(JSONMember("file_ids", .array(fileIDs.map { .string($0.value) })))
+        }
         return write(itemID, "reply", .post, "replies", body: .object(members))
     }
 

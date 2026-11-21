@@ -1,3 +1,4 @@
+import AttentionDomain
 import Foundation
 @testable import HarklightNativeRelay
 import XCTest
@@ -116,5 +117,150 @@ final class HTTPSClientAPITransportTests: XCTestCase {
             XCTAssertEqual(error.token, .cursorExpired)
             XCTAssertEqual(error.requestID, "feed-2")
         }
+    }
+
+    func testUploadHandleAttachesOnceAndOnlyTheReturnedFileRefDownloads() async throws {
+        let server = StagedFileFixture()
+        let api = transport(server.respond)
+        let files = ClientAPIFiles(transport: api)
+        let uploadKey = UUID()
+        let name = ExactText("café 100%.bin")
+        let upload = try await files.upload(server.bytes, name: name, contentType: "application/octet-stream",
+                                            idempotencyKey: uploadKey)
+        XCTAssertEqual(upload.name, name)
+        XCTAssertEqual(upload.size, UInt64(server.bytes.count))
+        let sent = try XCTUnwrap(StubURLProtocol.lock.withLock { StubURLProtocol.seen.first })
+        XCTAssertEqual(sent.httpMethod, "POST")
+        XCTAssertEqual(sent.value(forHTTPHeaderField: "Idempotency-Key"), uploadKey.uuidString.lowercased())
+        XCTAssertEqual(sent.value(forHTTPHeaderField: "Content-Type"), "application/octet-stream")
+        XCTAssertEqual(sent.value(forHTTPHeaderField: "Content-Length"), String(server.bytes.count))
+        XCTAssertEqual(sent.value(forHTTPHeaderField: "Content-Disposition"),
+                       "attachment; filename*=UTF-8''caf%C3%A9%20100%25.bin")
+
+        let write = ClientAPIWrites.reply(itemID: ExactText("i"), text: ExactText("See file"), fileIDs: [upload.handle])
+        let reply = try await api.send(APIRequest(method: write.write.method, path: write.write.path,
+            body: write.write.body, idempotencyKey: UUID()))
+        let entryJSON = try XCTUnwrap(JSONValue.parse(reply.body).uniqueValue(named: "entry"))
+        let entry = try APIEntry(json: entryJSON)
+        let ref = try XCTUnwrap(entry.files.first)
+        XCTAssertNotEqual(ref.fileID.value, upload.handle.value)
+        let downloaded = try await files.download(ref.fileID)
+        XCTAssertEqual(downloaded, server.bytes)
+        let downloadRequest = StubURLProtocol.lock.withLock { StubURLProtocol.seen.last }
+        XCTAssertEqual(downloadRequest?.value(forHTTPHeaderField: "Accept"), "*/*")
+
+        do {
+            // Deliberately bypass the typed file client to probe the wire contract.
+            _ = try await api.send(.get("/v2/files/staged%2F1"))
+            XCTFail("An upload handle cannot download bytes.")
+        } catch let error as APIError {
+            XCTAssertEqual(error.status, 404)
+            XCTAssertEqual(error.token, .notFound)
+        }
+        do {
+            try await files.discard(upload.handle)
+            XCTFail("An attached upload cannot be discarded.")
+        } catch let error as APIError {
+            XCTAssertEqual(error.status, 409)
+            XCTAssertEqual(error.token, .alreadyClosed)
+            XCTAssertEqual(ErrorLogReason.api(error).code, "already_closed")
+        }
+        do {
+            _ = try await api.send(APIRequest(method: write.write.method, path: write.write.path,
+                body: write.write.body, idempotencyKey: UUID()))
+            XCTFail("An attached upload cannot be used in a second write.")
+        } catch let error as APIError {
+            XCTAssertEqual(error.status, 400)
+            XCTAssertEqual(error.token, .invalidField)
+        }
+    }
+
+    func testDiscardRemovesAnAbandonedUpload() async throws {
+        let server = StagedFileFixture()
+        let api = transport(server.respond)
+        let files = ClientAPIFiles(transport: api)
+        let upload = try await files.upload(server.bytes, name: ExactText("café 100%.bin"),
+            contentType: "application/octet-stream", idempotencyKey: UUID())
+        try await files.discard(upload.handle)
+        let sent = try XCTUnwrap(StubURLProtocol.lock.withLock { StubURLProtocol.seen.last })
+        XCTAssertEqual(sent.httpMethod, "DELETE")
+        XCTAssertEqual(sent.url?.absoluteString, "https://server.example:8443/v2/files/staged%2F1")
+
+        let write = ClientAPIWrites.reply(itemID: ExactText("i"), text: ExactText("See file"), fileIDs: [upload.handle])
+        do {
+            _ = try await api.send(APIRequest(method: write.write.method, path: write.write.path,
+                body: write.write.body, idempotencyKey: UUID()))
+            XCTFail("A discarded upload cannot be attached.")
+        } catch let error as APIError {
+            XCTAssertEqual(error.status, 400)
+            XCTAssertEqual(error.token, .invalidField)
+        }
+    }
+
+    func testPreviouslySavedFileRefStillDecodesWithATypedDownloadID() throws {
+        let legacy = Data(#"{"fileID":{"rawValue":"download/1"},"name":{"rawValue":"file.bin"},"size":3,"sha256":"hash"}"#.utf8)
+        let ref = try JSONDecoder().decode(APIFileRef.self, from: legacy)
+        XCTAssertEqual(ref.fileID, FileDownloadID(ExactText("download/1")))
+        let saved = try JSONEncoder().encode(ref)
+        XCTAssertEqual(try JSONDecoder().decode(APIFileRef.self, from: saved), ref)
+    }
+}
+
+/// One staged file under the URL protocol's lock. The attachment consumes the
+/// staging handle and gives the entry a different ID for its download.
+private final class StagedFileFixture {
+    private enum State { case absent, staged, attached }
+
+    private var state = State.absent
+    let bytes = Data([0, 255, 7])
+    private let digest = String(repeating: "a", count: 64)
+
+    func respond(_ request: URLRequest) -> StubURLProtocol.Reply {
+        let path = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.percentEncodedPath
+        switch (request.httpMethod, path) {
+        case ("POST", "/v2/files"):
+            guard body(of: request) == bytes else {
+                return json(400, #"{"error":"invalid_field","retryable":false}"#)
+            }
+            state = .staged
+            return json(201, #"{"file_id":"staged/1","name":"café 100%.bin","size":3,"sha256":"\#(digest)"}"#)
+        case ("POST", "/v2/items/i/replies"):
+            guard state == .staged, let body = body(of: request),
+                  let decoded = try? JSONValue.parse(body),
+                  decoded.uniqueValue(named: "file_ids")?.arrayValues == [.string(ExactText("staged/1"))] else {
+                return json(400, #"{"error":"invalid_field","field":"file_ids","retryable":false}"#)
+            }
+            state = .attached
+            return json(200, #"{"rev":2,"entry":{"entry_id":"reply","item_id":"i","rev":2,"position":1,"kind":"reply","author":"person","request_revision":1,"files":[{"file_id":"download/1","name":"café 100%.bin","size":3,"sha256":"\#(digest)"}]}}"#)
+        case ("GET", "/v2/files/download%2F1") where state == .attached:
+            return .init(status: 200, headers: ["Content-Type": "application/octet-stream"], chunks: [bytes])
+        case ("DELETE", "/v2/files/staged%2F1") where state == .staged:
+            state = .absent
+            return .init(status: 204, chunks: [])
+        case ("DELETE", "/v2/files/staged%2F1") where state == .attached:
+            return json(409, #"{"error":"already_closed","retryable":false}"#)
+        default:
+            return json(404, #"{"error":"not_found","retryable":false}"#)
+        }
+    }
+
+    private func body(of request: URLRequest) -> Data? {
+        if let body = request.httpBody { return body }
+        guard let stream = request.httpBodyStream else { return nil }
+        stream.open()
+        defer { stream.close() }
+        var bytes = Data()
+        let capacity = 1024
+        var buffer = [UInt8](repeating: 0, count: capacity)
+        while true {
+            let count = stream.read(&buffer, maxLength: capacity)
+            if count < 0 { return nil }
+            if count == 0 { return bytes }
+            bytes.append(contentsOf: buffer.prefix(count))
+        }
+    }
+
+    private func json(_ status: Int, _ value: String) -> StubURLProtocol.Reply {
+        .init(status: status, headers: ["Content-Type": "application/json"], chunks: [Data(value.utf8)])
     }
 }

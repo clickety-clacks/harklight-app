@@ -10,8 +10,39 @@ public enum ClientAPIModelError: Error, Equatable {
     case unknownKind(String)
 }
 
+/// The identifier on an attached file's FileRef, usable for download.
+public struct FileDownloadID: Hashable, Codable, Sendable {
+    public let value: ExactText
+
+    public init(_ value: ExactText) { self.value = value }
+
+    // Keep the representation of an already persisted FileRef unchanged.
+    public init(from decoder: any Decoder) throws {
+        value = try decoder.singleValueContainer().decode(ExactText.self)
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(value)
+    }
+}
+
+/// The handle returned for a staged upload, usable for attachment or discard.
+public struct UploadHandle: Hashable, Codable, Sendable {
+    public let value: ExactText
+
+    fileprivate init(_ value: ExactText) { self.value = value }
+}
+
+public struct APIFileCreated: Equatable, Sendable {
+    public let handle: UploadHandle
+    public let name: ExactText
+    public let size: UInt64
+    public let sha256: String
+}
+
 public struct APIFileRef: Equatable, Codable, Sendable {
-    public let fileID: ExactText
+    public let fileID: FileDownloadID
     public let name: ExactText
     public let size: UInt64
     public let sha256: String
@@ -241,9 +272,19 @@ fileprivate struct Reader {
     }
 }
 
+extension APIFileCreated {
+    public init(json: JSONValue) throws {
+        let reader = try Reader(json, "file_created")
+        handle = try UploadHandle(reader.string("file_id"))
+        name = try reader.string("name")
+        size = try reader.unsigned("size")
+        sha256 = try reader.string("sha256").rawValue
+    }
+}
+
 extension APIFileRef {
     fileprivate init(_ reader: Reader) throws {
-        fileID = try reader.string("file_id")
+        fileID = try FileDownloadID(reader.string("file_id"))
         name = try reader.string("name")
         size = try reader.unsigned("size")
         sha256 = try reader.string("sha256").rawValue
