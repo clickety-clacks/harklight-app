@@ -577,6 +577,10 @@ final class NativeAppLaunch {
         return values
     }
 
+    var revokedRecoveryArchives: [NativeAccountDeparture] {
+        archivedAccountDepartures.filter { $0.record.v2Revoked == true }
+    }
+
     var displayedArchiveDeparture: NativeAccountDeparture? {
         if let selectedArchivedAccount { return selectedArchivedAccount }
         if isShowingDisconnectedArchive { return disconnectedAccount }

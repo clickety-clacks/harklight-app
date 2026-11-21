@@ -7,7 +7,7 @@ import XCTest
 
 final class V2RevocationRecoveryTests: XCTestCase {
     @MainActor
-    func testRevocationKeepsQueuedTextAndFlushedDraftBeforeAndAfterReenrolment() throws {
+    func testRevocationKeepsQueuedTextAndFlushedDraftBeforeAndAfterReenrolment() async throws {
         let namespace = "v2-revocation-test-" + UUID().uuidString
         let enrollment = NativeEnrollmentStore(service: namespace)
         let join = NativeGuidedJoinStore(namespace: namespace)
@@ -52,8 +52,22 @@ final class V2RevocationRecoveryTests: XCTestCase {
 
         XCTAssertTrue(launch.beginV2Reenrolment())
         XCTAssertNil(try enrollment.load())
-        let archive = try XCTUnwrap(launch.availableDisconnectedAccounts.first)
+        let archive = try XCTUnwrap(launch.revokedRecoveryArchives.first)
         XCTAssertEqual(try launch.recoveredUnsentText(for: archive), text)
+        XCTAssertEqual(launch.guidedJoin.screen, .welcome)
+
+        // Reopening while approval is pending reloads the same read-only
+        // destination from the archive catalog, without an active account.
+        var pending = record
+        pending.personID = nil
+        pending.v2Revoked = nil
+        let relaunched = NativeAppLaunch(arguments: [], enrollmentStore: enrollment, joinStore: join,
+            initialState: .enrollmentPending(pending), archivedPersistence: { persistence })
+        await relaunched.restoreInstallation()
+        guard case .enrollmentPending = relaunched.state else { return XCTFail("Expected pending enrollment.") }
+        let recovered = try XCTUnwrap(relaunched.revokedRecoveryArchives.first)
+        XCTAssertEqual(recovered.archiveID, archive.archiveID)
+        XCTAssertEqual(try relaunched.recoveredUnsentText(for: recovered), text)
         let replacement = ProfileIdentity(trustedRelayAuthority: identity.trustedRelayAuthority,
             personID: identity.personID, deviceID: ExactText("replacement-device"))
         let replacementContext = ProfileContext(identity: replacement, transportMode: .relay)
