@@ -42,6 +42,11 @@ struct NativeEnrollmentView: View {
                         .accessibilityIdentifier("enrollment-client-diagnostics-share")
                     }
                     content
+                    let archives = launch.revokedRecoveryArchives
+                    if !archives.isEmpty {
+                        NavigationLink("View unsent text") { unsentTextDestination(archives) }
+                            .accessibilityIdentifier("enrollment-unsent-text")
+                    }
                     if launch.canReturnToDisconnectedAccount {
                         Button("Back to saved messages") { launch.cancelReconnect() }
                             .buttonStyle(.bordered)
@@ -66,6 +71,27 @@ struct NativeEnrollmentView: View {
             }
         }
         .tint(HarklightDesignSystem.palette(for: colorScheme).amber)
+    }
+
+    @ViewBuilder private func unsentTextDestination(_ archives: [NativeAccountDeparture]) -> some View {
+        if archives.count == 1, let archive = archives.first {
+            PreviousDeviceUnsentTextView { try launch.recoveredUnsentText(for: archive) }
+        } else {
+            List {
+                ForEach(archives, id: \.archiveID) { archive in
+                    NavigationLink {
+                        PreviousDeviceUnsentTextView { try launch.recoveredUnsentText(for: archive) }
+                    } label: {
+                        VStack(alignment: .leading) {
+                            Text(archive.record.savedAccountName ?? "Saved account")
+                            Text(archive.record.deviceLabel ?? archive.record.serverDisplayName ?? "Previous device")
+                                .foregroundStyle(.hkSecondary)
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Previous devices")
+        }
     }
 
     @ViewBuilder private var content: some View {
