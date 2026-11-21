@@ -20,7 +20,7 @@ public struct APIFileRef: Equatable, Codable, Sendable {
 
 public struct APIChat: Equatable, Codable, Sendable {
     /// Informational only; it gates nothing (chat is never closed by rule).
-    public let available: Bool
+    public let available: Bool?
     public let started: Bool
     public let readPosition: ExactText?
     public let lastOriginReply: ExactText?
@@ -124,6 +124,8 @@ public struct APIEntry: Equatable, Codable, Sendable {
     public let terminal: APITerminal?
     public let availability: APIAvailability?
     public let delivery: APIEntryDelivery?
+    /// For a `result` entry: the origin's result fact (contract round 7).
+    public let result: APIOriginResult?
 }
 
 public struct APICounts: Equatable, Codable, Sendable {
@@ -265,7 +267,7 @@ extension APIItem {
         seen = try reader.bool("seen")
         recipientAs = try reader.optionalString("as")?.rawValue
         let chat = try reader.object("chat")
-        self.chat = APIChat(available: try chat.bool("available"), started: try chat.bool("started"),
+        self.chat = APIChat(available: try chat.optionalBool("available"), started: try chat.bool("started"),
                             readPosition: try chat.optionalString("read_position"),
                             lastOriginReply: try chat.optionalString("last_origin_reply"),
                             unreadReplies: try chat.optionalUnsigned("unread_replies").map { Int($0) },
@@ -314,6 +316,10 @@ extension APIEntry {
         delivery = try reader.optionalObject("delivery").map { delivery in
             APIEntryDelivery(delivered: try delivery.optionalBool("delivered"), acted: try delivery.optionalBool("acted"))
         }
+        result = try reader.optionalObject("result").map { result in
+            APIOriginResult(status: try result.string("status"), resultRef: try result.optionalString("result_ref"),
+                            revision: try result.unsigned("revision"))
+        }
         guard rev >= 1, position >= 1 else { throw ClientAPIModelError.invalid("entry.rev") }
     }
 }
@@ -335,16 +341,36 @@ extension APISettings {
 }
 
 /// `{rev, items, counts, next_page?}`
+/// A resource in a page that could not be read. It is reported and skipped,
+/// so one bad item never stops a whole page (or a rebaseline).
+public struct APIUnreadableResource: Equatable, Sendable {
+    /// The resource's id when even that much could be read.
+    public let id: ExactText?
+
+    static func from(_ value: JSONValue, idMember: String) -> Self {
+        Self(id: value.uniqueValue(named: idMember)?.stringValue)
+    }
+}
+
 public struct APIInboxPage: Equatable, Sendable {
     public let position: UInt64
     public let items: [APIItem]
+    /// Items in the page that could not be read.
+    public let unreadable: [APIUnreadableResource]
     public let counts: APICounts
     public let nextPage: ExactText?
 
     public init(json: JSONValue) throws {
         let reader = try Reader(json, "inbox")
         position = try reader.unsigned("rev")
-        items = try reader.array("items").map(APIItem.init(json:))
+        var items: [APIItem] = []
+        var unreadable: [APIUnreadableResource] = []
+        for value in try reader.array("items") {
+            if let item = try? APIItem(json: value) { items.append(item) }
+            else { unreadable.append(.from(value, idMember: "item_id")) }
+        }
+        self.items = items
+        self.unreadable = unreadable
         counts = try APICounts(json: reader.raw("counts") ?? .null)
         nextPage = try reader.optionalString("next_page")
     }
@@ -354,12 +380,21 @@ public struct APIInboxPage: Equatable, Sendable {
 public struct APIEntriesPage: Equatable, Sendable {
     public let position: UInt64
     public let entries: [APIEntry]
+    /// Entries in the page that could not be read.
+    public let unreadable: [APIUnreadableResource]
     public let older: Bool
 
     public init(json: JSONValue) throws {
         let reader = try Reader(json, "entries")
         position = try reader.unsigned("rev")
-        entries = try reader.array("entries").map(APIEntry.init(json:))
+        var entries: [APIEntry] = []
+        var unreadable: [APIUnreadableResource] = []
+        for value in try reader.array("entries") {
+            if let entry = try? APIEntry(json: value) { entries.append(entry) }
+            else { unreadable.append(.from(value, idMember: "entry_id")) }
+        }
+        self.entries = entries
+        self.unreadable = unreadable
         older = try reader.bool("older")
     }
 }

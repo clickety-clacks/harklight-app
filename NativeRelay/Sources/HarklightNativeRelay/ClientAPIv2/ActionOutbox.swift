@@ -32,6 +32,12 @@ public struct OutboxEntry: Codable, Equatable, Sendable, Identifiable {
     /// same key, so the server applies it at most once.
     public internal(set) var outcomeUnknown: Bool
     public internal(set) var attempts: Int
+    /// Answers outside the contract (a 4xx without a contract body) so far;
+    /// transient failures do not count. Optional for saved outboxes.
+    public internal(set) var outsideContractFailures: Int? = nil
+    /// Set when the server refused the write. The write stays in the outbox,
+    /// shown as failed, until the app discards it; it is never dropped silently.
+    public internal(set) var failure: OutboxFailure? = nil
 
     public var id: UUID { idempotencyKey }
 
@@ -39,6 +45,11 @@ public struct OutboxEntry: Codable, Equatable, Sendable, Identifiable {
         APIRequest(method: write.method, path: write.path, body: write.body, contentType: write.contentType,
                    idempotencyKey: idempotencyKey, ifMatch: write.ifMatch)
     }
+}
+
+public struct OutboxFailure: Codable, Equatable, Sendable {
+    public let status: Int
+    public let token: String
 }
 
 public protocol OutboxPersisting: Sendable {
@@ -91,7 +102,16 @@ public actor ActionOutbox {
     }
 
     /// The pending overlay: operations not yet accepted or refused.
-    public var pending: [OutboxEntry] { entries }
+    public var pending: [OutboxEntry] { entries.filter { $0.failure == nil } }
+
+    /// Writes the server refused, kept so the person sees them as failed.
+    public var failedWrites: [OutboxEntry] { entries.filter { $0.failure != nil } }
+
+    /// Removes a failed write once the app has shown or replaced it.
+    public func discardFailed(_ key: UUID) {
+        guard entries.contains(where: { $0.id == key && $0.failure != nil }) else { return }
+        remove(key)
+    }
 
     /// Records the intent durably, minting its key once, and sends it. If the
     /// record cannot be saved, nothing is sent and the error is thrown.
@@ -111,7 +131,7 @@ public actor ActionOutbox {
     /// Sends everything queued, each target in order and targets in parallel,
     /// and returns once every target has stopped (empty or waiting to retry).
     public func flush() async {
-        let targets = Set(entries.map(\.target))
+        let targets = Set(pending.map(\.target))
         await withTaskGroup(of: Void.self) { group in
             for target in targets {
                 group.addTask { await self.send(target) }
@@ -142,7 +162,7 @@ public actor ActionOutbox {
         retryTasks.removeValue(forKey: target)?.task.cancel()
         repeat {
             resendRequested.remove(target)
-            while let entry = entries.first(where: { $0.target == target }) {
+            while let entry = entries.first(where: { $0.target == target && $0.failure == nil }) {
                 guard await sendOne(entry) else { return }
             }
         } while resendRequested.contains(target)
@@ -167,12 +187,15 @@ public actor ActionOutbox {
             report(entry, phase: "send", error: error, initiator: .deviceRevoked, retryable: false)
             return false
         } catch let error as APIError where error.isPermanent || (error.isOutsideContractClientError &&
-                    attempts(of: entry.idempotencyKey) >= Self.outsideContractAttempts) {
+                    noteOutsideContractFailure(entry.idempotencyKey) >= Self.outsideContractAttempts) {
             // A contract refusal is definitive at once. A 4xx outside the
             // contract (no contract body) is retried a few times, then given
-            // up, so it cannot block that item's later writes forever.
+            // up, so it cannot block that item's later writes forever. Either
+            // way the write stays visible as failed.
             await outcomes.rejected(entry, error: error)
-            remove(entry.idempotencyKey)
+            update(entry.idempotencyKey) {
+                $0.failure = OutboxFailure(status: error.status, token: error.token.rawValue)
+            }
             report(entry, phase: "send", error: error, initiator: .unknown, retryable: false)
             return true
         } catch {
@@ -208,8 +231,10 @@ public actor ActionOutbox {
     /// Tries before a 4xx answer outside the contract counts as a refusal.
     static let outsideContractAttempts = 3
 
-    private func attempts(of key: UUID) -> Int {
-        entries.first { $0.id == key }?.attempts ?? 0
+    /// Counts one more answer outside the contract and returns the total.
+    private func noteOutsideContractFailure(_ key: UUID) -> Int {
+        update(key) { $0.outsideContractFailures = ($0.outsideContractFailures ?? 0) + 1 }
+        return entries.first { $0.id == key }?.outsideContractFailures ?? 0
     }
 
     private func noteAttempt(_ key: UUID) {

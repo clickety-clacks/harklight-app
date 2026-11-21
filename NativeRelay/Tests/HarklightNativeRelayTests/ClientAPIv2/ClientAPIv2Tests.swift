@@ -412,6 +412,31 @@ final class ActionOutboxTests: XCTestCase {
         XCTAssertEqual(outcomes.rejected.count, 1, "It no longer blocks the item's later writes.")
     }
 
+    func testOnlyAnswersOutsideTheContractCountAndARefusedWriteStaysVisibleAsFailed() async throws {
+        let outside = APIError(status: 404, body: Data("<html>not here</html>".utf8), requestID: nil, retryAfter: nil)
+        let server = FakeClientAPIServer()
+        server.nextWriteFailures = [URLError(.timedOut), outside, URLError(.timedOut), outside, outside]
+        let errors = RecordingErrorLogV2()
+        let outcomes = RecordingOutcomes()
+        let box = try outbox(server, MemoryOutboxPersistence(), outcomes, errors: errors)
+        let entry = try await box.submit(target: "a", operation: "mark_seen", write: seen)
+        await eventually("first try") { server.received.count == 1 }
+        for _ in 0..<3 { await box.flush() }
+        XCTAssertTrue(outcomes.rejected.isEmpty, "Transient failures do not count toward the limit.")
+        await box.flush()
+        XCTAssertEqual(server.received.count, 5)
+        XCTAssertEqual(outcomes.rejected.map(\.0), [entry.idempotencyKey])
+        let failed = await box.failedWrites
+        XCTAssertEqual(failed.map(\.idempotencyKey), [entry.idempotencyKey], "Kept as failed, not dropped.")
+        XCTAssertEqual(failed.first?.failure, OutboxFailure(status: 404, token: "other"))
+        let pending = await box.pending
+        XCTAssertTrue(pending.isEmpty, "A failed write no longer blocks the item's later writes.")
+        XCTAssertEqual(errors.reports.last?.retryable, false)
+        await box.discardFailed(entry.idempotencyKey)
+        let afterDiscard = await box.failedWrites
+        XCTAssertTrue(afterDiscard.isEmpty)
+    }
+
     func testAForbiddenWriteIsADefinitiveRefusal() async throws {
         let server = FakeClientAPIServer()
         server.nextWriteFailures = [APIError(status: 403, body: Data(#"{"error":"forbidden","retryable":false,"request_id":"r"}"#.utf8),

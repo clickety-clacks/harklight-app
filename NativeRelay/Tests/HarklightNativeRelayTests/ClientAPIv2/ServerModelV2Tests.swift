@@ -321,3 +321,101 @@ final class ServerModelV2RobustnessTests: XCTestCase {
         XCTAssertEqual(store.snapshot.orderedEntries(of: ExactText("i")).map(\.entryID.rawValue), ["e2"])
     }
 }
+
+/// Review items N-1 and N-2 of #371: unreadable resources never stop a page or
+/// a rebaseline, and a skipped change never leaves something looking complete.
+final class ServerModelV2UnreadableResourceTests: XCTestCase {
+    func testAnUnreadableItemInAnInboxPageIsSkippedAndTheRebaselineStillCompletes() async throws {
+        let store = ServerModelV2Store(fileURL: nil)
+        try store.apply(kind: "item", rev: 2, data: V2Fixture.json(V2Fixture.item("odd", rev: 2, rankKey: "z")))
+        let transport = InboxPagesTransport()
+        let broken = #"{"item_id":"odd","rev":9,"sender":7}"#
+        transport.pages[nil] = #"{"rev":12,"items":[\#(V2Fixture.item("a", rev: 3, rankKey: "a")),\#(broken)],"counts":{"unresolved":1}}"#
+        let errors = RecordingErrorLogV2()
+
+        let position = try await ServerModelSyncWriter(store: store, transport: transport, errors: errors).rebaseline()
+
+        XCTAssertEqual(position, 12, "One bad item does not stop the rebaseline, so Sync can start.")
+        XCTAssertEqual(Set(store.snapshot.items.keys.map(\.rawValue)), ["a", "odd"],
+                       "The unreadable item keeps its last-known copy rather than vanishing.")
+        XCTAssertEqual(errors.reports.map(\.operation), ["rebaseline"])
+    }
+
+    func testAnEntriesPageWithAnUnreadableEntryLeavesTheItemToBeReadAgain() throws {
+        let store = ServerModelV2Store(fileURL: nil)
+        try store.apply(kind: "item", rev: 2, data: V2Fixture.json(V2Fixture.item("i", rev: 2, rankKey: "a")))
+        let page = try APIEntriesPage(json: V2Fixture.json(#"{"rev":5,"older":false,"entries":[\#(V2Fixture.entry("e1", item: "i", rev: 3, position: 1)),{"entry_id":"e2","item_id":"i","rev":4}]}"#))
+        XCTAssertEqual(page.entries.count, 1)
+        XCTAssertEqual(page.unreadable.map(\.id), [ExactText("e2")])
+        try store.apply(page, of: ExactText("i"))
+        XCTAssertEqual(store.snapshot.orderedEntries(of: ExactText("i")).map(\.entryID.rawValue), ["e1"])
+        XCTAssertFalse(store.snapshot.loadedEntryItems.contains(ExactText("i")),
+                       "Not marked complete, so opening the item reads its entries again.")
+    }
+
+    func testASkippedFeedEntryMarksItsItemToBeReadAgain() throws {
+        let store = ServerModelV2Store(fileURL: nil)
+        try store.apply(kind: "item", rev: 2, data: V2Fixture.json(V2Fixture.item("i", rev: 2, rankKey: "a")))
+        try store.open("i")
+        try store.apply([ServerModelV2Store.Change(rev: 3, kind: "entry", data: Data(#"{"entry_id":"e1","item_id":"i","rev":3}"#.utf8))],
+                        cursor: 3)
+        XCTAssertFalse(store.snapshot.loadedEntryItems.contains(ExactText("i")),
+                       "A gap after a skipped entry is never kept as if complete.")
+        try store.apply(kind: "entry", rev: 4, data: V2Fixture.json(V2Fixture.entry("e2", item: "i", rev: 4, position: 2)))
+        XCTAssertTrue(store.snapshot.orderedEntries(of: ExactText("i")).isEmpty,
+                      "Later feed entries wait for the full read on open.")
+    }
+
+}
+
+final class UnreadableRebaselineOnceTests: XCTestCase {
+    /// L-13: the one rebaseline an unreadable change earns is spent only
+    /// once that rebaseline succeeds.
+    func testAFailedRebaselineLeavesTheNextUnreadableChangeToAskAgain() async throws {
+        let store = ServerModelV2Store(fileURL: nil)
+        let transport = InboxPagesTransport()
+        let writer = ServerModelSyncWriter(store: store, transport: transport, errors: RecordingErrorLogV2())
+        let broken = FeedChange(rev: 1, kind: .item, data: Data(#"{"item_id":"x","rev":1}"#.utf8))
+        do { try await writer.apply([broken], cursor: 1); XCTFail("Asks for a rebaseline.") }
+        catch { XCTAssertTrue(error is SyncNeedsRebaseline) }
+        do { _ = try await writer.rebaseline(); XCTFail("No inbox is served yet.") } catch {}
+        do { try await writer.apply([broken], cursor: 1); XCTFail("Still asks, as the rebaseline failed.") }
+        catch { XCTAssertTrue(error is SyncNeedsRebaseline) }
+        transport.pages[nil] = #"{"rev":1,"items":[],"counts":{"unresolved":0}}"#
+        _ = try await writer.rebaseline()
+        try await writer.apply([broken], cursor: 1)
+        XCTAssertEqual(store.heldCursor, 1, "After a successful rebaseline a recurrence is skipped.")
+    }
+}
+
+/// #377 review B-3/B-4 and round 7, at the model level.
+final class ServerModelV2ArrivalAndReplyTests: XCTestCase {
+    func testArrivalNumbersAreNeverReusedAfterARemoval() throws {
+        let store = ServerModelV2Store(fileURL: nil)
+        try store.apply(kind: "item", rev: 1, data: V2Fixture.json(V2Fixture.item("a", rev: 1, rankKey: "a")))
+        try store.apply(kind: "item", rev: 2, data: V2Fixture.json(V2Fixture.item("b", rev: 2, rankKey: "b")))
+        try store.apply(kind: "item_removed", rev: 3, data: V2Fixture.json(#"{"item_id":"a"}"#))
+        try store.apply(kind: "item", rev: 4, data: V2Fixture.json(V2Fixture.item("c", rev: 4, rankKey: "c")))
+        XCTAssertEqual(store.snapshot.arrivalOrder[ExactText("b")], 2)
+        XCTAssertEqual(store.snapshot.arrivalOrder[ExactText("c")], 3, "A new message gets a number never used before.")
+    }
+
+    func testItemsWithAgentRepliesKeepFeedEntriesWithoutBeingMarkedLoaded() throws {
+        let store = ServerModelV2Store(fileURL: nil)
+        let chat = #"{"started":true,"last_origin_reply":"r1","unread_replies":1,"reply_group":"earlier_chat_replies","reply_rank_key":"a5"}"#
+        try store.apply(kind: "item", rev: 1, data: V2Fixture.json(V2Fixture.item("i", rev: 1, rankKey: "a", chat: chat)))
+        XCTAssertEqual(store.snapshot.itemsNeedingEntries, [ExactText("i")], "The reply row needs the reply.")
+        try store.apply(kind: "entry", rev: 2, data: V2Fixture.json(V2Fixture.entry("r1", item: "i", rev: 2, position: 4)))
+        XCTAssertEqual(store.snapshot.orderedEntries(of: ExactText("i")).map(\.entryID.rawValue), ["r1"])
+        XCTAssertFalse(store.snapshot.loadedEntryItems.contains(ExactText("i")),
+                       "Not complete: opening the item still reads its whole chat.")
+        XCTAssertTrue(store.snapshot.itemsNeedingEntries.isEmpty)
+    }
+
+    func testChatWithoutAvailableAndAResultEntryDecode() throws {
+        let item = try APIItem(json: V2Fixture.json(V2Fixture.item("i", rev: 1, rankKey: "a", chat: #"{"started":false}"#)))
+        XCTAssertNil(item.chat.available, "available is optional in the contract.")
+        let entry = try APIEntry(json: V2Fixture.json(#"{"entry_id":"r","item_id":"i","rev":2,"position":3,"kind":"result","author":"origin","request_revision":1,"result":{"status":"done","revision":1}}"#))
+        XCTAssertEqual(entry.result?.status.rawValue, "done")
+    }
+}

@@ -14,8 +14,23 @@ public struct ServerModelV2: Equatable, Codable, Sendable {
     /// Items whose entries were read (the person opened them). Feed entries
     /// of other items are not kept; opening an item reads its entries.
     public internal(set) var loadedEntryItems: Set<ExactText> = []
+    /// Each item's arrival number, assigned once when the item is first held
+    /// and never reused, so the new-messages area can compare it with a
+    /// remembered high-water mark even after other items are removed.
+    public internal(set) var arrivalOrder: [ExactText: UInt64] = [:]
+    public internal(set) var lastArrival: UInt64 = 0
 
     public init() {}
+
+    /// Items with agent chat replies whose newest reply is not held yet: the
+    /// app reads their entries so reply rows can show the reply.
+    public var itemsNeedingEntries: [ExactText] {
+        orderedItems.compactMap { item in
+            guard item.chat.replyGroup != nil, let last = item.chat.lastOriginReply,
+                  entries[item.itemID]?[last] == nil else { return nil }
+            return item.itemID
+        }
+    }
 
     /// The inbox in the server's order: `rank.key` ascending, byte-wise.
     public var orderedItems: [APIItem] {
@@ -47,12 +62,17 @@ public struct ServerModelV2: Equatable, Codable, Sendable {
     // MARK: Writes through the gate
 
     private static func itemKey(_ id: ExactText) -> String { "item:\(id.rawValue)" }
+    static func itemGateKey(_ id: ExactText) -> String { itemKey(id) }
     private static func entryKey(_ id: ExactText) -> String { "entry:\(id.rawValue)" }
 
     @discardableResult
     mutating func put(_ item: APIItem) -> Bool {
         guard gate.admit(Self.itemKey(item.itemID), rev: item.rev) else { return false }
         items[item.itemID] = item
+        if arrivalOrder[item.itemID] == nil {
+            lastArrival += 1
+            arrivalOrder[item.itemID] = lastArrival
+        }
         return true
     }
 
@@ -71,8 +91,11 @@ public struct ServerModelV2: Equatable, Codable, Sendable {
         // Entries of a removed item are not kept, nor feed entries of an item
         // whose entries were never read.
         guard !gate.isRemoved(Self.itemKey(entry.itemID)) else { return false }
-        if fromFeed, !loadedEntryItems.contains(entry.itemID) { return false }
-        loadedEntryItems.insert(entry.itemID)
+        // Items with agent chat replies keep their feed entries so their reply
+        // rows can show the reply; other unopened items wait for the read on
+        // open. Only a full entries page marks an item loaded.
+        if fromFeed, !loadedEntryItems.contains(entry.itemID),
+           items[entry.itemID]?.chat.replyGroup == nil { return false }
         guard gate.admit(Self.entryKey(entry.entryID), rev: entry.rev) else { return false }
         entries[entry.itemID, default: [:]][entry.entryID] = entry
         return true
@@ -95,8 +118,11 @@ public struct ServerModelV2: Equatable, Codable, Sendable {
     /// After `410`: the full inbox (every page) at its first page's position.
     /// Items it does not list are gone; all cached entries are dropped and are
     /// fetched again when an item is opened.
-    mutating func rebaseline(items fresh: [APIItem], counts: APICounts, position: UInt64, at now: Date) {
-        let listed = Set(fresh.map(\.itemID))
+    /// `keeping` lists items the inbox named but the client could not read:
+    /// their last-known copy stays rather than disappearing.
+    mutating func rebaseline(items fresh: [APIItem], keeping unreadable: Set<ExactText> = [], counts: APICounts,
+                             position: UInt64, at now: Date) {
+        let listed = Set(fresh.map(\.itemID)).union(unreadable)
         for itemID in Array(items.keys) where !listed.contains(itemID) {
             items[itemID] = nil
             gate.forget(Self.itemKey(itemID))
@@ -104,7 +130,10 @@ public struct ServerModelV2: Equatable, Codable, Sendable {
         for (_, byID) in entries { for entryID in byID.keys { forgetEntry(entryID) } }
         entries = [:]
         loadedEntryItems = []
-        for item in fresh { put(item) }
+        // New items get arrival numbers in the order they first reached the person.
+        for item in fresh.sorted(by: { ($0.createdAtMs ?? 0, $0.itemID.rawValue) < ($1.createdAtMs ?? 0, $1.itemID.rawValue) }) {
+            put(item)
+        }
         gate.forget("counts")
         put(counts, rev: position)
         gate.pruneTombstones(now: now)
@@ -124,7 +153,8 @@ extension RevGate {
 /// is discarded with its cursor, so Sync takes a fresh snapshot rather than
 /// resuming over a model it no longer holds.
 public final class ServerModelV2Store: @unchecked Sendable {
-    public static let formatVersion = 1
+    /// 2: arrival order. An older file is discarded with its cursor.
+    public static let formatVersion = 2
 
     private struct Stored: Codable {
         let version: Int
@@ -185,8 +215,22 @@ public final class ServerModelV2Store: @unchecked Sendable {
                     try Self.apply(change, to: &model, now: now())
                 } catch {
                     try onUnreadable(change, error)
+                    Self.degrade(after: change, in: &model)
                 }
             }
+        }
+    }
+
+    /// After an unreadable change is skipped, nothing may look complete that is
+    /// not: an item whose entry was skipped is read again on open, and an
+    /// unreadable removal leaves a later snapshot of that item free to apply.
+    private static func degrade(after change: Change, in model: inout ServerModelV2) {
+        guard let value = try? JSONValue.parse(change.data),
+              let itemID = value.uniqueValue(named: "item_id")?.stringValue else { return }
+        switch change.kind {
+        case "entry": model.loadedEntryItems.remove(itemID)
+        case "item_removed": model.gate.forget(ServerModelV2.itemGateKey(itemID))
+        default: break
         }
     }
 
@@ -214,10 +258,13 @@ public final class ServerModelV2Store: @unchecked Sendable {
     }
 
     /// Entries read for an item; its later feed entries are kept from now on.
+    /// A page with an unreadable entry leaves the item not loaded, so its
+    /// entries are read again when it is next opened.
     public func apply(_ page: APIEntriesPage, of itemID: ExactText) throws {
         try mutate { model in
             model.loadedEntryItems.insert(itemID)
             for entry in page.entries { model.put(entry) }
+            if !page.unreadable.isEmpty { model.loadedEntryItems.remove(itemID) }
         }
     }
 
@@ -231,9 +278,10 @@ public final class ServerModelV2Store: @unchecked Sendable {
 
     /// Replaces the model from a full inbox and records its position as the
     /// cursor, in one save.
-    public func rebaseline(items: [APIItem], counts: APICounts, position: UInt64) throws {
+    public func rebaseline(items: [APIItem], keeping unreadable: Set<ExactText> = [], counts: APICounts,
+                           position: UInt64) throws {
         try mutate(cursor: position, replacingCursor: true) { model in
-            model.rebaseline(items: items, counts: counts, position: position, at: now())
+            model.rebaseline(items: items, keeping: unreadable, counts: counts, position: position, at: now())
         }
     }
 
