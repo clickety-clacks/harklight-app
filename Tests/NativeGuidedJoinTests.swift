@@ -131,7 +131,9 @@ final class NativeGuidedJoinTests: XCTestCase {
                 throw URLError(.notConnectedToInternet)
             }
             XCTAssertFalse(current.isReadOnly)
-            throw URLError(.notConnectedToInternet)
+            if removalRequests == 1 { throw URLError(.notConnectedToInternet) }
+            return try response(["state": "removed", "person_id": fixture.invitation.personID,
+                                 "device_id": request.deviceID, "enrollment_revision": 2])
         }
         await launch.disconnectCurrentAccount()
         XCTAssertEqual(removalRequests, 1)
@@ -160,6 +162,12 @@ final class NativeGuidedJoinTests: XCTestCase {
         XCTAssertFalse(cold.guidedJoin.isShowing)
         XCTAssertTrue(cold.canRetryUnconfirmedDisconnectRemoval)
         XCTAssertEqual(removalRequests, 1)
+
+        await launch.retryDisconnectRemoval(for: pending)
+        XCTAssertEqual(removalRequests, 2)
+        XCTAssertNil(try join.approvedRecord())
+        XCTAssertTrue(try XCTUnwrap(join.departure()).removed)
+        guard case .disconnected = launch.state else { return XCTFail("A confirmed retry must disconnect") }
     }
 
     func testConfirmedLegacyRemovalResumesFailedPushCleanupAfterRelaunch() async throws {

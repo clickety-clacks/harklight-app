@@ -70,6 +70,7 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
                 onMe: @escaping @Sendable (APIMe) -> Void = { _ in },
                 onPriorityLevelsChanged: @escaping @Sendable () -> Void = {},
                 onPublished: @escaping @Sendable () -> Void = {}) throws {
+        try repository.validateContext(context: context)
         if let directory {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         }

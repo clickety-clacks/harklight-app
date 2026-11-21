@@ -1085,8 +1085,9 @@ final class NativeAppLaunch {
     private func resumeAfterUnconfirmedV2Removal(_ record: NativeEnrollmentRecord,
                                                  presentation: LivePresentationStore) async throws {
         let lifecycle = departureLifecycle
+        let context = presentation.notificationContext
         guard activeEnrollmentRecord?.sameNotificationProfile(as: record) == true,
-              lifecycle.isPreparingV2SignOut(for: presentation.notificationContext) else { return }
+              lifecycle.isPreparingV2SignOut(for: context) else { return }
         let installation = try enrollment.material(from: record)
         await lifecycle.deactivate()
         guard activeEnrollmentRecord?.sameNotificationProfile(as: record) == true,
@@ -1094,11 +1095,11 @@ final class NativeAppLaunch {
         lifecycle.onV2AccountAccessChanged = { [weak self] access, context in
             self?.applyV2AccountAccess(access, for: context)
         }
-        try await lifecycle.activate(store: presentation.attentionStore, context: installation.context,
+        try await lifecycle.activate(store: presentation.attentionStore, context: context,
                                      relayURL: installation.relayURL, clientIdentity: installation.keychainIdentity,
                                      trustedRootDER: installation.trustedRootDER)
         if let access = lifecycle.v2AccountAccess {
-            applyV2AccountAccess(access, for: installation.context)
+            applyV2AccountAccess(access, for: context)
         }
     }
 

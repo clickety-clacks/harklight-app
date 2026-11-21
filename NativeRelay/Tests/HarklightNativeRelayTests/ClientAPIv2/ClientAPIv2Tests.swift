@@ -165,6 +165,64 @@ private actor HeldMeTransport: ClientAPITransport {
 }
 
 final class SavedV2ItemActionTests: XCTestCase {
+    func testTransportReplacementKeepsTheLiveRepositoryGenerationAndSendsSavedWrites() async throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+            personID: ExactText("person"), deviceID: ExactText("device"))
+        let retained = ProfileContext(identity: identity, transportMode: .relay)
+        let repository = try ClientRepository(context: retained, persistence: MemoryPendingActionPersistence())
+        let original = try ClientAPIv2Connection(transport: FakeClientAPIServer(), repository: repository,
+            context: retained, directory: nil, errors: RecordingErrorLogV2(), foregroundOnlyWrites: true)
+        let item = V2Fixture.item("i", rev: 1, rankKey: "a")
+        let model = ServerModelV2Store(fileURL: nil)
+        try model.apply(kind: "item", rev: 1, data: V2Fixture.json(item))
+        try model.open("i")
+        try model.apply(kind: "entry", rev: 2,
+                        data: V2Fixture.json(V2Fixture.entry("agent-reply", item: "i", rev: 2, position: 4)))
+        try repository.restoreCachedServerState(ServerModelV2Projection.cachedState(model.snapshot, identity: identity),
+                                                context: retained)
+
+        // An offline enrollment removal closes the transport. The app keeps this
+        // repository and its generation, even though loading enrollment remints one.
+        original.access.close()
+        await original.outbox.close()
+        let replacement = FakeClientAPIServer()
+        replacement.inboxItems = [item]
+        replacement.meBody = #"{"account":{"state":"active"},"features":{},"limits":{}}"#
+        let reminted = ProfileContext(identity: identity, transportMode: .relay)
+        XCTAssertThrowsError(try ClientAPIv2Connection(transport: replacement, repository: repository,
+            context: reminted, directory: nil, errors: RecordingErrorLogV2())) {
+            XCTAssertEqual($0 as? AttentionStoreError, .staleProfile)
+        }
+        let restored = try ClientAPIv2Connection(transport: replacement, repository: repository,
+            context: retained, directory: nil, errors: RecordingErrorLogV2(), foregroundOnlyWrites: true)
+        let key = RequestKey(accountScope: identity.personID, senderID: ExactText("agent-app"), messageID: ExactText("i"))
+        let seen = try repository.enqueueMessageOpen(key, requestRevision: 1, context: retained)
+        let read = try XCTUnwrap(repository.markConversationRead(key, through: ExactText("agent-reply"), context: retained))
+        let binding = ConversationBinding(request: key, revision: 1)
+        try repository.saveConversationDraft(ConversationDraft(binding: binding, text: ExactText("back online")),
+                                             context: retained)
+        let reply = try repository.queueChatMessage(binding, context: retained)
+        let replyKey = try XCTUnwrap(reply.operationID)
+        let expected = [
+            seen.operationID: "/v2/items/i/seen",
+            read.operationID: "/v2/items/i/read-position",
+            replyKey: "/v2/items/i/replies"
+        ]
+        let foreground = Task { await restored.runForeground() }
+        defer { foreground.cancel() }
+        await eventually("the restored generation sends all three saved writes") {
+            let keys = replacement.received.compactMap(\.idempotencyKey)
+            return Set(keys) == Set(expected.keys)
+        }
+        let writes = replacement.received.filter { $0.idempotencyKey != nil }
+        XCTAssertEqual(writes.count, expected.count)
+        for write in writes {
+            XCTAssertEqual(write.path, expected[try XCTUnwrap(write.idempotencyKey)])
+        }
+        foreground.cancel()
+        await foreground.value
+    }
+
     func testAnOlderVisibleEntryCannotReplaceAHigherPendingReadAcrossRelaunch() async throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
             personID: ExactText("person"), deviceID: ExactText("device"))
