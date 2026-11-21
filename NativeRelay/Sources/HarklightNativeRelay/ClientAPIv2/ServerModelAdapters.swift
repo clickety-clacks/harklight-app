@@ -104,6 +104,7 @@ public final class ServerModelSyncWriter: SyncModelWriting, @unchecked Sendable 
     /// then stays not loaded, so its entries are read again when it is next
     /// opened (review L-16).
     public func loadEntries(of itemID: ExactText) async throws {
+        let generation = store.syncPosition.generation
         var pages: [APIEntriesPage] = []
         var before: ExactText?
         var seen: Set<ExactText> = []
@@ -131,7 +132,7 @@ public final class ServerModelSyncWriter: SyncModelWriting, @unchecked Sendable 
             guard let oldest = page.entries.min(by: { $0.position < $1.position }) else { break }
             before = oldest.entryID
         }
-        try store.apply(pages, of: itemID, complete: complete)
+        try store.apply(pages, of: itemID, complete: complete, generation: generation)
     }
 
     private static func pathSegment(_ id: ExactText) -> String {
@@ -157,11 +158,16 @@ public final class ServerModelOutboxOutcomes: OutboxOutcomeHandling, @unchecked 
         self.onUnreadableResponse = onUnreadableResponse
     }
 
-    public func accepted(_ entry: OutboxEntry, response: APIResponse) async {
+    public var modelGeneration: UInt64 { store.syncPosition.generation }
+
+    public func accepted(_ entry: OutboxEntry, response: APIResponse, generation: UInt64) async {
         // A file upload answers FileCreated, not a WriteResult.
         guard !response.body.isEmpty, entry.write.path != "/v2/files" else { return }
         do {
-            try store.apply(APIWriteResult(json: JSONValue.parse(response.body)))
+            try store.apply(APIWriteResult(json: JSONValue.parse(response.body)), generation: generation)
+        } catch is ServerModelV2Store.SupersededGeneration {
+            // The server accepted the operation. Only its old projection is discarded.
+            return
         } catch {
             // The write took effect; the feed delivers its resources anyway.
             onUnreadableResponse(entry, error)

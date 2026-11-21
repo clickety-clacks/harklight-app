@@ -305,7 +305,9 @@ final class RecordingOutcomes: OutboxOutcomeHandling, @unchecked Sendable {
     var accepted: [(UUID, APIResponse)] { lock.withLock { _accepted } }
     private var _rejected: [(UUID, APIError)] = []
     var rejected: [(UUID, APIError)] { lock.withLock { _rejected } }
-    func accepted(_ entry: OutboxEntry, response: APIResponse) async {
+    let modelGeneration: UInt64 = 0
+
+    func accepted(_ entry: OutboxEntry, response: APIResponse, generation: UInt64) async {
         lock.withLock { _accepted.append((entry.idempotencyKey, response)) }
     }
     func rejected(_ entry: OutboxEntry, error: APIError) async {

@@ -471,7 +471,8 @@ final class ServerModelAdapterTests: XCTestCase {
                                 createdAt: Date(), outcomeUnknown: false, attempts: 1)
         let seen = V2Fixture.item("i", rev: 7, rankKey: "a").replacingOccurrences(of: #""seen":false"#, with: #""seen":true"#)
         await outcomes.accepted(entry, response: APIResponse(status: 200, requestID: "r",
-                                                             body: Data(#"{"rev":7,"item":\#(seen)}"#.utf8)))
+                                                             body: Data(#"{"rev":7,"item":\#(seen)}"#.utf8)),
+                                generation: outcomes.modelGeneration)
         XCTAssertEqual(store.snapshot.items[ExactText("i")]?.seen, true)
     }
 }
