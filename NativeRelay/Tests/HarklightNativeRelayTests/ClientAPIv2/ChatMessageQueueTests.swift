@@ -66,8 +66,13 @@ final class ChatMessageQueueTests: XCTestCase {
         try await assertReplyRecovery(cold: true, acceptBeforeBaseline: true, failFirstEntries: true)
     }
 
+    func testAnIndependentThreadReadResolvesAcceptedReplyConfirmation() async throws {
+        try await assertReplyRecovery(cold: true, acceptBeforeBaseline: true, failFirstEntries: true,
+                                      independentThreadRead: true)
+    }
+
     private func assertReplyRecovery(cold: Bool, acceptBeforeBaseline: Bool = false,
-                                     failFirstEntries: Bool = false) async throws {
+                                     failFirstEntries: Bool = false, independentThreadRead: Bool = false) async throws {
         let persistence = MemoryPendingActionPersistence()
         let (first, context, binding) = try repository(v2: true, persistence: persistence)
         try type("saved before handoff", first, binding, context)
@@ -148,7 +153,11 @@ final class ChatMessageQueueTests: XCTestCase {
                 operation: operation, turn: ExactText("accepted"))
             XCTAssertEqual(try reopened.queuedChatMessages(context: context).first?.disposition, receipt)
             XCTAssertEqual(server.received.filter { $0.path.hasSuffix("/entries") }.count, 1)
-            retryGate.release()
+            if independentThreadRead {
+                try await connection.loadEntriesIfNeeded(itemID: binding.request.messageID)
+            } else {
+                retryGate.release()
+            }
         }
         let overlayDeadline = ContinuousClock.now + .seconds(2)
         while !(try reopened.queuedChatMessages(context: context)).isEmpty,
@@ -159,6 +168,7 @@ final class ChatMessageQueueTests: XCTestCase {
         let accepted = try reopened.conversationSnapshot(context: context).threads[binding.request]
         XCTAssertTrue(accepted?.turns.contains { $0.id == ExactText("accepted") } == true)
         if failFirstEntries {
+            XCTAssertTrue(errors.resolutions.contains("snapshot.confirm_reply"))
             XCTAssertEqual(server.received.filter { $0.path.hasSuffix("/entries") }.count, 2)
             XCTAssertEqual(connection.model.heldCursor, 1, "The read retry does not advance the cursor.")
         }

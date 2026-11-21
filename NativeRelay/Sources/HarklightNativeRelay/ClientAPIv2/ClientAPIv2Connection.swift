@@ -225,9 +225,6 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
         do {
             try await modelWriter.loadEntries(of: itemID)
             publishModel()
-            if missingAcceptedReplyItems().isEmpty {
-                errors.resolve(concern: .snapshot, operation: "confirm_reply")
-            }
         } catch is CancellationError {
             return
         } catch {
@@ -297,12 +294,24 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
 
     /// Publishes the model into the repository when it holds a full
     /// baseline and the answer-screen rules are known.
+    private func hasAcceptedRepliesAwaitingEntries() -> Bool {
+        guard let messages = try? repository.queuedChatMessages(context: context) else { return true }
+        return messages.contains {
+            if case .acceptedPendingReplay = $0.disposition { return true }
+            return false
+        }
+    }
+
     public func publishModel() {
         lock.withLock {
             guard model.heldCursor != nil, presentation.hasRules,
                   let cached = try? presentation.cachedState(model.snapshot, identity: context.identity) else { return }
             do {
+                let awaitingEntries = hasAcceptedRepliesAwaitingEntries()
                 try repository.restoreCachedServerState(cached, context: context)
+                if awaitingEntries, !hasAcceptedRepliesAwaitingEntries() {
+                    errors.resolve(concern: .snapshot, operation: "confirm_reply")
+                }
             } catch {
                 errors.report(ErrorLogReport(concern: .snapshot, connectionRole: .request, operation: "publish",
                     phase: "restore", reason: Self.restoreFailure(error), initiator: .unknown, retryable: true))
