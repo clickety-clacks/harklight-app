@@ -222,11 +222,16 @@ final class NativeAppLaunch {
             await NativeRelayLifecycle.shared.removePushBeforeDeparture(for: record, enrollment: self.enrollment)
         }
         guidedJoin.didKeepCurrentAccount = { [weak self] record in
-            guard NativeRelayLifecycle.shared.featureFlags.isEnabled(.serverMatchedPushRouting),
+            let lifecycle = NativeRelayLifecycle.shared
+            guard lifecycle.clientAPIV2Enabled || lifecycle.featureFlags.isEnabled(.serverMatchedPushRouting),
                   let self, case let .live(presentation) = self.state,
                   !presentation.isReadOnly, !presentation.isLocalExample,
                   self.activeEnrollmentRecord?.sameNotificationProfile(as: record) == true else { return }
-            try self.enrollment.cancelPushDeparture(for: record)
+            if lifecycle.clientAPIV2Enabled {
+                try await lifecycle.keepV2PushAccount(record, enrollment: self.enrollment)
+            } else {
+                try self.enrollment.cancelPushDeparture(for: record)
+            }
             await self.refreshLive()
         }
         guidedJoin.didRemoveCurrentAccount = { [weak self] in
@@ -912,6 +917,9 @@ final class NativeAppLaunch {
             try enrollment.markNotificationExplanationSeen(for: record.deviceID)
             let allowed = try await notifications.choose(enabled) { self.activationGeneration == epoch }
             guard activationGeneration == epoch else { return }
+            if NativeRelayLifecycle.shared.clientAPIV2Enabled {
+                Task { await NativeRelayLifecycle.shared.refreshAfterPushAddressStored() }
+            }
             if allowed {
                 presentation.notificationWarning = nil
                 diagnostics.record(area: .notifications, phase: .pushRegistration, transition: .completed)
@@ -1090,8 +1098,30 @@ final class NativeAppLaunch {
         guard didFinishRestoring else { return }
         if NativeRelayLifecycle.shared.clientAPIV2Enabled, let payload = notificationRouter.pendingV2Tap {
             notificationRouter.pendingV2Tap = nil
-            guard let locator = await NativeRelayLifecycle.shared.v2LocatorForPush(payload) else { return }
+            let lifecycle = NativeRelayLifecycle.shared
+            guard let locator = await lifecycle.v2LocatorForPush(payload),
+                  case let .live(presentation) = state,
+                  !presentation.isReadOnly, !presentation.isLocalExample,
+                  lifecycle.isActive(for: presentation.notificationContext) else { return }
+            do {
+                try presentation.refreshFromDurableStore()
+            } catch {
+                notificationNavigationMessage = "Could not load this notification."
+                return
+            }
             notificationRouter.receive(locator: locator)
+            guard let intent = notificationRouter.intent else { return }
+            handledNotificationSerial = intent.serial
+            pendingMessageDeepLink = nil
+            selectedArchivedAccount = nil
+            selectedArchivedPresentation = nil
+            isShowingDisconnectedArchive = false
+            presentation.selectRequest(locator.request)
+            notificationNavigation = NativeInboxNavigation(serial: intent.serial, request: locator.request,
+                                                             opensChat: locator.target == "chat")
+            notificationNavigationMessage = nil
+            notificationRouter.consumed()
+            return
         }
         guard let intent = notificationRouter.intent,
               handledNotificationSerial != intent.serial else { return }

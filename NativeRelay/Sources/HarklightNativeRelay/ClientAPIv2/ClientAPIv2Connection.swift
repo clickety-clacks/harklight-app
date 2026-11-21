@@ -31,6 +31,7 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
     public let outbox: ActionOutbox
     public let sync: ChangeFeedSync
     public let files: ClientAPIFiles
+    public let push: ClientAPIPush
     private let transport: any ClientAPITransport
     private let foregroundOnlyWrites: Bool
     private let modelWriter: ServerModelSyncWriter
@@ -94,6 +95,8 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
             FileOutboxPersistence(url: $0.appendingPathComponent("outbox-v2.json"))
         } ?? MemoryOutbox()
         let relay = PublishRelay()
+        self.push = ClientAPIPush(transport: transport, model: model, errors: errors,
+                                  onSettingsChanged: { relay.connection?.publishModel() })
         let modelWriter = ServerModelSyncWriter(store: model, transport: transport, errors: errors)
         self.modelWriter = modelWriter
         let writer = PublishingSyncWriter(inner: modelWriter, publish: { relay.connection?.publishModel() })
@@ -139,6 +142,17 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
         let response = try await transport.send(.get("/v2/me"))
         try Task.checkCancellation()
         let me = try APIMe(json: JSONValue.parse(response.body))
+        let principal = me.pushPrincipal.flatMap {
+            $0.personID == context.identity.personID && $0.deviceID == context.identity.deviceID ? $0 : nil
+        }
+        do {
+            try model.savePushPrincipal(principal)
+            errors.resolve(concern: .snapshot, operation: "push_identity")
+        } catch {
+            errors.report(ErrorLogReport(concern: .snapshot, connectionRole: .request,
+                operation: "push_identity", phase: "save", reason: .api(error),
+                initiator: .unknown, retryable: true, correlation: .request(response.requestID)))
+        }
         if let meURL {
             do {
                 try response.body.write(to: meURL, options: .atomic)
@@ -250,6 +264,41 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
         if let persisted = model.persistedCursor(), persisted >= revision { return false }
         try await catchUp()
         return model.heldCursor != before
+    }
+
+    public func matchPush(_ payload: JSONValue) -> ClientAPIPushHint? {
+        guard let attention = payload.uniqueValue(named: "attention"),
+              attention.uniqueValue(named: "v")?.integerValue == 2,
+              attention.uniqueValue(named: "type")?.stringValue?.rawValue == "sync",
+              let locator = attention.uniqueValue(named: "locator"),
+              locator.uniqueValue(named: "v")?.integerValue == 2 else { return nil }
+        let held = model.snapshot
+        guard let principal = held.pushPrincipal,
+              let device = principal.deviceID,
+              let binding = held.routablePushBindingID,
+              !binding.rawValue.isEmpty,
+              principal.personID == context.identity.personID, device == context.identity.deviceID,
+              attention.uniqueValue(named: "server")?.stringValue == principal.serverID,
+              locator.uniqueValue(named: "person_id")?.stringValue == principal.personID,
+              locator.uniqueValue(named: "device_id")?.stringValue == device,
+              locator.uniqueValue(named: "binding_id")?.stringValue == binding else {
+            errors.report(ErrorLogReport(concern: .sync, connectionRole: .request,
+                operation: "push_wake", phase: "match", reason: .app("push_identity_mismatch"),
+                initiator: .unknown, retryable: false,
+                correlation: ErrorLogCorrelation(resourceID: context.identity.deviceID.rawValue)))
+            return nil
+        }
+        guard let item = locator.uniqueValue(named: "item_id")?.stringValue, !item.rawValue.isEmpty,
+              case let .number(rev)? = locator.uniqueValue(named: "rev"),
+              let revision = Rev(rev.lexeme), revision > 0 else { return nil }
+        return ClientAPIPushHint(serverID: principal.serverID, personID: principal.personID,
+            deviceID: device, bindingID: binding, itemID: item, revision: revision,
+            target: locator.uniqueValue(named: "target")?.stringValue?.rawValue)
+    }
+
+    public func catchUp(forPush payload: JSONValue) async throws -> Bool {
+        guard let hint = matchPush(payload) else { return false }
+        return try await catchUp(forPushRevision: hint.revision)
     }
 
     private func missingAcceptedReplyItems() -> Set<ExactText> {
@@ -774,7 +823,7 @@ private final class PublishingOutcomes: OutboxOutcomeHandling, @unchecked Sendab
 }
 
 /// An outbox that lives only in memory, for tests and previews.
-private final class MemoryOutbox: OutboxPersisting, @unchecked Sendable {
+final class MemoryOutbox: OutboxPersisting, @unchecked Sendable {
     private let lock = NSLock()
     private var entries: [OutboxEntry] = []
     func load() throws -> [OutboxEntry] { lock.withLock { entries } }

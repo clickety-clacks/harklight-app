@@ -39,7 +39,7 @@ struct NativeNotificationPermission {
         return allowed
     }
 
-    private static func allowed(_ status: UNAuthorizationStatus) -> Bool {
+    static func allowed(_ status: UNAuthorizationStatus) -> Bool {
         [.authorized, .provisional, .ephemeral].contains(status)
     }
 }

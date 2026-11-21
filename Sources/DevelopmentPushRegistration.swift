@@ -30,7 +30,8 @@ final class DevelopmentPushRegistration: NSObject, UIApplicationDelegate, UNUser
         }
 
         do {
-            try Self.addressStore().store(deviceToken)
+            try Self.persistToken(deviceToken, usesV2: NativeRelayLifecycle.shared.clientAPIV2Enabled,
+                                  legacyStore: Self.addressStore(), enrollment: NativeEnrollmentStore())
             UserDefaults.standard.set("registered", forKey: Self.statusKey)
             Task { await NativeRelayLifecycle.shared.refreshAfterPushAddressStored() }
         } catch DevelopmentAPNsAddressStore.AddressError.emptyToken {
@@ -141,10 +142,25 @@ final class DevelopmentPushRegistration: NSObject, UIApplicationDelegate, UNUser
     private func clearAddressAndSetStatus(_ status: String) {
         do {
             try Self.addressStore().clear()
+            if NativeRelayLifecycle.shared.clientAPIV2Enabled {
+                try NativeEnrollmentStore().clearV2APNsToken()
+            }
             UserDefaults.standard.set(status, forKey: Self.statusKey)
         } catch {
             NativeRelayLifecycle.shared.recordPushRegistrationFailure(error, area: .localStore)
             UserDefaults.standard.set("storage-failed", forKey: Self.statusKey)
+        }
+    }
+
+    static func persistToken(_ token: Data, usesV2: Bool, legacyStore: DevelopmentAPNsAddressStore,
+                             enrollment: NativeEnrollmentStore) throws {
+        if usesV2 {
+            // Discard the legacy file and obtain current bytes from APNs.
+            // The v2 path never reads the file into a registration intent.
+            try legacyStore.clear()
+            try enrollment.storeV2APNsToken(token)
+        } else {
+            try legacyStore.store(token)
         }
     }
 

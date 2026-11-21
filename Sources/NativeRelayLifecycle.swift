@@ -5,6 +5,7 @@ import HarklightNativeRelay
 import Security
 import Observation
 import Network
+import UserNotifications
 import enum SwiftUI.ScenePhase
 
 /// Shareable error details deliberately exclude response bodies, decoder context,
@@ -942,6 +943,13 @@ final class NativeRelayLifecycle {
     private let v2FocusReporter: NativeFocusReporter
     private let v2ShowCoordinator: NativePushedViewCoordinator
     private var v2ForegroundTask: Task<Void, Never>?
+    private var v2PushRegistrationTask: Task<Bool, Never>?
+    private var v2PushRegistrationRequested = false
+    private var v2PushRemovalTask: Task<Void, Never>?
+    private var v2PushRetryTask: Task<Void, Never>?
+    private var v2PushRetryAttempt = 0
+    private let v2NotificationPermission: NativeNotificationPermission
+    private let v2LegacyAddressStore: @MainActor () throws -> DevelopmentAPNsAddressStore
     private var sceneIsActive = false
 
     var usesClientAPIV2: Bool { v2Connection != nil }
@@ -995,13 +1003,20 @@ final class NativeRelayLifecycle {
         guard let self else { return .unavailable }
         return await self.performRefresh(generation: self.refreshGeneration)
     }
-    private let enrollment = NativeEnrollmentStore()
+    private let enrollment: NativeEnrollmentStore
 
     init(clientAPIV2Enabled: Bool = false, v2FocusReporter: NativeFocusReporter = .shared,
-         v2ShowCoordinator: NativePushedViewCoordinator = .shared) {
+         v2ShowCoordinator: NativePushedViewCoordinator = .shared,
+         v2NotificationPermission: NativeNotificationPermission = .system,
+         enrollment: NativeEnrollmentStore = NativeEnrollmentStore(),
+         v2LegacyAddressStore: @escaping @MainActor () throws -> DevelopmentAPNsAddressStore =
+             DevelopmentPushRegistration.addressStore) {
         self.clientAPIV2Enabled = clientAPIV2Enabled
         self.v2FocusReporter = v2FocusReporter
         self.v2ShowCoordinator = v2ShowCoordinator
+        self.v2NotificationPermission = v2NotificationPermission
+        self.enrollment = enrollment
+        self.v2LegacyAddressStore = v2LegacyAddressStore
     }
 
     func v2FocusScenePhaseChanged(_ phase: ScenePhase) {
@@ -1014,8 +1029,11 @@ final class NativeRelayLifecycle {
         sceneIsActive = isActive
         if isActive {
             startV2Foreground()
+            _ = requestV2PushRegistration()
         } else {
             v2ForegroundTask?.cancel()
+            v2PushRegistrationTask?.cancel()
+            cancelV2PushRetry()
         }
     }
 
@@ -1322,6 +1340,7 @@ final class NativeRelayLifecycle {
         v2Connection = connection
         featureFlags.connect(context: context, connectionID: attempt)
         startV2Foreground()
+        _ = requestV2PushRegistration()
     }
 
     func installV2FocusChannel(_ focus: ClientAPIFocusChannel, attempt: UUID) {
@@ -1419,12 +1438,11 @@ final class NativeRelayLifecycle {
         }
     }
 
-    func refreshV2ForPush(_ payload: JSONValue, enrollment: NativeEnrollmentRecord) async -> Bool {
-        guard clientAPIV2Enabled, let connection = v2Connection, let context,
-              let revision = NativeV2PushWake.revision(payload, enrollment: enrollment,
-                                                       identity: context.identity) else { return false }
+    func refreshV2ForPush(_ payload: JSONValue) async -> Bool {
+        guard clientAPIV2Enabled, let connection = v2Connection, let hint = connection.matchPush(payload),
+              await allowsV2PushRouting(connection), connection.matchPush(payload) == hint else { return false }
         do {
-            let changed = try await connection.catchUp(forPushRevision: revision)
+            let changed = try await connection.catchUp(forPushRevision: hint.revision)
             return v2Connection === connection && changed
         } catch {
             // Sync records transport failures with its Request-Id.
@@ -1440,24 +1458,31 @@ final class NativeRelayLifecycle {
 
     func v2LocatorForPush(_ payload: JSONValue) async -> NativeNotificationLocator? {
         guard clientAPIV2Enabled, let connection = v2Connection, let context,
-              let record = try? enrollment.load(),
-              NativeV2PushWake.revision(payload, enrollment: record, identity: context.identity) != nil,
-              let server = record.serverID,
-              let locator = payload.uniqueValue(named: "attention")?.uniqueValue(named: "locator"),
-              let itemID = locator.uniqueValue(named: "item_id")?.stringValue,
-              let binding = locator.uniqueValue(named: "binding_id")?.stringValue else { return nil }
-        _ = await refreshV2ForPush(payload, enrollment: record)
-        guard v2Connection === connection, let item = connection.model.snapshot.items[itemID] else { return nil }
-        let request = ServerModelV2Projection.key(for: itemID, sender: item.sender, identity: context.identity)
-        return NativeNotificationLocator(v2Request: request, bindingID: binding,
-            deviceID: context.identity.deviceID, serverID: server,
-            target: locator.uniqueValue(named: "target")?.stringValue?.rawValue)
+              await allowsV2PushRouting(connection),
+              let hint = connection.matchPush(payload) else { return nil }
+        _ = try? await connection.catchUp(forPushRevision: hint.revision)
+        guard v2Connection === connection, connection.matchPush(payload) == hint,
+              let item = connection.model.snapshot.items[hint.itemID] else { return nil }
+        let request = ServerModelV2Projection.key(for: hint.itemID, sender: item.sender, identity: context.identity)
+        return NativeNotificationLocator(v2Request: request, bindingID: hint.bindingID,
+            deviceID: hint.deviceID, serverID: hint.serverID.rawValue, target: hint.target)
+    }
+
+    private func allowsV2PushRouting(_ connection: ClientAPIv2Connection) async -> Bool {
+        let permission = await v2NotificationPermission.status()
+        guard !Task.isCancelled, v2Connection === connection else { return false }
+        guard NativeNotificationPermission.allowed(permission) else {
+            try? connection.model.setPushRoutingEnabled(false)
+            requestV2PushRegistration()
+            return false
+        }
+        return true
     }
 
     func refreshForRemotePush(_ payload: JSONValue?) async -> Bool {
         if !clientAPIV2Enabled { return await refreshFromTrustedRelay() }
-        guard let payload, let record = try? enrollment.load() else { return false }
-        return await refreshV2ForPush(payload, enrollment: record)
+        guard let payload else { return false }
+        return await refreshV2ForPush(payload)
     }
 
     private func stopMutationFlights() async {
@@ -1471,8 +1496,190 @@ final class NativeRelayLifecycle {
         for session in sessions { await session.close() }
     }
 
+    @discardableResult
+    private func requestV2PushRegistration() -> Task<Bool, Never>? {
+        guard sceneIsActive, v2PushRemovalTask == nil, let connection = v2Connection,
+              let context else { return nil }
+        v2PushRegistrationRequested = true
+        v2PushRetryTask?.cancel()
+        v2PushRetryTask = nil
+        if let current = v2PushRegistrationTask { return current }
+        let task = Task { [weak self] in
+            guard let self else { return false }
+            var registered = false
+            while self.v2PushRegistrationRequested, !Task.isCancelled, self.v2Connection === connection {
+                self.v2PushRegistrationRequested = false
+                registered = await self.registerV2Push(connection: connection, context: context)
+            }
+            if self.v2Connection === connection {
+                self.v2PushRegistrationTask = nil
+                if self.v2PushRegistrationRequested { self.requestV2PushRegistration() }
+            }
+            return registered
+        }
+        v2PushRegistrationTask = task
+        return task
+    }
+
+    private func registerV2Push(connection: ClientAPIv2Connection, context: ProfileContext) async -> Bool {
+        do {
+            let permission = await v2NotificationPermission.status()
+            guard !Task.isCancelled, v2Connection === connection else { return false }
+            let allowed = NativeNotificationPermission.allowed(permission)
+            if !allowed { try connection.model.setPushRoutingEnabled(false) }
+            guard let record = try enrollment.load(), record.matchesNotificationIdentity(context.identity),
+                  record.v2PushRegistration?.removalID == nil else { return false }
+            try v2LegacyAddressStore().clear()
+            let held = connection.model.snapshot.settings?.push
+            var hasBinding = held?.bindingID != nil
+            if !allowed, held == nil, record.v2PushRegistration?.registration == nil,
+               record.v2PushRegistration?.permissionRemovalID == nil {
+                // On the first v2 foreground, a legacy binding can already
+                // exist even though the v2 model and journal are both empty.
+                do {
+                    hasBinding = try await connection.push.status().bindingID != nil
+                } catch {
+                    if !Task.isCancelled, v2Connection === connection { scheduleV2PushRetry(connection: connection) }
+                    throw error
+                }
+                let latestPermission = await v2NotificationPermission.status()
+                guard !Task.isCancelled, v2Connection === connection else { return false }
+                if NativeNotificationPermission.allowed(latestPermission) {
+                    v2PushRegistrationRequested = true
+                    return false
+                }
+            }
+            let removal: UUID?
+            if !allowed, permission == .denied || hasBinding {
+                removal = try enrollment.updateV2PushRegistration(for: record) {
+                    $0.preparePermissionRemoval(hasBinding: hasBinding)
+                }
+            } else {
+                removal = record.v2PushRegistration?.permissionRemovalID
+            }
+            if let removal {
+                do {
+                    let response = try await connection.push.remove(idempotencyKey: removal)
+                    try enrollment.updateV2PushRegistration(for: record) {
+                        $0.confirmPermissionRemoval(removal, serverRevision: response.revision)
+                    }
+                    cancelV2PushRetry()
+                } catch {
+                    if !Task.isCancelled, v2Connection === connection { scheduleV2PushRetry(connection: connection) }
+                    throw error
+                }
+                // Permission may have changed while the DELETE was in flight.
+                if allowed { v2PushRegistrationRequested = true }
+                return false
+            }
+            guard allowed else { return false }
+            guard let address = try enrollment.v2APNsAddress() else {
+                v2NotificationPermission.register()
+                return false
+            }
+            let environment: APIPushEnvironment = PushRegistrationProfile.current == .sandbox ? .sandbox : .production
+            let saved = try enrollment.updateV2PushRegistration(for: record) {
+                try $0.prepareRegistration(token: ExactText(address), environment: environment)
+            }
+            guard let saved else {
+                if connection.model.snapshot.settings?.push == nil {
+                    _ = try await connection.push.status()
+                }
+                try connection.model.setPushRoutingEnabled(true)
+                return false
+            }
+            let accepted = try await connection.push.reconcileRegistration(saved) { revision in
+                let permission = await self.v2NotificationPermission.status()
+                guard !Task.isCancelled, self.v2Connection === connection else { return nil }
+                guard NativeNotificationPermission.allowed(permission) else {
+                    try connection.model.setPushRoutingEnabled(false)
+                    self.v2PushRegistrationRequested = true
+                    return nil
+                }
+                return try self.enrollment.updateV2PushRegistration(for: record) {
+                    try $0.replaceStaleRegistration(saved, serverRevision: revision)
+                }
+            }
+            guard let accepted, !Task.isCancelled, v2Connection === connection else { return false }
+            try enrollment.updateV2PushRegistration(for: record) { $0.confirmRegistration(accepted) }
+            let latestPermission = await v2NotificationPermission.status()
+            guard !Task.isCancelled, v2Connection === connection else { return false }
+            let stillAllowed = NativeNotificationPermission.allowed(latestPermission)
+            try connection.model.setPushRoutingEnabled(stillAllowed)
+            if !stillAllowed { v2PushRegistrationRequested = true }
+            return stillAllowed
+        } catch {
+            if !Task.isCancelled, v2Connection === connection { recordPushRegistrationFailure(error) }
+            return false
+        }
+    }
+
+    private func cancelV2PushRetry() {
+        v2PushRetryTask?.cancel()
+        v2PushRetryTask = nil
+        v2PushRetryAttempt = 0
+    }
+
+    private func scheduleV2PushRetry(connection: ClientAPIv2Connection) {
+        guard sceneIsActive, v2PushRetryTask == nil, v2PushRemovalTask == nil else { return }
+        v2PushRetryAttempt = min(v2PushRetryAttempt + 1, 6)
+        let attempt = v2PushRetryAttempt
+        v2PushRetryTask = Task { [weak self] in
+            do { try await ActionOutbox.backoff(attempt, nil) } catch { return }
+            guard !Task.isCancelled, let self, self.v2Connection === connection else { return }
+            self.v2PushRetryTask = nil
+            self.requestV2PushRegistration()
+        }
+    }
+
+    private func removeV2PushBeforeDeparture(for record: NativeEnrollmentRecord,
+                                             enrollment: NativeEnrollmentStore) async {
+        guard let connection = v2Connection, let context, record.matchesNotificationIdentity(context.identity) else {
+            return
+        }
+        if let removal = v2PushRemovalTask {
+            await removal.value
+            return
+        }
+        let task = Task { [weak self] in
+            guard let self, self.v2Connection === connection else { return }
+            defer {
+                if self.v2Connection === connection { self.v2PushRemovalTask = nil }
+            }
+            do {
+                guard let key = try enrollment.updateV2PushRegistration(for: record, { $0.prepareRemoval() }) else {
+                    return
+                }
+                let registration = self.v2PushRegistrationTask
+                self.cancelV2PushRetry()
+                self.v2PushRegistrationRequested = false
+                registration?.cancel()
+                _ = await registration?.value
+                try Task.checkCancellation()
+                let status = try await connection.push.remove(idempotencyKey: key)
+                try enrollment.updateV2PushRegistration(for: record) {
+                    $0.confirmRemoval(key, serverRevision: status.revision)
+                }
+            } catch {
+                if !Task.isCancelled, self.v2Connection === connection { self.recordPushRegistrationFailure(error) }
+            }
+        }
+        v2PushRemovalTask = task
+        await task.value
+    }
+
+    func keepV2PushAccount(_ record: NativeEnrollmentRecord, enrollment: NativeEnrollmentStore) async throws {
+        await v2PushRemovalTask?.value
+        try enrollment.updateV2PushRegistration(for: record) { $0.keepAccount() }
+        requestV2PushRegistration()
+    }
+
     func removePushBeforeDeparture(for record: NativeEnrollmentRecord,
                                    enrollment: NativeEnrollmentStore) async {
+        if clientAPIV2Enabled {
+            await removeV2PushBeforeDeparture(for: record, enrollment: enrollment)
+            return
+        }
         guard featureFlags.isEnabled(.serverMatchedPushRouting) else { return }
         guard let transport, let context, record.matchesNotificationIdentity(context.identity) else {
             recordDiagnostic(.notifications, .pushRegistration, .failed, error: NativeRelayCoreError.inactive)
@@ -1488,6 +1695,14 @@ final class NativeRelayLifecycle {
 
     func deactivate() async {
         let v2Task = v2ForegroundTask
+        let pushRegistration = v2PushRegistrationTask
+        let pushRemoval = v2PushRemovalTask
+        cancelV2PushRetry()
+        v2PushRegistrationTask = nil
+        v2PushRegistrationRequested = false
+        v2PushRemovalTask = nil
+        pushRegistration?.cancel()
+        pushRemoval?.cancel()
         let focus = v2FocusChannel
         v2FocusChannel = nil
         v2ShowLookup?.cancel()
@@ -1537,6 +1752,8 @@ final class NativeRelayLifecycle {
         if let priorCore { await priorCore.deactivate() }
         if let priorTransport { await priorTransport.close() }
         await v2Task?.value
+        _ = await pushRegistration?.value
+        await pushRemoval?.value
     }
 
     /// APNs data is a wake hint only. The payload cannot choose account,
@@ -1908,7 +2125,10 @@ final class NativeRelayLifecycle {
     /// the protected address. Queue one more authenticated pass in that case.
     @discardableResult
     func refreshAfterPushAddressStored() async -> Bool {
-        await refreshFlights.afterCurrent().completedWithoutError
+        if clientAPIV2Enabled {
+            return await requestV2PushRegistration()?.value ?? false
+        }
+        return await refreshFlights.afterCurrent().completedWithoutError
     }
 
     /// The current flight may already have read C's outbox before the person
