@@ -270,6 +270,7 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
             settingsContinuation.finish()
             queuedContinuation.finish()
         }
+        await replyUploads?.retryInternalErrors()
         publishModel()
         continuation.yield(())
         queuedContinuation.yield(())
@@ -814,9 +815,12 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
         case (.actions, "stage_reply_upload"):
             lock.withLock { pausedReplyUploads.removeAll() }
             signalQueuedReplies()
+        case (.actions, "discard_reply_upload"):
+            await replyUploads?.retryInternalErrors()
+            _ = await discardAbandonedReplyUploads()
         case (.actions, _):
             await outbox.resumeSending()
-            await outbox.retryInternalErrors(operation: record.operation)
+            await outbox.retryInternalErrors(operation: record.operation, id: record.correlation.clientOperationID)
         case (.sync, _):
             try await catchUp(userInitiated: true)
         default:

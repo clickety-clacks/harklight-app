@@ -202,10 +202,10 @@ public actor ActionOutbox {
         for task in tasks { await task.value }
     }
 
-    public func retryInternalErrors(operation: String? = nil) async {
+    func retryInternalErrors(operation: String? = nil, id: UUID? = nil) async {
         var retryLanes = Set<String>()
         for entry in entries where entry.waitsForInternalErrorRetry == true &&
-            (operation == nil || entry.operation == operation) {
+            (operation == nil || entry.operation == operation) && (id == nil || entry.id == id) {
             update(entry.id) { $0.waitsForInternalErrorRetry = nil }
             retryLanes.insert(entry.sendingLane)
         }

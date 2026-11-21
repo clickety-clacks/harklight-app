@@ -31,6 +31,7 @@ actor QueuedReplyUploads {
     private let source: @Sendable (ConversationFile) throws -> URL
     private var groups: [UUID: Group]
     private var working: Set<UUID> = []
+    private var pausedCleanup: Set<UUID> = []
 
     init(directory: URL?, files: ClientAPIFiles,
          source: @escaping @Sendable (ConversationFile) throws -> URL) throws {
@@ -122,12 +123,16 @@ actor QueuedReplyUploads {
         try save(nil, for: operation)
     }
 
+    func retryInternalErrors() {
+        pausedCleanup.removeAll()
+    }
+
     /// An edit or cancellation removes the old queued reply. Recover unknown
     /// uploads first, then DELETE them without creating any fresh uploads.
     func discardAbandoned(keeping retained: Set<UUID>,
                           stillQueued: @Sendable (UUID) throws -> Bool = { _ in false }) async -> [CleanupFailure] {
         var failures: [CleanupFailure] = []
-        for operation in groups.keys.filter({ !retained.contains($0) }) {
+        for operation in groups.keys.filter({ !retained.contains($0) && !pausedCleanup.contains($0) }) {
             guard !Task.isCancelled, working.insert(operation).inserted else { continue }
             defer { working.remove(operation) }
             guard var group = groups[operation] else { continue }
@@ -157,6 +162,10 @@ actor QueuedReplyUploads {
                     try save(group, for: operation)
                 } catch where Task.isCancelled {
                     return failures
+                } catch let error as APIError where error.token == .internalError {
+                    pausedCleanup.insert(operation)
+                    failures.append(CleanupFailure(item: group.item, error: error, retryable: false))
+                    break
                 } catch {
                     failures.append(CleanupFailure(item: group.item, error: error))
                 }

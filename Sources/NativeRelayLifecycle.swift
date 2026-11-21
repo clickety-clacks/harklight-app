@@ -1064,7 +1064,8 @@ final class NativeRelayLifecycle {
             await v2FocusChannel?.retryInternalError()
             return
         }
-        try? await connection.retryInternalError(record)
+        do { try await connection.retryInternalError(record) }
+        catch { return }
         guard record.concern == .sync, v2Connection === connection else { return }
         startV2Foreground()
     }
@@ -1355,8 +1356,10 @@ final class NativeRelayLifecycle {
                 Task { @MainActor [weak self] in
                     guard let self, self.activeTransportAttemptID == attempt else { return }
                     self.confirmedRelayContext = context
-                    if self.v2Connection?.priorityLevelsEditorWasOpened == true {
-                        await self.refreshPriorityLevels(expected: context)
+                    if let connection = self.v2Connection, connection.priorityLevelsEditorWasOpened {
+                        await connection.refreshPriorityLevels(userInitiated: false)
+                        guard self.activeTransportAttemptID == attempt else { return }
+                        self.publishPriorityLevelsUpdate(for: context)
                     }
                 }
             }, onShow: { data in
