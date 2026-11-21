@@ -1,0 +1,205 @@
+import Foundation
+import Security
+
+/// The r2 client API over HTTPS (HTTP/2 where the server offers it) with the
+/// enrolled device certificate. One URLSession carries every request and the
+/// feed; requests run in parallel and none waits on another.
+public final class HTTPSClientAPITransport: ClientAPITransport, @unchecked Sendable {
+    private let baseURL: URL
+    private let session: URLSession
+
+    /// `baseURL` is the device listener, for example `https://host:port`.
+    public convenience init(baseURL: URL, clientIdentity: TrustedKeychainIdentity, trustedRootDER: Data) throws {
+        guard baseURL.scheme == "https", let host = baseURL.host?.lowercased(), !host.isEmpty else {
+            throw InstallationTransportError.invalidEndpoint
+        }
+        guard let root = SecCertificateCreateWithData(nil, trustedRootDER as CFData) else {
+            throw InstallationTransportError.invalidTrustAnchor
+        }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.tlsMinimumSupportedProtocolVersion = .TLSv12
+        configuration.httpCookieStorage = nil
+        configuration.urlCredentialStorage = nil
+        configuration.urlCache = nil
+        // The feed is held open for as long as the app is in the foreground.
+        configuration.timeoutIntervalForRequest = 60
+        configuration.timeoutIntervalForResource = .infinity
+        self.init(baseURL: baseURL, configuration: configuration,
+                  delegate: DeviceCertificateDelegate(host: host, identity: clientIdentity.value, root: root))
+    }
+
+    /// Tests supply a configuration with a stub protocol and no delegate.
+    init(baseURL: URL, configuration: URLSessionConfiguration, delegate: (any URLSessionDelegate)?) {
+        self.baseURL = baseURL
+        session = URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
+    }
+
+    deinit { session.invalidateAndCancel() }
+
+    // MARK: Requests
+
+    public func send(_ request: APIRequest) async throws -> APIResponse {
+        let (data, response) = try await session.data(for: urlRequest(for: request))
+        return try Self.response(response, body: data)
+    }
+
+    func urlRequest(for request: APIRequest, accept: String = "application/json") -> URLRequest {
+        var components = URLComponents(url: baseURL.appendingPathComponent(request.path),
+                                       resolvingAgainstBaseURL: false)!
+        if !request.query.isEmpty {
+            components.queryItems = request.query.sorted { $0.key < $1.key }
+                .map { URLQueryItem(name: $0.key, value: $0.value) }
+        }
+        var urlRequest = URLRequest(url: components.url!)
+        urlRequest.httpMethod = request.method.rawValue
+        urlRequest.httpBody = request.body
+        urlRequest.setValue(accept, forHTTPHeaderField: "Accept")
+        if let contentType = request.contentType { urlRequest.setValue(contentType, forHTTPHeaderField: "Content-Type") }
+        if let key = request.idempotencyKey {
+            urlRequest.setValue(key.uuidString.lowercased(), forHTTPHeaderField: "Idempotency-Key")
+        }
+        if let ifMatch = request.ifMatch { urlRequest.setValue(ifMatch, forHTTPHeaderField: "If-Match") }
+        return urlRequest
+    }
+
+    static func response(_ response: URLResponse, body: Data) throws -> APIResponse {
+        guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
+        let requestID = http.value(forHTTPHeaderField: "Request-Id")
+        guard (200..<300).contains(http.statusCode) else {
+            throw APIError(status: http.statusCode, body: body, requestID: requestID,
+                           retryAfter: http.value(forHTTPHeaderField: "Retry-After").flatMap(TimeInterval.init))
+        }
+        return APIResponse(status: http.statusCode, requestID: requestID, body: body,
+                           etag: http.value(forHTTPHeaderField: "ETag"),
+                           replayed: http.value(forHTTPHeaderField: "Idempotent-Replayed")?.lowercased() == "true")
+    }
+
+    // MARK: Change feed
+
+    public func changeFeed(after: Rev) -> AsyncThrowingStream<FeedEvent, any Error> {
+        var feedRequest = urlRequest(for: .get("/v2/changes", query: ["after": String(after)]),
+                                     accept: "text/event-stream")
+        // Standard SSE resume; it takes precedence over `after` on the server.
+        feedRequest.setValue(String(after), forHTTPHeaderField: "Last-Event-ID")
+        let request = feedRequest
+        let session = session
+        return AsyncThrowingStream { continuation in
+            let reading = Task {
+                do {
+                    let (bytes, response) = try await session.bytes(for: request)
+                    guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
+                    guard http.statusCode == 200 else {
+                        var body = Data()
+                        for try await byte in bytes {
+                            body.append(byte)
+                            if body.count >= 4096 { break }
+                        }
+                        _ = try Self.response(response, body: body)
+                        throw URLError(.badServerResponse)
+                    }
+                    continuation.yield(.opened(requestID: http.value(forHTTPHeaderField: "Request-Id")))
+                    var parser = ServerSentEventParser()
+                    var lines = SSELineSplitter()
+                    for try await byte in bytes {
+                        guard let line = lines.append(byte) else { continue }
+                        guard let event = parser.feed(line: line) else { continue }
+                        let feedEvent = try FeedEvent(event)
+                        continuation.yield(feedEvent)
+                        if case .closing = feedEvent { break }
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in reading.cancel() }
+        }
+    }
+
+    /// Pending the accepted schema: each change in a batch is taken to be
+    /// `{rev, kind, data}`, the same three parts a feed event carries.
+    public func changeBatch(after: Rev) async throws -> FeedBatch {
+        let response = try await send(.get("/v2/changes", query: ["after": String(after)]))
+        guard let object = try JSONSerialization.jsonObject(with: response.body) as? [String: Any],
+              let rev = object["rev"].flatMap(APIResponse.rev),
+              let changes = object["changes"] as? [[String: Any]] else {
+            throw FeedDecodingError.invalidBatch
+        }
+        let decoded = try changes.map { change -> FeedChange in
+            guard let rev = change["rev"].flatMap(APIResponse.rev), let kind = change["kind"] as? String,
+                  let data = change["data"], JSONSerialization.isValidJSONObject(data) || data is NSNull else {
+                throw FeedDecodingError.invalidBatch
+            }
+            let bytes = (try? JSONSerialization.data(withJSONObject: data, options: [.fragmentsAllowed])) ?? Data()
+            return FeedChange(rev: rev, kind: FeedChange.Kind(kind), data: bytes)
+        }
+        guard zip(decoded, decoded.dropFirst()).allSatisfy({ $0.rev < $1.rev }) else {
+            throw FeedDecodingError.outOfOrder
+        }
+        return FeedBatch(changes: decoded, rev: rev, more: (object["more"] as? Bool) ?? false)
+    }
+}
+
+/// Splits an event stream into lines on LF, CRLF or CR, keeping empty lines
+/// (they dispatch events), which `AsyncBytes.lines` would drop.
+struct SSELineSplitter {
+    private var buffer: [UInt8] = []
+    private var lastWasCR = false
+
+    mutating func append(_ byte: UInt8) -> String? {
+        if byte == 0x0A, lastWasCR {
+            lastWasCR = false
+            return nil
+        }
+        lastWasCR = byte == 0x0D
+        if byte == 0x0A || byte == 0x0D {
+            defer { buffer.removeAll(keepingCapacity: true) }
+            return String(decoding: buffer, as: UTF8.self)
+        }
+        buffer.append(byte)
+        return nil
+    }
+}
+
+/// Presents the enrolled device identity only to the configured host and
+/// trusts only the enrollment-approved root.
+private final class DeviceCertificateDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    private let host: String
+    private let identity: SecIdentity
+    private let root: SecCertificate
+
+    init(host: String, identity: SecIdentity, root: SecCertificate) {
+        self.host = host
+        self.identity = identity
+        self.root = root
+    }
+
+    func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge,
+                    completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        guard challenge.protectionSpace.host.lowercased() == host else {
+            completionHandler(.cancelAuthenticationChallenge, nil)
+            return
+        }
+        switch challenge.protectionSpace.authenticationMethod {
+        case NSURLAuthenticationMethodClientCertificate:
+            completionHandler(.useCredential, URLCredential(identity: identity, certificates: nil, persistence: .forSession))
+        case NSURLAuthenticationMethodServerTrust:
+            guard let trust = challenge.protectionSpace.serverTrust,
+                  SecTrustSetPolicies(trust, SecPolicyCreateSSL(true, host as CFString)) == errSecSuccess,
+                  SecTrustSetAnchorCertificates(trust, [root] as CFArray) == errSecSuccess,
+                  SecTrustSetAnchorCertificatesOnly(trust, true) == errSecSuccess,
+                  SecTrustEvaluateWithError(trust, nil) else {
+                completionHandler(.cancelAuthenticationChallenge, nil)
+                return
+            }
+            completionHandler(.useCredential, URLCredential(trust: trust))
+        default:
+            completionHandler(.performDefaultHandling, nil)
+        }
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didReceive challenge: URLAuthenticationChallenge,
+                    completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        urlSession(session, didReceive: challenge, completionHandler: completionHandler)
+    }
+}
