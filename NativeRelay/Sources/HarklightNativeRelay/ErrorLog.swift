@@ -80,22 +80,29 @@ public struct ErrorLogCorrelation: Codable, Equatable, Sendable {
     public var clientOperationID: UUID?
     /// The server's `Request-Id` response header (opaque, safe to log).
     public var requestID: String?
+    /// The opaque server id of the resource a failure is about, such as an
+    /// `item_id` (safe to log, same rule as `requestID`).
+    public var resourceID: String?
+    /// The change-log position (`rev`) of the change a failure is about.
+    public var rev: UInt64?
 
     public init(attemptID: UUID? = nil, transportAttemptID: UUID? = nil,
                 serverConnectionID: String? = nil, clientOperationID: UUID? = nil,
-                requestID: String? = nil) {
+                requestID: String? = nil, resourceID: String? = nil, rev: UInt64? = nil) {
         self.attemptID = attemptID
         self.transportAttemptID = transportAttemptID
         self.serverConnectionID = serverConnectionID.flatMap(ErrorLogRedactor.safeID)
         self.clientOperationID = clientOperationID
         self.requestID = requestID.flatMap(ErrorLogRedactor.safeID)
+        self.resourceID = resourceID.flatMap(ErrorLogRedactor.safeID)
+        self.rev = rev
     }
 
     public static let none = ErrorLogCorrelation()
 
     var isEmpty: Bool {
         attemptID == nil && transportAttemptID == nil && serverConnectionID == nil &&
-            clientOperationID == nil && requestID == nil
+            clientOperationID == nil && requestID == nil && resourceID == nil && rev == nil
     }
 }
 
@@ -429,14 +436,16 @@ public final class ErrorLogStore: ErrorLogging, @unchecked Sendable {
         let domain = ErrorLogRedactor.domainToken(report.reason.domain)
         let code = ErrorLogRedactor.reasonCode(domain: domain, code: report.reason.code)
         let operationID = report.correlation.clientOperationID
+        let resourceID = report.correlation.resourceID.flatMap(ErrorLogRedactor.safeID)
         // Repeats of the same (concern, operation, domain, code, client
-        // operation) coalesce into the newest unresolved record. A failure after
-        // a resolution is a new record.
+        // operation, resource) coalesce into the newest unresolved record. A
+        // failure after a resolution is a new record.
         if let index = stored.indices.last(where: {
             let record = stored[$0]
             return !record.isResolved && record.concern == report.concern &&
                 record.operation == operation && record.domain == domain && record.code == code &&
-                record.correlation.clientOperationID == operationID
+                record.correlation.clientOperationID == operationID &&
+                record.correlation.resourceID == resourceID
         }) {
             stored[index].lastAt = max(stored[index].lastAt, at)
             stored[index].count += 1
@@ -647,6 +656,7 @@ public final class ErrorLogStore: ErrorLogging, @unchecked Sendable {
         var correlation = record.correlation
         correlation.serverConnectionID = correlation.serverConnectionID.flatMap(ErrorLogRedactor.safeID)
         correlation.requestID = correlation.requestID.flatMap(ErrorLogRedactor.safeID)
+        correlation.resourceID = correlation.resourceID.flatMap(ErrorLogRedactor.safeID)
         copy.correlation = correlation
         return ErrorLogRecord(
             id: copy.id, occurredAt: copy.occurredAt, lastAt: copy.lastAt, count: max(copy.count, 1),
@@ -784,6 +794,8 @@ public enum ErrorLogDetails {
         }
         if let id = correlation.serverConnectionID { lines.append("server_connection_id: \(id)") }
         if let id = correlation.requestID { lines.append("request_id: \(id)") }
+        if let id = correlation.resourceID { lines.append("resource_id: \(id)") }
+        if let rev = correlation.rev { lines.append("rev: \(rev)") }
         if let id = correlation.clientOperationID {
             lines.append("client_operation_id: \(id.uuidString.lowercased())")
         }
