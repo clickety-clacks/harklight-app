@@ -427,10 +427,18 @@ private struct ConversationHistoryContent: View, Equatable {
                     ForEach(pendingSubmissions) { pending in
                         ConversationPendingSubmissionView(submission: pending,
                             isClosed: !thread.isComposerOpen,
-                            retryEnabled: store.canSendDiscussion(for: key) && !store.isSendingDiscussion(for: key, revision: pending.revision),
+                            retryEnabled: pending.isQueued
+                                ? store.canRetryQueuedChatMessage(pending.id, for: key)
+                                : store.canSendDiscussion(for: key) && !store.isSendingDiscussion(for: key, revision: pending.revision),
                             editEnabled: store.canEditDiscussionDraft(for: key),
-                            retry: { store.sendDiscussion(for: key, revision: pending.revision) },
-                            edit: { store.editRejectedDiscussion(for: key, revision: pending.revision) },
+                            retry: {
+                                if pending.isQueued { store.retryQueuedChatMessage(pending.id, for: key) }
+                                else { store.sendDiscussion(for: key, revision: pending.revision) }
+                            },
+                            edit: {
+                                if pending.isQueued { store.editQueuedChatMessage(pending.id, for: key) }
+                                else { store.editRejectedDiscussion(for: key, revision: pending.revision) }
+                            },
                             inspect: { file in inspect(file, pending.revision) })
                         .id(pending.id)
                     }
@@ -608,11 +616,16 @@ struct ConversationPendingSubmission: Identifiable, Equatable {
     let text: ExactText
     let files: [ConversationFile]
     let disposition: ConversationDraft.Disposition
+    /// A client API v2 chat message: Retry and Edit act on it by its id.
+    var isQueued = false
 
     static func rows(in thread: ConversationThread) -> [Self] {
         let replayedOperations = Set(thread.turns.compactMap(\.operationID))
         let replayedTurns = Set(thread.turns.map(\.id))
-        return thread.drafts.values.compactMap { draft -> Self? in
+        let queuedOperations = Set((thread.queuedMessages ?? []).compactMap(\.operationID))
+        let queued = thread.queuedMessages ?? []
+        return (thread.drafts.values.sorted { $0.binding.revision < $1.binding.revision } + queued)
+            .compactMap { draft -> Self? in
             let operation: UUID
             switch draft.disposition {
             case .saved: return nil
@@ -626,8 +639,9 @@ struct ConversationPendingSubmission: Identifiable, Equatable {
             }
             guard !replayedOperations.contains(operation) else { return nil }
             return Self(id: operation, revision: draft.binding.revision, text: draft.text,
-                        files: draft.files, disposition: draft.disposition)
-        }.sorted { $0.revision < $1.revision }
+                        files: draft.files, disposition: draft.disposition,
+                        isQueued: queuedOperations.contains(operation) && draft.operationID == operation)
+        }
     }
 }
 

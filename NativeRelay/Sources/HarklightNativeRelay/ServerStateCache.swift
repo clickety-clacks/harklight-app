@@ -91,6 +91,8 @@ public struct ServerStateCacheSnapshot: Codable, Equatable, Sendable {
                 thread.answerDrafts = nil
                 thread.uploadGroups = nil
                 thread.uploadCleanups = nil
+                // Queued v2 chat text is the person's pending work, not server data.
+                thread.queuedMessages = nil
                 // Save only the server's confirmed read position. A queued read
                 // lives in the pending-action queue, not in the server cache.
                 if conversations.chatReadPositionSupport == true {

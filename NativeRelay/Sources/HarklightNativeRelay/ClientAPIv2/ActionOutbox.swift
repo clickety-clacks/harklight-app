@@ -116,9 +116,25 @@ public actor ActionOutbox {
     /// Records the intent durably, minting its key once, and sends it. If the
     /// record cannot be saved, nothing is sent and the error is thrown.
     @discardableResult
+    /// `idempotencyKey` is the operation id minted when the person acted, when
+    /// the app already saved one (for example a queued chat message).
     public func submit(target: String, operation: String, write: FrozenWrite,
-                       now: Date = Date()) async throws -> OutboxEntry {
-        let entry = OutboxEntry(idempotencyKey: UUID(), target: target, operation: operation, write: write,
+                       idempotencyKey: UUID = UUID(), now: Date = Date()) async throws -> OutboxEntry {
+        if let existing = entries.first(where: { $0.idempotencyKey == idempotencyKey }) {
+            // Handing a pending write over again queues it once. Handing over
+            // a refused one is the person's Retry: the server stores only
+            // successes, so the same key is evaluated again.
+            guard existing.failure != nil else { return existing }
+            var next = entries
+            guard let index = next.firstIndex(where: { $0.id == existing.id }) else { return existing }
+            next[index].failure = nil
+            next[index].outsideContractFailures = nil
+            try persistence.save(next)
+            entries = next
+            startSending(existing.target)
+            return next[index]
+        }
+        let entry = OutboxEntry(idempotencyKey: idempotencyKey, target: target, operation: operation, write: write,
                                 createdAt: now, outcomeUnknown: false, attempts: 0)
         var next = entries
         next.append(entry)

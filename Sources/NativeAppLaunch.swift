@@ -1419,6 +1419,9 @@ final class LivePresentationStore {
         return conversationAvailability.message(for: profileContext)
     }
     private var sendingDiscussionBindings: Set<ConversationBinding> = []
+    /// Client API v2: receives each queued chat message for the outbox. Set by
+    /// the v2 lifecycle; nil under the current protocol.
+    @ObservationIgnored var chatMessageQueued: ((ConversationDraft) -> Void)?
 
     func isSendingDiscussion(for key: RequestKey, revision: UInt64) -> Bool {
         sendingDiscussionBindings.contains(ConversationBinding(request: key, revision: revision))
@@ -2366,6 +2369,18 @@ final class LivePresentationStore {
                 return
             }
             let binding = ConversationBinding(request: key, revision: revision)
+            if thread.chatNeverCloses == true {
+                // Client API v2 (APP-07): each message is its own operation.
+                // It is saved with its id, the composer empties and stays
+                // enabled, and the message is handed to the outbox; nothing
+                // waits for an earlier message to finish.
+                let message = try attentionStore.queueChatMessage(binding, context: profileContext)
+                if conversationEditErrorBinding == binding { conversationError = nil }
+                try refreshFromDurableStore()
+                onQueued?()
+                chatMessageQueued?(message)
+                return
+            }
             if permitsDelivery {
                 guard !sendingDiscussionBindings.contains(binding), let files = conversationFiles else { return }
                 let context = profileContext
@@ -2433,6 +2448,45 @@ final class LivePresentationStore {
             diagnose(.conversation, .discussionSubmission, .failed, error: error,
                      operationID: discussionOperationID(for: key, revision: revision),
                      request: key, revision: revision, receiptState: .unknown)
+            do { try refreshFromDurableStore() }
+            catch { diagnose(.localStore, .projectionRefresh, .failed, error: error, request: key) }
+        }
+    }
+
+    /// Client API v2: Retry of a refused queued chat message, by its id.
+    func canRetryQueuedChatMessage(_ operation: UUID, for key: RequestKey) -> Bool {
+        guard canSendToCurrentServer, !isReadOnly, let thread = conversationThreads[key],
+              thread.isComposerOpen,
+              let message = thread.queuedMessages?.first(where: { $0.operationID == operation }),
+              case .rejected = message.disposition else { return false }
+        return true
+    }
+
+    func retryQueuedChatMessage(_ operation: UUID, for key: RequestKey) {
+        guard canRetryQueuedChatMessage(operation, for: key) else { return }
+        do {
+            let message = try attentionStore.retryQueuedChatMessage(operation, in: key, context: profileContext)
+            try refreshFromDurableStore()
+            chatMessageQueued?(message)
+        } catch {
+            conversationError = "Your message could not be sent again. It is still saved."
+            diagnose(.conversation, .discussionSubmission, .failed, error: error, operationID: operation, request: key)
+            do { try refreshFromDurableStore() }
+            catch { diagnose(.localStore, .projectionRefresh, .failed, error: error, request: key) }
+        }
+    }
+
+    /// Client API v2: Edit of a refused queued chat message, by its id. Its
+    /// text and files return to the composer.
+    func editQueuedChatMessage(_ operation: UUID, for key: RequestKey) {
+        guard !isReadOnly else { return }
+        do {
+            try attentionStore.editQueuedChatMessage(operation, in: key, context: profileContext)
+            conversationError = nil
+            try refreshFromDurableStore()
+        } catch {
+            conversationError = "Your message could not be opened for editing. It is still saved."
+            diagnose(.localStore, .draftSave, .failed, error: error, request: key)
             do { try refreshFromDurableStore() }
             catch { diagnose(.localStore, .projectionRefresh, .failed, error: error, request: key) }
         }
