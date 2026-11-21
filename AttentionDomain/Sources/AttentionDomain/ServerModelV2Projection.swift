@@ -269,6 +269,7 @@ public final class ServerModelV2Presentation: @unchecked Sendable {
     }
 
     public var hasRules: Bool { lock.withLock { me != nil } }
+    public var uploadCap: APIUploadCap? { lock.withLock { me?.uploadCap } }
 
     public func cachedState(_ model: ServerModelV2, identity: ProfileIdentity) throws -> CachedAttentionServerState {
         guard hasRules else { throw PresentationError.rulesNotRead }

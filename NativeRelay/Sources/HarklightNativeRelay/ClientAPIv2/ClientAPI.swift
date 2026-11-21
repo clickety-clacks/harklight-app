@@ -12,12 +12,18 @@ public typealias Rev = UInt64
 public struct APIRequest: Equatable, Sendable {
     public enum Method: String, Codable, Sendable { case get = "GET", post = "POST", put = "PUT", delete = "DELETE" }
 
+    struct FileBody: Equatable, Sendable {
+        let url: URL
+        let byteCount: UInt64
+    }
+
     public var method: Method
     /// Path below the API root, for example `/v2/inbox`, already
     /// percent-encoded: an opaque id is encoded once, where it is inserted.
     public var path: String
     public var query: [String: String]
     public var body: Data?
+    var fileBody: FileBody? = nil
     public var contentType: String?
     public var contentDisposition: String?
     public var accept: String?

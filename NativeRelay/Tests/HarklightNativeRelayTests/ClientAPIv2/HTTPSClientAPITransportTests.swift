@@ -197,6 +197,22 @@ final class HTTPSClientAPITransportTests: XCTestCase {
         }
     }
 
+    func testAFileUploadSendsTheRetainedBytesDirectlyFromDisk() async throws {
+        let server = StagedFileFixture()
+        let api = transport(server.respond)
+        let source = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try server.bytes.write(to: source, options: .atomic)
+        defer { try? FileManager.default.removeItem(at: source) }
+        let upload = try await ClientAPIFiles(transport: api).upload(from: source,
+            byteCount: UInt64(server.bytes.count), name: ExactText("café 100%.bin"),
+            contentType: "application/octet-stream", idempotencyKey: UUID())
+        XCTAssertEqual(upload.handle.value, ExactText("staged/1"))
+        let sent = try XCTUnwrap(StubURLProtocol.lock.withLock { StubURLProtocol.seen.first })
+        XCTAssertEqual(sent.value(forHTTPHeaderField: "Content-Length"), String(server.bytes.count))
+        XCTAssertEqual(sent.value(forHTTPHeaderField: "Content-Disposition"),
+                       "attachment; filename*=UTF-8''caf%C3%A9%20100%25.bin")
+    }
+
     func testPreviouslySavedFileRefStillDecodesWithATypedDownloadID() throws {
         let legacy = Data(#"{"fileID":{"rawValue":"download/1"},"name":{"rawValue":"file.bin"},"size":3,"sha256":"hash"}"#.utf8)
         let ref = try JSONDecoder().decode(APIFileRef.self, from: legacy)

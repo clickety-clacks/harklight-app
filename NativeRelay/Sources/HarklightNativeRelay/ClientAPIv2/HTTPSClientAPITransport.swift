@@ -39,7 +39,13 @@ public final class HTTPSClientAPITransport: ClientAPITransport, @unchecked Senda
     // MARK: Requests
 
     public func send(_ request: APIRequest) async throws -> APIResponse {
-        let (data, response) = try await session.data(for: urlRequest(for: request))
+        let urlRequest = urlRequest(for: request)
+        let (data, response): (Data, URLResponse)
+        if let file = request.fileBody {
+            (data, response) = try await session.upload(for: urlRequest, fromFile: file.url)
+        } else {
+            (data, response) = try await session.data(for: urlRequest)
+        }
         return try Self.response(response, body: data)
     }
 
@@ -61,7 +67,9 @@ public final class HTTPSClientAPITransport: ClientAPITransport, @unchecked Senda
         if let contentType = request.contentType { urlRequest.setValue(contentType, forHTTPHeaderField: "Content-Type") }
         if let disposition = request.contentDisposition {
             urlRequest.setValue(disposition, forHTTPHeaderField: "Content-Disposition")
-            if let body = request.body {
+            if let fileBody = request.fileBody {
+                urlRequest.setValue(String(fileBody.byteCount), forHTTPHeaderField: "Content-Length")
+            } else if let body = request.body {
                 urlRequest.setValue(String(body.count), forHTTPHeaderField: "Content-Length")
             }
         }
