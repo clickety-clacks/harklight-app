@@ -31,9 +31,27 @@ struct NewMessageAreaLedger: Codable, Equatable, Sendable {
     private(set) var highestAcceptanceOrderByAccount: [ExactText: UInt64] = [:]
     private(set) var knownMessageKeys: Set<RequestKey> = []
     private(set) var entriesByKey: [RequestKey: NewMessageAreaEntry] = [:]
+    /// The protocol each account's baseline was taken under. Optional so saved
+    /// ledgers stay readable; absent means today's protocol.
+    private(set) var baselineProtocolByAccount: [ExactText: String]? = nil
 
     var entries: [NewMessageAreaEntry] {
         entriesByKey.values.sorted(by: Self.isNewer)
+    }
+
+    /// Starts this account's baseline over when it moves to another protocol
+    /// (the client API v2 switch changes every key and order). Messages held
+    /// at the next reconcile become the baseline, so only later arrivals are
+    /// new. Calling it again for the same protocol does nothing.
+    mutating func resetBaseline(for account: ExactText, protocolID: String) {
+        guard (baselineProtocolByAccount?[account] ?? "v1") != protocolID else { return }
+        baselineEstablishedAccounts.remove(account)
+        highestAcceptanceOrderByAccount[account] = nil
+        knownMessageKeys = knownMessageKeys.filter { $0.accountScope != account }
+        entriesByKey = entriesByKey.filter { $0.key.accountScope != account }
+        var protocols = baselineProtocolByAccount ?? [:]
+        protocols[account] = protocolID
+        baselineProtocolByAccount = protocols
     }
 
     var nextExpiry: Date? {
@@ -222,6 +240,16 @@ final class NewMessageAreaStore {
         }
         if ledger != previousLedger { persist() }
         reconciliationGeneration &+= 1
+    }
+
+    /// See `NewMessageAreaLedger.resetBaseline(for:protocolID:)`.
+    func resetBaseline(for account: ExactText, protocolID: String) {
+        let previousLedger = ledger
+        ledger.resetBaseline(for: account, protocolID: protocolID)
+        for key in Set(previousLedger.entriesByKey.keys).subtracting(ledger.entriesByKey.keys) {
+            cancelSummaries(for: key)
+        }
+        if ledger != previousLedger { persist() }
     }
 
     nonisolated static func prepareReconciliation(

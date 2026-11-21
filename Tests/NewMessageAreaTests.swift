@@ -180,3 +180,61 @@ final class NewMessageAreaTests: XCTestCase {
         XCTAssertEqual(NewMessageAreaSummaryText.fallback(""), "")
     }
 }
+
+/// #377 review M-8: at the switch to the client API v2 every key and order
+/// changes, so each account's baseline starts over; only later arrivals are new.
+final class NewMessageAreaProtocolSwitchTests: XCTestCase {
+    private let account = ExactText("account")
+
+    private func message(_ id: String, order: UInt64) -> NewMessageAreaMessage {
+        NewMessageAreaMessage(key: RequestKey(accountScope: account, senderID: ExactText("agent"),
+                                              messageID: ExactText(id)),
+                              acceptanceOrder: order, isResolved: false, hasSubmittedAnswer: false)
+    }
+
+    func testTheSwitchDoesNotFloodNewMessagesAndLaterArrivalsStillShow() {
+        var ledger = NewMessageAreaLedger()
+        ledger.reconcile([message("old-1", order: 10)], accountScopes: [account], now: .now)
+        ledger.reconcile([message("old-1", order: 10), message("old-2", order: 11)], accountScopes: [account], now: .now)
+        XCTAssertEqual(ledger.entries.map(\.key.messageID.rawValue), ["old-2"])
+
+        // The v2 switch: the same messages arrive under item ids, at v2 orders.
+        ledger.resetBaseline(for: account, protocolID: "v2")
+        let v2Existing = [message("item-a", order: (1 << 40) + 5), message("item-b", order: (1 << 40) + 6)]
+        ledger.reconcile(v2Existing, accountScopes: [account], now: .now)
+        XCTAssertTrue(ledger.entries.isEmpty, "Messages already held at the switch are not new.")
+
+        ledger.reconcile(v2Existing + [message("item-c", order: (1 << 40) + 7)], accountScopes: [account], now: .now)
+        XCTAssertEqual(ledger.entries.map(\.key.messageID.rawValue), ["item-c"], "A later arrival is new.")
+
+        ledger.resetBaseline(for: account, protocolID: "v2")
+        XCTAssertEqual(ledger.entries.map(\.key.messageID.rawValue), ["item-c"], "Resetting again does nothing.")
+    }
+
+    func testTheReplyAreaBaselineAlsoStartsOverAtTheSwitch() {
+        var ledger = ReplyItemLedger()
+        let v1Parent = RequestKey(accountScope: account, senderID: ExactText("agent"), messageID: ExactText("m"))
+        ledger.reconcile([ReplyItemObservation(parent: v1Parent, turnID: ExactText("t1"), conversationSequence: 4,
+                                               isSeen: false, text: "hi")], accountScopes: [account], now: .now)
+        ledger.resetBaseline(for: account, protocolID: "v2")
+        let v2Parent = RequestKey(accountScope: account, senderID: ExactText("agent"), messageID: ExactText("item-m"))
+        let held = ReplyItemObservation(parent: v2Parent, turnID: ExactText("e1"), conversationSequence: 1,
+                                        isSeen: false, text: "hi")
+        ledger.reconcile([held], accountScopes: [account], now: .now)
+        XCTAssertTrue(ledger.entries.isEmpty, "Replies already held at the switch are not new.")
+        ledger.reconcile([held, ReplyItemObservation(parent: v2Parent, turnID: ExactText("e2"), conversationSequence: 2,
+                                                     isSeen: false, text: "again")],
+                         accountScopes: [account], now: .now)
+        XCTAssertEqual(ledger.entries.first?.unseenReplies.map(\.turnID.rawValue), ["e2"])
+    }
+
+    func testASavedLedgerFromBeforeTheSwitchStillLoads() throws {
+        var ledger = NewMessageAreaLedger()
+        ledger.reconcile([message("old-1", order: 10)], accountScopes: [account], now: .now)
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(ledger)) as? [String: Any])
+        object.removeValue(forKey: "baselineProtocolByAccount")
+        let decoded = try JSONDecoder().decode(NewMessageAreaLedger.self,
+                                               from: JSONSerialization.data(withJSONObject: object))
+        XCTAssertEqual(decoded.baselineEstablishedAccounts, [account])
+    }
+}
