@@ -91,8 +91,11 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
         let response = try await transport.send(.get("/v2/me"))
         let me = try APIMe(json: JSONValue.parse(response.body))
         if let meURL {
-            do { try response.body.write(to: meURL, options: .atomic) } catch {
-                errors.report(ErrorLogReport(concern: .snapshot, connectionRole: .request, operation: "me",
+            do {
+                try response.body.write(to: meURL, options: .atomic)
+                errors.resolve(concern: .snapshot, operation: "me_save")
+            } catch {
+                errors.report(ErrorLogReport(concern: .snapshot, connectionRole: .request, operation: "me_save",
                     phase: "save", reason: .from(error: error), initiator: .unknown, retryable: true))
             }
         }

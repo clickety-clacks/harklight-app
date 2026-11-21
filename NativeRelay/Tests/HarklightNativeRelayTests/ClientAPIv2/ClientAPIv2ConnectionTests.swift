@@ -153,6 +153,29 @@ final class ClientAPIv2ConnectionTests: XCTestCase {
         run.cancel()
     }
 
+    func testReadingRulesLeavesACacheSaveFailureOpenUntilASaveSucceeds() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let cache = directory.appendingPathComponent("me-v2.json")
+        try FileManager.default.createDirectory(at: cache, withIntermediateDirectories: true)
+
+        let repository = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        let errors = RecordingErrorLogV2()
+        let v2 = try connection(WithMe(FakeClientAPIServer(), me: me), repository,
+                                directory: directory, errors: errors)
+        try await v2.refreshMe()
+
+        XCTAssertEqual(errors.reports.filter { $0.operation == "me_save" && $0.phase == "save" }.count, 1)
+        XCTAssertTrue(errors.resolutions.contains("snapshot.me"))
+        XCTAssertFalse(errors.resolutions.contains("snapshot.me_save"))
+
+        try FileManager.default.removeItem(at: cache)
+        try await v2.refreshMe()
+
+        XCTAssertEqual(try Data(contentsOf: cache), Data(me.utf8))
+        XCTAssertTrue(errors.resolutions.contains("snapshot.me_save"))
+    }
+
     /// #393 review M2 (L-29): writes saved before a relaunch are sent once,
     /// under their saved keys, when the connection starts; refused ones stay
     /// failed until the person retries.
