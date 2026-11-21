@@ -4,6 +4,30 @@ import Foundation
 import XCTest
 
 final class ClientAPIPushTests: XCTestCase {
+    func testPushSettingsFailureRecordsRequestAndStatusUntilAReadSucceeds() async throws {
+        let transport = PushSettingsTransport()
+        await transport.failNextSettingsRead()
+        let errors = RecordingErrorLogV2()
+        let push = ClientAPIPush(transport: transport, errors: errors)
+        do {
+            _ = try await push.status()
+            XCTFail("The first settings read returns 503.")
+        } catch let error as APIError {
+            XCTAssertEqual(error.status, 503)
+            XCTAssertEqual(error.requestID, "push-settings-unavailable")
+        }
+        let report = try XCTUnwrap(errors.reports.first)
+        XCTAssertEqual(report.operation, "push_registration")
+        XCTAssertEqual(report.correlation.resourceID, "push_registration")
+        XCTAssertEqual(report.correlation.requestID, "push-settings-unavailable")
+        XCTAssertEqual(report.httpStatus, 503)
+        XCTAssertTrue(report.retryable)
+        XCTAssertTrue(errors.resolutions.isEmpty)
+
+        _ = try await push.status()
+        XCTAssertEqual(errors.resolutions, ["snapshot.push_registration"])
+    }
+
     @MainActor
     func testProtectedRegistrationSavesReplacementBeforeSendingAndReplaysALostResponse() async throws {
         let transport = PushSettingsTransport()
@@ -241,9 +265,14 @@ private actor PushSettingsTransport: ClientAPITransport {
     private var environment: String? = "production"
     private var receipts: [UUID: Data] = [:]
     private var loseRegistrationResponse = false
+    private var failSettingsRead = false
 
     func loseNextSuccessfulRegistrationResponse() {
         loseRegistrationResponse = true
+    }
+
+    func failNextSettingsRead() {
+        failSettingsRead = true
     }
 
     func send(_ request: APIRequest) async throws -> APIResponse {
@@ -255,7 +284,12 @@ private actor PushSettingsTransport: ClientAPITransport {
         case (.get, "/v2/me"):
             let body = #"{"account":{"state":"active"},"features":{},"limits":{},"server":{"id":"server"},"principal":{"person_id":"person","device_id":"device"}}"#
             return APIResponse(status: 200, requestID: "me", body: Data(body.utf8))
-        case (.get, "/v2/settings"): break
+        case (.get, "/v2/settings"):
+            if failSettingsRead {
+                failSettingsRead = false
+                throw APIError(status: 503, token: .storageUnavailable, retryable: true,
+                               requestID: "push-settings-unavailable")
+            }
         case (.put, "/v2/devices/me/push"):
             let body = try JSONValue.parse(XCTUnwrap(request.body))
             let upcoming = try XCTUnwrap(body.uniqueValue(named: "revision")?.integerValue)

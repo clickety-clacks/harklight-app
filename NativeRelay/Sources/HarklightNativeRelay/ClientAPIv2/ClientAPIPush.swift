@@ -20,7 +20,21 @@ public struct ClientAPIPush: Sendable {
     }
 
     public func status() async throws -> APIPushStatus {
-        try await request(.get("/v2/settings"))
+        do {
+            let status = try await request(.get("/v2/settings"))
+            errors.resolve(concern: .snapshot, operation: "push_registration")
+            return status
+        } catch where Task.isCancelled || error is CancellationError {
+            throw error
+        } catch {
+            let api = error as? APIError
+            errors.report(ErrorLogReport(concern: .snapshot, connectionRole: .request,
+                operation: "push_registration", phase: "read", reason: .api(error),
+                initiator: .forFailure(error), retryable: api?.retryable ?? true,
+                correlation: ErrorLogCorrelation(requestID: api?.requestID, resourceID: "push_registration"),
+                httpStatus: api?.status))
+            throw error
+        }
     }
 
     public func register(token: ExactText, environment: APIPushEnvironment,
