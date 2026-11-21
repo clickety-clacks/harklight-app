@@ -373,8 +373,8 @@ final class ServerSentEventParserTests: XCTestCase {
         let parsed = events([": heartbeat", "", "id: 7", "event: item", "data: {\"a\":", "data: 1}", "",
                              ": heartbeat", "", "id: 8", "event: entry", "data:{}", ""])
         XCTAssertEqual(parsed, [
-            ServerSentEvent(id: "7", event: "item", data: "{\"a\":\n1}"),
-            ServerSentEvent(id: "8", event: "entry", data: "{}")
+            ServerSentEvent(id: "7", event: "item", data: "{\"a\":\n1}", hasExplicitID: true),
+            ServerSentEvent(id: "8", event: "entry", data: "{}", hasExplicitID: true)
         ])
     }
 
@@ -383,17 +383,19 @@ final class ServerSentEventParserTests: XCTestCase {
         XCTAssertNil(parser.feed(line: "id: 3"))
         XCTAssertNil(parser.feed(line: ""), "No data, no event.")
         XCTAssertNil(parser.feed(line: "data: x"))
-        XCTAssertEqual(parser.feed(line: ""), ServerSentEvent(id: "3", event: "message", data: "x"))
+        XCTAssertEqual(parser.feed(line: ""), ServerSentEvent(id: "3", event: "message", data: "x",
+                                                              hasExplicitID: false))
         XCTAssertEqual(parser.lastEventID, "3", "A reconnect resumes from the last id.")
     }
 
     func testFeedEventsMapRevKindAndClosingReason() throws {
-        XCTAssertEqual(try FeedEvent(ServerSentEvent(id: "12", event: "item", data: "{}")),
+        XCTAssertEqual(try FeedEvent(ServerSentEvent(id: "12", event: "item", data: "{}", hasExplicitID: true)),
                        .change(FeedChange(rev: 12, kind: .item, data: Data("{}".utf8))))
-        XCTAssertEqual(try FeedEvent(ServerSentEvent(id: nil, event: "closing", data: #"{"reason":"revoked"}"#)),
+        XCTAssertEqual(try FeedEvent(ServerSentEvent(id: nil, event: "closing", data: #"{"reason":"revoked"}"#,
+                                                   hasExplicitID: false)),
                        .closing(reason: "revoked"))
-        XCTAssertThrowsError(try FeedEvent(ServerSentEvent(id: "x", event: "item", data: "{}")))
-        XCTAssertEqual(try FeedEvent(ServerSentEvent(id: nil, event: "heartbeat", data: "{}")), .heartbeat,
+        XCTAssertThrowsError(try FeedEvent(ServerSentEvent(id: "x", event: "item", data: "{}", hasExplicitID: true)))
+        XCTAssertEqual(try FeedEvent(ServerSentEvent(id: nil, event: "heartbeat", data: "{}", hasExplicitID: false)), .heartbeat,
                        "A heartbeat has no id and is not a change.")
     }
 

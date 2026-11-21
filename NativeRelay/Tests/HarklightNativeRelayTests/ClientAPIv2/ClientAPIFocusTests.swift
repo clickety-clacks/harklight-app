@@ -246,7 +246,7 @@ final class ClientAPIFocusTests: XCTestCase {
     }
 
     func testAShowEventOnTheFeedHasNoIdAndNeverMovesTheCursor() async throws {
-        XCTAssertEqual(try FeedEvent(ServerSentEvent(id: nil, event: "show", data: showJSON)),
+        XCTAssertEqual(try FeedEvent(ServerSentEvent(id: nil, event: "show", data: showJSON, hasExplicitID: false)),
                        .show(Data(showJSON.utf8)), "An id-less show is not a malformed change.")
 
         let server = FakeClientAPIServer()
