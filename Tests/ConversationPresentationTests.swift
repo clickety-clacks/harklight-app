@@ -1911,3 +1911,25 @@ extension ConversationPresentationTests {
         XCTAssertEqual(row.openTargetTurnID, ExactText("r2"))
     }
 }
+
+extension ConversationPresentationTests {
+    /// APP-06/APP-05 through the presentation store: a v2 item that has
+    /// expired, whose agent is not listening, still offers its chat draft.
+    func testV2ChatOffersTheComposerWhenExpiredAndTheAgentIsNotListening() throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+            personID: ExactText("person"), deviceID: ExactText("device"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let domain = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        let item = #"{"item_id":"v2-item","rev":3,"sender":"agent-app","request_revision":1,"message":{"title":"Question"},"files":[],"seen":false,"chat":{"available":true,"started":true},"availability":{"state":"not_listening"},"terminal":{"state":"expired","at_ms":9},"rank":{"key":"a","section":"resolved"}}"#
+        var model = ServerModelV2()
+        _ = model.putForTesting(try APIItem(json: JSONValue.parse(Data(item.utf8))))
+        try domain.restoreCachedServerState(ServerModelV2Projection.cachedState(model, identity: identity),
+                                            context: context)
+        let presentation = try LivePresentationStore(store: domain, context: context)
+        let key = RequestKey(accountScope: identity.personID, senderID: ExactText("agent-app"),
+                             messageID: ExactText("v2-item"))
+        XCTAssertTrue(presentation.canEditDiscussionDraft(for: key),
+                      "Chat is never closed by the item's state under the v2 rules.")
+        XCTAssertTrue(presentation.updateConversation(for: key, revision: 1, text: "Still here", files: []))
+    }
+}

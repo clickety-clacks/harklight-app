@@ -459,6 +459,11 @@ public struct ConversationThread: Equatable, Codable, Sendable {
     public var uploadCleanups: [UUID: ConversationUploadCleanup]?
     /// The account-wide read position reported by the server.
     public var accountReadThroughConversationSequence: UInt64?
+    /// Client API v2 chat rules (product rulings APP-05 and APP-06): chat is
+    /// never closed by the item's state or by the agent's availability. Set
+    /// only on threads from the v2 projection, so the current protocol keeps
+    /// today's rules. Optional so existing saved state stays readable.
+    public var chatNeverCloses: Bool?
 
     mutating func recordAvailabilityUpdate(_ state: ConversationAvailability) {
         availability = state
@@ -492,9 +497,16 @@ public struct ConversationThread: Equatable, Codable, Sendable {
 
     /// Answering the request ends its answer flow, not its separate Chat.
     public var allowsDiscussion: Bool {
+        if chatNeverCloses == true { return true }
         guard !isRetracted else { return false }
         guard let terminal else { return true }
         return terminal == .answered || terminal == .noComment
+    }
+
+    /// Whether the composer is offered: today, only while the request is open
+    /// and discussion is allowed; under the v2 chat rules, always.
+    public var isComposerOpen: Bool {
+        chatNeverCloses == true || (terminal == nil && allowsDiscussion)
     }
 
     public var revisionNumbers: [UInt64] { Set(revisions.keys).union(redactedRevisions ?? []).sorted() }
