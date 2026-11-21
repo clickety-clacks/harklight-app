@@ -116,12 +116,19 @@ actor QueuedReplyUploads {
 
     /// An edit or cancellation removes the old queued reply. Recover unknown
     /// uploads first, then DELETE them without creating any fresh uploads.
-    func discardAbandoned(keeping retained: Set<UUID>) async -> [CleanupFailure] {
+    func discardAbandoned(keeping retained: Set<UUID>,
+                          stillQueued: @Sendable (UUID) throws -> Bool = { _ in false }) async -> [CleanupFailure] {
         var failures: [CleanupFailure] = []
         for operation in groups.keys.filter({ !retained.contains($0) }) {
             guard !Task.isCancelled, working.insert(operation).inserted else { continue }
             defer { working.remove(operation) }
             guard var group = groups[operation] else { continue }
+            do {
+                guard try !stillQueued(operation) else { continue }
+            } catch {
+                failures.append(CleanupFailure(item: group.item, error: error))
+                continue
+            }
             for index in group.uploads.indices where group.uploads[index].attempted {
                 let input = group.uploads[index]
                 do {

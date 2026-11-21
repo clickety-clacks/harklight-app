@@ -304,30 +304,66 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
     }
 
     private func sendQueuedRepliesWhileForeground(_ signals: AsyncStream<Void>) async {
+        let (cleanup, cleanupSignal) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        await withTaskGroup(of: Void.self) { group in
+            var items: [ExactText: AsyncStream<Void>.Continuation] = [:]
+            group.addTask {
+                await self.retryOnReplySignals(cleanup) { await self.discardAbandonedReplyUploads() }
+            }
+            for await _ in signals {
+                do {
+                    let queued = try repository.queuedChatMessages(context: context)
+                    for item in Set(queued.map { $0.binding.request.messageID }) {
+                        if let signal = items[item] {
+                            signal.yield(())
+                            continue
+                        }
+                        let (work, signal) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+                        items[item] = signal
+                        signal.yield(())
+                        group.addTask {
+                            await self.retryOnReplySignals(work) {
+                                let retry = await self.recoverQueuedReplies(for: item)
+                                cleanupSignal.yield(())
+                                return retry
+                            }
+                        }
+                    }
+                } catch {
+                    reportReplyRecovery(error)
+                }
+                cleanupSignal.yield(())
+            }
+            for signal in items.values { signal.finish() }
+            cleanupSignal.finish()
+            group.cancelAll()
+        }
+    }
+
+    private func retryOnReplySignals(_ signals: AsyncStream<Void>,
+                                     retryWork: () async -> Bool) async {
         for await _ in signals {
             var attempt = 0
-            while !Task.isCancelled, await recoverQueuedReplies() {
+            while !Task.isCancelled, await retryWork() {
                 attempt += 1
                 do { try await replyWaitBeforeRetry(attempt) } catch { return }
             }
         }
     }
 
-    private func recoverQueuedReplies() async -> Bool {
+    private func recoverQueuedReplies(for item: ExactText) async -> Bool {
         do {
             let messages = try repository.queuedChatMessages(context: context)
+                .filter { $0.binding.request.messageID == item }
                 .sorted { ($0.submittedAt ?? .distantPast) < ($1.submittedAt ?? .distantPast) }
-            var blockedItems = Set<ExactText>()
-            var retry = false
             for message in messages {
                 try Task.checkCancellation()
-                let item = message.binding.request.messageID
-                guard !blockedItems.contains(item), let operation = message.operationID else { continue }
+                guard let operation = message.operationID else { continue }
                 switch message.disposition {
                 case .submitting, .outcomeUnknown:
                     if !message.files.isEmpty, !presentation.hasRules {
-                        blockedItems.insert(item)
-                        continue
+                        // Reading /me wakes this item when its rules are available.
+                        return false
                     }
                     do {
                         try await submitQueuedReply(message, retryRefused: false)
@@ -341,7 +377,7 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
                         reportUpload(error, operation: "stage_reply_upload", item: item, retryable: !permanent)
                         if permanent {
                             let reason: String
-                            if case .uploadCapExceeded = error as? ConversationError {
+                            if case .uploadCapExceeded? = error as? ConversationError {
                                 reason = APIErrorToken.payloadTooLarge.rawValue
                             } else {
                                 reason = (error as? APIError)?.token.rawValue ?? "attachment_failed"
@@ -349,32 +385,40 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
                             try repository.recordQueuedChatMessage(operation, in: message.binding.request,
                                 disposition: .rejected(ExactText(reason)), context: context)
                         } else {
-                            blockedItems.insert(item)
-                            retry = true
+                            return true
                         }
                     }
                 case .saved, .acceptedPendingReplay, .rejected:
                     continue
                 }
             }
-            if let replyUploads {
-                let held = try repository.queuedChatMessages(context: context).compactMap(\.operationID)
-                let active = await outbox.pending.map(\.id)
-                let failures = await replyUploads.discardAbandoned(keeping: Set(held + active))
-                for failure in failures {
-                    reportUpload(failure.error, operation: "discard_reply_upload", item: failure.item, retryable: true)
-                }
-                retry = retry || !failures.isEmpty
-            }
-            return retry
+            return false
         } catch is CancellationError {
             return false
         } catch {
-            errors.report(ErrorLogReport(concern: .actions, connectionRole: .request,
-                operation: "reply", phase: "restore", reason: .from(error: error),
-                initiator: .unknown, retryable: true))
+            reportReplyRecovery(error)
             return true
         }
+    }
+
+    private func discardAbandonedReplyUploads() async -> Bool {
+        guard let replyUploads else { return false }
+        let active = await outbox.pending.map(\.id)
+        let failures = await replyUploads.discardAbandoned(keeping: Set(active)) { [repository, context] operation in
+            try repository.queuedChatMessages(context: context).contains {
+                $0.operationID == operation
+            }
+        }
+        for failure in failures {
+            reportUpload(failure.error, operation: "discard_reply_upload", item: failure.item, retryable: true)
+        }
+        return !failures.isEmpty
+    }
+
+    private func reportReplyRecovery(_ error: any Error) {
+        errors.report(ErrorLogReport(concern: .actions, connectionRole: .request,
+            operation: "reply", phase: "restore", reason: .from(error: error),
+            initiator: .unknown, retryable: true))
     }
 
     private func reportUpload(_ error: any Error, operation: String, item: ExactText, retryable: Bool) {
