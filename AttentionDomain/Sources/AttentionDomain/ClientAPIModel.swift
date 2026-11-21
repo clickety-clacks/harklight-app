@@ -196,6 +196,17 @@ public struct APISettings: Equatable, Codable, Sendable {
     public let body: JSONValue
 }
 
+public enum APIPushEnvironment: String, Equatable, Sendable {
+    case production
+    case sandbox
+}
+
+public struct APIPushStatus: Equatable, Sendable {
+    public let state: String
+    public let revision: UInt64
+    public let environment: APIPushEnvironment?
+}
+
 // MARK: Decoding
 
 fileprivate struct Reader {
@@ -445,6 +456,27 @@ extension APISettings {
                                                 bounceAfterDays: days))
         }
         return PriorityLevelsTableValidation.levels(from: drafts)
+    }
+
+    public var push: APIPushStatus? {
+        guard let push = body.uniqueValue(named: "push") else { return nil }
+        return try? APIPushStatus(json: push)
+    }
+}
+
+extension APIPushStatus {
+    fileprivate init(json: JSONValue) throws {
+        let reader = try Reader(json, "settings.push")
+        state = try reader.string("state").rawValue
+        revision = try reader.unsigned("revision")
+        if let value = try reader.optionalString("environment") {
+            guard let known = APIPushEnvironment(rawValue: value.rawValue) else {
+                throw ClientAPIModelError.invalid("settings.push.environment")
+            }
+            environment = known
+        } else {
+            environment = nil
+        }
     }
 }
 
