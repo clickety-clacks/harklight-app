@@ -16,6 +16,9 @@ cleanup() {
     trap - EXIT INT TERM
     if [[ $status != 0 ]]; then
         printf 'B3 failed during %s (exit %s)\n' "$phase" "$status" >&2
+        if [[ $phase == 'seed real v2 inbox' && -f "$work/seed.log" ]]; then
+            grep -E '^curl: \([0-9]+\) (The requested URL returned error: [0-9]+|Failure when receiving data from the peer|Recv failure: Connection reset by peer)$' "$work/seed.log" || true
+        fi
         if [[ -f "$work/xctest.log" ]]; then
             grep -E 'Test Case.*B3EnrollmentProof.*(started|passed|failed)|\*\* TEST (SUCCEEDED|FAILED) \*\*' "$work/xctest.log" || true
         fi

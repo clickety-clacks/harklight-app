@@ -26,7 +26,7 @@ owner=(--connect 127.0.0.1 --name localhost --port 18445 --ca "$state/tls/ca.pem
 
 case $action in
     seed)
-        curl_cmd=(curl --silent --show-error --connect-timeout 2 --max-time 5
+        curl_cmd=(curl --http1.1 --silent --show-error --connect-timeout 2 --max-time 5
                   --resolve localhost:18444:127.0.0.1 --cacert "$state/tls/ca.pem")
         ready=''
         for ((i=0; i<25; i++)); do
@@ -45,9 +45,11 @@ case $action in
 import json, time, uuid
 print(json.dumps({"sender": "app:b3", "session": str(uuid.uuid4()),
                   "message": {"title": "B3 fixture request", "created_at": int(time.time() * 1000),
-                              "message_type": "request"}}))
+                              "message_type": "request",
+                              "answer_ui": {"schema": "attention-client.actions/1",
+                                            "actions": [{"id": "reply", "label": "Reply", "kind": "text"}]}}}))
 PY
-        curl --silent --show-error --fail --max-time 15 --resolve localhost:18443:127.0.0.1 \
+        curl --http1.1 --silent --show-error --fail --max-time 15 --resolve localhost:18443:127.0.0.1 \
             --cacert "$state/tls/ca.pem" --cert "$work/sender/identity.pem" --key "$work/sender/identity.key" \
             --header 'Content-Type: application/json' --header "Idempotency-Key: $(python3 -c 'import uuid; print(uuid.uuid4())')" \
             --data-binary "@$work/seed.json" -o "$work/seed-response.json" https://localhost:18443/v2/agent/messages
