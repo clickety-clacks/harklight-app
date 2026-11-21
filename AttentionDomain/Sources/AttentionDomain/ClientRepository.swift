@@ -3833,6 +3833,7 @@ public final class ClientRepository: @unchecked Sendable {
     /// files go back into the composer (ahead of anything already typed
     /// there, so nothing is lost) and it leaves the queue.
     public func editQueuedChatMessage(_ operation: UUID, in request: RequestKey,
+                                      allowUnsentAttachment: Bool = false,
                                       context suppliedContext: ProfileContext) throws {
         writerLock.lock()
         defer { writerLock.unlock() }
@@ -3846,7 +3847,11 @@ public final class ClientRepository: @unchecked Sendable {
               let index = queue.firstIndex(where: { $0.operationID == operation }) else {
             throw ConversationError.missingRequest
         }
-        guard case .rejected = queue[index].disposition else { throw ConversationError.closed }
+        switch queue[index].disposition {
+        case .rejected: break
+        case .submitting where allowUnsentAttachment && !queue[index].files.isEmpty: break
+        default: throw ConversationError.closed
+        }
         let message = queue.remove(at: index)
         let binding = ConversationBinding(request: request, revision: thread.currentRevision)
         var composer = thread.drafts[binding.revision] ?? ConversationDraft(binding: binding)

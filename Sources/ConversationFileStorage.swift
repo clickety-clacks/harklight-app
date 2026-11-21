@@ -55,6 +55,15 @@ struct ConversationFileStorage: Sendable {
         return directory.appendingPathComponent(name.rawValue)
     }
 
+    func verifiedUploadURL(for file: ConversationFile) throws -> URL {
+        let url = try fileURL(for: file)
+        let measured = try measuredBytes(at: url)
+        guard measured.count == file.byteCount, ExactText(measured.sha256) == file.sha256 else {
+            throw ConversationError.fileMismatch
+        }
+        return url
+    }
+
     func previewDestination(for file: ConversationFile) throws -> URL {
         guard file.name.rawValue == URL(fileURLWithPath: file.name.rawValue).lastPathComponent,
               file.sha256.rawValue.utf8.count == 64,

@@ -43,7 +43,8 @@ actor QueuedReplyUploads {
         }
     }
 
-    func prepare(_ message: ConversationDraft, operation: UUID, cap: APIUploadCap?) async throws -> [UploadHandle] {
+    func prepare(_ message: ConversationDraft, operation: UUID, cap: APIUploadCap?,
+                 stillQueued: @Sendable () throws -> Bool = { true }) async throws -> [UploadHandle] {
         guard working.insert(operation).inserted else { throw ConversationError.pendingSubmission }
         defer { working.remove(operation) }
         if let prior = groups[operation] {
@@ -65,6 +66,7 @@ actor QueuedReplyUploads {
         var handles: [UploadHandle] = []
         for index in group.uploads.indices {
             try Task.checkCancellation()
+            guard try stillQueued() else { throw ConversationError.missingRequest }
             if let handle = group.uploads[index].handle {
                 guard group.uploads[index].receiptMatches != false else { throw ConversationError.fileMismatch }
                 handles.append(handle)

@@ -1273,12 +1273,14 @@ final class NativeRelayLifecycle {
         }
         let transport = try HTTPSClientAPITransport(baseURL: baseURL,
             clientIdentity: TrustedKeychainIdentity(clientIdentity), trustedRootDER: trustedRootDER)
+        let retainedFiles = try ConversationFileStorage(identity: context.identity)
         let attempt = UUID()
         let focus = ClientAPIFocusChannel(transport: transport, errors: errorLog) { [weak self] show, receivedAt in
             await self?.receiveV2Show(show, receivedAt: receivedAt, attempt: attempt)
         }
         let connection = try ClientAPIv2Connection(transport: transport, repository: store, context: context,
             directory: Self.v2Directory(for: context.identity), errors: errorLog, foregroundOnlyWrites: true,
+            retainedUploadURL: { try retainedFiles.verifiedUploadURL(for: $0) },
             onLiveState: { [weak self] state in
                 guard state == .live else { return }
                 Task { @MainActor [weak self] in
@@ -1359,12 +1361,23 @@ final class NativeRelayLifecycle {
     func sendV2QueuedReply(_ message: ConversationDraft, expected: ProfileContext) async {
         guard let connection = v2Connection, context == expected else { return }
         do {
-            try await connection.submitQueuedReply(message)
+            try await connection.queuedReplyWasSaved(message)
         } catch {
             errorLog.report(ErrorLogReport(concern: .actions, connectionRole: .request,
                 operation: "reply", phase: "queue", reason: .from(error: error),
                 initiator: .unknown, retryable: true))
         }
+    }
+
+    func v2QueuedReplyWasEdited(_ operation: UUID, expected: ProfileContext) async {
+        guard let connection = v2Connection, context == expected else { return }
+        await connection.queuedReplyWasEdited(operation)
+    }
+
+    func cancelV2QueuedAttachmentReply(_ operation: UUID, for key: RequestKey,
+                                       expected: ProfileContext) async throws {
+        guard let connection = v2Connection, context == expected else { throw NativeRelayCoreError.inactive }
+        try await connection.cancelQueuedAttachmentReply(operation, request: key)
     }
 
     @discardableResult
