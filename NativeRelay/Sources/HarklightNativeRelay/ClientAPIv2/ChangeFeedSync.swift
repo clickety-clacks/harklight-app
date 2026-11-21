@@ -46,6 +46,7 @@ public actor ChangeFeedSync {
     private let errors: any ErrorLogging
     private let waitBeforeRetry: @Sendable (_ attempt: Int) async throws -> Void
     private let onLiveState: @Sendable (LiveState) -> Void
+    private let onShow: @Sendable (Data) async -> Void
     public private(set) var liveState: LiveState = .catchingUp {
         didSet { if liveState != oldValue { onLiveState(liveState) } }
     }
@@ -53,12 +54,14 @@ public actor ChangeFeedSync {
     public init(transport: any ClientAPITransport, model: any SyncModelWriting,
                 errors: any ErrorLogging,
                 waitBeforeRetry: @escaping @Sendable (_ attempt: Int) async throws -> Void = ChangeFeedSync.backoff,
-                onLiveState: @escaping @Sendable (LiveState) -> Void = { _ in }) {
+                onLiveState: @escaping @Sendable (LiveState) -> Void = { _ in },
+                onShow: @escaping @Sendable (Data) async -> Void = { _ in }) {
         self.transport = transport
         self.model = model
         self.errors = errors
         self.waitBeforeRetry = waitBeforeRetry
         self.onLiveState = onLiveState
+        self.onShow = onShow
     }
 
     /// 1, 2, 4 … 60 seconds between attempts.
@@ -171,6 +174,9 @@ public actor ChangeFeedSync {
                 case .heartbeat:
                     // The transport's 60 s no-bytes timeout is reset by it.
                     continue
+                case let .show(data):
+                    // Memory-only and outside the log: handed to focus.
+                    await onShow(data)
                 case let .change(change):
                     guard change.rev > last else { continue }
                     try await apply([change], cursor: change.rev)

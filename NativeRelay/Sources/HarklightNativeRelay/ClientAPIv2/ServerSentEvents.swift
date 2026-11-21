@@ -73,6 +73,10 @@ extension FeedEvent {
             self = .closing(reason: (object?["reason"] as? String) ?? "other")
             return
         }
+        if event.event == "show" {
+            self = .show(Data(event.data.utf8))
+            return
+        }
         guard let id = event.id, let rev = Rev(id) else { throw FeedDecodingError.missingRev }
         self = .change(FeedChange(rev: rev, kind: FeedChange.Kind(event.event), data: Data(event.data.utf8)))
     }

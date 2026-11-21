@@ -163,6 +163,15 @@ public struct ViewShowFrame: Equatable, Sendable {
     }
 }
 
+extension ViewShowFrame {
+    /// A client API v2 show in the shape the pushed-view coordinator already
+    /// takes. Under v2 the message id is the item id; the sender is the item's.
+    public static func clientAPI(_ show: ClientAPIShow, senderID: String) -> ViewShowFrame {
+        ViewShowFrame(senderID: senderID, messageID: show.itemID, target: show.target,
+                      heldMilliseconds: show.heldMilliseconds)
+    }
+}
+
 /// Reads the unsolicited `view_show` frame without turning it into a reply to
 /// an outstanding request. Unknown targets are ignored by the app.
 public struct ViewShowWire: Sendable {
