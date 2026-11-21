@@ -146,7 +146,7 @@ final class HarklightTests: XCTestCase {
         XCTAssertEqual(shows.first?.unavailable, .notHere)
 
         let item = Data(#"{"item_id":"later","rev":1,"sender":"sender","request_revision":1,"message":{"title":"Question"},"files":[],"seen":false,"rank":{"key":"a","section":"current"},"chat":{"available":true,"started":true}}"#.utf8)
-        try connection.model.apply(kind: "item", rev: 1, data: item)
+        try connection.model.apply([.init(rev: 1, kind: "item", data: item)], cursor: 1)
         lifecycle.deliverV2ShowIfHydrated(attempt: attempt)
         let arrival = ContinuousClock.now + .seconds(2)
         while shows.count < 2, ContinuousClock.now < arrival { try await Task.sleep(for: .milliseconds(5)) }
