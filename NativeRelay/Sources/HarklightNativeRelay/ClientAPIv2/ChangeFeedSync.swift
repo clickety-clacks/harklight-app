@@ -25,6 +25,11 @@ public struct SyncNeedsRebaseline: Error, Equatable {
     public init() {}
 }
 
+/// The inbox read lost to newer local Sync progress and was never installed.
+struct SyncSnapshotSuperseded: Error {
+    let position: Rev
+}
+
 /// Sync (design section 3) over the r2 change feed. It owns the only feed
 /// and the only cursor, and nothing else waits on it.
 public actor ChangeFeedSync {
@@ -121,8 +126,8 @@ public actor ChangeFeedSync {
                 batch = try await transport.changeBatch(after: after)
             } catch let error as APIError where error.token == .cursorExpired && !rebaselined {
                 // One rebaseline per drain; a second 410 is reported.
-                rebaselined = true
                 after = try await rebaseline()
+                rebaselined = true
                 continue
             }
             let fresh = batch.changes.filter { $0.rev > after }
@@ -132,8 +137,8 @@ public actor ChangeFeedSync {
                 do {
                     try await apply(fresh, cursor: through)
                 } catch let failure as ApplyFailure where failure.underlying is SyncNeedsRebaseline && !rebaselined {
-                    rebaselined = true
                     after = try await rebaseline()
+                    rebaselined = true
                     continue
                 }
             }
@@ -262,13 +267,28 @@ public actor ChangeFeedSync {
     /// The cursor, or a fresh snapshot's `rev` on first run.
     private func startingRev() async throws -> Rev {
         if let held = try model.heldCursor() { return held }
-        return try await rebaseline()
+        do {
+            return try await model.rebaseline()
+        } catch let error as SyncSnapshotSuperseded {
+            // Another Sync path already established the cold baseline.
+            return error.position
+        }
     }
 
-    /// A rebaseline replaces the cursor, even with a lower value: the
-    /// server's log may have started over.
+    /// Once the server has rejected the cursor, concurrent progress on that
+    /// cursor does not replace recovery. Read a fresh snapshot after a fence
+    /// rejection, with a bound on repeated interference.
     private func rebaseline() async throws -> Rev {
-        try await model.rebaseline()
+        for _ in 0..<2 {
+            try Task.checkCancellation()
+            do {
+                return try await model.rebaseline()
+            } catch is SyncSnapshotSuperseded {
+                continue
+            }
+        }
+        try Task.checkCancellation()
+        return try await model.rebaseline()
     }
 
     /// The cursor moves only with the changes, in the same durable write.

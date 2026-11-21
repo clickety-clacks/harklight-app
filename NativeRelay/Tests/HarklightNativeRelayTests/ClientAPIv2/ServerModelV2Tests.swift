@@ -164,6 +164,7 @@ final class ServerModelV2Tests: XCTestCase {
 private final class InboxPagesTransport: ClientAPITransport, @unchecked Sendable {
     var pages: [String?: String] = [:]
     var beforeReturningPage: @Sendable () async -> Void = {}
+    var maximumBatchPosition: Rev?
     func send(_ request: APIRequest) async throws -> APIResponse {
         guard request.path == "/v2/inbox", let body = pages[request.query["page"]] else {
             throw APIError(status: 404, token: .notFound, retryable: false, requestID: "r")
@@ -172,7 +173,12 @@ private final class InboxPagesTransport: ClientAPITransport, @unchecked Sendable
         return APIResponse(status: 200, requestID: "r", body: Data(body.utf8))
     }
     func changeFeed(after: Rev) -> AsyncThrowingStream<FeedEvent, any Error> { AsyncThrowingStream { $0.finish() } }
-    func changeBatch(after: Rev) async throws -> FeedBatch { FeedBatch(changes: [], rev: after, more: false) }
+    func changeBatch(after: Rev) async throws -> FeedBatch {
+        if let maximumBatchPosition, after > maximumBatchPosition {
+            throw APIError(status: 410, token: .cursorExpired, retryable: false, requestID: "r")
+        }
+        return FeedBatch(changes: [], rev: after, more: false)
+    }
 }
 
 final class ServerModelAdapterTests: XCTestCase {
@@ -196,15 +202,54 @@ final class ServerModelAdapterTests: XCTestCase {
 
         try store.apply(kind: "item", rev: 2, data: V2Fixture.json(V2Fixture.item("live", rev: 2, rankKey: "a")))
         blocked.release()
-        let position = try await rebaseline.value
+        do {
+            _ = try await rebaseline.value
+            XCTFail("A fenced snapshot was not installed.")
+        } catch let error as SyncSnapshotSuperseded {
+            XCTAssertEqual(error.position, 2)
+        }
         let reopened = ServerModelV2Store(fileURL: url)
-        XCTAssertEqual(position, 2, "Resume from the position that survived the delayed snapshot.")
         XCTAssertEqual(reopened.heldCursor, 2)
         XCTAssertNotNil(reopened.snapshot.items[ExactText("live")])
 
         let reset = try await writer.rebaseline()
         XCTAssertEqual(reset, 1, "A fresh rebaseline can still follow a server reset.")
         XCTAssertEqual(ServerModelV2Store(fileURL: url).heldCursor, 1)
+    }
+
+    func testContestedCursorExpiredRecoveryStillInstallsTheReset() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("model.json")
+        let store = ServerModelV2Store(fileURL: url)
+        try store.rebaseline(items: [], counts: APICounts(unresolved: 0), position: 10)
+        let transport = InboxPagesTransport()
+        let requested = AsyncGate()
+        let blocked = AsyncGate()
+        transport.maximumBatchPosition = 1
+        let reset = V2Fixture.item("reset", rev: 1, rankKey: "a")
+        transport.pages[nil] = #"{"rev":1,"items":[\#(reset)],"counts":{"unresolved":1}}"#
+        transport.beforeReturningPage = {
+            requested.release()
+            await blocked.wait()
+        }
+        let errors = RecordingErrorLogV2()
+        let writer = ServerModelSyncWriter(store: store, transport: transport, errors: errors)
+        let sync = ChangeFeedSync(transport: transport, model: writer, errors: errors)
+        let catchUp = Task { try await sync.catchUp() }
+        defer { blocked.release() }
+        await requested.wait()
+
+        // An already-buffered change from the old feed advances the disk
+        // cursor while the first reset snapshot is still loading.
+        try store.apply(kind: "item", rev: 11,
+                        data: V2Fixture.json(V2Fixture.item("old", rev: 11, rankKey: "b")))
+        blocked.release()
+        try await catchUp.value
+
+        let reopened = ServerModelV2Store(fileURL: url)
+        XCTAssertEqual(reopened.heldCursor, 1)
+        XCTAssertEqual(Set(reopened.snapshot.items.keys.map(\.rawValue)), ["reset"])
     }
 
     func testRebaselineReadsEveryPageKeepsTheFirstPositionAndDropsWhatIsGone() async throws {
