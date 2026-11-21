@@ -62,7 +62,7 @@ public enum ServerModelV2Projection {
             cursor: 0, conversationCursor: 0, conversations: conversations,
             inboxView: inboxView(ordered, keys: keys, model: model),
             currentRequestKeys: Set(keys.values),
-            chatReadPositions: readPositions)
+            chatReadPositions: readPositions, priorityLevels: model.settings?.priorityLevels)
     }
 
     /// Server arrival numbers sit above every local one.

@@ -40,6 +40,23 @@ public enum ClientAPIWrites {
         return write(itemID, "reply", .post, "replies", body: .object(members))
     }
 
+    public static func priorityLevels(_ operation: PendingPriorityLevelsSave) -> ClientAPIWrite? {
+        guard let tag = operation.ifMatch, !tag.isEmpty else { return nil }
+        let levels: [JSONValue] = operation.levels.map { level in
+            .object([
+                JSONMember("name", .string(level.name)),
+                JSONMember("lower_bound", .number(JSONNumber(lexeme: String(level.lowerBound)))),
+                JSONMember("bounce_after_days", level.bounceAfterDays.map {
+                    .number(JSONNumber(lexeme: String($0)))
+                } ?? .null)
+            ])
+        }
+        let body = JSONValue.object([JSONMember("levels", .array(levels))])
+        return ClientAPIWrite(target: "settings", operation: "priority_levels",
+            write: FrozenWrite(method: .put, path: "/v2/settings/priority-levels",
+                               body: Data(body.jsonString.utf8), ifMatch: tag))
+    }
+
     /// `POST /v2/items/{item_id}/answer` for an answer the person submitted.
     /// `answerUI` is the request's `answer_ui` for the submission's revision.
     ///

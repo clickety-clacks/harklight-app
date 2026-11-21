@@ -40,11 +40,15 @@ public struct PendingPriorityLevelsSave: Equatable, Codable, Sendable {
     public let operationID: UUID
     public let levels: [PriorityLevel]
     public let sourceDraftRevision: UInt64
+    /// The exact v2 settings ETag seen when the person chose Save.
+    public let ifMatch: String?
 
-    public init(operationID: UUID = UUID(), levels: [PriorityLevel], sourceDraftRevision: UInt64) {
+    public init(operationID: UUID = UUID(), levels: [PriorityLevel], sourceDraftRevision: UInt64,
+                ifMatch: String? = nil) {
         self.operationID = operationID
         self.levels = levels
         self.sourceDraftRevision = sourceDraftRevision
+        self.ifMatch = ifMatch
     }
 }
 

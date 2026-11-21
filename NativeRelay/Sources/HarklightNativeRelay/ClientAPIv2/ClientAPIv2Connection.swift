@@ -38,10 +38,14 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
     private let errors: any ErrorLogging
     private let meURL: URL?
     private let onPublished: @Sendable () -> Void
+    private let onMe: @Sendable (APIMe) -> Void
+    private let onPriorityLevelsChanged: @Sendable () -> Void
     private let meWaitBeforeRetry: @Sendable (Int) async throws -> Void
     private let replyWaitBeforeRetry: @Sendable (Int) async throws -> Void
     private var replySignal: AsyncStream<Void>.Continuation?
     private var checkingReplyItems: Set<ExactText> = []
+    private var priorityLevelsETag: (value: String, generation: UInt64)?
+    private var settingsReadID: UUID?
     private let lock = NSLock()
 
     /// `directory` holds the model, outbox and last `/v2/me` for this
@@ -55,6 +59,8 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
                 onLiveState: @escaping @Sendable (ChangeFeedSync.LiveState) -> Void = { _ in },
                 onShow: @escaping @Sendable (Data) async -> Void = { _ in },
                 onRejected: @escaping @Sendable (OutboxEntry, APIError) async -> Void = { _, _ in },
+                onMe: @escaping @Sendable (APIMe) -> Void = { _ in },
+                onPriorityLevelsChanged: @escaping @Sendable () -> Void = {},
                 onPublished: @escaping @Sendable () -> Void = {}) throws {
         if let directory {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -71,6 +77,8 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
         self.context = context
         self.errors = errors
         self.onPublished = onPublished
+        self.onMe = onMe
+        self.onPriorityLevelsChanged = onPriorityLevelsChanged
         self.meWaitBeforeRetry = meWaitBeforeRetry
         self.replyWaitBeforeRetry = replyWaitBeforeRetry
         let persistence: any OutboxPersisting = directory.map {
@@ -82,11 +90,17 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
         let writer = PublishingSyncWriter(inner: modelWriter, publish: { relay.connection?.publishModel() })
         let outcomes = PublishingOutcomes(inner: ServerModelOutboxOutcomes(store: model, onRejected: { entry, error in
             relay.connection?.recordReply(entry, disposition: .rejected(ExactText(error.token.rawValue)))
+            if entry.operation == "priority_levels" {
+                await relay.connection?.rejectPriorityLevels(entry, error: error)
+            }
             await onRejected(entry, error)
         }, onAcceptedResult: { entry, result in
             if let responseEntry = result.entry {
                 relay.connection?.recordReply(entry, disposition: .acceptedPendingReplay(
                     operation: entry.id, turn: responseEntry.entryID))
+            }
+            if entry.operation == "priority_levels" {
+                await relay.connection?.confirmPriorityLevels(entry, settings: result.settings)
             }
         }), publish: { relay.connection?.publishModel() })
         self.outbox = try ActionOutbox(persistence: persistence, transport: transport, outcomes: outcomes,
@@ -119,6 +133,7 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
             }
         }
         presentation.apply(me)
+        onMe(me)
         errors.resolve(concern: .snapshot, operation: "me")
         publishModel()
         return me
@@ -168,6 +183,7 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
             group.addTask { await self.reconcileAcceptedRepliesWhileForeground(signals) }
             group.addTask {
                 await self.recoverQueuedReplies()
+                await self.recoverPendingPriorityLevels()
                 await self.outbox.flush()
             }
             await sync.runForeground()
@@ -288,6 +304,135 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
                                 idempotencyKey: operation, retryRefused: retryRefused)
     }
 
+    public var priorityLevelsCanSave: Bool {
+        lock.withLock { priorityLevelsETag?.generation == model.syncPosition.generation }
+    }
+
+    public var priorityLevelsEditorWasOpened: Bool {
+        (try? repository.snapshot(context: context).priorityLevels.editorWasOpened) == true
+    }
+
+    public func refreshPriorityLevels() async {
+        let readID = UUID()
+        let generation = model.syncPosition.generation
+        lock.withLock { settingsReadID = readID }
+        var response: APIResponse?
+        do {
+            let read = try await transport.send(.get("/v2/settings"))
+            response = read
+            try Task.checkCancellation()
+            let result = try APIWriteResult(json: JSONValue.parse(read.body))
+            guard let tag = read.etag, !tag.isEmpty, let settings = result.settings,
+                  let levels = settings.priorityLevels else {
+                throw ClientAPIModelError.invalid("settings.priority_levels")
+            }
+            let current = try lock.withLock { () throws -> Bool in
+                guard settingsReadID == readID else { return false }
+                try model.apply(result, generation: generation)
+                guard model.snapshot.settings?.rev == settings.rev else { return false }
+                try repository.recordPriorityLevelsRead(levels, context: context)
+                priorityLevelsETag = (tag, generation)
+                return true
+            }
+            if current {
+                errors.resolve(concern: .snapshot, operation: "priority_levels")
+                onPriorityLevelsChanged()
+            }
+        } catch is CancellationError {
+            return
+        } catch is ServerModelV2Store.SupersededGeneration {
+            return
+        } catch {
+            let api = error as? APIError
+            errors.report(ErrorLogReport(concern: .snapshot, connectionRole: .request,
+                operation: "priority_levels", phase: "read", reason: .api(error),
+                initiator: .forFailure(error), retryable: true,
+                correlation: .request(api?.requestID ?? response?.requestID),
+                httpStatus: api?.status ?? response?.status))
+        }
+    }
+
+    public func savePriorityLevels(_ levels: [PriorityLevel]) async throws {
+        let operation = try lock.withLock {
+            guard let tag = priorityLevelsETag, tag.generation == model.syncPosition.generation else {
+                throw ClientAPIModelError.invalid("settings.etag")
+            }
+            return try repository.beginPriorityLevelsSave(levels, context: context, ifMatch: tag.value)
+        }
+        onPriorityLevelsChanged()
+        try await submitPriorityLevels(operation)
+    }
+
+    private func submitPriorityLevels(_ operation: PendingPriorityLevelsSave) async throws {
+        guard let write = ClientAPIWrites.priorityLevels(operation) else { return }
+        try await outbox.submit(target: write.target, operation: write.operation,
+            write: write.write, idempotencyKey: operation.operationID, retryRefused: false)
+    }
+
+    private func recoverPendingPriorityLevels() async {
+        do {
+            guard let operation = try repository.snapshot(context: context).priorityLevels.pendingSave else { return }
+            guard operation.ifMatch != nil else {
+                if try repository.rejectPriorityLevelsSave(operation.operationID, reason: "unconfirmed", context: context) {
+                    onPriorityLevelsChanged()
+                }
+                return
+            }
+            let refused = await outbox.failedWrites.first(where: { $0.id == operation.operationID })
+            if let failure = refused?.failure {
+                if try repository.rejectPriorityLevelsSave(operation.operationID, reason: failure.token, context: context) {
+                    await outbox.discardFailed(operation.operationID)
+                    onPriorityLevelsChanged()
+                }
+                if failure.status == 412 { await refreshPriorityLevels() }
+                return
+            }
+            try await submitPriorityLevels(operation)
+        } catch {
+            reportPriorityLevelsPersistence(error, phase: "restore")
+        }
+    }
+
+    private func invalidatePriorityLevelsETag() {
+        lock.withLock {
+            priorityLevelsETag = nil
+            settingsReadID = nil
+        }
+    }
+
+    private func rejectPriorityLevels(_ entry: OutboxEntry, error: APIError) async {
+        if error.status == 412 { invalidatePriorityLevelsETag() }
+        do {
+            if try repository.rejectPriorityLevelsSave(entry.id, reason: error.token.rawValue, context: context) {
+                await outbox.discardFailed(entry.id)
+            }
+        } catch {
+            reportPriorityLevelsPersistence(error, phase: "reject")
+        }
+        onPriorityLevelsChanged()
+        if error.status == 412 { await refreshPriorityLevels() }
+    }
+
+    private func confirmPriorityLevels(_ entry: OutboxEntry, settings: APISettings?) async {
+        invalidatePriorityLevelsETag()
+        do {
+            guard let levels = settings?.priorityLevels,
+                  try repository.confirmPriorityLevelsSave(entry.id, levels: levels, context: context) else {
+                throw ClientAPIModelError.invalid("settings.priority_levels")
+            }
+        } catch {
+            reportPriorityLevelsPersistence(error, phase: "confirm")
+        }
+        onPriorityLevelsChanged()
+        await refreshPriorityLevels()
+    }
+
+    private func reportPriorityLevelsPersistence(_ error: any Error, phase: String) {
+        errors.report(ErrorLogReport(concern: .actions, connectionRole: .request,
+            operation: "priority_levels", phase: phase, reason: .api(error),
+            initiator: .unknown, retryable: true))
+    }
+
     public func resolveShowItem(itemID: ExactText) async throws -> APIItem? {
         if let held = model.snapshot.items[itemID] { return held }
         let generation = model.syncPosition.generation
@@ -323,7 +468,7 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
                   let cached = try? presentation.cachedState(model.snapshot, identity: context.identity) else { return }
             do {
                 let awaitingEntries = hasAcceptedRepliesAwaitingEntries()
-                try repository.restoreCachedServerState(cached, context: context)
+                try repository.restoreCachedServerState(cached, context: context, mergePriorityLevels: true)
                 if awaitingEntries, !hasAcceptedRepliesAwaitingEntries() {
                     errors.resolve(concern: .snapshot, operation: "confirm_reply")
                 }

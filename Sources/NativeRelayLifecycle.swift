@@ -1284,11 +1284,30 @@ final class NativeRelayLifecycle {
                 Task { @MainActor [weak self] in
                     guard let self, self.activeTransportAttemptID == attempt else { return }
                     self.confirmedRelayContext = context
+                    if self.v2Connection?.priorityLevelsEditorWasOpened == true {
+                        await self.refreshPriorityLevels(expected: context)
+                    }
                 }
             }, onShow: { data in
                 await focus.received(feedShow: data)
+            }, onMe: { [weak self] me in
+                Task { @MainActor [weak self] in
+                    guard let self, self.context == context, self.activeTransportAttemptID == attempt else { return }
+                    let feature = RemoteFeatureFlag.priorityLevelEditing.name
+                    let fields = me.features[feature].map { [JSONMember(feature, .bool($0))] } ?? []
+                    self.featureFlags.replace(RemoteFeatureFlagSnapshot(field: .object(fields)), connectionID: attempt)
+                }
+            }, onPriorityLevelsChanged: { [weak self] in
+                Task { @MainActor [weak self] in
+                    guard let self, self.activeTransportAttemptID == attempt else { return }
+                    self.publishPriorityLevelsUpdate(for: context)
+                }
             }, onPublished: { [weak self] in
-                Task { @MainActor [weak self] in self?.deliverV2ShowIfHydrated(attempt: attempt) }
+                Task { @MainActor [weak self] in
+                    guard let self, self.activeTransportAttemptID == attempt else { return }
+                    self.deliverV2ShowIfHydrated(attempt: attempt)
+                    self.publishPriorityLevelsUpdate(for: context)
+                }
             })
         installV2Connection(connection, context: context, attempt: attempt)
         installV2FocusChannel(focus, attempt: attempt)
@@ -1299,6 +1318,7 @@ final class NativeRelayLifecycle {
         self.context = context
         activeTransportAttemptID = attempt
         v2Connection = connection
+        featureFlags.connect(context: context, connectionID: attempt)
         startV2Foreground()
     }
 
@@ -1549,15 +1569,29 @@ final class NativeRelayLifecycle {
 
     func hasConfirmedPriorityLevelsRelay(for expected: ProfileContext) -> Bool {
         guard featureFlags.isEnabled(.priorityLevelEditing) else { return false }
+        if let connection = v2Connection {
+            return context == expected && sceneIsActive && connection.priorityLevelsCanSave
+        }
         guard let activeTransportAttemptID else { return false }
         return confirmedRelayContext == expected && context == expected && core != nil &&
             priorityLevelsLostTransportAttemptID != activeTransportAttemptID
     }
 
     func refreshPriorityLevels(expected: ProfileContext) async {
+        if let connection = v2Connection {
+            guard context == expected, sceneIsActive, priorityLevelsFeatureEnabled else { return }
+            await connection.refreshPriorityLevels()
+            return
+        }
         guard featureFlags.isEnabled(.priorityLevelEditing),
               hasConfirmedPriorityLevelsRelay(for: expected), let core else { return }
         await core.refreshPriorityLevels()
+    }
+
+    func saveV2PriorityLevels(_ levels: [PriorityLevel], expected: ProfileContext) async throws {
+        guard let connection = v2Connection, context == expected, sceneIsActive,
+              priorityLevelsFeatureEnabled else { throw NativeRelayCoreError.inactive }
+        try await connection.savePriorityLevels(levels)
     }
 
     func sendPendingPriorityLevelsSave(expected: ProfileContext) async {
