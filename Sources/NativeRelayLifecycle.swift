@@ -1303,8 +1303,11 @@ final class NativeRelayLifecycle {
                 }
                 if state == .available {
                     self.startV2Foreground()
+                    self.requestV2PushRegistration()
                 } else {
                     self.v2ForegroundTask?.cancel()
+                    self.v2PushRegistrationTask?.cancel()
+                    self.cancelV2PushRetry()
                     self.confirmedRelayContext = nil
                 }
                 self.onV2AccountAccessChanged?(state, context)
@@ -1487,7 +1490,7 @@ final class NativeRelayLifecycle {
 
     private func allowsV2PushRouting(_ connection: ClientAPIv2Connection) async -> Bool {
         let permission = await v2NotificationPermission.status()
-        guard !Task.isCancelled, v2Connection === connection else { return false }
+        guard !Task.isCancelled, v2Connection === connection, connection.access.state == .available else { return false }
         guard NativeNotificationPermission.allowed(permission) else {
             try? connection.model.setPushRoutingEnabled(false)
             requestV2PushRegistration()
@@ -1516,7 +1519,7 @@ final class NativeRelayLifecycle {
     @discardableResult
     private func requestV2PushRegistration() -> Task<Bool, Never>? {
         guard sceneIsActive, v2PushRemovalTask == nil, let connection = v2Connection,
-              let context else { return nil }
+              connection.access.state == .available, let context else { return nil }
         v2PushRegistrationRequested = true
         v2PushRetryTask?.cancel()
         v2PushRetryTask = nil

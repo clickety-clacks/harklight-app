@@ -30,6 +30,28 @@ final class ClientAPIAccessTests: XCTestCase {
             directory: directory, errors: RecordingErrorLogV2(), foregroundOnlyWrites: true)
     }
 
+    func testPushSettingsAndWritesUseTheAccountAccessGate() async throws {
+        let server = FakeClientAPIServer()
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let connection = try connection(server, directory: directory)
+        connection.access.pause()
+        do {
+            _ = try await connection.push.status()
+            XCTFail("A paused account must not fetch push settings.")
+        } catch let error as APIError {
+            XCTAssertEqual(error.token, .accountPaused)
+        }
+        connection.access.revoke()
+        do {
+            _ = try await connection.push.remove(idempotencyKey: UUID())
+            XCTFail("A revoked device must not send a push DELETE.")
+        } catch let error as APIError {
+            XCTAssertEqual(error.token, .unauthorized)
+        }
+        XCTAssertTrue(server.received.isEmpty)
+    }
+
     func testAnOlderPausedMeCannotUndoANewerActiveMeOrItsSavedState() async throws {
         let server = HeldMeTransport()
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
