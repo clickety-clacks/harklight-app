@@ -9,6 +9,11 @@ import Foundation
 /// reflects, and the change feed is numbered by it.
 public typealias Rev = UInt64
 
+/// Emitted only by the client's own change-feed deadline.
+enum ChangeFeedIdleTimeout: Error {
+    case expired
+}
+
 public struct APIRequest: Equatable, Sendable {
     public enum Method: String, Codable, Sendable { case get = "GET", post = "POST", put = "PUT", delete = "DELETE" }
 

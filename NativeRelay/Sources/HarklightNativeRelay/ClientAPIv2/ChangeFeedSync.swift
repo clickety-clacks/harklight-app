@@ -192,6 +192,7 @@ public actor ChangeFeedSync {
         liveState = .catchingUp
         feedRequestID = nil
         var generation = after.generation
+        var followingFeed = false
         do {
             // The backlog comes by batch (one write per batch); the stream
             // then carries only live changes.
@@ -199,6 +200,7 @@ public actor ChangeFeedSync {
             generation = caughtUp.generation
             var last = caughtUp.revision
             try checkGeneration(generation)
+            followingFeed = true
             for try await event in transport.changeFeed(after: last) {
                 try checkGeneration(generation)
                 switch event {
@@ -284,10 +286,16 @@ public actor ChangeFeedSync {
         } catch let error as ApplyFailure {
             report(Self.feedOperation, phase: "apply", error: error.underlying, initiator: .unknown)
             return .dropped(.unknown, retryPromptly: false)
+        } catch is ChangeFeedIdleTimeout {
+            report(Self.feedOperation, phase: "stream", reason: .app("idle_timeout"),
+                   initiator: .timeout, retryable: true)
+            return .dropped(.timeout, retryPromptly: false)
         } catch {
             if Task.isCancelled { return .cancelled }
-            report(Self.feedOperation, phase: "stream", error: error, initiator: .forFailure(error))
-            return .dropped(.forFailure(error), retryPromptly: false)
+            let classified = ErrorLogInitiator.forFailure(error)
+            let initiator: ErrorLogInitiator = followingFeed && classified != .osNetwork ? .unknown : classified
+            report(Self.feedOperation, phase: followingFeed ? "stream" : "batch", error: error, initiator: initiator)
+            return .dropped(initiator, retryPromptly: false)
         }
     }
 
