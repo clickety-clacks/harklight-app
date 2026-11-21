@@ -2453,6 +2453,45 @@ final class LivePresentationStore {
         }
     }
 
+    /// Client API v2: Retry of a refused queued chat message, by its id.
+    func canRetryQueuedChatMessage(_ operation: UUID, for key: RequestKey) -> Bool {
+        guard canSendToCurrentServer, !isReadOnly, let thread = conversationThreads[key],
+              thread.isComposerOpen,
+              let message = thread.queuedMessages?.first(where: { $0.operationID == operation }),
+              case .rejected = message.disposition else { return false }
+        return true
+    }
+
+    func retryQueuedChatMessage(_ operation: UUID, for key: RequestKey) {
+        guard canRetryQueuedChatMessage(operation, for: key) else { return }
+        do {
+            let message = try attentionStore.retryQueuedChatMessage(operation, in: key, context: profileContext)
+            try refreshFromDurableStore()
+            chatMessageQueued?(message)
+        } catch {
+            conversationError = "Your message could not be sent again. It is still saved."
+            diagnose(.conversation, .discussionSubmission, .failed, error: error, operationID: operation, request: key)
+            do { try refreshFromDurableStore() }
+            catch { diagnose(.localStore, .projectionRefresh, .failed, error: error, request: key) }
+        }
+    }
+
+    /// Client API v2: Edit of a refused queued chat message, by its id. Its
+    /// text and files return to the composer.
+    func editQueuedChatMessage(_ operation: UUID, for key: RequestKey) {
+        guard !isReadOnly else { return }
+        do {
+            try attentionStore.editQueuedChatMessage(operation, in: key, context: profileContext)
+            conversationError = nil
+            try refreshFromDurableStore()
+        } catch {
+            conversationError = "Your message could not be opened for editing. It is still saved."
+            diagnose(.localStore, .draftSave, .failed, error: error, request: key)
+            do { try refreshFromDurableStore() }
+            catch { diagnose(.localStore, .projectionRefresh, .failed, error: error, request: key) }
+        }
+    }
+
     func editRejectedDiscussion(for key: RequestKey, revision: UInt64) {
         guard !isReadOnly else { return }
         do {

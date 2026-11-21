@@ -370,6 +370,14 @@ public final class ClientRepository: @unchecked Sendable {
         conversation.chatReadPositions = cached.chatReadPositions
         conversation.chatReadPositionSupport = cached.chatReadPositions != nil
         next.server.conversation = conversation
+        // A queued chat message whose entry the restored state now holds is done.
+        for (key, thread) in conversation.threads {
+            guard var pending = next.pendingConversations[key], pending.queuedMessages != nil else { continue }
+            var held = thread
+            held.queuedMessages = pending.queuedMessages
+            pending.queuedMessages = ClientSessionState.unreplayedQueuedMessages(in: held)
+            next.pendingConversations[key] = pending
+        }
         try commit(next)
         acceptedAwaitingTerminalReplay = Self.acceptedAwaitingTerminalReplay(in: state)
     }
@@ -3786,6 +3794,68 @@ public final class ClientRepository: @unchecked Sendable {
         try commit(next)
     }
 
+    /// Retry of a refused queued message, by its operation id. It keeps that
+    /// id: a refused request is not stored by the server, so the same key is
+    /// evaluated again. Returns the message for the outbox.
+    @discardableResult
+    public func retryQueuedChatMessage(_ operation: UUID, in request: RequestKey,
+                                       context suppliedContext: ProfileContext) throws -> ConversationDraft {
+        writerLock.lock()
+        defer { writerLock.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        var next = state
+        guard var conversation = next.conversation, var thread = conversation.threads[request],
+              thread.isComposerOpen else { throw ConversationError.closed }
+        guard var queue = thread.queuedMessages,
+              let index = queue.firstIndex(where: { $0.operationID == operation }) else {
+            throw ConversationError.missingRequest
+        }
+        guard case .rejected = queue[index].disposition else { return queue[index] }
+        queue[index].disposition = .submitting(operation)
+        queue[index].submittedAt = Date()
+        let message = queue[index]
+        thread.queuedMessages = queue
+        conversation.threads[request] = thread
+        next.conversation = conversation
+        try commit(next)
+        return message
+    }
+
+    /// Edit of a refused queued message, by its operation id: its text and
+    /// files go back into the composer (ahead of anything already typed
+    /// there, so nothing is lost) and it leaves the queue.
+    public func editQueuedChatMessage(_ operation: UUID, in request: RequestKey,
+                                      context suppliedContext: ProfileContext) throws {
+        writerLock.lock()
+        defer { writerLock.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
+        try validate(suppliedContext)
+        var next = state
+        guard var conversation = next.conversation, var thread = conversation.threads[request],
+              thread.isComposerOpen else { throw ConversationError.closed }
+        guard var queue = thread.queuedMessages,
+              let index = queue.firstIndex(where: { $0.operationID == operation }) else {
+            throw ConversationError.missingRequest
+        }
+        guard case .rejected = queue[index].disposition else { throw ConversationError.closed }
+        let message = queue.remove(at: index)
+        let binding = ConversationBinding(request: request, revision: thread.currentRevision)
+        var composer = thread.drafts[binding.revision] ?? ConversationDraft(binding: binding)
+        let typed = composer.text.rawValue
+        composer.text = typed.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? message.text : ExactText(message.text.rawValue + "\n\n" + typed)
+        let held = Set(composer.files.map(\.id))
+        composer.files = message.files.filter { !held.contains($0.id) } + composer.files
+        thread.drafts[binding.revision] = composer
+        thread.queuedMessages = queue.isEmpty ? nil : queue
+        conversation.threads[request] = thread
+        next.conversation = conversation
+        try commit(next)
+    }
+
     public func prepareDiscussion(_ binding: ConversationBinding, context suppliedContext: ProfileContext) throws -> UUID {
         writerLock.lock()
         defer { writerLock.unlock() }
@@ -4806,6 +4876,7 @@ private struct ClientSessionState {
                 value.threads[key]?.answerDrafts = queued.answerDrafts
                 value.threads[key]?.uploadGroups = queued.uploadGroups
                 value.threads[key]?.uploadCleanups = queued.uploadCleanups
+                value.threads[key]?.queuedMessages = queued.queuedMessages
             }
             return value
         }
@@ -4835,6 +4906,7 @@ private struct ClientSessionState {
                     thread.answerDrafts = queued.answerDrafts
                     thread.uploadGroups = queued.uploadGroups
                     thread.uploadCleanups = queued.uploadCleanups
+                    thread.queuedMessages = queued.queuedMessages
                     // Held server history may already prove an exact operation
                     // accepted before the thread's original delivery arrives.
                     for turn in thread.turns where turn.kind != .result {
@@ -4849,6 +4921,7 @@ private struct ClientSessionState {
                         }
                     }
                 }
+                thread.queuedMessages = Self.unreplayedQueuedMessages(in: thread)
                 let retainedText = pendingConversations[key]?.retainedUnsentText
                 pendingConversations[key] = PendingConversationActions(thread: thread)
                 pendingConversations[key]?.retainedUnsentText = retainedText
@@ -4856,12 +4929,28 @@ private struct ClientSessionState {
                 thread.answerDrafts = nil
                 thread.uploadGroups = nil
                 thread.uploadCleanups = nil
+                // Queued chat text lives only with the person's pending work.
+                thread.queuedMessages = nil
                 value.threads[key] = thread
             }
             server.conversation = value
         }
     }
     init(profileIdentity: ProfileIdentity) { self.profileIdentity = profileIdentity }
+
+    /// A queued message leaves the queue once its entry is held: by the turn
+    /// it was accepted as, or by its operation id.
+    static func unreplayedQueuedMessages(in thread: ConversationThread) -> [ConversationDraft]? {
+        guard let queue = thread.queuedMessages else { return nil }
+        let turns = Set(thread.turns.map(\.id))
+        let operations = Set(thread.turns.compactMap(\.operationID))
+        let kept = queue.filter { message in
+            if case let .acceptedPendingReplay(_, turn) = message.disposition, turns.contains(turn) { return false }
+            if let operation = message.operationID, operations.contains(operation) { return false }
+            return true
+        }
+        return kept.isEmpty ? nil : kept
+    }
 }
 
 /// Read once during upgrade, then delete the source file. Deliberately omits
@@ -5159,12 +5248,16 @@ private struct PendingConversationActions: Codable {
     var answerDrafts: [UInt64: RequestDraft]?
     var uploadGroups: [UUID: ConversationUploadGroup]?
     var uploadCleanups: [UUID: ConversationUploadCleanup]?
+    /// Client API v2 chat messages (APP-07), each with its own operation id,
+    /// kept here so they survive a projection restore and a relaunch.
+    var queuedMessages: [ConversationDraft]?
 
     init(thread: ConversationThread) {
         drafts = thread.drafts
         answerDrafts = thread.answerDrafts
         uploadGroups = thread.uploadGroups
         uploadCleanups = thread.uploadCleanups
+        queuedMessages = thread.queuedMessages
     }
 
     init(drafts: [UInt64: ConversationDraft], answerDrafts: [UInt64: RequestDraft]?,

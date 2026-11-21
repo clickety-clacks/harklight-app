@@ -88,4 +88,128 @@ final class ChatMessageQueueTests: XCTestCase {
         while ContinuousClock.now < deadline, server.received.isEmpty { try await Task.sleep(for: .milliseconds(5)) }
         XCTAssertEqual(server.received.map(\.idempotencyKey), [id])
     }
+
+    // MARK: #384 review B-6 and B-7, L-28 and L-30
+
+    private func restoreProjection(_ repository: ClientRepository, _ context: ProfileContext,
+                                   entries: [String] = []) throws {
+        let store = ServerModelV2Store(fileURL: nil)
+        try store.apply(kind: "item", rev: 1, data: V2Fixture.json(V2Fixture.item("i", rev: 1, rankKey: "a")))
+        if !entries.isEmpty { try store.open("i") }
+        for (index, entry) in entries.enumerated() {
+            try store.apply(kind: "entry", rev: UInt64(index + 2), data: V2Fixture.json(entry))
+        }
+        try repository.restoreCachedServerState(ServerModelV2Projection.cachedState(store.snapshot, identity: identity),
+                                                context: context)
+    }
+
+    private func queue(_ repository: ClientRepository, _ context: ProfileContext) throws -> [ConversationDraft] {
+        try repository.conversationSnapshot(context: context).threads[
+            RequestKey(accountScope: identity.personID, senderID: ExactText("agent-app"), messageID: ExactText("i"))
+        ]?.queuedMessages ?? []
+    }
+
+    func testQueuedMessagesSurviveTheNextProjectionRestoreAndARelaunch() throws {
+        let persistence = MemoryPendingActionPersistence()
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let repository = try ClientRepository(context: context, persistence: persistence)
+        try restoreProjection(repository, context)
+        let key = RequestKey(accountScope: identity.personID, senderID: ExactText("agent-app"), messageID: ExactText("i"))
+        let binding = ConversationBinding(request: key, revision: 1)
+        try type("one", repository, binding, context)
+        let message = try repository.queueChatMessage(binding, context: context)
+        try repository.recordQueuedChatMessage(try XCTUnwrap(message.operationID), in: key,
+                                               disposition: .rejected(ExactText("too_large")), context: context)
+
+        try restoreProjection(repository, context)
+        XCTAssertEqual(try queue(repository, context).map(\.text.rawValue), ["one"],
+                       "The next projection restore keeps the queue.")
+
+        let relaunched = try ClientRepository(context: context, persistence: persistence)
+        try restoreProjection(relaunched, context)
+        let kept = try queue(relaunched, context)
+        XCTAssertEqual(kept.map(\.text.rawValue), ["one"], "A relaunch keeps the queue.")
+        XCTAssertEqual(kept.first?.operationID, message.operationID, "With the id it was saved under.")
+        XCTAssertEqual(kept.first?.disposition, .rejected(ExactText("too_large")), "And the refusal.")
+    }
+
+    func testAQueuedMessageLeavesTheQueueOnceItsEntryIsHeld() throws {
+        let (repository, context, binding) = try repository(v2: true)
+        try type("one", repository, binding, context)
+        let operation = try XCTUnwrap(repository.queueChatMessage(binding, context: context).operationID)
+        try repository.recordQueuedChatMessage(operation, in: binding.request,
+            disposition: .acceptedPendingReplay(operation: operation, turn: ExactText("e1")), context: context)
+        try restoreProjection(repository, context,
+                              entries: [V2Fixture.entry("e1", item: "i", rev: 2, position: 1, author: "person", text: "one")])
+        XCTAssertTrue(try queue(repository, context).isEmpty)
+    }
+
+    func testRetryActsOnTheRefusedMessageByItsIdAndLeavesTheComposerAlone() throws {
+        let (repository, context, binding) = try repository(v2: true)
+        var ids: [UUID] = []
+        for text in ["one", "two"] {
+            try type(text, repository, binding, context)
+            ids.append(try XCTUnwrap(repository.queueChatMessage(binding, context: context).operationID))
+        }
+        try repository.recordQueuedChatMessage(ids[0], in: binding.request,
+                                               disposition: .rejected(ExactText("unavailable")), context: context)
+        try type("still typing", repository, binding, context)
+
+        let retried = try repository.retryQueuedChatMessage(ids[0], in: binding.request, context: context)
+        XCTAssertEqual(retried.operationID, ids[0], "Retry keeps the message's id.")
+        XCTAssertEqual(retried.text, ExactText("one"))
+        let thread = try XCTUnwrap(repository.conversationSnapshot(context: context).threads[binding.request])
+        XCTAssertEqual(thread.queuedMessages?.map(\.disposition), [.submitting(ids[0]), .submitting(ids[1])])
+        XCTAssertEqual(thread.drafts[1]?.text, ExactText("still typing"), "The composer is not sent.")
+    }
+
+    func testEditReturnsTheRefusedMessageToTheComposerWithoutLosingTypedText() throws {
+        let (repository, context, binding) = try repository(v2: true)
+        try type("one", repository, binding, context)
+        let operation = try XCTUnwrap(repository.queueChatMessage(binding, context: context).operationID)
+        XCTAssertThrowsError(try repository.editQueuedChatMessage(operation, in: binding.request, context: context),
+                             "Only a refused message can be edited.")
+        try repository.recordQueuedChatMessage(operation, in: binding.request,
+                                               disposition: .rejected(ExactText("too_large")), context: context)
+        try type("and more", repository, binding, context)
+
+        try repository.editQueuedChatMessage(operation, in: binding.request, context: context)
+        let thread = try XCTUnwrap(repository.conversationSnapshot(context: context).threads[binding.request])
+        XCTAssertEqual(thread.drafts[1]?.text, ExactText("one\n\nand more"))
+        XCTAssertNil(thread.queuedMessages)
+    }
+
+    func testQueuedTextStaysOutOfTheServerCache() throws {
+        let (repository, context, binding) = try repository(v2: true)
+        try type("private words", repository, binding, context)
+        try repository.queueChatMessage(binding, context: context)
+        let snapshot = ServerStateCacheSnapshot.make(identity: identity,
+                                                     from: try repository.snapshot(context: context),
+                                                     conversations: try repository.conversationSnapshot(context: context))
+        XCTAssertTrue(snapshot.conversations.allSatisfy { $0.thread.queuedMessages == nil })
+        let encoded = String(decoding: try JSONEncoder().encode(snapshot), as: UTF8.self)
+        XCTAssertFalse(encoded.contains("private words"))
+    }
+
+    func testTheOutboxResendsARefusedWriteHandedOverAgainUnderItsKey() async throws {
+        let server = FakeClientAPIServer()
+        server.nextWriteFailures = [APIError(status: 413, token: .payloadTooLarge, retryable: false, requestID: "r")]
+        let persistence = MemoryOutboxPersistence()
+        server.persistedKeys = { persistence.keys }
+        let outcomes = RecordingOutcomes()
+        let box = try ActionOutbox(persistence: persistence, transport: server, outcomes: outcomes,
+                                   errors: RecordingErrorLogV2(), waitBeforeRetry: { _, _ in try await Task.sleep(for: .seconds(3600)) })
+        let id = UUID()
+        let write = FrozenWrite(method: .post, path: "/v2/items/i/replies", body: Data(#"{"text":"one"}"#.utf8))
+        try await box.submit(target: "item:i", operation: "reply", write: write, idempotencyKey: id)
+        var deadline = ContinuousClock.now + .seconds(2)
+        while ContinuousClock.now < deadline, outcomes.rejected.isEmpty { try await Task.sleep(for: .milliseconds(5)) }
+        let again = try await box.submit(target: "item:i", operation: "reply", write: write, idempotencyKey: id)
+        XCTAssertNil(again.failure)
+        deadline = ContinuousClock.now + .seconds(2)
+        while ContinuousClock.now < deadline, outcomes.accepted.isEmpty { try await Task.sleep(for: .milliseconds(5)) }
+        XCTAssertEqual(server.received.map(\.idempotencyKey), [id, id], "Retry resends under the same key.")
+        let failed = await box.failedWrites
+        XCTAssertTrue(failed.isEmpty)
+    }
 }
