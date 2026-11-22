@@ -38,6 +38,9 @@ final class V2PushPermissionTests: XCTestCase {
         let transport = V2PermissionTransport(hasLegacyBinding: true, holdFirstDelete: true)
         let connection = try ClientAPIv2Connection(transport: transport, repository: repository, context: context,
                                                     directory: nil, errors: NoopErrorLog(), foregroundOnlyWrites: true)
+        // Keep the initial inbox baseline from superseding the settings read.
+        // The push settings and the registration journal are still both empty.
+        try connection.model.rebaseline(items: [], counts: APICounts(unresolved: 0), position: 0)
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let lifecycle = NativeRelayLifecycle(
             v2NotificationPermission: NativeNotificationPermission(status: { .denied },
@@ -50,23 +53,24 @@ final class V2PushPermissionTests: XCTestCase {
         let firstPass = Task { await lifecycle.refreshAfterPushAddressStored() }
         let firstDeleteStarted = await transport.waitForFirstDelete()
         XCTAssertTrue(firstDeleteStarted, "The denied first foreground must look up and remove the legacy binding.")
-        await transport.releaseFirstDelete()
-        let savedRemoval = try XCTUnwrap(enrollment.load()?.v2PushRegistration?.permissionRemovalID)
-        let firstWrites = await transport.writes
-        let firstDeleteKey = firstWrites.first(where: { $0.method == .delete })?.idempotencyKey
-        XCTAssertEqual(firstDeleteKey, savedRemoval,
-                       "The removal key is durably saved before the request starts.")
+        let persistedRemoval = Result { try enrollment.load()?.v2PushRegistration?.permissionRemovalID }
+        let firstDeleteKey = await transport.writes.first(where: { $0.method == .delete })?.idempotencyKey
+        XCTAssertNotNil(connection.model.snapshot.settings?.push?.bindingID)
         XCTAssertNil(connection.model.snapshot.routablePushBindingID)
+        await transport.releaseFirstDelete()
         _ = await firstPass.value
         _ = await lifecycle.refreshAfterPushAddressStored()
         let readCount = await transport.settingsReads
         let writes = await transport.writes
+        await lifecycle.deactivate()
+        let savedRemoval = try XCTUnwrap(persistedRemoval.get(),
+                                         "The removal key must be durably saved while the first DELETE is held.")
+        XCTAssertEqual(firstDeleteKey, savedRemoval)
         XCTAssertEqual(readCount, 1)
         XCTAssertEqual(writes.map(\.method), [.delete, .delete])
         XCTAssertEqual(writes.map(\.idempotencyKey), [savedRemoval, savedRemoval])
         XCTAssertNil(connection.model.snapshot.settings?.push?.bindingID)
         XCTAssertNil(try enrollment.load()?.v2PushRegistration?.permissionRemovalID)
-        await lifecycle.deactivate()
     }
 
     @MainActor
@@ -131,7 +135,7 @@ private actor V2PermissionTransport: ClientAPITransport {
     private var revision: Int
     private var environment: String?
     private var failFirstDelete = true
-    private let holdFirstDelete: Bool
+    private var holdFirstDelete: Bool
     private var firstDeleteRelease: CheckedContinuation<Void, Never>?
 
     init(hasLegacyBinding: Bool = false, holdFirstDelete: Bool = false) {
@@ -178,6 +182,7 @@ private actor V2PermissionTransport: ClientAPITransport {
     }
 
     func releaseFirstDelete() {
+        holdFirstDelete = false
         firstDeleteRelease?.resume()
         firstDeleteRelease = nil
     }
