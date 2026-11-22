@@ -122,6 +122,22 @@ final class ClientAPIFocusTests: XCTestCase {
         XCTAssertTrue(transport.acceptedBodies.isEmpty)
     }
 
+    func testLateInboxFocusCannotReplaceFinalSignedOutFocus() async throws {
+        let transport = FocusTransport()
+        let held = AsyncGate()
+        transport.holdFirst = held
+        let focus = ClientAPIFocusChannel(transport: transport, errors: RecordingErrorLogV2()) { _, _ in }
+        let departure = Task { await focus.reportSignedOutBeforeClosing() }
+        await waitFor("signed-out focus is in flight") { transport.sentBodies.count == 1 }
+        await focus.enqueue(.inbox)
+        held.release()
+        await departure.value
+
+        XCTAssertEqual(transport.sentBodies.count, 1)
+        let body = try V2Fixture.json(XCTUnwrap(transport.acceptedBodies.first))
+        XCTAssertEqual(body.uniqueValue(named: "screen")?.stringValue?.rawValue, "signed_out")
+    }
+
     private let showJSON = #"{"show_id":"s1","device_id":"d1","item_id":"i1","target":"chat","held_ms":1500}"#
 
     private func channel(_ transport: FocusTransport, ticks: ManualTicks = ManualTicks(),
