@@ -86,10 +86,10 @@ final class ReleaseNotesUITests: XCTestCase {
                       app.debugDescription)
         XCTAssertTrue(app.staticTexts["Example messages are gone from the app"].exists,
                       app.debugDescription)
-        let pendingHeader = app.staticTexts["Version 0.1.0 · Build 107"]
+        let pendingHeader = app.staticTexts["Version 0.2.0 · Build 107"]
         revealHistoryElement(pendingHeader, in: app)
         XCTAssertTrue(pendingHeader.exists,
-                      "The pending release uses the installed build number.")
+                      "The pending 0.2 release uses the installed build number.")
         // The Build 106 heading was checked above; the list is lazy, so after
         // scrolling assert that no heading took the installed build's number.
         XCTAssertFalse(app.staticTexts["Version 0.1.0 · First confirmed in Build 107"].exists,
