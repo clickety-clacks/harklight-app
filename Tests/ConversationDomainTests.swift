@@ -15,22 +15,31 @@ final class ConversationDomainTests: XCTestCase {
             senderID: ExactText("author"), messageID: ExactText("request")), revision: revision)
     }
 
-    private func reopenWithServerCache(_ store: ClientRepository,
-                                       context: ProfileContext,
+    private func reopenWithServerCache(_ source: ClientRepository, context: ProfileContext,
                                        persistence: MemoryPendingActionPersistence) async throws -> ClientRepository {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let url = directory.appendingPathComponent("server-cache.json")
-        let cache = FileServerStateCache(identity: context.identity, fileURL: url)
-        try await cache.save(ServerStateCacheSnapshot.make(identity: context.identity,
-            from: store.snapshot(context: context), conversations: store.conversationSnapshot(context: context)))
-        let reopenedCache = FileServerStateCache(identity: context.identity, fileURL: url)
-        let cached = try await reopenedCache.load()
+        let inbox = try source.snapshot(context: context)
+        let conversations = try source.conversationSnapshot(context: context)
+        let serverThreads = conversations.threads.mapValues { original in
+            var thread = original
+            thread.drafts.removeAll()
+            thread.answerDrafts = nil
+            thread.uploadGroups = nil
+            thread.uploadCleanups = nil
+            thread.queuedMessages = nil
+            if conversations.chatReadPositionSupport == true {
+                thread.accountReadThroughConversationSequence =
+                    conversations.chatReadPositions?[thread.request] ?? 0
+            }
+            return thread
+        }
         let restored = try ClientRepository(context: context, persistence: persistence)
-        XCTAssertTrue(try restored.snapshot(context: context).requests.isEmpty,
-                      "The pending input file must not restore server request state.")
-        try restored.restoreCachedServerState(try XCTUnwrap(cached).attentionDomainState(for: context.identity),
-                                               context: context)
+        try restored.restoreCachedServerState(CachedAttentionServerState(
+            identity: context.identity, requests: inbox.requests, remoteStates: inbox.remoteStates,
+            cursor: inbox.cursor, conversationCursor: conversations.cursor, conversations: serverThreads,
+            inboxView: inbox.inboxView, currentRequestKeys: inbox.inboxCandidate?.currentKeys ?? inbox.inboxCurrentKeys,
+            chatReadPositions: conversations.chatReadPositions, pendingRelayOverlays: inbox.pendingRelayOverlays,
+            inboxReferences: inbox.inboxReferences, conversationEvents: conversations.heldEvents,
+            priorityLevels: inbox.priorityLevels.confirmedLevels), context: context)
         return restored
     }
 

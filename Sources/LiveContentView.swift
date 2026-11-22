@@ -690,7 +690,6 @@ struct LiveContentView: View {
                     .compactMap { $0 },
                 isRefreshing: store.isRefreshing,
                 conversationStore: store,
-                fetchOlderInboxPage: store.isReadOnly ? nil : { await store.fetchNextInboxPage() },
                 refreshInbox: inboxRefreshAction,
                 showsLocalExamples: showsSampleMessages && !store.isReadOnly,
                 notificationNavigation: testNotificationNavigation ?? launch?.notificationNavigation,
@@ -754,39 +753,10 @@ struct LiveContentView: View {
             .task(id: store.nextRetractionExpiry) {
                 await store.waitForNextRetractionExpiry()
             }
-#if DEBUG
-            .overlay(alignment: .top) {
-                let arguments = ProcessInfo.processInfo.arguments
-                if arguments.contains("--harklight-test-server-retraction") ||
-                    arguments.contains("--harklight-test-retraction-expiry-after-deadline") {
-                    VStack(spacing: 8) {
-                        if let status = fixtureStore?.serverRetractionTestStatus {
-                            Text(status)
-                                .font(.caption)
-                                .accessibilityIdentifier("server-retraction-persistence-readback")
-                        }
-                        if arguments.contains("--harklight-test-server-retraction") {
-                            Button("Advance retraction expiry clock") {
-                                store.advanceRetractionExpiryForTesting()
-                            }
-                            .accessibilityIdentifier("advance-server-retraction-expiry")
-                        }
-                    }
-                    .padding(8)
-                    .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 10))
-                    .frame(maxWidth: .infinity, alignment: .center)
-                }
-            }
-#endif
         }
     }
 
     private func refreshRetractionVisibilityForSceneActivation() {
-#if DEBUG
-        if ProcessInfo.processInfo.arguments.contains("--harklight-test-retraction-expiry-after-deadline") {
-            return
-        }
-#endif
         store.refreshRetractionVisibility()
     }
 
@@ -940,6 +910,16 @@ struct LiveInboxSettings: View {
                     HarklightFormSection("Account") {
                         LabeledContent("Account", value: record.savedAccountName ?? "Current account")
                         LabeledContent("Server", value: record.serverDisplayName ?? record.host)
+                    }
+                }
+                if !store.isReadOnly, (try? store.recoveredPreviousProtocolText().isEmpty) == false {
+                    HarklightFormSection("Saved text") {
+                        NavigationLink("Unsent from the previous version") {
+                            PreviousDeviceUnsentTextView(title: "Unsent from the previous version",
+                                explanation: "You can copy this saved text and use it in a new message. Some earlier sends may already have reached the server.") {
+                                    try store.recoveredPreviousProtocolText()
+                                }
+                        }
                     }
                 }
                 if let launch {

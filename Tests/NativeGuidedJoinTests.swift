@@ -50,7 +50,7 @@ final class NativeGuidedJoinTests: XCTestCase {
         let pendingKey = UUID()
         _ = try await connection.outbox.submit(target: "item:i", operation: "mark_seen",
             write: FrozenWrite(method: .post, path: "/v2/items/i/seen"), idempotencyKey: pendingKey)
-        let lifecycle = NativeRelayLifecycle(clientAPIV2Enabled: true, v2FocusReporter: NativeFocusReporter())
+        let lifecycle = NativeRelayLifecycle(v2FocusReporter: NativeFocusReporter())
         let attempt = UUID()
         lifecycle.installV2Connection(connection, context: context, attempt: attempt)
         lifecycle.installV2FocusChannel(ClientAPIFocusChannel(transport: connection.access, errors: NoopErrorLog()) { _, _ in },
@@ -116,7 +116,7 @@ final class NativeGuidedJoinTests: XCTestCase {
         let context = try enrollment.material(from: record).context
         let repository = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
         let presentation = try LivePresentationStore(store: repository, context: context)
-        let lifecycle = NativeRelayLifecycle(clientAPIV2Enabled: true, v2FocusReporter: NativeFocusReporter())
+        let lifecycle = NativeRelayLifecycle(v2FocusReporter: NativeFocusReporter())
         let oldConnection = try ClientAPIv2Connection(transport: SignOutFocusTransport(), repository: repository,
             context: context, directory: nil, errors: NoopErrorLog())
         lifecycle.installV2Connection(oldConnection, context: context)
@@ -170,47 +170,6 @@ final class NativeGuidedJoinTests: XCTestCase {
         guard case .disconnected = launch.state else { return XCTFail("A confirmed retry must disconnect") }
     }
 
-    func testConfirmedLegacyRemovalResumesFailedPushCleanupAfterRelaunch() async throws {
-        let fixture = try Fixture()
-        defer { fixture.cleanup() }
-        let wire = FakeTransport()
-        let join = NativeGuidedJoinStore(namespace: fixture.namespace, transport: wire)
-        let request = try join.prepare(fixture.invitation, deviceLabel: "My phone")
-        fixture.retainForCleanup(request)
-        wire.handler = { _, _, _ in
-            try response(["state": "approved", "person_id": fixture.invitation.personID,
-                          "device_id": request.deviceID])
-        }
-        _ = try await join.checkApproval()
-        let record = try XCTUnwrap(join.approvedRecord())
-        var removalRequests = 0
-        wire.removalHandler = { _, _, _, _ in
-            removalRequests += 1
-            return try response(["state": "removed", "person_id": fixture.invitation.personID,
-                                 "device_id": request.deviceID, "enrollment_revision": 2])
-        }
-        join.finishLegacyPushDeparture = { _ in throw NativeEnrollmentError.identityStorage }
-        do {
-            try await join.removeCurrentAccount(record)
-            XCTFail("Expected the injected cleanup error")
-        } catch NativeEnrollmentError.identityStorage {}
-        XCTAssertEqual(try join.departure()?.cleanupPending, true)
-        XCTAssertEqual(try join.approvedRecord(), record)
-
-        let reopened = NativeGuidedJoinStore(namespace: fixture.namespace, transport: wire)
-        var cleanups = 0
-        reopened.finishLegacyPushDeparture = { retired in
-            XCTAssertEqual(retired.deviceID, request.deviceID)
-            cleanups += 1
-        }
-        let restored = NativeGuidedJoinCoordinator(store: reopened, deviceName: "My phone")
-        await restored.restore()
-        XCTAssertEqual(cleanups, 1)
-        XCTAssertEqual(removalRequests, 1)
-        XCTAssertEqual(try reopened.departure()?.removed, true)
-        XCTAssertNil(try reopened.departure()?.cleanupPending)
-        XCTAssertNil(try reopened.approvedRecord())
-    }
 
     func testLostJoinReplyRestoresAndRetriesTheSameDeviceRequest() async throws {
         let fixture = try Fixture()
@@ -976,48 +935,75 @@ final class NativeGuidedJoinTests: XCTestCase {
         XCTAssertNil(try store.loadAttempt())
     }
 
-    func testTamperedTrustOrRelayDestinationIsRejected() throws {
+    func testTamperedTrustOrDeviceDestinationIsRejected() throws {
         let fixture = try Fixture()
         defer { fixture.cleanup() }
         var fields = fixture.payload
         fields["ca_sha256"] = String(repeating: "0", count: 64)
         XCTAssertThrowsError(try NativeJoinInvitation.decodePayload(JSONSerialization.data(withJSONObject: fields)))
         fields = fixture.payload
-        fields["relay_url"] = "wss://another-server.test:18443/relay"
+        fields["device_url"] = "https://another-server.test:18443"
         XCTAssertThrowsError(try NativeJoinInvitation.decodePayload(JSONSerialization.data(withJSONObject: fields)))
     }
 
-    func testSystemTimeoutDuringFirstConnectionKeepsWaitingWithoutAnError() async throws {
+    func testV2InvitationRequiresAnHTTPSDeviceOriginAndIgnoresRelayURL() throws {
         let fixture = try Fixture()
         defer { fixture.cleanup() }
+        var fields = fixture.payload
+        fields["relay_url"] = "wss://another-server.test:8123/relay"
+        let decoded = try NativeJoinInvitation.decodePayload(JSONSerialization.data(withJSONObject: fields))
+        XCTAssertEqual(decoded.deviceURL, URL(string: "https://relay.example.test:18443"))
+        for origin in [nil, "http://relay.example.test:18443", "https://relay.example.test:18443/v2",
+                       "https://relay.example.test:18443?x=1", "https://relay.example.test:18443#x",
+                       "https://user@relay.example.test:18443"] as [String?] {
+            fields["device_url"] = origin
+            XCTAssertThrowsError(try NativeJoinInvitation.decodePayload(JSONSerialization.data(withJSONObject: fields)))
+        }
+    }
+
+    func testOlderServerInvitationAsksForReplacementBeforeAnyRequest() async throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanup() }
+        var fields = fixture.payload
+        fields["v"] = 1
+        fields.removeValue(forKey: "device_url")
+        fields["relay_url"] = "wss://relay.example.test:18443/relay"
+        let data = try JSONSerialization.data(withJSONObject: fields)
+        let encoded = data.base64EncodedString().replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
+        let url = try XCTUnwrap(URL(string: "harklight://join#" + encoded))
         let transport = FakeTransport()
-        let store = NativeGuidedJoinStore(namespace: fixture.namespace, transport: transport)
-        let prepared = try store.prepare(fixture.invitation, deviceLabel: "My phone")
-        fixture.retainForCleanup(prepared)
         transport.handler = { _, _, _ in
-            try response(["state": "approved", "person_id": fixture.invitation.personID,
-                          "device_id": prepared.deviceID])
+            XCTFail("A v1 invitation must not reach the network.")
+            throw NativeJoinError.refused
         }
-        _ = try await store.checkApproval()
+        let store = NativeGuidedJoinStore(namespace: fixture.namespace, transport: transport)
         let flow = NativeGuidedJoinCoordinator(store: store, deviceName: "My phone")
-        let (started, start) = AsyncStream<Void>.makeStream()
-        let (released, release) = AsyncStream<Void>.makeStream()
-        flow.connectApproved = { _ in
-            XCTAssertTrue(NativeRelayLifecycle.shouldReconnectAfterConnectionError(
-                URLError(.timedOut), awaitingFirstConnection: true))
-            start.yield()
-            for await _ in released { break }
-            return true
-        }
-        let connecting = Task { await flow.restore() }
-        for await _ in started { break }
-        XCTAssertEqual(flow.screen, .approvedFinishing)
-        XCTAssertTrue(flow.isShowing)
-        XCTAssertTrue(flow.isApprovedConnectBusy)
-        XCTAssertNil(flow.message, "A system timeout must keep reconnecting without showing a join error")
-        release.yield()
-        await connecting.value
-        XCTAssertEqual(flow.screen, .connected)
+        await flow.receive(url)
+        XCTAssertEqual(flow.screen, .refused)
+        XCTAssertEqual(flow.message, "This invitation is from an older Server. Ask the owner for a new invitation.")
+        XCTAssertNil(try store.loadAttempt())
+    }
+
+    func testSavedV1AttemptDoesNotBlockAReissuedInvitation() throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanup() }
+        let store = NativeGuidedJoinStore(namespace: fixture.namespace, transport: FakeTransport())
+        let prior = try store.prepare(fixture.invitation, deviceLabel: "My phone")
+        fixture.retainForCleanup(prior)
+        var saved = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(prior)) as? [String: Any])
+        var legacy = fixture.payload
+        legacy["v"] = 1
+        legacy.removeValue(forKey: "device_url")
+        legacy["relay_url"] = "wss://relay.example.test:18443/relay"
+        saved["invitation"] = legacy
+        try fixture.saveAttemptData(JSONSerialization.data(withJSONObject: saved))
+
+        XCTAssertNil(try store.loadAttempt())
+        let replacement = try fixture.invitationWith(token: String(repeating: "2", count: 64))
+        let reissued = try store.prepare(replacement, deviceLabel: "My phone")
+        fixture.retainForCleanup(reissued)
+        XCTAssertEqual(try store.loadAttempt()?.invitation, replacement)
     }
 
     func testConnectedScreenWaitsForOwnerApprovalAndRelayProgress() async throws {
@@ -1731,6 +1717,8 @@ final class NativeGuidedJoinTests: XCTestCase {
             _ = try await store.checkApproval()
             let record = try XCTUnwrap(store.approvedRecord())
             XCTAssertEqual(record.personID, invitation.personID)
+            XCTAssertEqual(record.deviceURL, invitation.deviceURL)
+            XCTAssertEqual(record.enrollmentPort, invitation.enrollmentURL.port)
             XCTAssertEqual(record.accountDisplayName, label)
             XCTAssertEqual(record.savedAccountName, label)
         }
@@ -2026,9 +2014,9 @@ final class NativeGuidedJoinTests: XCTestCase {
             labels.insert(root.label)
             let pem = "-----BEGIN CERTIFICATE-----\n" + root.certificateDER.base64EncodedString() +
                 "\n-----END CERTIFICATE-----\n"
-            payload = ["v": 1, "person_id": "invited-person", "server_name": "relay.example.test",
+            payload = ["v": 2, "person_id": "invited-person", "server_name": "relay.example.test",
                        "enrollment_url": "https://relay.example.test:18444/enroll",
-                       "relay_url": "wss://relay.example.test:18443/relay", "ca_pem": pem,
+                       "device_url": "https://relay.example.test:18443", "ca_pem": pem,
                        "ca_sha256": SHA256.hash(data: root.certificateDER).map { String(format: "%02x", $0) }.joined(),
                        "invite_token": String(repeating: "1", count: 64),
                        "expires_at": Int64(Date().timeIntervalSince1970 * 1000) + 1_800_000]
@@ -2060,11 +2048,15 @@ final class NativeGuidedJoinTests: XCTestCase {
         // Model the durable format written by the previously shipped app,
         // including an expired request retained across an app upgrade.
         func saveLegacyAttempt(_ attempt: NativeJoinAttempt) throws {
+            try saveAttemptData(JSONEncoder().encode(attempt))
+        }
+
+        func saveAttemptData(_ data: Data) throws {
             let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
                                        kSecAttrService as String: namespace,
                                        kSecAttrAccount as String: "guided-request"]
             let status = SecItemUpdate(query as CFDictionary,
-                                      [kSecValueData as String: try JSONEncoder().encode(attempt)] as CFDictionary)
+                                      [kSecValueData as String: data] as CFDictionary)
             guard status == errSecSuccess else { throw NativeEnrollmentError.identityStorage }
         }
 

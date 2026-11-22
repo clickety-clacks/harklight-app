@@ -832,3 +832,29 @@ public enum ErrorLogDetails {
         return formatter.string(from: date)
     }
 }
+extension ErrorLogInitiator {
+    /// The client cannot see who ended a cancelled or aborted connection, so
+    /// it says `unknown` rather than guessing; only a timeout is known.
+    static func forFailure(_ error: any Error) -> Self {
+        let value = error as NSError
+        if value.domain == NSURLErrorDomain, value.code == NSURLErrorTimedOut { return .timeout }
+        if value.domain == NSPOSIXErrorDomain, value.code == Int(POSIXErrorCode.ETIMEDOUT.rawValue) { return .timeout }
+        // The system reported the network itself going away.
+        if value.domain == NSURLErrorDomain, [NSURLErrorNetworkConnectionLost, NSURLErrorNotConnectedToInternet,
+            NSURLErrorDataNotAllowed, NSURLErrorInternationalRoamingOff, NSURLErrorCallIsActive].contains(value.code) {
+            return .osNetwork
+        }
+        if value.domain == NSPOSIXErrorDomain, [ENETDOWN, ENETUNREACH, ENETRESET].map(Int.init).contains(value.code) {
+            return .osNetwork
+        }
+        return .unknown
+    }
+}
+extension ErrorLogReason {
+    /// A system error keeps its domain and numeric code; the client's own
+    /// errors keep their fixed cause token instead of becoming `other`.
+    static func client(_ error: any Error) -> Self {
+        let reason = from(error: error)
+        return reason == .app("other") ? .app(NativeDiagnosticCauseCode.forError(error)) : reason
+    }
+}

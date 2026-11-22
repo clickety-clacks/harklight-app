@@ -92,7 +92,7 @@ final class HarklightTests: XCTestCase {
         let store = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
         let connection = try ClientAPIv2Connection(transport: transport, repository: store, context: context,
                                                     directory: nil, errors: NoopErrorLog())
-        let lifecycle = NativeRelayLifecycle(clientAPIV2Enabled: true)
+        let lifecycle = NativeRelayLifecycle()
         lifecycle.installV2Connection(connection, context: context)
         let item = Data(#"{"item_id":"item","rev":1,"sender":"sender","request_revision":1,"message":{"title":"Attachment"},"files":[],"seen":false,"rank":{"key":"a","section":"current"},"chat":{"available":true,"started":true}}"#.utf8)
         let page = Data(#"{"rev":2,"older":false,"entries":[{"entry_id":"entry","item_id":"item","rev":2,"position":1,"kind":"reply","author":"origin","request_revision":1,"files":[{"file_id":"download/1","name":"file.txt","size":3,"sha256":"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad","content_type":"text/plain"}]}]}"#.utf8)
@@ -133,7 +133,7 @@ final class HarklightTests: XCTestCase {
     }
 
     @MainActor
-    func testV2PushWakeRequiresTheActiveAccountAndTheReleaseGate() async throws {
+    func testPushWakeRequiresTheActiveAccount() async throws {
         let server = String(repeating: "a", count: 32)
         let binding = ExactText("00000000-0000-0000-0000-000000000001")
         let record = NativeEnrollmentRecord(
@@ -154,15 +154,7 @@ final class HarklightTests: XCTestCase {
             try JSONValue.parse(Data(#"{"attention":{"v":2,"type":"sync","server":"\#(serverID)","locator":{"v":2,"binding_id":"\#(binding.rawValue)","person_id":"\#(person)","device_id":"device","item_id":"item","rev":1}}}"#.utf8))
         }
 
-        let off = NativeRelayLifecycle()
-        off.installV2Connection(connection, context: context)
-        off.sceneActivityChanged(isActive: true)
-        _ = await off.refreshV2ForPush(try payload(person: "person"))
-        XCTAssertFalse(off.usesClientAPIV2)
-        XCTAssertEqual(transport.counts.batches, 0)
-        XCTAssertEqual(transport.counts.opened, 0)
-
-        let on = NativeRelayLifecycle(clientAPIV2Enabled: true,
+        let on = NativeRelayLifecycle(
             v2NotificationPermission: NativeNotificationPermission(status: { .authorized },
                                                                    request: { true }, register: {}))
         on.installV2Connection(connection, context: context)
@@ -186,7 +178,7 @@ final class HarklightTests: XCTestCase {
         let store = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
         let connection = try ClientAPIv2Connection(transport: transport, repository: store, context: context,
                                                     directory: nil, errors: NoopErrorLog())
-        let lifecycle = NativeRelayLifecycle(clientAPIV2Enabled: true)
+        let lifecycle = NativeRelayLifecycle()
         lifecycle.installV2Connection(connection, context: context)
         let key = RequestKey(accountScope: identity.personID, senderID: ExactText("sender"), messageID: ExactText("item"))
         let item = try APIItem(json: JSONValue.parse(Data(#"{"item_id":"item","rev":1,"sender":"sender","request_revision":1,"message":{"title":"Question"},"files":[],"seen":false,"rank":{"key":"a","section":"current"},"chat":{"available":true,"started":true}}"#.utf8)))
@@ -213,7 +205,7 @@ final class HarklightTests: XCTestCase {
         let connection = try ClientAPIv2Connection(transport: transport, repository: repository,
             context: context, directory: nil, errors: NoopErrorLog())
         let coordinator = NativePushedViewCoordinator()
-        let lifecycle = NativeRelayLifecycle(clientAPIV2Enabled: true, v2ShowCoordinator: coordinator)
+        let lifecycle = NativeRelayLifecycle(v2ShowCoordinator: coordinator)
         let attempt = UUID()
         lifecycle.installV2Connection(connection, context: context, attempt: attempt)
         try connection.model.apply([.init(rev: 1, kind: "item", data: Data(#"{"item_id":"older","rev":1,"sender":"sender","request_revision":1,"message":{"title":"Older"},"files":[],"seen":false,"rank":{"key":"a","section":"current"},"chat":{"available":true,"started":true}}"#.utf8))], cursor: 1)
@@ -254,7 +246,7 @@ final class HarklightTests: XCTestCase {
         let connection = try ClientAPIv2Connection(transport: V2ScenePushTransport(), repository: repo,
             context: context, directory: nil, errors: NoopErrorLog())
         let coordinator = NativePushedViewCoordinator()
-        let lifecycle = NativeRelayLifecycle(clientAPIV2Enabled: true, v2ShowCoordinator: coordinator)
+        let lifecycle = NativeRelayLifecycle(v2ShowCoordinator: coordinator)
         let attempt = UUID()
         lifecycle.installV2Connection(connection, context: context, attempt: attempt)
         var shows: [ViewShowFrame] = []
@@ -290,7 +282,7 @@ final class HarklightTests: XCTestCase {
         let connection = try ClientAPIv2Connection(transport: transport, repository: repository,
                                                     context: context, directory: nil, errors: NoopErrorLog())
         let reporter = NativeFocusReporter()
-        let lifecycle = NativeRelayLifecycle(clientAPIV2Enabled: true, v2FocusReporter: reporter)
+        let lifecycle = NativeRelayLifecycle(v2FocusReporter: reporter)
         let attempt = UUID()
         let focus = ClientAPIFocusChannel(transport: transport, errors: NoopErrorLog()) { _, _ in }
         func expect(_ screens: [String]) async throws {
@@ -322,7 +314,7 @@ final class HarklightTests: XCTestCase {
         let store = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
         let connection = try ClientAPIv2Connection(transport: transport, repository: store, context: context,
                                                     directory: nil, errors: NoopErrorLog())
-        let lifecycle = NativeRelayLifecycle(clientAPIV2Enabled: true)
+        let lifecycle = NativeRelayLifecycle()
         lifecycle.installV2Connection(connection, context: context)
         XCTAssertEqual(transport.counts.opened, 0)
 
@@ -690,19 +682,9 @@ final class HarklightTests: XCTestCase {
 
     @MainActor
     func testPendingNotificationOpensExactMessageOrChatAfterValidation() throws {
-        let generation = UUID()
-        let record = NativeEnrollmentRecord(
-            host: "relay.example", enrollmentPort: 18444, relayPort: 18443,
-            trustedRootDER: Data([1, 2, 3]), identityLabel: "test device",
-            deviceID: "device", approvalCode: "ABCDEFGH",
-            statusSecret: String(repeating: "b", count: 64),
-            expiresAt: 1, statusExpiresAt: 2, personID: "person",
-            notificationProfileGeneration: generation)
-        let profile = try XCTUnwrap(NativeNotificationProfile(record))
-        let payload = try JSONValue.parse(Data(#"{"attention":{"v":1,"type":"sync","locator":{"v":1,"binding_id":"00000000-0000-0000-0000-000000000001","person_id":"person","device_id":"device","sender_id":"sender","message_id":"target-message","acceptance_seq":4,"target":"chat"}}}"#.utf8))
-        let locator = try XCTUnwrap(NativeNotificationLocator(payload))
+        let locator = notificationLocator(target: "chat")
         let route = NativeInboxNavigation(serial: 50, request: nil)
-        let intent = NativeNotificationIntent(serial: 50, locator: locator, profile: profile)
+        let intent = NativeNotificationIntent(serial: 50, locator: locator)
 
         let pending = InboxNotificationDestination(route: route, rows: [])
         let presentation = InboxNotificationPendingPresentation(
@@ -711,7 +693,6 @@ final class HarklightTests: XCTestCase {
         XCTAssertEqual(pending.selection, .notificationPending(50))
         XCTAssertEqual(pending.workspaceTab, .inbox)
         XCTAssertEqual(presentation.locator, locator)
-        XCTAssertEqual(presentation.profile, profile)
         XCTAssertEqual(presentation.target, .chat)
         XCTAssertEqual(presentation.state, .opening)
         XCTAssertEqual(presentation.listRowState, .opening(.chat))
@@ -727,10 +708,9 @@ final class HarklightTests: XCTestCase {
 
     @MainActor
     func testPendingNotificationShowsRetryAndUnavailableStates() throws {
-        let payload = try JSONValue.parse(Data(#"{"attention":{"v":1,"type":"sync","locator":{"v":1,"binding_id":"00000000-0000-0000-0000-000000000001","person_id":"person","device_id":"device","sender_id":"sender","message_id":"target-message","acceptance_seq":4,"target":"message"}}}"#.utf8))
-        let locator = try XCTUnwrap(NativeNotificationLocator(payload))
+        let locator = notificationLocator(target: "message")
         let route = NativeInboxNavigation(serial: 70, request: nil)
-        let intent = NativeNotificationIntent(serial: 70, locator: locator, profile: nil)
+        let intent = NativeNotificationIntent(serial: 70, locator: locator)
 
         let states: [(String, InboxNotificationPendingPresentation.State,
                       InboxNotificationPendingPresentation.ListRowState)] = [
@@ -752,13 +732,19 @@ final class HarklightTests: XCTestCase {
                            expectedRowState == .checkingAgain, message)
         }
 
-        let staleIntent = NativeNotificationIntent(serial: 69, locator: locator, profile: nil)
+        let staleIntent = NativeNotificationIntent(serial: 69, locator: locator)
         let invalid = InboxNotificationPendingPresentation(
             route: route, intent: staleIntent, statusMessage: "Checking this notification.")
         XCTAssertEqual(invalid.state, .invalid,
                        "A different notification's locator must never be shown as this target.")
         XCTAssertEqual(invalid.listRowState, .invalid)
         XCTAssertFalse(invalid.listRowState.showsProgress)
+    }
+
+    private func notificationLocator(target: String) -> NativeNotificationLocator {
+        NativeNotificationLocator(v2Request: RequestKey(accountScope: ExactText("person"), senderID: ExactText("sender"),
+            messageID: ExactText("target-message")), bindingID: ExactText("binding"), deviceID: ExactText("device"),
+            serverID: String(repeating: "a", count: 32), target: target)
     }
 
     func testDismissingPendingNotificationSuppressesItsLateResolution() {
@@ -819,59 +805,6 @@ final class HarklightTests: XCTestCase {
         }
     }
 
-    @MainActor
-    func testLivePresentationReadsCommittedRelayEnvelopeFromSharedDomainStore() async throws {
-        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
-                                       personID: ExactText("person-A"),
-                                       deviceID: ExactText("device-A"))
-        let context = ProfileContext(identity: identity, transportMode: .relay)
-        let store = try ClientRepository(context: context,
-                                             persistence: MemoryPendingActionPersistence())
-        let visible = try LivePresentationStore(store: store, context: context)
-        XCTAssertTrue(visible.presentation.requests.isEmpty)
-
-        let payload = try JSONValue.parse(Data(#"{"sender_id":"app:test","message_id":"m1","created_at":1,"title":"Real relay request","body":"Reply requested"}"#.utf8))
-        let key = RequestKey(accountScope: identity.personID,
-                             senderID: ExactText("app:test"), messageID: ExactText("m1"))
-        _ = try store.apply(RelayEvent(sequence: 1,
-                                       body: .delivery(StoredRequest(key: key, originalPayload: payload), .message)),
-                            context: context)
-        let cacheRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        addTeardownBlock {
-            await NativeRelayLifecycle.shared.deactivate()
-            try? FileManager.default.removeItem(at: cacheRoot)
-        }
-        let confirmation = try await NativeRelayLifecycle.shared.confirmInProcessSessionForTesting(
-            store: store, context: context,
-            session: ReplyCheckpointSession(identity: identity, key: key, payload: payload),
-            serverStateCache: FileServerStateCache(identity: identity,
-                fileURL: cacheRoot.appendingPathComponent("server-cache.json")))
-        XCTAssertTrue(confirmation.relayConfirmed)
-        try visible.refreshFromDurableStore()
-
-        XCTAssertEqual(visible.presentation.cursor, 1)
-        XCTAssertEqual(visible.openRequests.map(\.key), [key])
-        XCTAssertNil(visible.selectedRequest)
-        visible.selectRequest(key)
-        XCTAssertEqual(visible.selectedRequest?.title?.rawValue, "Real relay request")
-        XCTAssertEqual(visible.selectedRequest?.body?.rawValue, "Reply requested")
-        XCTAssertTrue(LiveRequestDetail(request: try XCTUnwrap(visible.selectedRequest),
-                                        store: visible).canAnswer)
-
-        guard case let .compatibility(actions) = try XCTUnwrap(visible.selectedRequest).projection,
-              actions.count == 1,
-              let reply = actions.first,
-              reply.kind == .text else {
-            return XCTFail("A plain sender message needs a deliberate text reply in the real inbox.")
-        }
-        visible.selectAction(reply.id, input: nil, for: key)
-        visible.updateCompatibilityText("  Yes, I can help.\n", action: reply.id, for: key)
-        let receipt = try visible.submit(key)
-        XCTAssertEqual(receipt.exactAnswerJSON, #""  Yes, I can help.\n""#)
-        XCTAssertEqual(visible.selectedRequest?.lifecycleStatus, .pending)
-        XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty)
-        XCTAssertEqual(try store.lookupIntent(receipt.intentID, context: context)?.operationID, receipt.opID)
-    }
 
     @MainActor
     func testOnlyRequestsWithAUserActionAppearInReplied() throws {
@@ -939,7 +872,10 @@ final class HarklightTests: XCTestCase {
     }
 
     @MainActor
-    func testSuppliedUnsupportedAnswerFormatOffersNoSend() throws {
+    func testUnknownV2AnswerFormatOffersPlainReplyAndExplainsTheFallback() throws {
+        let savedRules = AnswerScreenRules.current
+        AnswerScreenRules.current = AnswerScreenRules(limits: .builtIn, degradesUnshowableScreens: true)
+        defer { AnswerScreenRules.current = savedRules }
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
                                        personID: ExactText("person-A"),
                                        deviceID: ExactText("device-A"))
@@ -954,109 +890,15 @@ final class HarklightTests: XCTestCase {
                             context: context)
         let visible = try LivePresentationStore(store: store, context: context)
         let request = try XCTUnwrap(visible.presentation.requests.first)
-        guard case .unsupported = request.projection else {
-            return XCTFail("An explicitly supplied unknown answer format must be unsupported.")
+        guard case let .compatibility(actions) = request.projection else {
+            return XCTFail("The v2 client should offer plain reply for an unknown custom screen.")
         }
-        XCTAssertFalse(LiveRequestDetail(request: request, store: visible).canAnswer,
-                       "An unsupported sender format must not offer Send.")
+        XCTAssertEqual(actions.map(\.id), [ExactText("reply")])
+        XCTAssertTrue(request.customAnswerScreenNotShown)
+        XCTAssertTrue(LiveRequestDetail(request: request, store: visible).canAnswer)
     }
 
-    @MainActor
-    func testAnswerControlsRemainAvailableWhileInboxFreshnessIsUnknown() async throws {
-        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
-                                       personID: ExactText("refresh-answer-\(UUID().uuidString)"),
-                                       deviceID: ExactText("device-A"))
-        let context = ProfileContext(identity: identity, transportMode: .relay)
-        let store = try ClientRepository(context: context,
-                                             persistence: MemoryPendingActionPersistence())
-        let key = RequestKey(accountScope: identity.personID,
-                             senderID: ExactText("app:test"), messageID: ExactText("refresh-answer"))
-        let payload = try JSONValue.parse(Data(#"{"sender_id":"app:test","message_id":"refresh-answer","title":"Refresh answer","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"reply","label":"Reply","kind":"text"}]}}"#.utf8))
-        let cacheRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        addTeardownBlock {
-            await NativeRelayLifecycle.shared.deactivate()
-            try? FileManager.default.removeItem(at: cacheRoot)
-        }
-        let confirmation = try await NativeRelayLifecycle.shared.confirmInProcessSessionForTesting(
-            store: store, context: context,
-            session: ReplyCheckpointSession(identity: identity, key: key, payload: payload),
-            serverStateCache: FileServerStateCache(identity: identity,
-                fileURL: cacheRoot.appendingPathComponent("server-cache.json")))
-        XCTAssertTrue(confirmation.relayConfirmed)
-        _ = try store.beginInboxCandidate(startupID: "refresh", since: 1, batches: [], context: context)
-        let visible = try LivePresentationStore(store: store, context: context)
-        let request = try XCTUnwrap(visible.request(for: key))
 
-        visible.beginRefresh()
-        defer { visible.endRefresh() }
-        let row = try XCTUnwrap(visible.inboxRows.first { $0.key == key })
-        XCTAssertTrue(request.inboxStateIsCurrent,
-                      "A pending refresh keeps rows from the last accepted inbox snapshot current.")
-        XCTAssertTrue(visible.isRefreshing)
-        XCTAssertFalse(row.isResolved, "Unknown freshness must not gray an otherwise open message.")
-        XCTAssertTrue(row.canNoComment)
-        XCTAssertTrue(LiveRequestDetail(request: request, store: visible).canAnswer,
-                      "A freshness check must not dim or disable an answer for the version on screen.")
-    }
-
-    @MainActor
-    func testLiveAnswerUsesSenderChoiceAndStaysPendingAcrossRestart() async throws {
-        let fixture = try XCTUnwrap(loadFixtures().requests.first(where: { $0.key.messageID == ExactText("review-01") }))
-        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
-                                       personID: fixture.key.accountScope,
-                                       deviceID: ExactText("enrolled-device"))
-        let context = ProfileContext(identity: identity, transportMode: .relay)
-        let persistence = MemoryPendingActionPersistence()
-        let store = try ClientRepository(context: context, persistence: persistence)
-        _ = try store.apply(RelayEvent(sequence: 1,
-                                       body: .delivery(StoredRequest(key: fixture.key,
-                                                                     originalPayload: fixture.originalPayload), .message)),
-                            context: context)
-        let cacheRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        addTeardownBlock {
-            await NativeRelayLifecycle.shared.deactivate()
-            try? FileManager.default.removeItem(at: cacheRoot)
-        }
-        let cacheURL = cacheRoot.appendingPathComponent("server-cache.json")
-        let cache = FileServerStateCache(identity: identity, fileURL: cacheURL)
-        let confirmation = try await NativeRelayLifecycle.shared.confirmInProcessSessionForTesting(
-            store: store, context: context,
-            session: ReplyCheckpointSession(identity: identity, key: fixture.key, payload: fixture.originalPayload),
-            serverStateCache: cache)
-        XCTAssertTrue(confirmation.relayConfirmed)
-        let live = try LivePresentationStore(store: store, context: context)
-        XCTAssertNil(live.selectedRequest)
-        live.selectRequest(fixture.key)
-        guard case let .sender(sender) = try XCTUnwrap(live.selectedRequest).projection,
-              let input = sender.inputs.first,
-              case let .response(actions) = input.kind,
-              let action = actions.first(where: { $0.kind == .value }) else {
-            return XCTFail("The admitted sender choice must be available to the real inbox.")
-        }
-
-        live.selectAction(action.id, input: input.id, for: fixture.key)
-        XCTAssertNil(live.actionError)
-        let receipt = try live.submit(fixture.key)
-        XCTAssertEqual(live.selectedRequest?.lifecycleStatus, .pending)
-        XCTAssertEqual(live.selectedRequest?.intentReceipt?.opID, receipt.opID)
-        XCTAssertTrue(try store.snapshot(context: context).outbox.isEmpty)
-        XCTAssertEqual(try store.lookupIntent(receipt.intentID, context: context)?.operationID, receipt.opID)
-
-        let reopenedContext = ProfileContext(identity: identity, transportMode: .relay)
-        let reopened = try ClientRepository(context: reopenedContext, persistence: persistence)
-        let reopenedCache = FileServerStateCache(identity: identity, fileURL: cacheURL)
-        let cached = try await reopenedCache.load()
-        try reopened.restoreCachedServerState(try XCTUnwrap(cached).attentionDomainState(for: identity), context: reopenedContext)
-        let reopenedLive = try LivePresentationStore(store: reopened, context: reopenedContext)
-        XCTAssertNil(reopenedLive.selectedRequest)
-        reopenedLive.selectRequest(fixture.key)
-        XCTAssertEqual(reopenedLive.selectedRequest?.lifecycleStatus, .pending)
-        XCTAssertEqual(reopenedLive.selectedRequest?.intentReceipt?.intentID, receipt.intentID)
-        XCTAssertThrowsError(try reopenedLive.submit(fixture.key),
-                             "The visible Pending answer must not mint another original operation.")
-        XCTAssertTrue(try reopened.snapshot(context: reopenedContext).outbox.isEmpty)
-        XCTAssertEqual(try reopened.lookupIntent(receipt.intentID, context: reopenedContext)?.operationID, receipt.opID)
-    }
 
     func testNormativeFixturesAdmitTwoDifferentSenderScenesAndWholeFallback() throws {
         let fixtures = try loadFixtures()
@@ -1118,59 +960,6 @@ final class HarklightTests: XCTestCase {
         XCTAssertEqual(projectedActions.map(\.illustrationID), actions.map(\.illustrationID))
     }
 
-    func testRelayPresentationPreservesDurableAcceptanceOrderAcrossRestart() async throws {
-        let fixtures = try loadFixtures()
-        let review = try XCTUnwrap(fixtures.requests.first)
-        let facilities = try XCTUnwrap(fixtures.requests.first(where: { $0.key.messageID == ExactText("facilities-01") }))
-        let lexicalOrder = [review, facilities].sorted { left, right in
-            if left.key.senderID.rawValue != right.key.senderID.rawValue {
-                return left.key.senderID.rawValue < right.key.senderID.rawValue
-            }
-            return left.key.messageID.rawValue < right.key.messageID.rawValue
-        }
-        let acceptedOrder = Array(lexicalOrder.reversed())
-        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay-test"),
-                                       personID: fixtures.accountScope,
-                                       deviceID: ExactText("device-a"))
-        let context = ProfileContext(identity: identity, transportMode: .relay)
-        let persistence = MemoryPendingActionPersistence()
-        let store = try ClientRepository(context: context, persistence: persistence)
-
-        XCTAssertNotEqual(acceptedOrder.map(\.key), lexicalOrder.map(\.key))
-        XCTAssertEqual(try store.apply(RelayEvent(sequence: 1,
-                                                  body: .delivery(StoredRequest(key: acceptedOrder[0].key,
-                                                                                originalPayload: acceptedOrder[0].originalPayload),
-                                                                  .message)),
-                                       context: context), 1)
-        XCTAssertEqual(try store.apply(RelayEvent(sequence: 2,
-                                                  body: .delivery(StoredRequest(key: acceptedOrder[1].key,
-                                                                                originalPayload: acceptedOrder[1].originalPayload),
-                                                                  .message)),
-                                       context: context), 2)
-
-        let port = AttentionDomainPort(store: store)
-        let firstSnapshot = try port.observe(context: port.context)
-        let newestFirst = Array(acceptedOrder.reversed())
-        XCTAssertEqual(firstSnapshot.requests.map(\.key), newestFirst.map(\.key),
-                       "The inbox presents the most recently accepted item first while retaining durable order values.")
-        XCTAssertEqual(firstSnapshot.requests.map(\.acceptanceOrder), [UInt64(2), 1])
-
-        let cacheRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: cacheRoot) }
-        let cacheURL = cacheRoot.appendingPathComponent("server-cache.json")
-        let cache = FileServerStateCache(identity: identity, fileURL: cacheURL)
-        try await cache.save(ServerStateCacheSnapshot.make(identity: identity,
-            from: store.snapshot(context: context), conversations: store.conversationSnapshot(context: context)))
-        let restartedContext = ProfileContext(identity: identity, transportMode: .relay)
-        let restartedStore = try ClientRepository(context: restartedContext, persistence: persistence)
-        let reopenedCache = FileServerStateCache(identity: identity, fileURL: cacheURL)
-        let cached = try await reopenedCache.load()
-        try restartedStore.restoreCachedServerState(try XCTUnwrap(cached).attentionDomainState(for: identity), context: restartedContext)
-        let restartedPort = AttentionDomainPort(store: restartedStore)
-        let restartedSnapshot = try restartedPort.observe(context: restartedPort.context)
-        XCTAssertEqual(restartedSnapshot.requests.map(\.key), newestFirst.map(\.key))
-        XCTAssertEqual(restartedSnapshot.requests.map(\.acceptanceOrder), [UInt64(2), 1])
-    }
 
     func testMalformedAuthorizedResultPointProjectsTheWholeNeutralScene() throws {
         let fixtures = try loadFixtures()
@@ -1368,10 +1157,10 @@ final class HarklightTests: XCTestCase {
                     XCTAssertEqual(resultKinds(acceptedDocument.result),
                                    Set(["literal", "input", "array", "object"]))
 
-                    guard case .sender = RequestInterface.recognize(document, deliveredFileNames: names) else {
+                    guard case .sender = RequestInterface.recognize(document, deliveredFileNames: names, rules: .today) else {
                         return XCTFail("A delivered picture document should be recognized as sender UI.")
                     }
-                    guard case .unsupported(.unfamiliar) = RequestInterface.recognize(document) else {
+                    guard case .unsupported(.unfamiliar) = RequestInterface.recognize(document, rules: .today) else {
                         return XCTFail("A picture document without its delivered file names must remain unsupported.")
                     }
                     let payload = JSONValue.object([JSONMember("answer_ui", document)])
@@ -1379,10 +1168,10 @@ final class HarklightTests: XCTestCase {
                                                                 senderID: ExactText("agent"),
                                                                 messageID: ExactText("picture")),
                                                 originalPayload: payload)
-                    guard case .sender = request.interface(deliveredFileNames: names) else {
+                    guard case .sender = request.interface(deliveredFileNames: names, rules: .today) else {
                         return XCTFail("Stored request recognition must use its delivered file names.")
                     }
-                    guard case .unsupported(.unfamiliar) = request.interface else {
+                    guard case .unsupported(.unfamiliar) = request.interface(deliveredFileNames: [], rules: .today) else {
                         return XCTFail("Stored request recognition must not invent missing delivered files.")
                     }
                 }

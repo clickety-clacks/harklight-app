@@ -42,7 +42,7 @@ A feature too big for one short-lived branch lands on `main` in small, reviewed 
 - **Removal is part of the feature.** Once the feature is accepted, delete the flag, the off path and its tests in a follow-up pull request, and remove its register row. The feature isn't done until its flag is gone.
 - Flags are for unfinished features. Don't use them for per-user settings or permanent configuration.
 
-The server owns the remote flag configuration; this section only describes how the app reads flags. Remote flag values arrive from the server in the resynced frame on connect, under `resynced.feature_flags`. When a flag is absent from that frame, the app uses its built-in default.
+The server owns its remote capability values. The app reads the priority-level editing capability from `GET /v2/me` and uses its built-in default when the capability is absent.
 
 ### Feature-flag register
 
@@ -51,7 +51,6 @@ Add a row when you add a flag, update it when the default changes, and delete th
 | Flag | Owner | Default | Remove when |
 | --- | --- | --- | --- |
 | `progress_inbox` | Client PO and the Progress feature owner | **on** (recorded exception: Progress was requested, is reviewed and merged in #293, and the server has no flag support yet, so default-off would hide it with no way to turn it on) | the Progress list and detail behavior is accepted |
-| `server_matched_push_routing` | Client PO and the push-routing feature owner | off | notification routing and the account-departure behavior (#292) are accepted |
 | `priority_level_editing` | Client PO and the priority-levels feature owner | off | native read and save of priority levels (#203) are accepted |
 
 ## Project generation

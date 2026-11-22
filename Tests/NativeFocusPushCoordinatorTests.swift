@@ -11,8 +11,8 @@ final class NativeFocusPushCoordinatorTests: XCTestCase {
         let coordinator = NativePushedViewCoordinator()
         var applied: [ViewShowFrame] = []
         coordinator.setApplyHandler { applied.append($0) }
-        coordinator.receive(try viewShow(messageID: "first", target: "message"))
-        coordinator.receive(try viewShow(messageID: "latest", target: "chat"))
+        coordinator.receiveV2(viewShow(messageID: "first", target: "message"), elapsedSinceReceipt: 0)
+        coordinator.receiveV2(viewShow(messageID: "latest", target: "chat"), elapsedSinceReceipt: 0)
         coordinator.scenePhaseChanged(.active)
         await Task.yield()
 
@@ -33,65 +33,47 @@ final class NativeFocusPushCoordinatorTests: XCTestCase {
         XCTAssertEqual(coordinator.contentTouchRevision, 1)
     }
 
-    func testLegacyShowScheduledWhileActiveStillAppliesAfterSceneBecomesInactive() async throws {
-        let coordinator = NativePushedViewCoordinator()
-        let applied = expectation(description: "Legacy frame applies without scene reactivation")
-        coordinator.setApplyHandler { frame in
-            XCTAssertEqual(frame.messageID, "legacy")
-            applied.fulfill()
-        }
-        coordinator.scenePhaseChanged(.active)
-        coordinator.receive(try viewShow(messageID: "legacy", target: "message"))
-        coordinator.scenePhaseChanged(.inactive)
 
-        await fulfillment(of: [applied], timeout: 1)
-    }
-
-    func testPassiveChatKeepsThreeRepliesUnreadUntilContentIsTouched() throws {
+    func testPassiveChatKeepsThreeRepliesUnreadUntilContentIsTouched() async throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
                                        personID: ExactText("person"), deviceID: ExactText("device"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
         let key = RequestKey(accountScope: identity.personID,
                              senderID: ExactText("agent"), messageID: ExactText("request"))
-        let binding = ConversationBinding(request: key, revision: 1)
-        let handle = ExactText("session")
-        let store = try ClientRepository(context: context,
-            persistence: MemoryPendingActionPersistence())
-        let payload = try JSONValue.parse(Data(#"{"title":"Question"}"#.utf8))
-        try store.apply(RelayEvent(sequence: 1,
-            body: .delivery(StoredRequest(key: key, originalPayload: payload), .message),
-            conversation: RelayConversationMetadata(revision: 1, sessionHandle: handle)),
-            context: context)
-
-        let question = ConversationTurn(id: ExactText("question"), binding: binding,
-            author: .person, sessionHandle: handle, text: ExactText("Question"), kind: .discussion)
-        try store.applyConversation(ConversationEvent(sequence: 1, binding: binding,
-            fact: .turn(question)), context: context)
-        let replies = (1...3).map { sequence in
-            ConversationTurn(id: ExactText("reply-\(sequence)"), binding: binding,
-                author: .origin, sessionHandle: handle, text: ExactText("Reply \(sequence)"),
-                inReplyTo: question.id, kind: .reply)
+        let store = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        let model = ServerModelV2Store(fileURL: nil)
+        let item = #"{"item_id":"request","sender":"agent","rev":1,"request_revision":1,"message":{"title":"Question"},"files":[],"seen":false,"chat":{"available":true,"started":true},"rank":{"key":"a","section":"current"}}"#
+        try model.apply([.init(rev: 1, kind: "item", data: Data(item.utf8))], cursor: 1)
+        let page = try APIEntriesPage(json: JSONValue.parse(Data(#"{"rev":1,"entries":[],"older":false}"#.utf8)))
+        try model.apply(page, of: key.messageID)
+        let replyIDs = (1...3).map { ExactText("reply-\($0)") }
+        for (index, replyID) in replyIDs.enumerated() {
+            let position = index + 1
+            let revision = UInt64(position + 1)
+            let entry = #"{"entry_id":"\#(replyID.rawValue)","item_id":"request","rev":\#(revision),"position":\#(position),"kind":"reply","author":"origin","request_revision":1,"text":"Reply","files":[]}"#
+            try model.apply([.init(rev: revision, kind: "entry", data: Data(entry.utf8))], cursor: revision)
         }
-        for (index, reply) in replies.enumerated() {
-            try store.applyConversation(ConversationEvent(sequence: UInt64(index + 2),
-                binding: binding, fact: .turn(reply)), context: context)
-        }
+        try store.restoreCachedServerState(ServerModelV2Projection.cachedState(model.snapshot, identity: identity),
+                                           context: context)
 
         let coordinator = NativePushedViewCoordinator()
-        coordinator.setApplyHandler { _ in }
-        coordinator.receive(try viewShow(messageID: "request", target: "chat"))
+        let applied = expectation(description: "The held show opens chat")
+        coordinator.setApplyHandler { _ in applied.fulfill() }
+        coordinator.receiveV2(viewShow(messageID: "request", target: "chat"), elapsedSinceReceipt: 0)
         coordinator.scenePhaseChanged(.active)
+        await fulfillment(of: [applied], timeout: 2)
         XCTAssertTrue(coordinator.isPassive(key))
 
-        for reply in replies {
+        for replyID in replyIDs {
             coordinator.performReadIfContentIsActive(for: key) {
-                do { try store.markConversationRead(key, through: reply.id, context: context) }
+                do { try store.markConversationRead(key, through: replyID, context: context) }
                 catch { XCTFail("Unexpected read update failure: \(error)") }
             }
         }
         let untouched = try XCTUnwrap(store.conversationSnapshot(context: context).threads[key])
         XCTAssertTrue(untouched.hasUnreadAgentReply, "All three replies remain unread while the pushed chat is untouched.")
-        XCTAssertNil(untouched.accountReadThroughConversationSequence)
+        XCTAssertEqual(untouched.accountReadThroughConversationSequence, 0)
+        XCTAssertTrue(try store.savedV2ReadPositions(context: context).isEmpty)
         XCTAssertEqual(untouched.turns.filter {
             $0.kind == .reply && $0.author == .origin
         }.count, 3)
@@ -102,16 +84,20 @@ final class NativeFocusPushCoordinatorTests: XCTestCase {
             catch { XCTFail("Unexpected message-open update failure: \(error)") }
         })
         XCTAssertEqual(try store.snapshot(context: context).pendingMessageOpens.count, 1)
-        let newest = try XCTUnwrap(replies.last)
+        let newest = try XCTUnwrap(replyIDs.last)
         let readResumed = coordinator.performReadIfContentIsActive(for: key) {
-            do { try store.markConversationRead(key, through: newest.id, context: context) }
+            do { try store.markConversationRead(key, through: newest, context: context) }
             catch { XCTFail("Unexpected read update failure: \(error)") }
         }
         XCTAssertTrue(readResumed, "The first scroll after the touch resumes normal chat read handling.")
         let touched = try XCTUnwrap(store.conversationSnapshot(context: context).threads[key])
-        XCTAssertTrue(touched.hasUnreadAgentReply,
-                      "A visible read request cannot manufacture the server read position.")
-        XCTAssertNil(touched.accountReadThroughConversationSequence)
+        XCTAssertFalse(touched.hasUnreadAgentReply,
+                       "The staged read is projected optimistically after the person touches chat.")
+        XCTAssertEqual(touched.accountReadThroughConversationSequence, 3)
+        XCTAssertEqual(try store.savedV2ReadPositions(context: context).first?.entryID, newest)
+        XCTAssertNil(model.snapshot.items[key.messageID]?.chat.readPosition,
+                     "The confirmed server read position remains unchanged until the write is accepted.")
+        XCTAssertEqual(model.heldCursor, 4, "Staging a read does not move the feed cursor.")
         coordinator.accountConnectionWillBeRemoved()
     }
 
@@ -120,14 +106,14 @@ final class NativeFocusPushCoordinatorTests: XCTestCase {
         let coordinator = NativePushedViewCoordinator(uptime: { uptime })
         var applied: [ViewShowFrame] = []
         coordinator.setApplyHandler { applied.append($0) }
-        coordinator.receive(try viewShow(messageID: "older", target: "message", heldMilliseconds: 1_000))
+        coordinator.receiveV2(viewShow(messageID: "older", target: "message", heldMilliseconds: 1_000), elapsedSinceReceipt: 0)
         coordinator.recordOwnOpen()
         coordinator.scenePhaseChanged(.active)
         await Task.yield()
 
         XCTAssertTrue(applied.isEmpty)
         uptime += 0.1
-        coordinator.receive(try viewShow(messageID: "newer", target: "message"))
+        coordinator.receiveV2(viewShow(messageID: "newer", target: "message"), elapsedSinceReceipt: 0)
         await Task.yield()
         XCTAssertEqual(applied.map(\.messageID), ["newer"])
     }
@@ -139,7 +125,7 @@ final class NativeFocusPushCoordinatorTests: XCTestCase {
         coordinator.setApplyHandler { applied.append($0) }
         coordinator.scenePhaseChanged(.active)
         coordinator.replyEditorFocusChanged(true)
-        coordinator.receive(try viewShow(messageID: "deferred", target: "chat"))
+        coordinator.receiveV2(viewShow(messageID: "deferred", target: "chat"), elapsedSinceReceipt: 0)
 
         uptime += 2
         coordinator.scenePhaseChanged(.inactive)
@@ -159,7 +145,7 @@ final class NativeFocusPushCoordinatorTests: XCTestCase {
         leavingField.setApplyHandler { _ in appliedAfterBlur.fulfill() }
         leavingField.scenePhaseChanged(.active)
         leavingField.conversationComposerFocusChanged(true)
-        leavingField.receive(try viewShow(messageID: "after-blur", target: "message"))
+        leavingField.receiveV2(viewShow(messageID: "after-blur", target: "message"), elapsedSinceReceipt: 0)
         leavingField.conversationComposerFocusChanged(false)
         await fulfillment(of: [appliedAfterBlur], timeout: 1)
 
@@ -168,12 +154,9 @@ final class NativeFocusPushCoordinatorTests: XCTestCase {
     }
 
     private func viewShow(messageID: String, target: String,
-                          heldMilliseconds: Int? = nil) throws -> Data {
-        var frame: [String: Any] = [
-            "v": 1, "type": "view_show", "sender_id": "agent",
-            "message_id": messageID, "target": target
-        ]
-        if let heldMilliseconds { frame["held_ms"] = heldMilliseconds }
-        return try JSONSerialization.data(withJSONObject: frame)
+                          heldMilliseconds: UInt64 = 0) -> ViewShowFrame {
+        .clientAPI(ClientAPIShow(showID: messageID, deviceID: "device", itemID: messageID,
+                                target: target == "chat" ? .chat : .message,
+                                heldMilliseconds: heldMilliseconds), senderID: "agent")
     }
 }

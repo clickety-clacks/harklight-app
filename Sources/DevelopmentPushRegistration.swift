@@ -30,7 +30,7 @@ final class DevelopmentPushRegistration: NSObject, UIApplicationDelegate, UNUser
         }
 
         do {
-            try Self.persistToken(deviceToken, usesV2: NativeRelayLifecycle.shared.clientAPIV2Enabled,
+            try Self.persistToken(deviceToken,
                                   legacyStore: Self.addressStore(), enrollment: NativeEnrollmentStore())
             UserDefaults.standard.set("registered", forKey: Self.statusKey)
             Task { await NativeRelayLifecycle.shared.refreshAfterPushAddressStored() }
@@ -71,11 +71,7 @@ final class DevelopmentPushRegistration: NSObject, UIApplicationDelegate, UNUser
         let navigationPayload = Self.notificationNavigationPayload(
             actionIdentifier: actionIdentifier, userInfo: userInfo)
         Task { @MainActor in
-            if NativeRelayLifecycle.shared.clientAPIV2Enabled {
-                NativeNotificationRouter.shared.pendingV2Tap = navigationPayload
-            } else {
-                Self.routeNotificationPayload(navigationPayload, to: .shared)
-            }
+            NativeNotificationRouter.shared.pendingV2Tap = navigationPayload
             // UIKit snapshots the app after this completion; finish on the main thread.
             completionHandler()
         }
@@ -94,21 +90,9 @@ final class DevelopmentPushRegistration: NSObject, UIApplicationDelegate, UNUser
 
         Task { @MainActor in
             completionHandler([])
-            if NativeRelayLifecycle.shared.clientAPIV2Enabled {
-                if let locator = await NativeRelayLifecycle.shared.v2LocatorForPush(payload) {
-                    NativeNotificationRouter.shared.receiveForegroundNotification(payload, locator: locator,
-                                                                                title: title, body: body)
-                }
-                return
-            }
-            let handled = NativeNotificationRouter.shared.receiveForegroundNotification(
-                payload, title: title, body: body)
-            // Chat replies use the in-app indicator when another screen is open;
-            // the matching visible chat needs no separate notification at all.
-            if handled {
-                // The alert is only a wake hint; the authenticated relay supplies
-                // the reply text to an already-visible conversation.
-                Task { _ = await NativeRelayLifecycle.shared.refreshFromTrustedRelay() }
+            if let locator = await NativeRelayLifecycle.shared.v2LocatorForPush(payload) {
+                NativeNotificationRouter.shared.receiveForegroundNotification(payload, locator: locator,
+                                                                            title: title, body: body)
             }
         }
     }
@@ -121,30 +105,15 @@ final class DevelopmentPushRegistration: NSObject, UIApplicationDelegate, UNUser
         // do not alter navigation, domain state, or notification presentation.
         guard actionIdentifier == UNNotificationDefaultActionIdentifier else { return nil }
 
-        var payload: JSONValue = .null
-        let sequence = ((userInfo["attention"] as? [String: Any])?["locator"] as? [String: Any])?["acceptance_seq"] as? NSNumber
-        let integerSequence = sequence.map {
-            !["d", "f"].contains(String(cString: $0.objCType)) && CFGetTypeID($0) != CFBooleanGetTypeID()
-        } ?? true
-        if integerSequence,
-           let data = try? JSONSerialization.data(withJSONObject: userInfo),
-           let decoded = try? JSONValue.parse(data) {
-            payload = decoded
-        }
+        guard let data = try? JSONSerialization.data(withJSONObject: userInfo),
+              let payload = try? JSONValue.parse(data) else { return .null }
         return payload
-    }
-
-    static func routeNotificationPayload(_ payload: JSONValue?, to router: NativeNotificationRouter) {
-        guard let payload else { return }
-        router.receive(payload, opened: true)
     }
 
     private func clearAddressAndSetStatus(_ status: String) {
         do {
             try Self.addressStore().clear()
-            if NativeRelayLifecycle.shared.clientAPIV2Enabled {
-                try NativeEnrollmentStore().clearV2APNsToken()
-            }
+            try NativeEnrollmentStore().clearV2APNsToken()
             UserDefaults.standard.set(status, forKey: Self.statusKey)
         } catch {
             NativeRelayLifecycle.shared.recordPushRegistrationFailure(error, area: .localStore)
@@ -152,16 +121,11 @@ final class DevelopmentPushRegistration: NSObject, UIApplicationDelegate, UNUser
         }
     }
 
-    static func persistToken(_ token: Data, usesV2: Bool, legacyStore: DevelopmentAPNsAddressStore,
+    static func persistToken(_ token: Data, legacyStore: DevelopmentAPNsAddressStore,
                              enrollment: NativeEnrollmentStore) throws {
-        if usesV2 {
-            // Discard the legacy file and obtain current bytes from APNs.
-            // The v2 path never reads the file into a registration intent.
-            try legacyStore.clear()
-            try enrollment.storeV2APNsToken(token)
-        } else {
-            try legacyStore.store(token)
-        }
+        // Remove the previous release's address file. Current bytes come from APNs.
+        try legacyStore.clear()
+        try enrollment.storeV2APNsToken(token)
     }
 
     static func addressStore() throws -> DevelopmentAPNsAddressStore {
@@ -195,41 +159,4 @@ struct DevelopmentAPNsAddressStore {
         }
     }
 
-    func store(_ token: Data) throws {
-        guard !token.isEmpty else {
-            try clear()
-            throw AddressError.emptyToken
-        }
-        try FileManager.default.createDirectory(
-            at: directory,
-            withIntermediateDirectories: true,
-            attributes: [
-                .protectionKey: FileProtectionType.completeUntilFirstUserAuthentication,
-                .posixPermissions: 0o700
-            ]
-        )
-        let address = token.map { String(format: "%02x", $0) }.joined()
-        do {
-            try Data(address.utf8).write(
-                to: file,
-                options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication]
-            )
-            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
-        } catch {
-            try? clear()
-            throw error
-        }
-    }
-
-    func load() throws -> String? {
-        guard FileManager.default.fileExists(atPath: file.path) else { return nil }
-        let data = try Data(contentsOf: file)
-        guard let address = String(data: data, encoding: .utf8),
-              address.count == 64,
-              address.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) else {
-            try clear()
-            throw AddressError.invalidStoredToken
-        }
-        return address
-    }
 }

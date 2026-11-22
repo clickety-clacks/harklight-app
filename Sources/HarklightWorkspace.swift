@@ -360,7 +360,6 @@ struct InboxNotificationPendingPresentation: Equatable {
 
     let serial: UInt64
     let locator: NativeNotificationLocator?
-    let profile: NativeNotificationProfile?
     let target: Target
     let state: State
 
@@ -369,7 +368,6 @@ struct InboxNotificationPendingPresentation: Equatable {
         let matchingIntent = intent.flatMap { $0.serial == route.serial ? $0 : nil }
         serial = route.serial
         locator = matchingIntent?.locator
-        profile = matchingIntent?.profile
         target = matchingIntent?.locator?.target == "chat" ? .chat : .message
         state = Self.presentationState(for: statusMessage,
                                        hasMatchingIntent: matchingIntent != nil,

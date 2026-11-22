@@ -413,7 +413,7 @@ public enum NativeDiagnosticCauseCode {
         "enrollment_identity_storage", "enrollment_invalid_response", "enrollment_server_rejected",
         "enrollment_approval_pending", "enrollment_approval_expired", "enrollment_no_pending_request",
         "enrollment_wrong_approved_device", "enrollment_key_pending", "enrollment_key_in_use",
-        "enrollment_identity_mismatch", "invitation_invalid", "invitation_expired", "join_existing_account",
+        "enrollment_identity_mismatch", "invitation_invalid", "invitation_expired", "invitation_older_server", "join_existing_account",
         "join_saved_request_exists", "join_attempt_superseded", "join_request_expired", "join_invitation_used",
         "join_transport_refused", "join_request_not_found", "join_service_unavailable", "join_response_invalid",
         "join_approval_identity_mismatch", "local_example_operation_refused", "answer_request_not_open", "answer_input_incomplete",
@@ -474,34 +474,11 @@ public enum NativeDiagnosticCauseCode {
     public static func forError(_ error: Error) -> String {
         if error is CancellationError { return "cancelled" }
         if let value = error as? URLError { return "url_session_error_code_\(value.errorCode)" }
-        if let value = error as? InstallationTransportError {
+        if let value = error as? ClientConnectionError {
             switch value {
             case .invalidEndpoint: return "invalid_relay_endpoint"
             case .invalidTrustAnchor: return "invalid_trust_anchor"
-            case .wrongDeviceIdentity: return "wrong_device_identity"
-            case .invalidServerTrust: return "server_trust_rejected"
-            case .unexpectedServerFrame: return "unexpected_relay_frame"
-            case .serverRejected: return "relay_server_rejected"
-            case .conversationsUnavailable: return "conversations_unavailable"
-            case .acknowledgementBehind: return "relay_acknowledgement_behind"
-            }
-        }
-        if let value = error as? ConversationFileTransportError {
-            switch value {
-            case let .server(status, _): return "file_http_status_\(status)"
-            }
-        }
-        if let value = error as? NativeRelayCoreError {
-            switch value {
-            case .fixtureProfile: return "relay_fixture_profile"
-            case .wrongInstallation: return "relay_wrong_installation"
             case .inactive: return "relay_inactive"
-            case .invalidReplay: return "relay_invalid_replay"
-            case .missingOriginContent: return "relay_origin_content_missing"
-            case .eventRejected: return "relay_event_rejected"
-            case .mismatchedOperationResult: return "relay_operation_result_mismatch"
-            case .inboxPagingUnavailable: return "relay_inbox_paging_unavailable"
-            case .inboxPagingBusy: return "relay_inbox_paging_busy"
             }
         }
         if let value = error as? ConversationError {

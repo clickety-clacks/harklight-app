@@ -12,23 +12,6 @@ private final class FlagErrorCounter: @unchecked Sendable {
     var value: Int { lock.withLock { count } }
 }
 
-private final class FlagRelaySession: AuthenticatedInboxPagingSession, @unchecked Sendable {
-    let authenticatedIdentity: ProfileIdentity
-    let frame: Data
-
-    init(context: ProfileContext, frame: String) {
-        authenticatedIdentity = context.identity
-        self.frame = Data(frame.utf8)
-    }
-
-    func resync(_ request: Data, consume: @Sendable (Data) async throws -> Void) async throws {
-        try await consume(frame)
-    }
-    func acknowledge(_ request: Data) async throws {}
-    func sendOriginalOperation(_ frame: Data, operationID: UUID) async throws -> OriginalOperationResult {
-        .unresolved
-    }
-}
 
 @MainActor
 final class RemoteFeatureFlagsTests: XCTestCase {
@@ -42,15 +25,13 @@ final class RemoteFeatureFlagsTests: XCTestCase {
     }
 
     private func snapshot(_ field: String?) throws -> RemoteFeatureFlagSnapshot {
-        let member = field.map { ",\"feature_flags\":\($0)" } ?? ""
-        return try RelayWire(profile: context()).decodeFeatureFlags(
-            Data("{\"v\":1,\"type\":\"resynced\",\"seq\":0\(member)}".utf8))
+        try RemoteFeatureFlagSnapshot(field: field.map { try JSONValue.parse(Data($0.utf8)) })
     }
 
     func testApprovedProductionDefaultsAndRemoteProgressOverride() throws {
         let flags = RemoteFeatureFlags()
         XCTAssertTrue(flags.isEnabled(.progressInbox))
-        XCTAssertFalse(flags.isEnabled(.serverMatchedPushRouting))
+        XCTAssertTrue(flags.isEnabled(.serverMatchedPushRouting))
         XCTAssertFalse(flags.isEnabled(.priorityLevelEditing))
         let id = UUID()
         flags.connect(context: context(), connectionID: id)
@@ -124,28 +105,6 @@ final class RemoteFeatureFlagsTests: XCTestCase {
         XCTAssertFalse(flags.isEnabled(off))
     }
 
-    func testAcceptedReplayChangesFlagsBetweenConnectionsWithoutRelaunch() async throws {
-        let flags = RemoteFeatureFlags()
-        let ctx = context()
-        let repository = try ClientRepository(context: ctx, persistence: MemoryPendingActionPersistence())
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: root) }
-        for enabled in [true, false] {
-            let id = UUID()
-            flags.connect(context: ctx, connectionID: id)
-            let session = FlagRelaySession(context: ctx,
-                frame: "{\"v\":1,\"type\":\"resynced\",\"seq\":0,\"feature_flags\":{\"test_off\":\(enabled)}}")
-            let core = try NativeRelayCore(store: repository, context: ctx, session: session,
-                serverStateCache: FileServerStateCache(identity: ctx.identity,
-                    fileURL: root.appendingPathComponent("cache.json")),
-                onFeatureFlags: { snapshot in
-                    await flags.replace(snapshot, connectionID: id)
-                })
-            _ = try await core.resyncAndDrainOutbox()
-            XCTAssertEqual(flags.isEnabled(off), enabled)
-            await core.deactivate()
-        }
-    }
 
     func testReconnectKeepsCacheUntilSnapshotThenReplacesRatherThanMerges() throws {
         let flags = RemoteFeatureFlags()
@@ -161,27 +120,6 @@ final class RemoteFeatureFlagsTests: XCTestCase {
         XCTAssertTrue(flags.isEnabled(on))
     }
 
-    func testRejectedReplayCannotChangeFlags() async throws {
-        let flags = RemoteFeatureFlags()
-        let ctx = context(), id = UUID()
-        flags.connect(context: ctx, connectionID: id)
-        let repository = try ClientRepository(context: ctx, persistence: MemoryPendingActionPersistence())
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: root) }
-        let session = FlagRelaySession(context: ctx,
-            frame: #"{"v":1,"type":"resynced","seq":1,"feature_flags":{"test_off":true}}"#)
-        let core = try NativeRelayCore(store: repository, context: ctx, session: session,
-            serverStateCache: FileServerStateCache(identity: ctx.identity,
-                fileURL: root.appendingPathComponent("cache.json")),
-            onFeatureFlags: { snapshot in await flags.replace(snapshot, connectionID: id) })
-        do {
-            _ = try await core.resyncAndDrainOutbox()
-            XCTFail("Invalid replay must be refused")
-        } catch {
-            XCTAssertFalse(flags.isEnabled(off))
-        }
-        await core.deactivate()
-    }
 
     func testAccessorIsObservedForLiveUIUpdates() throws {
         let flags = RemoteFeatureFlags()

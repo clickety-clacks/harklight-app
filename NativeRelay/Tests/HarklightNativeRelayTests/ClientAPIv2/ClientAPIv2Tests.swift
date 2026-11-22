@@ -256,15 +256,31 @@ final class SavedV2ItemActionTests: XCTestCase {
         ]
         let foreground = Task { await restored.runForeground() }
         defer { foreground.cancel() }
-        await eventually("the restored generation sends all three saved writes") {
-            let keys = replacement.received.compactMap(\.idempotencyKey)
-            return Set(keys) == Set(expected.keys)
-        }
-        for (key, path) in expected {
-            XCTAssertEqual(replacement.received.filter { $0.idempotencyKey == key }.map(\.path), [path])
+        await eventually("the restored generation settles all three saved writes") {
+            (try? repository.snapshot(context: retained).pendingMessageOpens.isEmpty) == true &&
+                (try? repository.savedV2ReadPositions(context: retained).isEmpty) == true &&
+                (try? repository.queuedChatMessages(context: retained).isEmpty) == true
         }
         foreground.cancel()
         await foreground.value
+        let writes = replacement.received.filter { $0.method != .get }
+        XCTAssertEqual(Set(writes.compactMap(\.idempotencyKey)), Set(expected.keys))
+        for (key, path) in expected {
+            let attempts = writes.filter { $0.idempotencyKey == key }
+            XCTAssertEqual(Set(attempts.map(\.path)), [path])
+            let body = try XCTUnwrap(attempts.first?.body)
+            XCTAssertTrue(attempts.allSatisfy { $0.body == body })
+        }
+        // Reply recovery can race settlement. A same-key replay must not
+        // create a second server entry.
+        var batch = try await replacement.changeBatch(after: 0)
+        var changes = batch.changes
+        while batch.more {
+            batch = try await replacement.changeBatch(after: batch.rev)
+            changes += batch.changes
+        }
+        XCTAssertEqual(changes.count, 3)
+        XCTAssertEqual(changes.filter { $0.kind == .entry }.count, 1)
     }
 
     func testAnOlderVisibleEntryCannotReplaceAHigherPendingReadAcrossRelaunch() async throws {
@@ -344,6 +360,93 @@ final class SavedV2ItemActionTests: XCTestCase {
             XCTAssertEqual(connection.model.heldCursor, 1)
             XCTAssertEqual(server.received.map(\.path), ["/v2/items/i/answer"])
         }
+    }
+
+    func testUpgradeHoldsAllAmbiguousTargetsEvenWhenTheirIDAndSenderMatchAnotherItem() async throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                                       personID: ExactText("person"), deviceID: ExactText("device"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let persistence = FilePendingActionPersistence(directoryURL: directory)
+        let first = try ClientRepository(context: context, persistence: persistence)
+        let model = ServerModelV2Store(fileURL: nil)
+        let message = #"{"title":"Question","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"ok","label":"OK","kind":"value","value":true}]}}"#
+        let item = V2Fixture.item("i42", rev: 1, rankKey: "a", message: message)
+        try model.apply(kind: "item", rev: 1, data: V2Fixture.json(item))
+        try model.open("i42")
+        try model.apply(kind: "entry", rev: 2,
+                        data: V2Fixture.json(V2Fixture.entry("entry-first", item: "i42", rev: 2, position: 4)))
+        try first.restoreCachedServerState(ServerModelV2Projection.cachedState(model.snapshot, identity: identity),
+                                           context: context)
+        let key = RequestKey(accountScope: identity.personID, senderID: ExactText("agent-app"), messageID: ExactText("i42"))
+        let seen = try first.enqueueMessageOpen(key, requestRevision: 1, context: context)
+        let read = try XCTUnwrap(first.markConversationRead(key, through: ExactText("entry-first"), context: context))
+        let port = AttentionDomainPort(store: first)
+        let selector = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first?.selector)
+        let receipt = try port.submit(SubmitIntent(context: port.context, selector: selector, intentID: UUID(),
+            inputs: [.compatibilityValue(action: ExactText("ok"))]))
+        let answer = try XCTUnwrap(first.lookupIntent(receipt.intentID, context: context))
+
+
+        let heldIDs: Set<UUID> = [seen.operationID, read.operationID, answer.operationID]
+        let newContext = ProfileContext(identity: identity, transportMode: .relay)
+        let migration = try ClientRepository(context: newContext, persistence: persistence)
+        try migration.migratePendingItemActionsToClientAPI(context: newContext)
+        let reopened = try ClientRepository(context: newContext, persistence: persistence)
+        XCTAssertEqual(try reopened.heldPreviousProtocolOperations(context: newContext), heldIDs)
+        XCTAssertTrue(try reopened.snapshot(context: newContext).pendingMessageOpens.isEmpty)
+        XCTAssertTrue(try reopened.savedV2ReadPositions(context: newContext).isEmpty)
+        XCTAssertTrue(try reopened.inboxOperationInventory(context: newContext).isEmpty)
+
+        // A pre-release installation may also have handed a held key to the
+        // v2 outbox before upgrading. It must be excluded there as well.
+        let v2Directory = directory.appendingPathComponent("v2")
+        let persistedOutbox = FileOutboxPersistence(url: v2Directory.appendingPathComponent("outbox-v2.json"))
+        let oldWrite = ClientAPIWrites.seen(itemID: key.messageID)
+        try persistedOutbox.save([OutboxEntry(idempotencyKey: seen.operationID, target: oldWrite.target,
+            operation: oldWrite.operation, write: oldWrite.write, createdAt: Date(), outcomeUnknown: true, attempts: 1)])
+
+        // The v2 authority assigned the original message i77. Another item
+        // has the same spelling, sender and revision as the saved 0.1 target.
+        let server = FakeClientAPIServer()
+        server.inboxItems = [item, V2Fixture.item("i77", rev: 2, rankKey: "b", message: message)]
+        server.meBody = #"{"account":{"state":"active"},"features":{},"limits":{}}"#
+        let connection = try ClientAPIv2Connection(transport: server, repository: reopened, context: newContext,
+            directory: v2Directory, errors: RecordingErrorLogV2(), foregroundOnlyWrites: true)
+        XCTAssertTrue(try persistedOutbox.load().isEmpty)
+        let run = Task { await connection.runForeground() }
+        defer { run.cancel() }
+        await eventually("the new items are published") {
+            (try? reopened.conversationSnapshot(context: newContext).threads.count) == 2
+        }
+        do {
+            try await connection.sendSavedAnswer(answer.intentID)
+            XCTFail("The held answer must not be callable through Retry.")
+        } catch AttentionStoreError.intentMissing {}
+        await connection.sendSavedContentOpens()
+        await connection.sendSavedConversationReads()
+        await connection.outbox.flush()
+        XCTAssertTrue(server.received.allSatisfy { $0.method == .get })
+
+        // A deliberate new open can still target the colliding ID, with a
+        // fresh key which survives the next process restart.
+        let freshOpen = try reopened.enqueueMessageOpen(key, requestRevision: 1, context: newContext)
+        XCTAssertNotEqual(freshOpen.operationID, seen.operationID)
+        run.cancel()
+        await run.value
+        let secondContext = ProfileContext(identity: identity, transportMode: .relay)
+        let second = try ClientRepository(context: secondContext, persistence: persistence)
+        try second.migratePendingItemActionsToClientAPI(context: secondContext)
+        let nextConnection = try ClientAPIv2Connection(transport: server, repository: second,
+            context: secondContext, directory: nil, errors: RecordingErrorLogV2())
+        await nextConnection.sendSavedContentOpens()
+        await eventually("the fresh v2 open settles under its saved key") {
+            (try? second.snapshot(context: secondContext).pendingMessageOpens.isEmpty) == true
+        }
+        let writes = server.received.filter { $0.method != .get }
+        XCTAssertEqual(writes.map(\.idempotencyKey), [freshOpen.operationID])
+        XCTAssertEqual(writes.map(\.path), ["/v2/items/i42/seen"])
     }
 
     func testForegroundRecoversSavedSeenReadAndAnswerAndSettlesTheirKeys() async throws {

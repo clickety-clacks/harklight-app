@@ -19,7 +19,7 @@ private struct V2DiscussionOnOpen: ViewModifier {
     }
 
     func body(content: Content) -> some View {
-        if NativeRelayLifecycle.shared.clientAPIV2Enabled, !store.isLocalExample, !store.isReadOnly {
+        if !store.isLocalExample, !store.isReadOnly {
             VStack(spacing: 0) {
                 if loadFailed {
                     HStack {

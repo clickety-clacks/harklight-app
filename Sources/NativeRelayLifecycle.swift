@@ -4,7 +4,6 @@ import Foundation
 import HarklightNativeRelay
 import Security
 import Observation
-import Network
 import UserNotifications
 import enum SwiftUI.ScenePhase
 
@@ -17,26 +16,12 @@ struct NativeForegroundConnectErrorDetails: Equatable, Sendable {
 
     init(_ error: Error) {
         type = String(reflecting: Swift.type(of: error))
-        let code: String
-        if let paging = error as? InboxPagingWireError {
-            switch paging {
-            case .invalidFrame: code = "inbox_paging_invalid_frame"
-            case .serverRefused: code = "inbox_paging_server_refused"
-            }
-        } else {
-            code = NativeClientDiagnosticJournal.causeCode(for: error)
-        }
+        let code = NativeClientDiagnosticJournal.causeCode(for: error)
         cause = code == "unknown_error" ? type : code
         description = Self.describe(error, cause: code)
     }
 
     private static func describe(_ error: Error, cause: String) -> String {
-        if let value = error as? InboxPagingWireError {
-            switch value {
-            case .invalidFrame: return "The inbox paging response was invalid."
-            case .serverRefused: return "The server refused inbox paging (response text omitted)."
-            }
-        }
         if let value = error as? DecodingError {
             switch value {
             case .dataCorrupted: return "Decoding failed because the data was corrupted."
@@ -291,8 +276,7 @@ struct NativeForegroundConnectProgress: Equatable, Sendable {
             if error is CancellationError || (error as? URLError)?.code == .cancelled { return .cancelled }
             let value = error as NSError
             if value.domain == NSURLErrorDomain { return .urlSession(code: value.code) }
-            if error is InstallationTransportError { return .relayProtocol }
-            if error is NativeRelayCoreError { return .nativeSync }
+            if error is ClientConnectionError { return .relayProtocol }
             return .unknown
         }
     }
@@ -390,11 +374,8 @@ struct NativeForegroundConnectProgress: Equatable, Sendable {
             let issueText = issue.map { "\($0.message) " } ?? ""
             return "The connection was not confirmed. \(issueText)\(observedCauseText)Last confirmed step: \(last) Try again with the same approved identity."
         case .timedOut:
-            let setupLimit = !webSocketOpenObserved && issue == nil
-                ? "No WebSocket-open event arrived. Secure relay setup did not complete; this client cannot distinguish a TLS failure from a WebSocket-upgrade timeout. "
-                : ""
             let issueText = issue.map { "\($0.message) " } ?? ""
-            return "The connection timed out. \(issueText)\(setupLimit)\(observedCauseText)Last confirmed step: \(last) Try again with the same approved identity. Saved profile, local content and pending operation state were preserved; any replay already saved remains saved."
+            return "The connection timed out. \(issueText)\(observedCauseText)Last confirmed step: \(last) Try again with the same approved identity. Saved profile, local content and pending operation state were preserved; any replay already saved remains saved."
         case .confirmed:
             return lastConfirmedStage?.label ?? "Foreground connection is confirmed."
         }
@@ -700,51 +681,6 @@ final class ForegroundConnectProgressTracker {
         publishProgress()
     }
 
-    func observe(_ event: NativeRelayProgressEvent, transportAttemptID: UUID) {
-        guard acceptsEvents, activeTransportAttemptID == transportAttemptID else { return }
-        let candidate: NativeForegroundConnectProgress.Stage?
-        let issue: NativeForegroundConnectProgress.Issue?
-        switch event {
-        case .serverTrustValidated:
-            candidate = .serverTrustValidated; issue = nil
-        case .serverTrustRejected:
-            candidate = nil; issue = .serverTrustRejected
-            progress.failureClass = .serverTrustRejected
-        case .clientIdentityOffered:
-            candidate = .clientIdentityOffered; issue = nil
-        case .clientIdentityChallengeRejected:
-            candidate = nil; issue = .clientIdentityChallengeRejected
-            progress.failureClass = .clientIdentityChallengeRejected
-        case .webSocketOpened:
-            candidate = .webSocketOpened; issue = nil
-            progress.webSocketOpenObserved = true
-        case .relayAdmitted:
-            candidate = .relayAdmitted; issue = nil
-        case .nativeSyncReplayRequested:
-            candidate = nil; issue = nil
-            progress.nativeSyncReplayRequested = true
-        case .nativeSyncResynced:
-            candidate = .nativeSyncResynced; issue = nil
-        case .nativeSyncAcknowledged:
-            candidate = .nativeSyncAcknowledged; issue = nil
-            advancePostAckBoundary(.nativeCursorAcknowledged)
-        case .postAckDrainBegan:
-            candidate = nil; issue = nil
-            progress.postAckDrainTransition = .began
-        case let .postAckDrainFinished(transition):
-            candidate = nil; issue = nil
-            progress.postAckDrainTransition = transition
-            if transition == .completed { advancePostAckBoundary(.coreDrainCompleted) }
-        }
-        if let candidate,
-           progress.lastConfirmedStage.map({ candidate.rank >= $0.rank }) ?? true {
-            progress.lastConfirmedStage = candidate
-        }
-        progress.issue = issue
-        progress.outcome = .connecting
-        publishProgress()
-    }
-
     func run(operation: @escaping @MainActor () async -> Bool,
              onBegin: @escaping @MainActor (UUID) -> Void = { _ in },
              onProgress: @escaping @MainActor (NativeForegroundConnectProgress) -> Void) async -> NativeForegroundConnectProgress {
@@ -775,24 +711,14 @@ final class ForegroundConnectProgressTracker {
         progress.terminalReason = terminalReason
         if terminalReason == .generationInvalidated { progress.generationValidation = .failed }
         if terminalReason == .profileContextChanged { progress.profileContextValidation = .failed }
-        if confirmed { advancePostAckBoundary(.foregroundConfirmed) }
         return progress
     }
 
-    func recordPostAckCompletion(postAckReached: Bool,
-                                 relayRefreshConfirmed: Bool,
-                                 generationMatches: Bool,
-                                 profileMatches: Bool,
-                                 relayContextMatches: Bool) {
+    func recordSnapshotConfirmation(relayRefreshConfirmed: Bool,
+                                    generationMatches: Bool,
+                                    profileMatches: Bool,
+                                    relayContextMatches: Bool) {
         guard acceptsEvents, attempt != nil else { return }
-        if postAckReached {
-            progress.postAckRelayRefresh = relayRefreshConfirmed ? .passed : .failed
-            if relayRefreshConfirmed {
-                progress.postAckDrainTransition = .completed
-                advancePostAckBoundary(.coreDrainCompleted)
-            }
-            advancePostAckBoundary(.relayRefreshReturned)
-        }
         progress.generationValidation = generationMatches ? .passed : .failed
         progress.profileContextValidation = profileMatches ? .passed : .failed
         progress.relayContextValidation = relayContextMatches ? .passed : .failed
@@ -805,24 +731,6 @@ final class ForegroundConnectProgressTracker {
         } else if !relayContextMatches || !relayRefreshConfirmed {
             progress.terminalReason = .relayContextUnconfirmed
         }
-        if postAckReached, !relayRefreshConfirmed,
-           (progress.postAckDrainTransition == nil || progress.postAckDrainTransition == .began) {
-            switch progress.terminalReason {
-            case .cancelled, .generationInvalidated, .profileContextChanged:
-                progress.postAckDrainTransition = .cancelled
-            case .deadlineExceeded:
-                progress.postAckDrainTransition = .timedOut
-            default:
-                progress.postAckDrainTransition = progress.failureClass == nil ? .unresolved : .failed
-            }
-        }
-        publishProgress()
-    }
-
-    func recordPostAckFailure(_ details: NativePostAckFailureDetails) {
-        guard acceptsEvents, attempt != nil else { return }
-        progress.postAckFailureStep = details.step
-        progress.postAckFailureErrorCode = details.errorCode
         publishProgress()
     }
 
@@ -834,11 +742,6 @@ final class ForegroundConnectProgressTracker {
             ? error.localizedDescription : nil
         if progress.failureClass == .cancelled { progress.terminalReason = .cancelled }
         publishProgress()
-    }
-
-    private func advancePostAckBoundary(_ candidate: NativeForegroundConnectProgress.PostAckBoundary) {
-        guard candidate.rank >= progress.lastCompletedPostAckBoundary.rank else { return }
-        progress.lastCompletedPostAckBoundary = candidate
     }
 
     private func publishProgress() {
@@ -859,7 +762,6 @@ final class ForegroundConnectProgressTracker {
             progress.errorDetails = nil
             progress.outcome = .confirmed
             progress.terminalReason = .confirmed
-            advancePostAckBoundary(.foregroundConfirmed)
         } else {
             progress.outcome = .incomplete
             if progress.terminalReason == nil {
@@ -931,11 +833,6 @@ final class NativeRelayLifecycle {
 
     let conversationAvailability = NativeConversationAvailability()
     let featureFlags = RemoteFeatureFlags()
-    private var core: NativeRelayCore? {
-        didSet { conversationAvailability.reset() }
-    }
-    // client_api_v2 is a release gate. B4 removes it with the relay.
-    let clientAPIV2Enabled: Bool
     private var v2Connection: ClientAPIv2Connection?
     private var v2FocusChannel: ClientAPIFocusChannel?
     private var v2PushWaitsForInternalError = false
@@ -958,9 +855,6 @@ final class NativeRelayLifecycle {
     }
     private var sceneIsActive = false
 
-    var usesClientAPIV2: Bool { v2Connection != nil }
-
-    private var transport: URLSessionInstallationSession?
     private var context: ProfileContext?
     private let snapshotState = NativeRelaySnapshotState()
     private var confirmedRelayContext: ProfileContext? {
@@ -968,18 +862,11 @@ final class NativeRelayLifecycle {
         set { snapshotState.confirmedContext = newValue }
     }
     private var activeTransportAttemptID: UUID?
-    private var focusTransportID: UUID?
     private let foregroundProgress = ForegroundConnectProgressTracker()
-    private var priorityLevelsLostTransportAttemptID: UUID?
     private var diagnosticJournal: NativeClientDiagnosticJournal?
     /// The app's Error Log, which the relay components report failures to.
     var errorLog: any ErrorLogging = NoopErrorLog()
 
-    /// The live connection's attempt and whether it may send focus reports,
-    /// for tests that follow focus suppression across reconnects.
-    var liveConnectionFocusState: (attemptID: UUID?, sendsFocusReports: Bool?) {
-        get async { (activeTransportAttemptID, await transport?.sendsFocusReports) }
-    }
     private var foregroundDiagnosticContext: ProfileContext?
     private var foregroundDiagnosticOperationsAtStart: [UUID: NativeForegroundOperationDiagnostic] = [:]
     private var foregroundDiagnosticIntentIDs: [UUID: UUID] = [:]
@@ -987,37 +874,20 @@ final class NativeRelayLifecycle {
     private var foregroundDiagnosticAttemptID = UUID()
     private var foregroundDiagnosticOperations = NativeForegroundOperationSnapshot.unavailable
     private var priorityLevelsObservers: [UUID: PriorityLevelsObserver] = [:]
-    private var configuration: (store: ClientRepository,
-                                context: ProfileContext,
-                                relayURL: URL,
-                                identity: SecIdentity,
-                                rootDER: Data,
-                                serverStateCache: (any ServerStateCaching)?)?
-    private var answerFlights: [UUID: (token: UUID, task: Task<Void, Error>)] = [:]
-    private var reconnectFlight: (token: UUID, task: Task<Void, Error>)?
-    private var discussionFlights: [UUID: (token: UUID, task: Task<DiscussionOperationResult, Error>)] = [:]
-    private var discussionTransports: [UUID: URLSessionInstallationSession] = [:]
-    private var fileTransports: [UUID: URLSessionInstallationSession] = [:]
-    private var awaitingFirstConnection = false
+    private var repository: ClientRepository?
     private var refreshGeneration = UUID()
-    private var pathMonitor: NWPathMonitor?
-    private var hasObservedInitialPath = false
-    private var connectionHealthTask: Task<Void, Never>?
-    private var connectionRecoveryTask: Task<Void, Never>?
-    private var connectionHealthCheckID: UUID?
     private lazy var refreshFlights = RelayRefreshFlights(inactive: NativeRelayRefreshResult.unavailable) { [weak self] in
         guard let self else { return .unavailable }
-        return await self.performRefresh(generation: self.refreshGeneration)
+        return await self.refreshSnapshot()
     }
     private let enrollment: NativeEnrollmentStore
 
-    init(clientAPIV2Enabled: Bool = false, v2FocusReporter: NativeFocusReporter = .shared,
+    init(v2FocusReporter: NativeFocusReporter = .shared,
          v2ShowCoordinator: NativePushedViewCoordinator = .shared,
          v2NotificationPermission: NativeNotificationPermission = .system,
          enrollment: NativeEnrollmentStore = NativeEnrollmentStore(),
          v2LegacyAddressStore: @escaping @MainActor () throws -> DevelopmentAPNsAddressStore =
              DevelopmentPushRegistration.addressStore) {
-        self.clientAPIV2Enabled = clientAPIV2Enabled
         self.v2FocusReporter = v2FocusReporter
         self.v2ShowCoordinator = v2ShowCoordinator
         self.v2NotificationPermission = v2NotificationPermission
@@ -1026,12 +896,10 @@ final class NativeRelayLifecycle {
     }
 
     func v2FocusScenePhaseChanged(_ phase: ScenePhase) {
-        guard clientAPIV2Enabled else { return }
         v2FocusReporter.scenePhaseChanged(phase)
     }
 
     func sceneActivityChanged(isActive: Bool) {
-        guard clientAPIV2Enabled else { return }
         sceneIsActive = isActive
         if isActive {
             v2PushWaitsForInternalError = false
@@ -1097,236 +965,10 @@ final class NativeRelayLifecycle {
 
 
 
-    private func observeNetworkPath(generation: UUID) {
-        pathMonitor?.cancel()
-        connectionHealthTask?.cancel()
-        connectionRecoveryTask?.cancel()
-        connectionRecoveryTask = nil
-        connectionHealthCheckID = nil
-        hasObservedInitialPath = false
-        // This is check cadence, never a catch-up or pong deadline. A healthy
-        // peer may keep replay open across any number of these checks.
-        connectionHealthTask = Task { @MainActor [weak self] in
-            while !Task.isCancelled {
-                do { try await Task.sleep(for: .seconds(15)) }
-                catch { return }
-                guard let self, self.refreshGeneration == generation else { return }
-                await self.checkConnectionHealth(allowReconnect: true, generation: generation)
-            }
-        }
-        let monitor = NWPathMonitor()
-        pathMonitor = monitor
-        monitor.pathUpdateHandler = { [weak self] path in
-            let available = path.status == .satisfied
-            Task { @MainActor [weak self] in
-                await self?.networkPathChanged(available: available, generation: generation)
-            }
-        }
-        monitor.start(queue: DispatchQueue(label: "Harklight.relay-network-path"))
-    }
-
-    private func networkPathChanged(available: Bool, generation: UUID) async {
-        guard refreshGeneration == generation else { return }
-        // The first callback describes the current path, not a network change.
-        guard hasObservedInitialPath else { hasObservedInitialPath = true; return }
-        await checkConnectionHealth(allowReconnect: available, generation: generation)
-    }
-
-    private func checkConnectionHealth(allowReconnect: Bool, generation: UUID) async {
-        guard refreshGeneration == generation, let current = transport,
-              connectionHealthCheckID == nil else { return }
-        let checkID = UUID()
-        connectionHealthCheckID = checkID
-        defer {
-            if connectionHealthCheckID == checkID { connectionHealthCheckID = nil }
-        }
-        do {
-            try await current.checkConnection()
-            // A healthy pong is not a new delivery opportunity. Recovery is
-            // triggered by launch, refresh, or a replacement connection, not
-            // by the periodic health-check cadence.
-        } catch {
-            guard refreshGeneration == generation, allowReconnect,
-                  connectionRecoveryTask == nil else { return }
-            // A failed ping unblocks the current replay with its actual error.
-            // Serialize replacement after that replay saves its validated prefix.
-            // Recovery must not occupy the health cadence: the replacement replay
-            // can also be long-running and still needs independent pings.
-            connectionRecoveryTask = Task { @MainActor [weak self] in
-                guard let self else { return }
-                defer {
-                    if self.refreshGeneration == generation { self.connectionRecoveryTask = nil }
-                }
-                _ = await self.refreshFlights.afterCurrent { [weak self] in
-                    guard let self, self.refreshGeneration == generation else { return .unavailable }
-                    do {
-                        try await self.reconnect(replacing: current, generation: generation)
-                    } catch { return .failed(error: error) }
-                    return await self.performRefresh(generation: generation)
-                }
-            }
-        }
-    }
-
-    private func focusReportingReadyHandler(generation: UUID,
-                                            transportID: UUID) -> @Sendable () -> Void {
-        { [weak self] in
-            Task { @MainActor [weak self] in
-                guard let self,
-                      self.refreshGeneration == generation,
-                      self.focusTransportID == transportID else { return }
-                NativeFocusReporter.shared.relaySessionBecameReady(transportID)
-            }
-        }
-    }
-
-    private func focusReportingUnsupportedHandler(generation: UUID,
-                                                  transportID: UUID) -> @Sendable () -> Void {
-        { [weak self] in
-            Task { @MainActor [weak self] in
-                guard let self,
-                      self.refreshGeneration == generation,
-                      self.focusTransportID == transportID else { return }
-                // The refusal ends focus reports on this connection only. Each
-                // new relay session sends the current focus again, so a Server
-                // that gains support (or a supported session) gets it.
-                NativeFocusReporter.shared.relaySessionDoesNotSupportFocus(transportID)
-            }
-        }
-    }
-
-    private func viewShowHandler(generation: UUID,
-                                 transportID: UUID) -> @Sendable (Data) -> Void {
-        { [weak self] data in
-            Task { @MainActor [weak self] in
-                guard let self,
-                      self.refreshGeneration == generation,
-                      self.focusTransportID == transportID else { return }
-                NativePushedViewCoordinator.shared.receive(data)
-            }
-        }
-    }
-
-    private func installFocusReportHandler(for session: URLSessionInstallationSession?,
-                                           transportID: UUID?) {
-        guard let session, let transportID else {
-            NativeFocusReporter.shared.installReportHandler(for: nil, handler: nil)
-            return
-        }
-        NativeFocusReporter.shared.installReportHandler(for: transportID) { report in
-            await session.sendFocusReport(report)
-        }
-    }
-
-    func activate(store: ClientRepository,
-                  context: ProfileContext,
-                  relayURL: URL,
-                  clientIdentity: SecIdentity,
-                  trustedRootDER: Data,
-                  diagnostics: NativeClientDiagnosticJournal? = nil,
-                  serverStateCache: (any ServerStateCaching)? = nil,
-                  awaitingFirstConnection: Bool = false) async throws {
-        if clientAPIV2Enabled {
-            try activateV2(store: store, context: context, relayURL: relayURL,
-                           clientIdentity: clientIdentity, trustedRootDER: trustedRootDER)
-            return
-        }
-        let generation = UUID()
-        let transportAttemptID = UUID()
-        self.diagnosticJournal = diagnostics
-        recordDiagnostic(.connection, .approvedConnection, .began,
-                         attemptID: transportAttemptID, transportAttemptID: transportAttemptID)
-        let nextTransport: URLSessionInstallationSession
-        do {
-            nextTransport = try URLSessionInstallationSession(profile: context,
-                                                              relayURL: relayURL,
-                                                              clientIdentity: TrustedKeychainIdentity(clientIdentity),
-                                                              trustedRootDER: trustedRootDER,
-                                                              attemptID: transportAttemptID,
-                                                              serverMatchedPushRoutingEnabled: pushRoutingEnabledHandler(),
-                                                              onProgress: progressHandler(generation: generation,
-                                                                                          transportAttemptID: transportAttemptID),
-                                                              onFocusReportingReady: focusReportingReadyHandler(
-                                                                generation: generation,
-                                                                transportID: transportAttemptID),
-                                                              onFocusReportingUnsupported: focusReportingUnsupportedHandler(
-                                                                generation: generation,
-                                                                transportID: transportAttemptID),
-                                                              onViewShow: viewShowHandler(
-                                                                generation: generation,
-                                                                transportID: transportAttemptID),
-                                                              onDiagnostic: diagnosticSink())
-        } catch {
-            recordDiagnostic(.connection, .approvedConnection,
-                             NativeDiagnosticCauseCode.failureTransition(for: error), error: error,
-                             attemptID: transportAttemptID, transportAttemptID: transportAttemptID)
-            throw error
-        }
-        let nextCore: NativeRelayCore
-        do {
-            nextCore = try NativeRelayCore(store: store, context: context, session: nextTransport,
-                                           automaticallySendsPendingOperations: false,
-                                           attemptID: transportAttemptID,
-                                           serverStateCache: serverStateCache,
-                                           onProgress: progressHandler(generation: generation,
-                                                                       transportAttemptID: transportAttemptID),
-                                           onPriorityLevelsChanged: priorityLevelsChangeHandler(for: context),
-                                           onPriorityLevelsConnectionLost: priorityLevelsConnectionLostHandler(
-                                               for: context, transportAttemptID: transportAttemptID),
-                                           onPriorityLevelsFeatureEnabled: priorityLevelsFeatureEnabledHandler(),
-                                           onDiagnostic: diagnosticSink(),
-                                           onFeatureFlags: featureFlagsHandler(connectionID: transportAttemptID), errorLog: errorLog)
-        } catch {
-            recordDiagnostic(.connection, .approvedConnection, .failed, error: error,
-                             attemptID: transportAttemptID, transportAttemptID: transportAttemptID)
-            await nextTransport.close()
-            throw error
-        }
-        featureFlags.reset()
-        refreshGeneration = generation
-        refreshFlights.reset()
-        foregroundProgress.beginSession(transportAttemptID: transportAttemptID)
-        let priorCore = core
-        let priorTransport = transport
-        if priorTransport != nil, let priorContext = self.context, priorContext != context {
-            await NativeFocusReporter.shared.accountConnectionWillBeRemoved()
-        }
-        core = nil
-        transport = nil
-        self.context = nil
-        await stopMutationFlights()
-        snapshotState.failureContext = nil
-        snapshotState.failureMessage = nil
-        confirmedRelayContext = nil
-        priorityLevelsLostTransportAttemptID = nil
-        configuration = nil
-        if let priorCore { await priorCore.deactivate() }
-        if let priorTransport { await priorTransport.close() }
-        guard refreshGeneration == generation else {
-            await nextCore.deactivate()
-            await nextTransport.close()
-            throw NativeRelayCoreError.inactive
-        }
-        transport = nextTransport
-        core = nextCore
-        self.context = context
-        activeTransportAttemptID = transportAttemptID
-        focusTransportID = transportAttemptID
-        featureFlags.connect(context: context, connectionID: transportAttemptID)
-        installFocusReportHandler(for: nextTransport, transportID: transportAttemptID)
-        configuration = (store, context, relayURL, clientIdentity, trustedRootDER, serverStateCache)
-        self.awaitingFirstConnection = awaitingFirstConnection
-        observeNetworkPath(generation: generation)
-        resumeSavedAnswers()
-        resumeSavedDiscussions()
-    }
-
-    private func activateV2(store: ClientRepository, context: ProfileContext, relayURL: URL,
-                            clientIdentity: SecIdentity, trustedRootDER: Data) throws {
-        guard let baseURL = ClientAPIv2Endpoint.baseURL(fromRelayURL: relayURL) else {
-            throw InstallationTransportError.invalidEndpoint
-        }
-        let transport = try HTTPSClientAPITransport(baseURL: baseURL,
+    func activate(store: ClientRepository, context: ProfileContext, deviceURL: URL,
+                  clientIdentity: SecIdentity, trustedRootDER: Data,
+                  diagnostics: NativeClientDiagnosticJournal? = nil) throws {
+        let transport = try HTTPSClientAPITransport(baseURL: deviceURL,
             clientIdentity: TrustedKeychainIdentity(clientIdentity), trustedRootDER: trustedRootDER)
         let retainedFiles = try ConversationFileStorage(identity: context.identity)
         let attempt = UUID()
@@ -1359,6 +1001,7 @@ final class NativeRelayLifecycle {
                 Task { @MainActor [weak self] in
                     guard let self, self.activeTransportAttemptID == attempt else { return }
                     self.confirmedRelayContext = context
+                    self.conversationAvailability.confirm(for: context, conversationsUnavailable: false)
                     if let connection = self.v2Connection, connection.priorityLevelsEditorWasOpened {
                         await connection.refreshPriorityLevels(userInitiated: false)
                         guard self.activeTransportAttemptID == attempt else { return }
@@ -1386,12 +1029,15 @@ final class NativeRelayLifecycle {
                     self.publishPriorityLevelsUpdate(for: context)
                 }
             })
+        repository = store
+        diagnosticJournal = diagnostics
+        foregroundProgress.beginSession(transportAttemptID: attempt)
         installV2Connection(connection, context: context, attempt: attempt)
         installV2FocusChannel(focus, attempt: attempt)
     }
 
     func installV2Connection(_ connection: ClientAPIv2Connection, context: ProfileContext, attempt: UUID = UUID()) {
-        guard clientAPIV2Enabled, v2Connection == nil else { return }
+        guard v2Connection == nil else { return }
         self.context = context
         activeTransportAttemptID = attempt
         v2Connection = connection
@@ -1401,7 +1047,7 @@ final class NativeRelayLifecycle {
     }
 
     func installV2FocusChannel(_ focus: ClientAPIFocusChannel, attempt: UUID) {
-        guard clientAPIV2Enabled, activeTransportAttemptID == attempt, v2Connection != nil else { return }
+        guard activeTransportAttemptID == attempt, v2Connection != nil else { return }
         v2FocusChannel = focus
         v2FocusReporter.installReportHandler(for: attempt) { report in
             // The channel may return the last drained reply, so this sender
@@ -1472,7 +1118,7 @@ final class NativeRelayLifecycle {
 
     func cancelV2QueuedAttachmentReply(_ operation: UUID, for key: RequestKey,
                                        expected: ProfileContext) async throws {
-        guard let connection = v2Connection, context == expected else { throw NativeRelayCoreError.inactive }
+        guard let connection = v2Connection, context == expected else { throw ClientConnectionError.inactive }
         try await connection.cancelQueuedAttachmentReply(operation, request: key)
     }
 
@@ -1491,7 +1137,7 @@ final class NativeRelayLifecycle {
     }
 
     func refreshV2ForPush(_ payload: JSONValue) async -> Bool {
-        guard clientAPIV2Enabled, let connection = v2Connection, let hint = connection.matchPush(payload),
+        guard let connection = v2Connection, let hint = connection.matchPush(payload),
               await allowsV2PushRouting(connection), connection.matchPush(payload) == hint else { return false }
         do {
             let changed = try await connection.catchUp(forPushRevision: hint.revision)
@@ -1509,7 +1155,7 @@ final class NativeRelayLifecycle {
     }
 
     func v2LocatorForPush(_ payload: JSONValue) async -> NativeNotificationLocator? {
-        guard clientAPIV2Enabled, let connection = v2Connection, let context,
+        guard let connection = v2Connection, let context,
               await allowsV2PushRouting(connection),
               let hint = connection.matchPush(payload) else { return nil }
         _ = try? await connection.catchUp(forPushRevision: hint.revision)
@@ -1532,20 +1178,8 @@ final class NativeRelayLifecycle {
     }
 
     func refreshForRemotePush(_ payload: JSONValue?) async -> Bool {
-        if !clientAPIV2Enabled { return await refreshFromTrustedRelay() }
         guard let payload else { return false }
         return await refreshV2ForPush(payload)
-    }
-
-    private func stopMutationFlights() async {
-        for flight in answerFlights.values { flight.task.cancel() }
-        for flight in discussionFlights.values { flight.task.cancel() }
-        let sessions = Array(discussionTransports.values) + Array(fileTransports.values)
-        answerFlights.removeAll()
-        discussionFlights.removeAll()
-        discussionTransports.removeAll()
-        fileTransports.removeAll()
-        for session in sessions { await session.close() }
     }
 
     @discardableResult
@@ -1720,25 +1354,6 @@ final class NativeRelayLifecycle {
         context == expected && v2DepartureTask != nil
     }
 
-    func removePushBeforeDeparture(for record: NativeEnrollmentRecord,
-                                   enrollment: NativeEnrollmentStore) async {
-        if clientAPIV2Enabled {
-            await prepareV2SignOut(for: record)
-            return
-        }
-        guard featureFlags.isEnabled(.serverMatchedPushRouting) else { return }
-        guard let transport, let context, record.matchesNotificationIdentity(context.identity) else {
-            recordDiagnostic(.notifications, .pushRegistration, .failed, error: NativeRelayCoreError.inactive)
-            return
-        }
-        do {
-            try await enrollment.retryPendingPushRemoval(using: transport)
-        } catch {
-            recordDiagnostic(.notifications, .pushRegistration, .failed, error: error,
-                             attemptID: activeTransportAttemptID)
-        }
-    }
-
     func deactivate() async {
         let v2Task = v2ForegroundTask
         let pushRegistration = v2PushRegistrationTask
@@ -1761,36 +1376,17 @@ final class NativeRelayLifecycle {
         v2Connection = nil
         v2Task?.cancel()
         featureFlags.reset()
-        pathMonitor?.cancel()
-        pathMonitor = nil
-        connectionHealthTask?.cancel()
-        connectionHealthTask = nil
-        connectionRecoveryTask?.cancel()
-        connectionRecoveryTask = nil
-        connectionHealthCheckID = nil
-        hasObservedInitialPath = false
         refreshGeneration = UUID()
         refreshFlights.reset()
-        let priorCore = core
-        let priorTransport = transport
-        if clientAPIV2Enabled {
-            await v2FocusReporter.accountConnectionWillBeRemoved(sendSignedOut: false)
-            await focus?.stop()
-        } else {
-            await NativeFocusReporter.shared.accountConnectionWillBeRemoved()
-        }
-        core = nil
-        transport = nil
+        await v2FocusReporter.accountConnectionWillBeRemoved(sendSignedOut: false)
+        await focus?.stop()
         context = nil
-        await stopMutationFlights()
+        repository = nil
+        conversationAvailability.reset()
         snapshotState.failureContext = nil
         snapshotState.failureMessage = nil
         confirmedRelayContext = nil
         activeTransportAttemptID = nil
-        focusTransportID = nil
-        installFocusReportHandler(for: nil, transportID: nil)
-        priorityLevelsLostTransportAttemptID = nil
-        configuration = nil
         foregroundDiagnosticContext = nil
         foregroundDiagnosticOperationsAtStart = [:]
         foregroundDiagnosticIntentIDs = [:]
@@ -1798,8 +1394,6 @@ final class NativeRelayLifecycle {
         foregroundDiagnosticAttemptID = UUID()
         foregroundDiagnosticOperations = .unavailable
         diagnosticJournal = nil
-        if let priorCore { await priorCore.deactivate() }
-        if let priorTransport { await priorTransport.close() }
         await priorV2?.outbox.close()
         await v2Task?.value
         _ = await pushRegistration?.value
@@ -1816,86 +1410,65 @@ final class NativeRelayLifecycle {
     }
 
     func refreshResultFromTrustedRelay(checkBlockedPush: Bool = false) async -> NativeRelayRefreshResult {
-        if let connection = v2Connection, let context {
-            let attempt = activeTransportAttemptID
-            do {
-                if connection.access.state == .paused {
-                    try await connection.refreshMe(userInitiated: checkBlockedPush)
-                }
-                guard v2Connection === connection, connection.access.state == .available else { return .unavailable }
-                try await connection.catchUp()
-                guard v2Connection === connection else { return .unavailable }
-                confirmedRelayContext = context
-                return NativeRelayRefreshResult(relayConfirmed: true, pushRegistration: .notAttempted,
-                    confirmedContext: context, confirmedTransportAttemptID: attempt)
-            } catch {
-                guard v2Connection === connection else { return .unavailable }
-                return .failed(error: error)
-            }
-        }
         if checkBlockedPush {
             return await refreshFlights.afterCurrent { [weak self] in
                 guard let self else { return .unavailable }
-                return await self.performRefresh(generation: self.refreshGeneration,
-                                                 checkBlockedPush: true)
+                return await self.refreshSnapshot(userInitiated: true)
             }
         }
         return await refreshFlights.coalesced()
     }
 
+    private func refreshSnapshot(userInitiated: Bool = false) async -> NativeRelayRefreshResult {
+        if let connection = v2Connection, let context {
+            let attempt = activeTransportAttemptID
+            do {
+                if connection.access.state == .paused {
+                    try await connection.refreshMe(userInitiated: userInitiated)
+                }
+                guard v2Connection === connection, connection.access.state == .available else { return .unavailable }
+                try await connection.catchUp(userInitiated: userInitiated)
+                guard v2Connection === connection else { return .unavailable }
+                confirmedRelayContext = context
+                conversationAvailability.confirm(for: context, conversationsUnavailable: false)
+                snapshotState.failureContext = nil
+                snapshotState.failureMessage = nil
+                return NativeRelayRefreshResult(relayConfirmed: true, pushRegistration: .notAttempted,
+                    confirmedContext: context, confirmedTransportAttemptID: attempt)
+            } catch {
+                guard v2Connection === connection else { return .unavailable }
+                let result = NativeRelayRefreshResult.failed(error: error)
+                snapshotState.failureContext = context
+                snapshotState.failureMessage = result.failureMessage
+                return result
+            }
+        }
+        return .unavailable
+    }
     /// Attempts durable message-open reports on the current authenticated
     /// relay session. With no active session, the store keeps them for the
     /// ordinary reconnect drain.
     func sendPendingMessageOpens() async {
-        if let v2Connection {
-            await v2Connection.sendSavedContentOpens()
-            return
-        }
-        _ = await core?.sendPendingMessageOpens()
+        await v2Connection?.sendSavedContentOpens()
     }
 
     func hasConfirmedPriorityLevelsRelay(for expected: ProfileContext) -> Bool {
-        guard featureFlags.isEnabled(.priorityLevelEditing) else { return false }
-        if let connection = v2Connection {
-            return context == expected && sceneIsActive && connection.priorityLevelsCanSave
-        }
-        guard let activeTransportAttemptID else { return false }
-        return confirmedRelayContext == expected && context == expected && core != nil &&
-            priorityLevelsLostTransportAttemptID != activeTransportAttemptID
+        guard let connection = v2Connection else { return false }
+        return context == expected && sceneIsActive && connection.priorityLevelsCanSave
     }
 
     func refreshPriorityLevels(expected: ProfileContext) async {
-        if let connection = v2Connection {
-            guard context == expected, sceneIsActive, priorityLevelsFeatureEnabled else { return }
-            await connection.refreshPriorityLevels(userInitiated: true)
-            return
-        }
-        guard featureFlags.isEnabled(.priorityLevelEditing),
-              hasConfirmedPriorityLevelsRelay(for: expected), let core else { return }
-        await core.refreshPriorityLevels()
+        guard context == expected, sceneIsActive, priorityLevelsFeatureEnabled else { return }
+        await v2Connection?.refreshPriorityLevels(userInitiated: true)
     }
 
     func saveV2PriorityLevels(_ levels: [PriorityLevel], expected: ProfileContext) async throws {
         guard let connection = v2Connection, context == expected, sceneIsActive,
-              priorityLevelsFeatureEnabled else { throw NativeRelayCoreError.inactive }
+              priorityLevelsFeatureEnabled else { throw ClientConnectionError.inactive }
         try await connection.savePriorityLevels(levels)
     }
-
-    func sendPendingPriorityLevelsSave(expected: ProfileContext) async {
-        guard featureFlags.isEnabled(.priorityLevelEditing),
-              hasConfirmedPriorityLevelsRelay(for: expected), let core else { return }
-        await core.sendPendingPriorityLevelsSave()
-    }
-
     private var priorityLevelsFeatureEnabled: Bool {
         featureFlags.isEnabled(.priorityLevelEditing)
-    }
-
-    private func priorityLevelsFeatureEnabledHandler() -> @Sendable () async -> Bool {
-        { [weak self] in
-            guard let self else { return false }
-            return await self.priorityLevelsFeatureEnabled
-        }
     }
 
     func priorityLevelsUpdates(for expected: ProfileContext) -> AsyncStream<Void> {
@@ -1907,27 +1480,6 @@ final class NativeRelayLifecycle {
                 Task { @MainActor [weak self] in
                     self?.priorityLevelsObservers.removeValue(forKey: observerID)
                 }
-            }
-        }
-    }
-
-    private func priorityLevelsChangeHandler(for expected: ProfileContext) -> @Sendable () -> Void {
-        { [weak self] in
-            Task { @MainActor [weak self] in
-                self?.publishPriorityLevelsUpdate(for: expected)
-            }
-        }
-    }
-
-    private func priorityLevelsConnectionLostHandler(for expected: ProfileContext,
-                                                      transportAttemptID: UUID) -> @Sendable () -> Void {
-        { [weak self] in
-            Task { @MainActor [weak self] in
-                guard let self,
-                      self.context == expected,
-                      self.activeTransportAttemptID == transportAttemptID else { return }
-                self.priorityLevelsLostTransportAttemptID = transportAttemptID
-                self.publishPriorityLevelsUpdate(for: expected)
             }
         }
     }
@@ -1958,8 +1510,6 @@ final class NativeRelayLifecycle {
             (confirmed ? .completed : (cancelled ? .cancelled : .failed))
         let terminalReason = confirmed ? NativeDiagnosticTerminalReason.confirmed :
             progress.terminalReason?.journalValue
-        let postAckBoundary = confirmed ? NativeDiagnosticPostAckBoundary.foregroundConfirmed :
-            progress.lastCompletedPostAckBoundary.journalValue
 
         return [
             NativeClientDiagnosticEvent(area: .connection, phase: .foregroundGenerationValidation,
@@ -1978,13 +1528,11 @@ final class NativeRelayLifecycle {
                 transition: transition,
                 causeCode: progress.failureClass?.diagnosticValue,
                 terminalReason: terminalReason,
-                postAckBoundary: postAckBoundary,
-                postAckDrainTransition: progress.postAckDrainTransition,
                 attemptID: attemptID, transportAttemptID: transportAttemptID)
         ]
     }
 
-    /// Enrollment readiness is actual authenticated replay progress. A later
+    /// Enrollment readiness requires an authenticated client API snapshot. A later
     /// push-register failure must not hide a working foreground connection.
     func confirmForegroundProgress(for expected: ProfileContext,
                                    checkBlockedPush: Bool = false,
@@ -2008,9 +1556,9 @@ final class NativeRelayLifecycle {
         let diagnosticAttemptID = UUID()
         foregroundDiagnosticAttemptID = diagnosticAttemptID
         foregroundDiagnosticOperations = .unavailable
-        if let configuration, configuration.context == expected {
+        if let repository {
             do {
-                let snapshot = try configuration.store.snapshot(context: expected)
+                let snapshot = try repository.snapshot(context: expected)
                 foregroundDiagnosticSnapshotAvailable = true
                 var submissions = Dictionary(uniqueKeysWithValues: snapshot.intents.values
                     .filter { Self.isUnresolved($0, remoteStates: snapshot.remoteStates) }
@@ -2064,10 +1612,7 @@ final class NativeRelayLifecycle {
             let profileMatches = self.context == expected
             let relayContextMatches = refresh.confirms(expected, transportAttemptID: self.activeTransportAttemptID)
             guard self.foregroundProgress.progress.outcome == .connecting else { return false }
-            let beforeValidation = self.foregroundProgress.progress
-            let postAckReached = beforeValidation.lastCompletedPostAckBoundary != .none || relayConfirmed
-            self.foregroundProgress.recordPostAckCompletion(
-                postAckReached: postAckReached,
+            self.foregroundProgress.recordSnapshotConfirmation(
                 relayRefreshConfirmed: relayConfirmed,
                 generationMatches: generationMatches,
                 profileMatches: profileMatches,
@@ -2096,10 +1641,8 @@ final class NativeRelayLifecycle {
                          causeCode: result.failureClass?.diagnosticValue,
                          terminalReason: result.terminalReason?.journalValue,
                          attemptID: result.attemptID ?? activeTransportAttemptID,
-                         transportAttemptID: result.transportAttemptID ?? activeTransportAttemptID,
                          receipt: nil)
         await progressDelivery?.value
-        if result.outcome == .confirmed { awaitingFirstConnection = false }
         return result
     }
 
@@ -2111,13 +1654,12 @@ final class NativeRelayLifecycle {
     private func prepareForegroundOperationDiagnostics(for expected: ProfileContext) async -> NativeForegroundOperationSnapshot {
         guard foregroundDiagnosticContext == expected, context == expected,
               foregroundDiagnosticSnapshotAvailable,
-              let configuration, configuration.context == expected else {
+              let store = repository else {
             return .unavailable
         }
         guard !foregroundDiagnosticOperationsAtStart.isEmpty else {
             return NativeForegroundOperationSnapshot(available: true, operations: [])
         }
-        let store = configuration.store
         let initialOperations = foregroundDiagnosticOperationsAtStart
         let intentIDs = foregroundDiagnosticIntentIDs
         let transportAttemptID = activeTransportAttemptID
@@ -2178,14 +1720,11 @@ final class NativeRelayLifecycle {
         return true
     }
 
-    /// A token callback can arrive after an in-flight resync has already read
+    /// A token callback can arrive after an in-flight registration has already read
     /// the protected address. Queue one more authenticated pass in that case.
     @discardableResult
     func refreshAfterPushAddressStored() async -> Bool {
-        if clientAPIV2Enabled {
-            return await requestV2PushRegistration()?.value ?? false
-        }
-        return await refreshFlights.afterCurrent().completedWithoutError
+        await requestV2PushRegistration()?.value ?? false
     }
 
     /// The current flight may already have read C's outbox before the person
@@ -2209,100 +1748,14 @@ final class NativeRelayLifecycle {
                                          expected: ProfileContext,
                                          onSendCallStateChange: @escaping @MainActor @Sendable (Bool) -> Void = { _ in },
                                          onSendCallCompleted: @MainActor () -> Void = {}) async throws {
-        guard context == expected else {
-            throw NativeRelayCoreError.inactive
-        }
-        if let v2Connection {
-            onSendCallStateChange(true)
-            defer {
-                onSendCallStateChange(false)
-                onSendCallCompleted()
-            }
-            try await v2Connection.sendSavedAnswer(intentID)
-            return
-        }
-        guard let configuration else { throw NativeRelayCoreError.inactive }
-        if let existing = answerFlights[intentID] {
-            try await existing.task.value
-            onSendCallCompleted()
-            return
-        }
-        let token = UUID()
-        let flight = Task { @MainActor [self] in
-            // The Server keeps one relay session per device and closes the
-            // others whenever a new one opens, so a submission goes on the live
-            // connection. A second connection would close the live one and
-            // restart its catch-up.
-            guard context == expected, !Task.isCancelled, let core, let transport else {
-                throw NativeRelayCoreError.inactive
-            }
-            try await core.sendOriginalOperationForUserTap(intentID, using: transport,
-                onSendCallStateChange: { sending in onSendCallStateChange(sending) })
-        }
-        answerFlights[intentID] = (token, flight)
+        guard context == expected, let v2Connection else { throw ClientConnectionError.inactive }
+        onSendCallStateChange(true)
         defer {
-            if answerFlights[intentID]?.token == token { answerFlights.removeValue(forKey: intentID) }
+            onSendCallStateChange(false)
             onSendCallCompleted()
         }
-        try await flight.value
-        // Only a receipt calls for immediate reconciliation. An unresolved
-        // transport waits for a launch/refresh/reconnect trigger rather than
-        // recursively creating refresh/send attempts.
-        if case .accepted = try configuration.store.snapshot(context: expected).intents[intentID]?.disposition {
-            Task { [weak self] in _ = await self?.refreshResultFromTrustedRelay() }
-        }
+        try await v2Connection.sendSavedAnswer(intentID)
     }
-
-    private func resumeSavedAnswers() {
-        guard let expected = context, let configuration else { return }
-        do {
-            try configuration.store.queueRecoverableOperations(context: expected)
-            let pending = try configuration.store.snapshot(context: expected).outbox
-            for operation in pending where answerFlights[operation.intentID] == nil {
-                Task { [weak self] in
-                    guard let self else { return }
-                    do { _ = try await self.sendOriginalOperationForUserTap(operation.intentID, expected: expected) }
-                    catch {
-                        self.recordDiagnostic(.answer, .originalOperationDelivery, .unresolved,
-                            error: error, attemptID: self.activeTransportAttemptID)
-                    }
-                }
-            }
-        } catch {
-            recordDiagnostic(.localStore, .originalOperationDelivery, .failed, error: error)
-        }
-    }
-
-    @discardableResult
-    func fetchNextInboxPage() async -> Bool {
-        guard let core, let context else { return false }
-        do {
-            let fetched = try await core.fetchNextInboxPage()
-            guard self.context == context else { return false }
-            return fetched
-        } catch {
-            recordDiagnostic(.relay, .ordinaryReplay,
-                NativeDiagnosticCauseCode.failureTransition(for: error), error: error,
-                attemptID: activeTransportAttemptID)
-            if NativeRelayCoreError.isInvalidSavedServerState(error), self.context == context {
-                // The core has discarded the saved state that no longer
-                // validates. Rebuild it from the Server on a fresh connection
-                // instead of leaving older pages unloadable.
-                let generation = refreshGeneration
-                Task { [weak self] in
-                    guard let self, self.refreshGeneration == generation else { return }
-                    _ = await self.refreshFlights.afterCurrent { [weak self] in
-                        guard let self, self.refreshGeneration == generation else { return .unavailable }
-                        do { try await self.reconnect(replacing: nil, generation: generation) }
-                        catch { return .failed(error: error) }
-                        return await self.performRefresh(generation: generation)
-                    }
-                }
-            }
-            return false
-        }
-    }
-
     func recordPushRegistrationFailure(_ error: Error? = nil,
                                       causeCode: String? = nil,
                                       area: NativeDiagnosticArea = .notifications) {
@@ -2311,613 +1764,22 @@ final class NativeRelayLifecycle {
                          attemptID: activeTransportAttemptID)
     }
 
-    func submitDiscussion(_ binding: ConversationBinding, expected: ProfileContext,
-                          retainedFile: @escaping @Sendable (ConversationFile) async throws -> URL) async throws -> DiscussionOperationResult {
-        guard context == expected, let configuration else {
-            throw NativeRelayCoreError.inactive
-        }
-        let pending = try configuration.store.conversationSnapshot(context: expected)
-            .threads[binding.request]?.drafts[binding.revision]
-        if case let .acceptedPendingReplay(_, turn) = pending?.disposition { return .accepted(turnID: turn) }
-        let operation = try configuration.store.prepareDiscussion(binding, context: expected)
-        if let existing = discussionFlights[operation] { return try await existing.task.value }
-        let token = UUID()
-        let flight = Task { @MainActor [self] in
-            guard context == expected, !Task.isCancelled else {
-                throw NativeRelayCoreError.inactive
-            }
-            // One relay session per device (see sendOriginalOperationForUserTap):
-            // the discussion goes on the live connection, and the file origin
-            // comes from the live conversation catch-up rather than a second
-            // connection.
-            guard let core, let transport else { throw NativeRelayCoreError.inactive }
-            let endpoint = try await core.conversationOriginURL()
-            if pending?.wireFrame == nil, pending?.files.isEmpty == false, endpoint == nil {
-                // Saved, not rejected: the next refresh opens the conversation
-                // catch-up, which reports the origin, and resumes this discussion.
-                try configuration.store.markDiscussionOutcome(binding, operation: operation,
-                    rejection: nil, context: expected)
-                return DiscussionOperationResult.unresolved
-            }
-            guard context == expected, !Task.isCancelled else { throw NativeRelayCoreError.inactive }
-            return try await core.submitDiscussion(binding, using: transport,
-                originURL: endpoint, retainedFile: retainedFile)
-        }
-        discussionFlights[operation] = (token, flight)
-        defer {
-            if discussionFlights[operation]?.token == token {
-                discussionFlights.removeValue(forKey: operation)
-                discussionTransports.removeValue(forKey: operation)
-            }
-        }
-        let result = try await flight.value
-        if case .accepted = result {
-            Task { [weak self] in _ = await self?.refreshResultFromTrustedRelay() }
-        }
-        return result
-    }
-
-    private func resumeSavedDiscussions() {
-        guard let expected = context, let configuration else { return }
-        do {
-            let files = try ConversationFileStorage(identity: expected.identity)
-            let threads = try configuration.store.conversationSnapshot(context: expected).threads
-            for thread in threads.values {
-                for draft in thread.drafts.values {
-                    let operation: UUID
-                    switch draft.disposition {
-                    case let .submitting(id), let .outcomeUnknown(id): operation = id
-                    case .saved, .rejected, .acceptedPendingReplay: continue
-                    }
-                    guard discussionFlights[operation] == nil,
-                          thread.uploadGroups?[operation]?.cleanupID == nil else { continue }
-                    Task { [weak self] in
-                        guard let self else { return }
-                        do {
-                            _ = try await self.submitDiscussion(draft.binding, expected: expected) {
-                                try files.fileURL(for: $0)
-                            }
-                        } catch {
-                            self.recordDiagnostic(.conversation, .discussionSubmission, .unresolved, error: error)
-                        }
-                    }
-                }
-            }
-        } catch {
-            recordDiagnostic(.localStore, .discussionSubmission, .failed, error: error)
-        }
-    }
-
     func sendPendingConversationReadPositions(expected: ProfileContext) async {
         guard context == expected else { return }
-        if let v2Connection {
-            await v2Connection.sendSavedConversationReads()
-            return
-        }
-        guard let core else { return }
-        await core.sendPendingConversationReadPositions()
-        guard context == expected else { return }
-    }
-
-    func discardAbandonedUploads(for request: RequestKey, expected: ProfileContext) async throws {
-        guard context == expected, let core else { throw NativeRelayCoreError.inactive }
-        // Do not wait for the active send flight: departure fences its upload.
-        try await core.discardAbandonedUploads(for: request)
-        guard context == expected else { throw NativeRelayCoreError.inactive }
+        await v2Connection?.sendSavedConversationReads()
     }
 
     func fetchConversationFile(_ file: ConversationFile, to destination: URL, expected: ProfileContext) async throws {
-        guard context == expected else { throw NativeRelayCoreError.inactive }
-        if case let .v2Download(id, contentType) = file.content {
-            guard let connection = v2Connection else { throw NativeRelayCoreError.inactive }
-            let staged = destination.deletingLastPathComponent().appendingPathComponent(UUID().uuidString)
-            defer { try? FileManager.default.removeItem(at: staged) }
-            _ = try await connection.files.download(id, to: staged, expectedContentType: contentType)
-            try await Task.detached { try ConversationFileStorage.verify(file, at: staged) }.value
-            try Task.checkCancellation()
-            guard context == expected, v2Connection === connection else { throw NativeRelayCoreError.inactive }
-            if !FileManager.default.fileExists(atPath: destination.path) {
-                try FileManager.default.moveItem(at: staged, to: destination)
-            }
-            return
-        }
-        guard let configuration else { throw NativeRelayCoreError.inactive }
-        let token = UUID()
-        defer { fileTransports.removeValue(forKey: token) }
-        // The file origin comes from the live conversation catch-up. Opening a
-        // second relay connection to ask would make the Server close the live
-        // one (one relay session per device).
-        let endpoint = try await core?.conversationOriginURL()
-        guard context == expected, !Task.isCancelled else { throw NativeRelayCoreError.inactive }
-        guard let endpoint else { throw NativeRelayCoreError.inactive }
-        // HTTPS only: this session never opens a relay WebSocket.
-        let download = try URLSessionInstallationSession(profile: expected,
-            relayURL: configuration.relayURL,
-            clientIdentity: TrustedKeychainIdentity(configuration.identity),
-            trustedRootDER: configuration.rootDER, attemptID: token,
-            onDiagnostic: diagnosticSink(), opensRelaySocket: false)
-        fileTransports[token] = download
-        do {
-            try await download.fetchConversationFile(file, to: destination, originURL: endpoint)
-            await download.close()
-        } catch {
-            await download.close()
-            throw error
-        }
-        guard context == expected else { throw NativeRelayCoreError.inactive }
-    }
-
-    private func performRefresh(generation: UUID,
-                                checkBlockedPush: Bool = false) async -> NativeRelayRefreshResult {
-        guard refreshGeneration == generation else { return .unavailable }
-        guard let expected = context else { return .unavailable }
-        let result = await performRefreshAttempt(generation: generation, checkBlockedPush: checkBlockedPush)
-        guard refreshGeneration == generation else { return .unavailable }
-        snapshotState.failureContext = expected
-        snapshotState.failureMessage = result.failureMessage
-        return result
-    }
-
-    private func performRefreshAttempt(generation: UUID,
-                                       checkBlockedPush: Bool) async -> NativeRelayRefreshResult {
-        var needsReconnect = false
-        // The connection that failed; nil when a rebuild needs a fresh one anyway.
-        var failedTransport: URLSessionInstallationSession?
-        // Set after discarding saved Server state. Cleared by a socket
-        // interruption, or when the rebuilt connection got further than the
-        // previous failure (its accepted checkpoint moved the cursor past the
-        // cursor seen at that failure). Only a rebuild that fails again with
-        // no progress is reported; the next foreground, push, network change,
-        // answer or relaunch rebuilds again.
-        var rebuiltSavedServerState = false
-        var cursorAtLastRebuild: UInt64 = 0
-        while refreshGeneration == generation && !Task.isCancelled {
-            var attempted: URLSessionInstallationSession?
-            do {
-                if needsReconnect {
-                    try await reconnect(replacing: failedTransport, generation: generation)
-                    needsReconnect = false
-                }
-                attempted = transport
-                recordDiagnostic(.relay, .projectionRefresh, .began, attemptID: activeTransportAttemptID)
-                let result = try await refreshOnce(generation: generation,
-                                                   checkBlockedPush: checkBlockedPush)
-                recordDiagnostic(.relay, .projectionRefresh,
-                                 result.relayConfirmed ? .completed : .unresolved,
-                                 attemptID: activeTransportAttemptID)
-                return refreshGeneration == generation ? result : .unavailable
-            } catch {
-                guard refreshGeneration == generation, !Task.isCancelled else { return .unavailable }
-                foregroundProgress.recordFailure(error)
-                confirmedRelayContext = nil
-                if rebuiltSavedServerState, let cursor = savedRelayCursor(), cursor > cursorAtLastRebuild {
-                    rebuiltSavedServerState = false
-                    cursorAtLastRebuild = cursor
-                }
-                if !rebuiltSavedServerState, NativeRelayCoreError.isInvalidSavedServerState(error),
-                   await discardSavedServerState(after: error) {
-                    // Saved Server state is a cache. Report it, drop it, and
-                    // rebuild from the Server on a fresh connection.
-                    rebuiltSavedServerState = true
-                    needsReconnect = true
-                    failedTransport = nil
-                    continue
-                }
-                guard Self.shouldReconnectAfterConnectionError(error, awaitingFirstConnection: awaitingFirstConnection) else {
-                    recordDiagnostic(.relay, .projectionRefresh, .failed, error: error,
-                                     attemptID: activeTransportAttemptID)
-                    return .failed(error: error)
-                }
-                // A real reset/closure ends this socket, not the catch-up.
-                // Each replacement starts from the committed repository/cache
-                // prefix. There is no elapsed-time or retry-count cutoff.
-                recordDiagnostic(.relay, .projectionRefresh, .retrying, error: error,
-                                 attemptID: activeTransportAttemptID)
-                rebuiltSavedServerState = false
-                needsReconnect = true
-                failedTransport = attempted
-            }
-        }
-        return .unavailable
-    }
-
-    /// A rebuild starts from cursor 0; only an accepted Server checkpoint or
-    /// replayed events move it, so it measures progress made from the Server.
-    private func savedRelayCursor() -> UInt64? {
-        guard let expected = context, let configuration else { return nil }
-        return try? configuration.store.snapshot(context: expected).cursor
-    }
-
-    /// Records the validation failure and discards every saved copy of
-    /// Server state (repository and cache file), keeping the person's queue.
-    /// Returns false only when the discard itself cannot be committed.
-    private func discardSavedServerState(after error: Error) async -> Bool {
-        guard let expected = context, let configuration else { return false }
-        recordDiagnostic(.localStore, .projectionRefresh, .retrying, error: error,
-                         attemptID: activeTransportAttemptID)
-        do {
-            if let core {
-                try await core.discardSavedServerState()
-            } else {
-                try configuration.store.discardServerState(context: expected)
-                try await configuration.serverStateCache?.discard()
-            }
-        } catch {
-            recordDiagnostic(.localStore, .projectionRefresh, .failed, error: error,
-                             attemptID: activeTransportAttemptID)
-            return false
-        }
-        recordDiagnostic(.localStore, .projectionRefresh, .completed,
-                         causeCode: "saved_server_state_rebuilt",
-                         attemptID: activeTransportAttemptID)
-        return true
-    }
-
-    static func shouldReconnectAfterConnectionError(_ error: Error, awaitingFirstConnection: Bool = false) -> Bool {
-        let value = error as NSError
-        if value.domain == NSURLErrorDomain {
-            return value.code == URLError.timedOut.rawValue ||
-                (!awaitingFirstConnection && value.code == URLError.networkConnectionLost.rawValue)
-        }
-        if value.domain == NSPOSIXErrorDomain {
-            return !awaitingFirstConnection && [POSIXErrorCode.ECONNRESET, .ECONNABORTED, .ENOTCONN, .EPIPE]
-                .contains { Int($0.rawValue) == value.code }
-        }
-        // A refusal, invalid frame, or failed local write needs its actual
-        // reason surfaced; reconnecting cannot turn that fact into acceptance.
-        return false
-    }
-
-    private func refreshConfirmedProjection(core: NativeRelayCore, context: ProfileContext,
-                                            generation: UUID) async throws {
-        do {
-            _ = try await core.resyncAndDrainOutbox()
-        } catch {
-            if let details = await core.takePostAckFailureDetails() {
-                foregroundProgress.recordPostAckFailure(details)
-            }
-            throw error
-        }
-        let conversationsUnavailable = await core.conversationsUnavailable
-        guard refreshGeneration == generation, self.context == context, self.core === core else {
-            throw NativeRelayCoreError.inactive
-        }
-        conversationAvailability.confirm(for: context, conversationsUnavailable: conversationsUnavailable)
-        snapshotState.failureContext = context
-        snapshotState.failureMessage = nil
-        confirmedRelayContext = context
-    }
-
-#if DEBUG
-    /// Test-target entry into the same replay and confirmation path, without TLS
-    /// enrollment or notification registration. It never forces send permission.
-    func confirmInProcessSessionForTesting(store: ClientRepository, context: ProfileContext,
-                                          session: any AuthenticatedInstallationSession,
-                                          serverStateCache: any ServerStateCaching,
-                                          pushRemovalSession: (any AuthenticatedPushRemovalSession)? = nil,
-                                          enrollmentStore: NativeEnrollmentStore = NativeEnrollmentStore()) async throws -> NativeRelayRefreshResult {
-        await deactivate()
-        let generation = UUID()
-        let attemptID = UUID()
-        refreshGeneration = generation
-        activeTransportAttemptID = attemptID
-        self.context = context
-        featureFlags.connect(context: context, connectionID: attemptID)
-        let core = try NativeRelayCore(store: store, context: context, session: session,
-                                       automaticallySendsPendingOperations: false,
-                                       attemptID: attemptID, serverStateCache: serverStateCache,
-                                       onFeatureFlags: featureFlagsHandler(connectionID: attemptID), errorLog: errorLog)
-        self.core = core
-        if let pushRemovalSession {
-            try await refreshProjectionAfterPendingPushRemoval(core: core, context: context, generation: generation,
-                                                              pushSession: pushRemovalSession, enrollment: enrollmentStore)
-        } else {
-            try await refreshConfirmedProjection(core: core, context: context, generation: generation)
-        }
-        try await resumeConfirmedDiscussions(core: core, context: context, generation: generation)
-        return NativeRelayRefreshResult(relayConfirmed: true, pushRegistration: .notAttempted,
-            confirmedContext: context, confirmedTransportAttemptID: attemptID)
-    }
-#endif
-
-    private func resumeConfirmedDiscussions(core: NativeRelayCore, context: ProfileContext,
-                                            generation: UUID) async throws {
-        let files = try ConversationFileStorage(identity: context.identity)
-        try await core.resumePendingDiscussions { file in try files.fileURL(for: file) }
-        guard refreshGeneration == generation, self.context == context, self.core === core else {
-            throw NativeRelayCoreError.inactive
-        }
-    }
-
-    private func refreshProjectionAfterPendingPushRemoval(core: NativeRelayCore, context: ProfileContext,
-                                                           generation: UUID,
-                                                           pushSession: any AuthenticatedPushRemovalSession,
-                                                           enrollment: NativeEnrollmentStore) async throws {
-        try await refreshConfirmedProjection(core: core, context: context, generation: generation)
-        do {
-            try await enrollment.retryPendingPushRemoval(using: pushSession)
-        } catch {
-            // Notification setup cannot prevent the account from syncing. A
-            // refused removal stays durable for another connection.
-            recordDiagnostic(.notifications, .pushRegistration, .failed, error: error,
-                             attemptID: activeTransportAttemptID)
-        }
-        guard refreshGeneration == generation, self.context == context else {
-            throw NativeRelayCoreError.inactive
-        }
-    }
-
-    private func refreshOnce(generation: UUID,
-                             checkBlockedPush: Bool = false) async throws -> NativeRelayRefreshResult {
-        guard refreshGeneration == generation else { throw NativeRelayCoreError.inactive }
-        guard let core, let transport, let context else { throw NativeRelayCoreError.inactive }
-        resumeSavedAnswers()
-        resumeSavedDiscussions()
-        try await refreshProjectionAfterPendingPushRemoval(core: core, context: context, generation: generation,
-                                                          pushSession: transport, enrollment: enrollment)
-        try enrollment.updateServerID(await transport.serverID, for: context.identity)
-        if let configuration {
-            let threads = try configuration.store.conversationSnapshot(context: context).threads
-            for (request, thread) in threads where (thread.uploadCleanups ?? [:]).values.contains(where: {
-                if case .acknowledged = $0.outcome { return false }; return true
-            }) {
-                // Cleanup retry never resends a discussion or changes a replay cursor.
-                try? await core.discardAbandonedUploads(for: request)
-            }
-        }
-        // Notification setup is a separate fact from the replay/answer receipt
-        // already committed above. Its refusal cannot undo that success.
-        return await NativeRelayRefreshResult.afterConfirmedRelay(
-            context: context, transportAttemptID: activeTransportAttemptID, onFailure: { [weak self] error in
-            self?.recordDiagnostic(.notifications, .pushRegistration, .failed,
-                                   error: error, attemptID: self?.activeTransportAttemptID)
-        }) {
-            if try enrollment.hasPushDeparture(for: context.identity) { return .notAttempted }
-            let currentAddress = try DevelopmentPushRegistration.addressStore().load()
-            if let currentAddress,
-               let binding = try enrollment.pendingPushRegistration(address: currentAddress,
-                                                                     for: context.identity.deviceID.rawValue) {
-                guard let expected = try enrollment.load(), expected.matchesNotificationIdentity(context.identity) else {
-                    throw NativeJoinError.superseded
-                }
-                let bindingID = try await transport.registerPush(address: binding.address,
-                                                 operationID: binding.operationID,
-                                                 revision: binding.revision)
-                guard self.refreshGeneration == generation, self.context == context else {
-                    throw NativeRelayCoreError.inactive
-                }
-                try enrollment.markPushAccepted(binding, bindingID: bindingID, expected: expected)
-                return .confirmed
-            }
-            guard let expected = try enrollment.load(),
-                  expected.matchesNotificationIdentity(context.identity),
-                  let binding = expected.pushBinding, binding.accepted else { return .notAttempted }
-
-            if checkBlockedPush && PushRegistrationProfile.current == .production {
-                guard let status = try await transport.currentPushBindingStatus(),
-                      self.refreshGeneration == generation, self.context == context,
-                      status.profile == .production, status.revision == binding.revision else {
-                    return .notAttempted
-                }
-                let associations = (expected.notificationBindings ?? []).filter {
-                    $0.operationID == binding.operationID && $0.revision == binding.revision
-                }
-                guard associations.count <= 1,
-                      associations.first?.bindingID.rawValue == nil ||
-                        associations.first?.bindingID.rawValue == status.bindingID else {
-                    return .notAttempted
-                }
-
-                if status.isBlockedByConfiguration {
-                    guard let replacement = try enrollment.pendingBlockedConfigurationRegistration(
-                        address: binding.address,
-                        for: context.identity.deviceID.rawValue,
-                        status: status,
-                        profile: .production),
-                          let current = try enrollment.load(),
-                          current.matchesNotificationIdentity(context.identity),
-                          current.pushBinding == replacement else { return .notAttempted }
-                    let bindingID = try await transport.registerPush(address: replacement.address,
-                        operationID: replacement.operationID, revision: replacement.revision)
-                    guard self.refreshGeneration == generation, self.context == context else {
-                        throw NativeRelayCoreError.inactive
-                    }
-                    try enrollment.markPushAccepted(replacement, bindingID: bindingID, expected: current)
-                    return .confirmed
-                }
-
-                if associations.isEmpty {
-                    try enrollment.markPushAccepted(binding, bindingID: status.bindingID, expected: expected)
-                    return .confirmed
-                }
-                return .notAttempted
-            }
-
-            if !(expected.notificationBindings ?? []).contains(where: {
-                $0.operationID == binding.operationID && $0.revision == binding.revision
-            }), let bindingID = try await transport.currentPushBindingID(revision: binding.revision) {
-                guard self.refreshGeneration == generation, self.context == context else {
-                    throw NativeRelayCoreError.inactive
-                }
-                try enrollment.markPushAccepted(binding, bindingID: bindingID, expected: expected)
-                return .confirmed
-            }
-            return .notAttempted
-        }
-    }
-
-    /// Replaces the live connection once per failure. Callers that saw the
-    /// same failed connection share one replacement, and a caller whose failed
-    /// connection was already replaced uses that replacement, so a reconnect
-    /// admits exactly one new relay session.
-    private func reconnect(replacing failed: URLSessionInstallationSession?, generation: UUID) async throws {
-        if let flight = reconnectFlight {
-            try await flight.task.value
-            return
-        }
-        if let failed, let current = transport, current !== failed { return }
-        let token = UUID()
-        let task = Task { @MainActor [weak self] in
-            guard let self else { throw NativeRelayCoreError.inactive }
-            try await self.replaceLiveConnection(generation: generation)
-        }
-        reconnectFlight = (token, task)
-        defer { if reconnectFlight?.token == token { reconnectFlight = nil } }
-        try await task.value
-    }
-
-    private func replaceLiveConnection(generation: UUID) async throws {
-        guard refreshGeneration == generation else { throw NativeRelayCoreError.inactive }
-        guard let configuration else { throw NativeRelayCoreError.inactive }
-        let transportAttemptID = UUID()
-        let previousProgress = foregroundProgress.progress
-        var retryEvents: [NativeClientDiagnosticEvent] = []
-        if previousProgress.postAckDrainTransition == .completed,
-           previousProgress.lastCompletedPostAckBoundary != .none,
-           let previousTransportAttemptID = activeTransportAttemptID {
-            // A completed drain can be followed by a later refresh failure
-            // before foreground completion. Preserve that transport's boundary
-            // before the retry resets the in-memory progress to a new attempt.
-            retryEvents.append(NativeClientDiagnosticEvent(area: .relay, phase: .postAckDrain,
-                transition: .completed,
-                postAckBoundary: previousProgress.lastCompletedPostAckBoundary.journalValue,
-                postAckDrainTransition: .completed,
-                attemptID: previousProgress.attemptID,
-                transportAttemptID: previousTransportAttemptID))
-        }
-        retryEvents.append(NativeClientDiagnosticEvent(area: .connection, phase: .approvedConnection,
-            transition: .retrying, attemptID: transportAttemptID,
-            transportAttemptID: transportAttemptID))
-        diagnosticJournal?.record(retryEvents)
-        foregroundProgress.beginTransportAttempt(transportAttemptID)
-        activeTransportAttemptID = transportAttemptID
-        featureFlags.connect(context: configuration.context, connectionID: transportAttemptID)
-        let priorCore = core
-        let priorTransport = transport
-        core = nil
-        transport = nil
-        focusTransportID = nil
-        installFocusReportHandler(for: nil, transportID: nil)
-        if let priorCore { await priorCore.deactivate() }
-        if let priorTransport { await priorTransport.close() }
-        guard refreshGeneration == generation else { throw NativeRelayCoreError.inactive }
-        let nextTransport: URLSessionInstallationSession
-        do {
-            nextTransport = try URLSessionInstallationSession(profile: configuration.context,
-                                                              relayURL: configuration.relayURL,
-                                                              clientIdentity: TrustedKeychainIdentity(configuration.identity),
-                                                              trustedRootDER: configuration.rootDER,
-                                                              attemptID: transportAttemptID,
-                                                              serverMatchedPushRoutingEnabled: pushRoutingEnabledHandler(),
-                                                              onProgress: progressHandler(generation: generation,
-                                                                                          transportAttemptID: transportAttemptID),
-                                                              onFocusReportingReady: focusReportingReadyHandler(
-                                                                generation: generation,
-                                                                transportID: transportAttemptID),
-                                                              onFocusReportingUnsupported: focusReportingUnsupportedHandler(
-                                                                generation: generation,
-                                                                transportID: transportAttemptID),
-                                                              onViewShow: viewShowHandler(
-                                                                generation: generation,
-                                                                transportID: transportAttemptID),
-                                                              onDiagnostic: diagnosticSink())
-        } catch {
-            recordDiagnostic(.connection, .approvedConnection,
-                             NativeDiagnosticCauseCode.failureTransition(for: error), error: error,
-                             attemptID: transportAttemptID, transportAttemptID: transportAttemptID)
-            throw error
-        }
-        let nextCore: NativeRelayCore
-        do {
-            nextCore = try NativeRelayCore(store: configuration.store,
-                                           context: configuration.context,
-                                           session: nextTransport,
-                                           automaticallySendsPendingOperations: false,
-                                           attemptID: transportAttemptID,
-                                           serverStateCache: configuration.serverStateCache,
-                                           onProgress: progressHandler(generation: generation,
-                                                                       transportAttemptID: transportAttemptID),
-                                           onPriorityLevelsChanged: priorityLevelsChangeHandler(for: configuration.context),
-                                           onPriorityLevelsConnectionLost: priorityLevelsConnectionLostHandler(
-                                               for: configuration.context, transportAttemptID: transportAttemptID),
-                                           onPriorityLevelsFeatureEnabled: priorityLevelsFeatureEnabledHandler(),
-                                           onDiagnostic: diagnosticSink(),
-                                           onFeatureFlags: featureFlagsHandler(connectionID: transportAttemptID), errorLog: errorLog)
-        } catch {
-            recordDiagnostic(.connection, .approvedConnection, .failed, error: error,
-                             attemptID: transportAttemptID, transportAttemptID: transportAttemptID)
-            await nextTransport.close()
-            throw error
-        }
-        guard refreshGeneration == generation else {
-            await nextCore.deactivate()
-            await nextTransport.close()
-            throw NativeRelayCoreError.inactive
-        }
-        self.transport = nextTransport
-        self.core = nextCore
-        focusTransportID = transportAttemptID
-        featureFlags.connect(context: configuration.context, connectionID: transportAttemptID)
-        installFocusReportHandler(for: nextTransport, transportID: transportAttemptID)
-    }
-
-    private func pushRoutingEnabledHandler() -> @Sendable () async -> Bool {
-        { [weak self] in
-            await self?.featureFlags.isEnabled(.serverMatchedPushRouting) ?? false
-        }
-    }
-
-    private func featureFlagsHandler(connectionID: UUID)
-        -> @Sendable (RemoteFeatureFlagSnapshot) async -> Void {
-        { [weak self] snapshot in
-            await self?.featureFlags.replace(snapshot, connectionID: connectionID)
-        }
-    }
-
-    private func progressHandler(generation: UUID,
-                                 transportAttemptID: UUID) -> @Sendable (NativeRelayProgressEvent) -> Void {
-        { [weak self] event in
-            Task { @MainActor [weak self] in
-                guard let self, self.refreshGeneration == generation,
-                      self.activeTransportAttemptID == transportAttemptID else { return }
-                self.foregroundProgress.observe(event, transportAttemptID: transportAttemptID)
-                switch event {
-                case .serverTrustValidated:
-                    self.recordDiagnostic(.connection, .serverTrust, .completed, attemptID: transportAttemptID)
-                case .serverTrustRejected:
-                    self.recordDiagnostic(.connection, .serverTrust, .failed,
-                                          causeCode: "server_trust_rejected", attemptID: transportAttemptID)
-                case .clientIdentityOffered:
-                    self.recordDiagnostic(.connection, .clientIdentity, .observed, attemptID: transportAttemptID)
-                case .clientIdentityChallengeRejected:
-                    self.recordDiagnostic(.connection, .clientIdentity, .failed,
-                                          causeCode: "client_identity_challenge_rejected", attemptID: transportAttemptID)
-                case .webSocketOpened:
-                    self.recordDiagnostic(.connection, .webSocketOpen, .completed, attemptID: transportAttemptID)
-                case .relayAdmitted:
-                    // The session journals this admission itself, timed when it
-                    // happened. A second record here, made only once the main
-                    // actor ran this task, read as a second admission.
-                    break
-                case .nativeSyncReplayRequested, .nativeSyncResynced:
-                    // The core journals the replay's start and end itself.
-                    break
-                case .nativeSyncAcknowledged:
-                    // The core emits the correlated acknowledgement diagnostic
-                    // at this same boundary. Keep progress without a second
-                    // identical journal rewrite for every successful ACK.
-                    break
-                case .postAckDrainBegan, .postAckDrainFinished(_):
-                    break
-                }
-            }
-        }
-    }
-
-    private func diagnosticSink() -> NativeClientDiagnosticSink {
-        guard let diagnosticJournal else { return { _ in } }
-        return { [weak diagnosticJournal] event in
-            Task { @MainActor [weak diagnosticJournal] in diagnosticJournal?.record(event) }
+        guard context == expected, let connection = v2Connection else { throw ClientConnectionError.inactive }
+        guard case let .v2Download(id, contentType) = file.content else { throw CocoaError(.fileReadUnsupportedScheme) }
+        let staged = destination.deletingLastPathComponent().appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: staged) }
+        _ = try await connection.files.download(id, to: staged, expectedContentType: contentType)
+        try await Task.detached { try ConversationFileStorage.verify(file, at: staged) }.value
+        try Task.checkCancellation()
+        guard context == expected, v2Connection === connection else { throw ClientConnectionError.inactive }
+        if !FileManager.default.fileExists(atPath: destination.path) {
+            try FileManager.default.moveItem(at: staged, to: destination)
         }
     }
 

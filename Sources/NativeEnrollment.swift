@@ -70,11 +70,8 @@ struct NativeEnrollmentRecord: Codable, Equatable {
     let statusExpiresAt: Int64?
     var personID: String?
     var v2Revoked: Bool? = nil
-    var pushBinding: NativePushBinding? = nil
-    var pushRegistrationRevisionFloor: UInt64? = nil
     var v2PushRegistration: ClientAPIPushRegistrationState? = nil
     var serverDisplayName: String? = nil
-    var serverID: String? = nil
     var accountDisplayName: String? = nil
     var notificationExplanationSeen: Bool? = nil
     var foregroundRelayConfirmed: Bool? = nil
@@ -82,7 +79,6 @@ struct NativeEnrollmentRecord: Codable, Equatable {
     /// endpoint migration; those records use their enrollment host.
     var localProfileAuthority: String? = nil
     var notificationProfileGeneration: UUID? = nil
-    var notificationBindings: [NativeNotificationBinding]? = nil
 
     var isApproved: Bool { personID != nil }
     /// The invitation's person label, when it supplied one. Earlier builds saved
@@ -94,6 +90,15 @@ struct NativeEnrollmentRecord: Codable, Equatable {
         return accountDisplayName
     }
     var profileAuthority: String { localProfileAuthority ?? host }
+
+    var deviceURL: URL? {
+        // The existing record stores the device listener port as relayPort.
+        var origin = URLComponents()
+        origin.scheme = "https"
+        origin.host = host
+        origin.port = relayPort
+        return origin.url
+    }
 
     func removalArchiveRecord() -> Self {
         Self(host: host, enrollmentPort: enrollmentPort, relayPort: relayPort,
@@ -114,13 +119,6 @@ enum NativeAuthorityBinding {
         default: false
         }
     }
-}
-
-struct NativePushBinding: Codable, Equatable {
-    let address: String
-    let operationID: UUID
-    let revision: UInt64
-    var accepted: Bool
 }
 
 private struct PreparedEnrollment: Codable {
@@ -148,19 +146,12 @@ private struct PreparedEnrollment: Codable {
 /// is never copied into the C store, transport frames or profile metadata.
 struct NativeEnrollmentStore {
     private let service: String
-    private let featureFlags: RemoteFeatureFlags?
     private static let account = "current-installation"
     private static let preparedAccount = "unconfirmed-installation"
     private static let v2APNsAccount = "client-api-v2-apns-token"
 
-    init(service: String = "co.clicketyclacks.Harklight.native-enrollment",
-         featureFlags: RemoteFeatureFlags? = nil) {
+    init(service: String = "co.clicketyclacks.Harklight.native-enrollment") {
         self.service = service
-        self.featureFlags = featureFlags
-    }
-
-    @MainActor private var serverMatchedPushRoutingEnabled: Bool {
-        (featureFlags ?? NativeRelayLifecycle.shared.featureFlags).isEnabled(.serverMatchedPushRouting)
     }
 
     func load() throws -> NativeEnrollmentRecord? {
@@ -341,7 +332,7 @@ struct NativeEnrollmentStore {
     func material(from record: NativeEnrollmentRecord) throws -> NativeInstallationMaterial {
         guard let personID = record.personID,
               !personID.isEmpty,
-              let relayURL = URL(string: "wss://\(record.host):\(record.relayPort)/relay") else {
+              let deviceURL = record.deviceURL else {
             throw NativeEnrollmentError.invalidIdentity
         }
         let clientIdentity: SecIdentity
@@ -369,7 +360,7 @@ struct NativeEnrollmentStore {
                                                                deviceID: ExactText(record.deviceID)),
                                      transportMode: .relay)
         return NativeInstallationMaterial(context: profile,
-                                          relayURL: relayURL,
+                                          deviceURL: deviceURL,
                                           keychainIdentity: clientIdentity,
                                           trustedRootDER: record.trustedRootDER)
     }
@@ -487,83 +478,6 @@ struct NativeEnrollmentStore {
         try save(record)
     }
 
-    /// Persist the exact registration operation before sending it. Repeated
-    /// refreshes use the same operation ID and revision until the server reply
-    /// is confirmed; a changed APNs address advances the revision.
-    @MainActor func pendingPushRegistration(address: String, for deviceID: String) throws -> NativePushBinding? {
-        guard address.count == 64,
-              address.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }),
-              var record = try load(),
-              record.isApproved,
-              record.deviceID == deviceID else { return nil }
-        if serverMatchedPushRoutingEnabled, try pushRemovalState(for: notificationIdentity(record)) != nil { return nil }
-        if let existing = record.pushBinding, existing.address == address {
-            return existing.accepted ? nil : existing
-        }
-        let previous = max(record.pushBinding?.revision ?? 0,
-                           serverMatchedPushRoutingEnabled ? record.pushRegistrationRevisionFloor ?? 0 : 0)
-        guard previous < UInt64(Int64.max) - 1 else {
-            throw NativeEnrollmentError.invalidServerResponse
-        }
-        let revision = previous + 1
-        let binding = NativePushBinding(address: address,
-                                        operationID: UUID(),
-                                        revision: revision,
-                                        accepted: false)
-        record.pushBinding = binding
-        try save(record)
-        return binding
-    }
-
-    /// Opens a new durable registration only when the authenticated server
-    /// status still names this accepted Production binding and reports the
-    /// existing configuration-blocked state. Older installations persist the
-    /// binding ID in `notificationBindings`; records without that association
-    /// can still match by their accepted revision and current Production build.
-    @MainActor func pendingBlockedConfigurationRegistration(
-        address: String,
-        for deviceID: String,
-        status: PushBindingStatus,
-        profile: PushRegistrationProfile
-    ) throws -> NativePushBinding? {
-        guard profile == .production,
-              status.profile == profile,
-              status.isBlockedByConfiguration,
-              address.count == 64,
-              address.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }),
-              var record = try load(),
-              record.isApproved,
-              record.deviceID == deviceID,
-              let existing = record.pushBinding,
-              existing.accepted,
-              existing.address == address,
-              existing.revision == status.revision else { return nil }
-
-        if try hasPushDeparture(for: notificationIdentity(record)) { return nil }
-        let associations = (record.notificationBindings ?? []).filter {
-            $0.operationID == existing.operationID && $0.revision == existing.revision
-        }
-        guard associations.count <= 1,
-              associations.first?.bindingID.rawValue == nil ||
-                associations.first?.bindingID.rawValue == status.bindingID else { return nil }
-        guard existing.revision < UInt64(Int64.max) - 1 else {
-            throw NativeEnrollmentError.invalidServerResponse
-        }
-
-        let binding = NativePushBinding(address: existing.address,
-                                        operationID: UUID(),
-                                        revision: existing.revision + 1,
-                                        accepted: false)
-        record.pushBinding = binding
-        try save(record)
-        return binding
-    }
-
-    private struct PushRemovalState: Codable {
-        var operation: PushRemovalOperation?
-        var revision: UInt64? = nil
-    }
-
     private func notificationIdentity(_ record: NativeEnrollmentRecord) throws -> ProfileIdentity {
         guard let person = record.personID else { throw NativeJoinError.superseded }
         return ProfileIdentity(trustedRelayAuthority: ExactText(record.profileAuthority),
@@ -577,136 +491,19 @@ struct NativeEnrollmentStore {
         return "push-departure-" + SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
     }
 
-    private func pushRemovalState(for identity: ProfileIdentity) throws -> PushRemovalState? {
+    /// The previous release may have left a local push departure record.
+    /// A confirmed removal retires it without sending another operation.
+    func discardLegacyPushDeparture(for record: NativeEnrollmentRecord) throws {
+        let identity = try notificationIdentity(record)
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
-            kSecAttrAccount as String: try pushRemovalKey(identity),
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne
+            kSecAttrAccount as String: try pushRemovalKey(identity)
         ]
-        var result: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        if status == errSecItemNotFound { return nil }
-        guard status == errSecSuccess, let bytes = result as? Data else {
-            throw NativeEnrollmentError.identityStorage
-        }
-        return try JSONDecoder().decode(PushRemovalState.self, from: bytes)
-    }
-
-    private func savePushRemoval(_ state: PushRemovalState, for identity: ProfileIdentity) throws {
-        try saveData(JSONEncoder().encode(state), account: pushRemovalKey(identity))
-    }
-
-    @MainActor func hasPushDeparture(for identity: ProfileIdentity) throws -> Bool {
-        guard serverMatchedPushRoutingEnabled else { return false }
-        return try pushRemovalState(for: identity) != nil
-    }
-
-    @MainActor func finishPushDeparture(for record: NativeEnrollmentRecord) throws {
-        guard serverMatchedPushRoutingEnabled else { return }
-        let identity = try notificationIdentity(record)
-        let prior = try pushRemovalState(for: identity)
-        try savePushRemoval(PushRemovalState(operation: nil,
-            revision: prior?.operation?.revision ?? prior?.revision), for: identity)
-    }
-
-    /// The pending operation is independent of the current enrollment so an
-    /// offline departure survives replacement with a different account.
-    @MainActor func preparePushRemoval(for record: NativeEnrollmentRecord) throws {
-        guard serverMatchedPushRoutingEnabled else { return }
-        let identity = try notificationIdentity(record)
-        if try pushRemovalState(for: identity) != nil { return }
-        let revision = record.pushBinding?.revision ?? 0
-        guard revision < UInt64(Int64.max) - 1 else { throw NativeEnrollmentError.invalidServerResponse }
-        let operation = try PushRemovalOperation(revision: revision + 1)
-        try savePushRemoval(PushRemovalState(operation: operation, revision: operation.revision), for: identity)
-    }
-
-    /// A failed switch-away kept this account live. Cancel unsent removal and
-    /// prepare registration above any removal that may already have reached the
-    /// server, so the kept account continues receiving notifications.
-    @MainActor func cancelPushDeparture(for expected: NativeEnrollmentRecord) throws {
-        guard serverMatchedPushRoutingEnabled else { return }
-        guard var record = try load(), record.sameNotificationProfile(as: expected) else {
-            throw NativeJoinError.superseded
-        }
-        let identity = try notificationIdentity(record)
-        guard let departure = try pushRemovalState(for: identity) else { return }
-        let floor = max(record.pushRegistrationRevisionFloor ?? 0,
-                        departure.operation?.revision ?? departure.revision ?? 0)
-        guard floor < UInt64(Int64.max) - 1 else { throw NativeEnrollmentError.invalidServerResponse }
-        record.pushRegistrationRevisionFloor = floor
-        if let binding = record.pushBinding {
-            record.pushBinding = NativePushBinding(address: binding.address, operationID: UUID(),
-                                                  revision: max(binding.revision, floor) + 1, accepted: false)
-        }
-        try save(record)
-        let status = SecItemDelete([kSecClass as String: kSecClassGenericPassword,
-                                    kSecAttrService as String: service,
-                                    kSecAttrAccount as String: try pushRemovalKey(identity)] as CFDictionary)
+        let status = SecItemDelete(query as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else {
             throw NativeEnrollmentError.identityStorage
         }
-    }
-
-    @MainActor func retryPendingPushRemoval(using session: any AuthenticatedPushRemovalSession) async throws {
-        let identity = session.authenticatedIdentity
-        while serverMatchedPushRoutingEnabled, let operation = try pushRemovalState(for: identity)?.operation {
-            let result = try await session.removePush(operation)
-            guard serverMatchedPushRoutingEnabled, result != .deferred else { return }
-            guard try pushRemovalState(for: identity)?.operation == operation else {
-                throw NativeJoinError.superseded
-            }
-            if result == .stale {
-                let status = try await session.currentPushBindingStatus()
-                guard serverMatchedPushRoutingEnabled else { return }
-                guard try pushRemovalState(for: identity)?.operation == operation else {
-                    throw NativeJoinError.superseded
-                }
-                if let status {
-                    guard status.revision >= operation.revision, status.revision < UInt64(Int64.max) - 1 else {
-                        throw NativeEnrollmentError.invalidServerResponse
-                    }
-                    let next = try PushRemovalOperation(revision: status.revision + 1)
-                    try savePushRemoval(PushRemovalState(operation: next, revision: next.revision), for: identity)
-                    continue
-                }
-                // The server reports no binding remaining.
-            }
-            // Keep the departure marker so reconnect cannot register pushes again.
-            try savePushRemoval(PushRemovalState(operation: nil, revision: operation.revision), for: identity)
-            return
-        }
-    }
-
-    /// The authenticated server is the authority; an older server with no field
-    /// resets the cached identity to unknown.
-    @MainActor func updateServerID(_ serverID: String?, for identity: ProfileIdentity) throws {
-        guard serverMatchedPushRoutingEnabled else { return }
-        guard var record = try load() else { return }
-        guard record.matchesNotificationIdentity(identity) else { throw NativeJoinError.superseded }
-        guard record.serverID != serverID else { return }
-        record.serverID = serverID
-        try save(record)
-    }
-
-    /// Persist routing metadata and acceptance together, guarded by the exact
-    /// preexisting trusted enrollment and durable registration operation.
-    func markPushAccepted(_ binding: NativePushBinding, bindingID: String,
-                          expected: NativeEnrollmentRecord) throws {
-        guard var record = try load(), record.sameNotificationProfile(as: expected),
-              record.pushBinding == binding, UUID(uuidString: bindingID) != nil else {
-            throw NativeJoinError.superseded
-        }
-        record.notificationProfileGeneration = record.notificationProfileGeneration ?? UUID()
-        let association = NativeNotificationBinding(bindingID: ExactText(bindingID),
-            operationID: binding.operationID, revision: binding.revision)
-        var associations = record.notificationBindings ?? []
-        if !associations.contains(association) { associations.append(association) }
-        record.notificationBindings = associations
-        record.pushBinding?.accepted = true
-        try save(record)
     }
 
     private func importIdentity(_ data: Data, password: String) throws -> SecIdentity {

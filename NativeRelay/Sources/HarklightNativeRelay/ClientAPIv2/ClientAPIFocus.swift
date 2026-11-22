@@ -97,6 +97,7 @@ public actor ClientAPIFocusChannel {
     private var renewal: Task<Void, Never>?
     private var retryTimer: Task<Void, Never>?
     private var drainTask: Task<Void, Never>?
+    private var isClosing = false
     private var backgroundFailures = 0
     private var deliveredShows: [String] = []
     private static let rememberedShows = 64
@@ -125,28 +126,39 @@ public actor ClientAPIFocusChannel {
     /// the reply of the write that superseded it.
     @discardableResult
     public func report(_ report: FocusReport) async -> FocusReportReply {
-        guard pausedForInternalError != report else { return .rejected }
-        return await withCheckedContinuation { continuation in
+        guard !isClosing, pausedForInternalError != report else { return .rejected }
+        return await waitForDelivery(of: report)
+    }
+
+    private func waitForDelivery(of report: FocusReport) async -> FocusReportReply {
+        await withCheckedContinuation { continuation in
             waiters.append(continuation)
-            enqueue(report)
+            replaceLatest(with: report)
         }
     }
 
     /// Best effort before enrollment removal. A held or offline focus write
     /// cannot keep the person waiting on sign-out.
     public func reportSignedOutBeforeClosing(timeout: Duration = .seconds(2)) async {
+        guard !isClosing else { return }
+        // A report already handed off by the app must not supersede signed_out.
+        isClosing = true
         let timer = Task {
             do { try await Task.sleep(for: timeout) } catch { return }
             self.stop()
         }
         defer { timer.cancel() }
-        _ = await report(.signedOut)
+        _ = await waitForDelivery(of: .signedOut)
         stop()
     }
 
     /// Queues the latest screen without waiting for the current HTTP write.
     public func enqueue(_ report: FocusReport) {
-        guard pausedForInternalError != report else { return }
+        guard !isClosing, pausedForInternalError != report else { return }
+        replaceLatest(with: report)
+    }
+
+    private func replaceLatest(with report: FocusReport) {
         pausedForInternalError = nil
         latest = report
         renewal?.cancel()

@@ -14,11 +14,11 @@ final class NativeJoinInvitationValidationTests: XCTestCase {
             identity.certificateDER.base64EncodedString() + "\n-----END CERTIFICATE-----\n"
         let personID = String(repeating: "p", count: 300)
         let payload: [String: Any] = [
-            "v": 1,
+            "v": 2,
             "person_id": personID,
             "server_name": "relay.example.test",
             "enrollment_url": "https://relay.example.test:18444/enroll",
-            "relay_url": "wss://relay.example.test:18443/relay",
+            "device_url": "https://relay.example.test:18443",
             "ca_pem": pem,
             "ca_sha256": SHA256.hash(data: identity.certificateDER)
                 .map { String(format: "%02x", $0) }.joined(),

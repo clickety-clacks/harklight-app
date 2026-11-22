@@ -75,6 +75,23 @@ struct NativeAccountDeparture: Codable {
     }
 }
 
+extension NativeAccountDeparture {
+    init(from decoder: any Decoder) throws {
+        let fields = try decoder.container(keyedBy: CodingKeys.self)
+        record = try fields.decode(NativeEnrollmentRecord.self, forKey: .record)
+        do {
+            replacement = try fields.decodeIfPresent(NativeJoinInvitation.self, forKey: .replacement)
+        } catch NativeJoinInvitationError.olderServer {
+            // An obsolete invitation must not hide the old account's removal receipt.
+            replacement = nil
+        }
+        removed = try fields.decode(Bool.self, forKey: .removed)
+        stagedRevokedText = try fields.decodeIfPresent([ExactText].self, forKey: .stagedRevokedText)
+        v2SignOut = try fields.decodeIfPresent(Bool.self, forKey: .v2SignOut)
+        cleanupPending = try fields.decodeIfPresent(Bool.self, forKey: .cleanupPending)
+    }
+}
+
 struct NativeJoinResponse {
     let statusCode: Int
     let data: Data
@@ -132,10 +149,8 @@ final class NativeGuidedJoinStore {
     private let transport: any NativeJoinTransport
     private let enrollment: NativeEnrollmentStore
     private var confirmedRemovalIDs: Set<String> = []
-    var removePushBeforeDeparture: ((NativeEnrollmentRecord) async -> Void)?
     var prepareV2Removal: ((NativeEnrollmentRecord) async throws -> Void)?
     var didConfirmV2Removal: ((NativeEnrollmentRecord) async -> Void)?
-    var finishLegacyPushDeparture: ((NativeEnrollmentRecord) throws -> Void)?
 
     init(namespace: String = "co.clicketyclacks.Harklight.native-enrollment",
          transport: any NativeJoinTransport = PinnedNativeJoinTransport()) {
@@ -160,7 +175,14 @@ final class NativeGuidedJoinStore {
         let status = SecItemCopyMatching(query as CFDictionary, &value)
         if status == errSecItemNotFound { return nil }
         guard status == errSecSuccess, let data = value as? Data else { throw NativeEnrollmentError.identityStorage }
-        let attempt = try JSONDecoder().decode(NativeJoinAttempt.self, from: data)
+        let attempt: NativeJoinAttempt
+        do {
+            attempt = try JSONDecoder().decode(NativeJoinAttempt.self, from: data)
+        } catch NativeJoinInvitationError.olderServer {
+            // A new invitation can replace a saved v1 request. Approved enrollment
+            // is stored separately and remains usable with its existing identity.
+            return nil
+        }
         try attempt.invitation.validate()
         guard DeviceCertificateBinding.matches(attempt.certificateDER, expectedDeviceID: attempt.deviceID),
               (attempt.requestGeneration ?? 0) >= 0,
@@ -605,12 +627,7 @@ final class NativeGuidedJoinStore {
             try saveDeparture(departure)
         }
         if !departure.removed {
-            if let prepareV2Removal {
-                try await prepareV2Removal(departure.record)
-            } else {
-                try enrollment.preparePushRemoval(for: departure.record)
-                await removePushBeforeDeparture?(departure.record)
-            }
+            try await prepareV2Removal?(departure.record)
             let material = try enrollment.material(from: record)
             guard let url = URL(string: "https://\(record.host):\(record.enrollmentPort)/device/remove") else {
                 throw NativeJoinError.invalidResponse
@@ -668,11 +685,8 @@ final class NativeGuidedJoinStore {
                 if try enrollment.load().map({ sameInstallation($0, record) }) ?? true {
                     try enrollment.clearV2APNsToken()
                 }
-            } else if let finishLegacyPushDeparture {
-                try finishLegacyPushDeparture(record)
-            } else {
-                try enrollment.finishPushDeparture(for: record)
             }
+            try enrollment.discardLegacyPushDeparture(for: record)
             try enrollment.retireDeviceIdentity(record)
         }
         if let attempt = try loadAttempt(), attempt.deviceID == record.deviceID {
@@ -763,9 +777,9 @@ final class NativeGuidedJoinStore {
         case "approved":
             guard NativeAuthorityBinding.samePerson(response.personID, attempt.invitation.personID),
                   response.deviceID == attempt.deviceID else { throw NativeJoinError.wrongApproval }
-            var record = NativeEnrollmentRecord(host: attempt.invitation.enrollmentURL.host!.lowercased(),
+            var record = NativeEnrollmentRecord(host: attempt.invitation.deviceURL.host!.lowercased(),
                                                 enrollmentPort: attempt.invitation.enrollmentURL.port ?? 443,
-                                                relayPort: attempt.invitation.relayURL.port ?? 443,
+                                                relayPort: attempt.invitation.deviceURL.port ?? 443,
                                                 trustedRootDER: attempt.invitation.trustedRootDER,
                                                 identityLabel: attempt.identityLabel,
                                                 deviceLabel: attempt.deviceLabel, deviceID: attempt.deviceID,

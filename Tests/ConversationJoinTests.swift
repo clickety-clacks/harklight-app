@@ -11,64 +11,6 @@ final class ConversationJoinTests: XCTestCase {
         let key = RequestKey(accountScope: context.identity.personID, senderID: ExactText("sender"), messageID: ExactText("request"))
         return (context, persistence, domain, key)
     }
-    func testRedactedNewQuestionCannotExposeOrReuseAnEarlierAnswerSelector() async throws {
-        let (context, persistence, domain, key) = try setup()
-        let payload = try JSONValue.parse(Data(#"{"title":"First question","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"old","label":"Old choice","kind":"value","value":"old"}]}}"#.utf8))
-        try domain.apply(RelayEvent(sequence: 1, body: .delivery(StoredRequest(key: key, originalPayload: payload), .message),
-            conversation: RelayConversationMetadata(revision: 1, sessionHandle: ExactText("handle"), eventID: ExactText("1"))), context: context)
-        let port = AttentionDomainPort(store: domain)
-        let old = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first)
-        let selector = try XCTUnwrap(old.selector)
-        var draft = old.draft
-        draft.compatibility.selectedActionID = ExactText("old")
-        try domain.saveDraft(draft, selector: selector, context: context)
-        let redacted = ConversationTurn(id: ExactText("2"), binding: ConversationBinding(request: key, revision: 2),
-            author: .origin, sessionHandle: ExactText("handle"), text: ExactText(""), contentRedacted: true, kind: .revision)
-        try domain.applyConversation(ConversationEvent(sequence: 1, binding: redacted.binding, fact: .redactedRevision(redacted)), context: context)
-        XCTAssertThrowsError(try domain.saveDraft(draft, selector: selector, context: context))
-        XCTAssertThrowsError(try domain.selector(for: key, context: context))
-        let current = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first)
-        XCTAssertNil(current.selector)
-        XCTAssertEqual(current.title, ExactText("Question content unavailable on this device"))
-        XCTAssertThrowsError(try port.inspect(context: port.context, request: key, revision: 2),
-                             "An explicitly requested redacted version remains unavailable.")
-        let archived = try XCTUnwrap(port.inspectAnswerDraft(context: port.context, request: key, revision: 1))
-        XCTAssertEqual(archived.draft.compatibility.selectedActionID, ExactText("old"))
-        XCTAssertNil(archived.selector)
-        let cacheDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: cacheDirectory) }
-        let cacheURL = cacheDirectory.appendingPathComponent("server-cache.json")
-        let cache = FileServerStateCache(identity: context.identity, fileURL: cacheURL)
-        try await cache.save(ServerStateCacheSnapshot.make(identity: context.identity,
-            from: domain.snapshot(context: context), conversations: domain.conversationSnapshot(context: context)))
-        let cached = try await FileServerStateCache(identity: context.identity, fileURL: cacheURL).load()
-        let restored = try ClientRepository(context: context, persistence: persistence)
-        XCTAssertTrue(try restored.conversationSnapshot(context: context).threads.isEmpty,
-                      "Pending inputs alone must not restore server conversation state.")
-        try restored.restoreCachedServerState(try XCTUnwrap(cached).attentionDomainState(for: context.identity),
-                                              context: context)
-        let thread = try XCTUnwrap(restored.conversationSnapshot(context: context).threads[key])
-        XCTAssertEqual(thread.revisionNumbers, [1, 2])
-        XCTAssertTrue(thread.currentContentRedacted)
-        XCTAssertEqual(thread.revisions[1], payload)
-        XCTAssertEqual(try restored.snapshot(context: context).cursor, 1)
-        XCTAssertEqual(try restored.conversationSnapshot(context: context).cursor, 1)
-    }
-    func testAdditiveInitialIdentityAndTerminalAuthorJoinWithoutExtraConversationEvents() throws {
-        let (context, _, domain, key) = try setup()
-        let wire = try RelayWire(profile: context)
-        let first = Data(#"{"v":1,"type":"delivery","seq":1,"sender_id":"sender","message_id":"request","origin":"origin","as":"message","message":{"title":"Question"},"session_handle":"handle","request_revision":1,"event_id":"1","listening_support":{"route":"codex","origin":"origin","reported_at":5}}"#.utf8)
-        try domain.apply(wire.decodeEvent(first), context: context)
-        let closed = Data(#"{"v":1,"type":"lifecycle","seq":2,"sender_id":"sender","message_id":"request","origin":"origin","state":"cleared","by":"clear","request_revision":1,"event_id":"3","author":"origin"}"#.utf8)
-        try domain.apply(wire.decodeEvent(closed), context: context)
-        let thread = try XCTUnwrap(domain.conversationSnapshot(context: context).threads[key])
-        XCTAssertEqual(thread.turns.map(\.id), [ExactText("1"), ExactText("3")])
-        XCTAssertEqual(thread.terminalAuthor, .origin, "Action label is not terminal author")
-        XCTAssertEqual(thread.turns.last?.author, .origin)
-        XCTAssertEqual(thread.listeningSupport?.uniqueValue(named: "route"), .string(ExactText("codex")))
-        XCTAssertEqual(try domain.conversationSnapshot(context: context).cursor, 0)
-        XCTAssertEqual(try domain.snapshot(context: context).cursor, 2)
-    }
     func testRetainedOriginContentCanGainMetadataWithoutReplacingItsDraftOrCursor() throws {
         let (context, _, domain, key) = try setup()
         let request = StoredRequest(key: key, originalPayload: try JSONValue.parse(Data(#"{"title":"Retained original"}"#.utf8)))
@@ -84,13 +26,5 @@ final class ConversationJoinTests: XCTestCase {
         XCTAssertEqual(after.requests[key]?.acceptanceOrder, 1)
         XCTAssertEqual(try domain.conversationSnapshot(context: context).cursor, 0)
         XCTAssertEqual(try domain.conversationSnapshot(context: context).threads[key]?.turns.first?.id, ExactText("1"))
-    }
-    func testOriginPortDiscoveryUsesOnlyTheEnrolledServerAndDisappearsWhenNotPublished() throws {
-        let (context, _, _, _) = try setup()
-        let wire = try ConversationWire(profile: context)
-        let reply = Data(#"{"v":1,"type":"ok","ref":"native-conversation-sync","origin_https_port":9443,"host":"ignored.example"}"#.utf8)
-        XCTAssertEqual(try wire.originEndpoint(reply)?.absoluteString, "https://relay.example:9443/origin/v1")
-        XCTAssertNil(try wire.originEndpoint(Data(#"{"v":1,"type":"ok","ref":"native-conversation-sync"}"#.utf8)))
-        XCTAssertThrowsError(try wire.originEndpoint(Data(#"{"v":1,"type":"ok","ref":"native-conversation-sync","origin_https_port":0}"#.utf8)))
     }
 }

@@ -35,11 +35,14 @@ final class V2PushPermissionTests: XCTestCase {
                                        personID: ExactText("person"), deviceID: ExactText("device"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
         let repository = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
-        let transport = V2PermissionTransport(hasLegacyBinding: true)
+        let transport = V2PermissionTransport(hasLegacyBinding: true, holdFirstDelete: true)
         let connection = try ClientAPIv2Connection(transport: transport, repository: repository, context: context,
                                                     directory: nil, errors: NoopErrorLog(), foregroundOnlyWrites: true)
+        // Keep the initial inbox baseline from superseding the settings read.
+        // The push settings and the registration journal are still both empty.
+        try connection.model.rebaseline(items: [], counts: APICounts(unresolved: 0), position: 0)
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        let lifecycle = NativeRelayLifecycle(clientAPIV2Enabled: true,
+        let lifecycle = NativeRelayLifecycle(
             v2NotificationPermission: NativeNotificationPermission(status: { .denied },
                                                                    request: { false }, register: {}),
             enrollment: enrollment, v2LegacyAddressStore: { DevelopmentAPNsAddressStore(directory: folder) })
@@ -47,18 +50,27 @@ final class V2PushPermissionTests: XCTestCase {
         XCTAssertNil(try enrollment.load()?.v2PushRegistration)
         lifecycle.installV2Connection(connection, context: context)
         lifecycle.sceneActivityChanged(isActive: true)
-        _ = await lifecycle.refreshAfterPushAddressStored()
-        let savedRemoval = try XCTUnwrap(enrollment.load()?.v2PushRegistration?.permissionRemovalID)
+        let firstPass = Task { await lifecycle.refreshAfterPushAddressStored() }
+        let firstDeleteStarted = await transport.waitForFirstDelete()
+        XCTAssertTrue(firstDeleteStarted, "The denied first foreground must look up and remove the legacy binding.")
+        let persistedRemoval = Result { try enrollment.load()?.v2PushRegistration?.permissionRemovalID }
+        let firstDeleteKey = await transport.writes.first(where: { $0.method == .delete })?.idempotencyKey
+        XCTAssertNotNil(connection.model.snapshot.settings?.push?.bindingID)
         XCTAssertNil(connection.model.snapshot.routablePushBindingID)
+        await transport.releaseFirstDelete()
+        _ = await firstPass.value
         _ = await lifecycle.refreshAfterPushAddressStored()
         let readCount = await transport.settingsReads
         let writes = await transport.writes
+        await lifecycle.deactivate()
+        let savedRemoval = try XCTUnwrap(persistedRemoval.get(),
+                                         "The removal key must be durably saved while the first DELETE is held.")
+        XCTAssertEqual(firstDeleteKey, savedRemoval)
         XCTAssertEqual(readCount, 1)
         XCTAssertEqual(writes.map(\.method), [.delete, .delete])
         XCTAssertEqual(writes.map(\.idempotencyKey), [savedRemoval, savedRemoval])
         XCTAssertNil(connection.model.snapshot.settings?.push?.bindingID)
         XCTAssertNil(try enrollment.load()?.v2PushRegistration?.permissionRemovalID)
-        await lifecycle.deactivate()
     }
 
     @MainActor
@@ -80,7 +92,7 @@ final class V2PushPermissionTests: XCTestCase {
                                                     directory: nil, errors: NoopErrorLog(), foregroundOnlyWrites: true)
         var permission = UNAuthorizationStatus.notDetermined
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        let lifecycle = NativeRelayLifecycle(clientAPIV2Enabled: true,
+        let lifecycle = NativeRelayLifecycle(
             v2NotificationPermission: NativeNotificationPermission(status: { permission },
                                                                    request: { false }, register: {}),
             enrollment: enrollment, v2LegacyAddressStore: { DevelopmentAPNsAddressStore(directory: folder) })
@@ -123,9 +135,12 @@ private actor V2PermissionTransport: ClientAPITransport {
     private var revision: Int
     private var environment: String?
     private var failFirstDelete = true
+    private var holdFirstDelete: Bool
+    private var firstDeleteRelease: CheckedContinuation<Void, Never>?
 
-    init(hasLegacyBinding: Bool = false) {
+    init(hasLegacyBinding: Bool = false, holdFirstDelete: Bool = false) {
         revision = hasLegacyBinding ? 7 : 0
+        self.holdFirstDelete = holdFirstDelete
         environment = hasLegacyBinding ? "sandbox" : nil
     }
 
@@ -140,6 +155,9 @@ private actor V2PermissionTransport: ClientAPITransport {
             if request.method == .delete {
                 if failFirstDelete {
                     failFirstDelete = false
+                    if holdFirstDelete {
+                        await withCheckedContinuation { firstDeleteRelease = $0 }
+                    }
                     throw URLError(.networkConnectionLost)
                 }
                 revision += 1
@@ -153,6 +171,20 @@ private actor V2PermissionTransport: ClientAPITransport {
         let push = environment.map { #"{"state":"ready","revision":\#(revision),"environment":"\#($0)","binding_id":"binding-\#(revision)"}"# }
             ?? #"{"state":"canceled","revision":\#(revision)}"#
         return reply(#"{"rev":\#(revision),"settings":{"rev":\#(revision),"priority_levels":[],"push":\#(push)}}"#)
+    }
+
+    func waitForFirstDelete() async -> Bool {
+        for _ in 0..<200 {
+            if writes.contains(where: { $0.method == .delete }) { return true }
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        return false
+    }
+
+    func releaseFirstDelete() {
+        holdFirstDelete = false
+        firstDeleteRelease?.resume()
+        firstDeleteRelease = nil
     }
 
     private func reply(_ body: String) -> APIResponse {

@@ -75,15 +75,6 @@ final class ClientAPIv2ConnectionTests: XCTestCase {
         Set(try repository.snapshot(context: context).requests.keys.map(\.messageID.rawValue))
     }
 
-    func testTheEndpointIsTheRelaysHostAndPortOverHTTPS() throws {
-        XCTAssertEqual(ClientAPIv2Endpoint.baseURL(fromRelayURL: try XCTUnwrap(URL(string: "wss://server.example:8443/relay"))),
-                       URL(string: "https://server.example:8443"))
-        XCTAssertEqual(ClientAPIv2Endpoint.baseURL(fromRelayURL: try XCTUnwrap(URL(string: "https://server.example/x?y=1"))),
-                       URL(string: "https://server.example"))
-        XCTAssertNil(ClientAPIv2Endpoint.baseURL(fromRelayURL: try XCTUnwrap(URL(string: "ws://server.example:80/relay"))),
-                     "Never in the clear.")
-    }
-
     func testForegroundReadsTheRulesThenPublishesTheBaselineAndEveryChange() async throws {
         let server = FakeClientAPIServer()
         server.inboxItems = [V2Fixture.item("a", rev: 1, rankKey: "a")]
