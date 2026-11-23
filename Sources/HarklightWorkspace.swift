@@ -174,38 +174,18 @@ struct HarklightBrand: View {
     var large = false
 
     var body: some View {
-        Group {
+        VStack(spacing: 16) {
+            Image("HarklightLockup")
+                .resizable()
+                .scaledToFit()
+                .frame(width: large ? 190 : 128)
+                .accessibilityLabel("Harklight")
+
             if large {
-                VStack(spacing: 16) {
-                    LighthouseMark().frame(width: 64, height: 78)
-                    Text("Harklight").harklightType(.messageTitle)
-                    Text("Select a message").harklightType(.rowBody).foregroundStyle(.hkSecondary)
-                }
-            } else {
-                HStack(spacing: 14) {
-                    LighthouseMark().frame(width: 15, height: 19)
-                    Text("Harklight").harklightType(.brand)
-                }
-                .fixedSize(horizontal: true, vertical: false)
+                Text("Select a message").harklightType(.rowBody).foregroundStyle(.hkSecondary)
             }
         }
-        .foregroundStyle(.hkText)
         .accessibilityElement(children: .combine)
-    }
-}
-
-// Product artwork from the approved lighthouse, not an invented system symbol.
-struct LighthouseMark: Shape {
-    func path(in rect: CGRect) -> Path {
-        var path = Path()
-        func point(_ x: CGFloat, _ y: CGFloat) -> CGPoint {
-            CGPoint(x: rect.minX + rect.width * x / 18, y: rect.minY + rect.height * y / 22)
-        }
-        path.move(to: point(9, 1)); path.addLine(to: point(5.6, 5)); path.addLine(to: point(12.4, 5)); path.closeSubpath()
-        path.move(to: point(6.4, 7)); path.addLine(to: point(11.6, 7)); path.addLine(to: point(13.5, 21)); path.addLine(to: point(4.5, 21)); path.closeSubpath()
-        path.move(to: point(2, 5)); path.addLine(to: point(6, 6.4)); path.addLine(to: point(6, 7.6)); path.addLine(to: point(2, 6.2)); path.closeSubpath()
-        path.move(to: point(16, 5)); path.addLine(to: point(12, 6.4)); path.addLine(to: point(12, 7.6)); path.addLine(to: point(16, 6.2)); path.closeSubpath()
-        return path
     }
 }
 
