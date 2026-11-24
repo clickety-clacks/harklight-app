@@ -57,8 +57,10 @@ final class ConversationPresentationTests: XCTestCase {
                 XCTAssertEqual(facts.personDelivery?.outcome, "not_handed", "A reply never rewrites the receipt.")
             }
         }
-        var thread = ConversationThread(request: binding.request, sessionHandle: turn.sessionHandle,
-                                        revision: 1, payload: .null)
+        var state = ConversationState()
+        try state.apply(ConversationEvent(sequence: 1, binding: binding,
+            fact: .request(sessionHandle: turn.sessionHandle, payload: .null)))
+        var thread = try XCTUnwrap(state.threads[binding.request])
         thread.chatNeverCloses = true
         func reply(_ author: ConversationAuthor, to target: String) -> ConversationTurn {
             ConversationTurn(id: ExactText("reply"), binding: binding, author: author,
