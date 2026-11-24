@@ -57,6 +57,18 @@ final class ConversationPresentationTests: XCTestCase {
                 XCTAssertEqual(facts.personDelivery?.outcome, "not_handed", "A reply never rewrites the receipt.")
             }
         }
+        var thread = ConversationThread(request: binding.request, sessionHandle: turn.sessionHandle,
+                                        revision: 1, payload: .null)
+        thread.chatNeverCloses = true
+        func reply(_ author: ConversationAuthor, to target: String) -> ConversationTurn {
+            ConversationTurn(id: ExactText("reply"), binding: binding, author: author,
+                sessionHandle: turn.sessionHandle, text: ExactText("Reply"),
+                inReplyTo: ExactText(target), kind: .reply)
+        }
+        thread.turns = [turn, reply(.origin, to: "other"), reply(.server, to: "sent")]
+        XCTAssertFalse(ConversationSentChatStatusPresentation.replyTargets(in: thread).contains(turn.id))
+        thread.turns.append(reply(.origin, to: "sent"))
+        XCTAssertTrue(ConversationSentChatStatusPresentation.replyTargets(in: thread).contains(turn.id))
         var served = ConversationTurnFacts()
         served.delivered = true
         for state: ConversationAvailability in [.listening, .notListening(lastDetachedAt: nil), .gone,

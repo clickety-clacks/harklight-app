@@ -417,11 +417,7 @@ private struct ConversationHistoryContent: View, Equatable {
         let textByTurnID = Dictionary(
             thread.turns.map { ($0.id, $0.text.rawValue) },
             uniquingKeysWith: { first, _ in first })
-        let replyTargetIDs = Set(thread.turns.compactMap { turn -> ExactText? in
-            guard turn.author != .person,
-                  turn.kind == nil || turn.kind == .reply else { return nil }
-            return turn.inReplyTo
-        })
+        let replyTargetIDs = ConversationSentChatStatusPresentation.replyTargets(in: thread)
         let turnIDs = Set(thread.turns.map(\.id))
 
         ScrollViewReader { proxy in
@@ -1192,6 +1188,15 @@ enum ConversationSentChatStatusPresentation {
         if case .listenerReceived(_, true, _, _)? = facts.deliveryAck1 { return .sending }
         if case .notListening? = availability?.state { return .noListenerPickedThisUp }
         return .sending
+    }
+
+    static func replyTargets(in thread: ConversationThread) -> Set<ExactText> {
+        Set(thread.turns.compactMap { turn -> ExactText? in
+            guard turn.author != .person,
+                  thread.chatNeverCloses != true || turn.author == .origin || turn.author == .agent,
+                  turn.kind == nil || turn.kind == .reply else { return nil }
+            return turn.inReplyTo
+        })
     }
 
     static func failureCaption(_ reason: String) -> String {
