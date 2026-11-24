@@ -3688,8 +3688,10 @@ private struct FYIList: View {
     let markSeen: (InboxRequestRow) -> Void
     @State private var order = FYIOrder.priority
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
+        let palette = HarklightDesignSystem.palette(for: colorScheme)
         NavigationStack {
             List(order.sorted(items)) { item in
                 VStack(alignment: .leading, spacing: 8) {
@@ -3697,7 +3699,7 @@ private struct FYIList: View {
                                    title: item.title, createdAt: item.fyiPostedAt ?? item.createdAt,
                                    messageType: item.resolvedMessageType)
                     if let body = item.bodyText {
-                        SystemDetectedMessageBody(text: body, foregroundColor: .hkText)
+                        SystemDetectedMessageBody(text: body, foregroundColor: palette.text)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
                     if item.informationalSeenStatus == .pending {
