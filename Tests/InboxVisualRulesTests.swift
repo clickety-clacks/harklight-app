@@ -5,6 +5,55 @@ import AttentionDomain
 import SwiftUI
 
 final class InboxVisualRulesTests: XCTestCase {
+    func testFYIPostedSortUsesOriginalServerTimeInsteadOfUpdatedContent() {
+        var later = fyiRow("later")
+        later.fyiPostedAt = Date(timeIntervalSince1970: 200)
+        later.createdAt = Date(timeIntervalSince1970: 10)
+        later.fyiPriority = .low
+        var earlier = fyiRow("earlier")
+        earlier.fyiPostedAt = Date(timeIntervalSince1970: 100)
+        earlier.createdAt = Date(timeIntervalSince1970: 400)
+        earlier.fyiPriority = .high
+
+        XCTAssertEqual(FYIOrder.posted.sorted([earlier, later]).map(\.key), [later.key, earlier.key])
+        XCTAssertEqual(FYIOrder.priority.sorted([later, earlier]).map(\.key), [earlier.key, later.key])
+    }
+
+    func testFYISeenUsesExistingResponseStateAndKeepsConfirmedRows() {
+        var item = fyiRow("item")
+        item.informationalSeenStatus = .available
+        item.canMarkSeen = true
+        XCTAssertTrue(item.canMarkFYISeen)
+        item.informationalSeenStatus = .pending
+        item.canMarkSeen = false
+        XCTAssertTrue(item.isUnseenFYI)
+        XCTAssertFalse(item.canMarkFYISeen)
+        item.informationalSeenStatus = .confirmed
+        item.fyiServerSeen = false
+        XCTAssertFalse(item.isUnseenFYI)
+        XCTAssertEqual(FYIOrder.priority.sorted([item]).map(\.key), [item.key])
+    }
+
+    func testExplicitFYIWithoutResponseUsesOrdinaryNativeSeen() {
+        var item = fyiRow("item")
+        item.canReportFYISeen = true
+        item.fyiServerSeen = false
+        XCTAssertTrue(item.canMarkFYISeen)
+        item.fyiServerSeen = true
+        XCTAssertFalse(item.canMarkFYISeen)
+        item.declaredMessageType = .request
+        XCTAssertFalse(item.isFYI)
+    }
+
+    private func fyiRow(_ id: String) -> InboxRequestRow {
+        var row = InboxRequestRow(
+            key: RequestKey(accountScope: ExactText("person"), senderID: ExactText("sender"),
+                            messageID: ExactText(id)),
+            title: id, sender: "Sender", status: "")
+        row.declaredMessageType = .fyi
+        return row
+    }
+
     func testAbsoluteScoreUsesExistingPlainLanguageLabelsAndOmitsNormal() {
         func renderedLabel(for score: Double?) -> String? {
             guard let display = InboxPriorityDisplay.forScore(score) else { return nil }
