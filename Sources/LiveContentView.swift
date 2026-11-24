@@ -638,7 +638,7 @@ struct LiveContentView: View {
     }
 
     var presentsConnectionFailure: Bool {
-        guard !store.isReadOnly, !store.v2AccountPaused, !replyEditorFocused,
+        guard !store.isReadOnly, !store.v2AccountPaused,
               let launch, launch.foregroundConnectDiagnostic != nil,
               let key = launch.foregroundConnectFailureKey else { return false }
         return launch.shouldPresentForegroundConnectFailure(key)
@@ -649,7 +649,7 @@ struct LiveContentView: View {
         let failureKey = launch?.foregroundConnectFailureKey
         let diagnostic = launch?.foregroundConnectDiagnostic
         let failureAlertPresented = Binding<Bool>(
-            get: { presentsConnectionFailure },
+            get: { presentsConnectionFailure && !replyEditorFocused },
             set: { isPresented in
                 guard !isPresented, let launch, let failureKey else { return }
                 launch.dismissForegroundConnectFailure(failureKey)

@@ -848,6 +848,7 @@ final class NativeRelayLifecycle {
     private var v2PushRetryAttempt = 0
     private let v2NotificationPermission: NativeNotificationPermission
     private let v2LegacyAddressStore: @MainActor () throws -> DevelopmentAPNsAddressStore
+    var onV2FeedOpened: ((ProfileContext, UUID) -> Void)?
     var onV2AccountAccessChanged: ((ClientAPIAccessState, ProfileContext) -> Void)?
     var v2AccountAccess: ClientAPIAccessState? { v2Connection?.access.state }
     func inboxItems(for expected: ProfileContext) -> [ExactText: APIItem] {
@@ -1034,10 +1035,18 @@ final class NativeRelayLifecycle {
     }
 
     func v2FeedStateChanged(_ state: ChangeFeedSync.LiveState, context: ProfileContext, attempt: UUID) async {
-        guard state == .live, activeTransportAttemptID == attempt else { return }
+        guard state == .live, activeTransportAttemptID == attempt, self.context == context,
+              let connection = v2Connection, await connection.sync.liveState == .live,
+              v2Connection === connection, sceneIsActive, v2DepartureTask == nil,
+              connection.access.state == .available else { return }
         confirmedRelayContext = context
         conversationAvailability.confirm(for: context, conversationsUnavailable: false)
-        if let connection = v2Connection, connection.priorityLevelsEditorWasOpened {
+        if snapshotState.failureContext == context {
+            snapshotState.failureContext = nil
+            snapshotState.failureMessage = nil
+        }
+        onV2FeedOpened?(context, attempt)
+        if connection.priorityLevelsEditorWasOpened {
             await connection.refreshPriorityLevels(userInitiated: false)
             guard activeTransportAttemptID == attempt else { return }
             publishPriorityLevelsUpdate(for: context)
@@ -1382,6 +1391,7 @@ final class NativeRelayLifecycle {
         pendingV2Show = nil
         v2ForegroundTask = nil
         onV2AccountAccessChanged = nil
+        onV2FeedOpened = nil
         v2Connection = nil
         v2Task?.cancel()
         featureFlags.reset()
@@ -1609,7 +1619,9 @@ final class NativeRelayLifecycle {
                 guard self.foregroundDiagnosticAttemptID == diagnosticAttemptID,
                       self.context == expected else { return }
                 self.foregroundDiagnosticOperations = operations
-                onProgress(progress)
+                if progress.outcome == .confirmed || !self.hasRecoveredRefreshFailure(for: expected) {
+                    onProgress(progress)
+                }
             }
         }
         let result = await foregroundProgress.run(operation: { [weak self] in
@@ -1745,6 +1757,13 @@ final class NativeRelayLifecycle {
     func hasConfirmedServerSnapshot(for expected: ProfileContext) -> Bool {
         // Read the observable value first, including before activation.
         confirmedRelayContext == expected && context == expected
+    }
+
+    /// A successful feed or snapshot can settle the failure while its caller
+    /// is waiting to present the result. A later failure sets the context again.
+    func hasRecoveredRefreshFailure(for expected: ProfileContext) -> Bool {
+        hasConfirmedServerSnapshot(for: expected) && snapshotState.failureContext != expected &&
+            v2Connection?.access.state == .available
     }
 
     func refreshFailureMessage(for expected: ProfileContext) -> String? {

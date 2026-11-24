@@ -133,6 +133,7 @@ extension ErrorLogForegroundConnectTests {
             }, onLiveState: { state in
                 Task { @MainActor in await lifecycle.v2FeedStateChanged(state, context: context, attempt: attempt) }
             })
+        launch.observeV2Connection(lifecycle)
         lifecycle.installV2Connection(connection, context: context, attempt: attempt)
         defer {
             transport.feedEvents.finish()
@@ -154,11 +155,16 @@ extension ErrorLogForegroundConnectTests {
         transport.restoreRequests()
         _ = try await connection.outbox.submit(target: "item:one", operation: "mark_seen",
             write: FrozenWrite(method: .put, path: "/v2/items/one/seen"))
-        await connection.outbox.flush()
-        let pending = await connection.outbox.pending
-        XCTAssertTrue(pending.isEmpty)
+        try await waitUntil { await connection.outbox.pending.isEmpty }
         XCTAssertEqual(transport.successfulWrites, 1)
         XCTAssertTrue(inbox.presentsConnectionFailure, "A successful write does not reopen the feed.")
+        XCTAssertTrue(showsLiveUpdatesPaused(log))
+
+        let dismissed = try XCTUnwrap(launch.foregroundConnectFailureKey)
+        launch.dismissForegroundConnectFailure(dismissed)
+        await lifecycle.v2FeedStateChanged(.live, context: context, attempt: UUID())
+        XCTAssertFalse(inbox.presentsConnectionFailure)
+        XCTAssertEqual(launch.foregroundConnectFailureKey, dismissed)
         XCTAssertTrue(showsLiveUpdatesPaused(log))
 
         retry.yield(())
@@ -166,15 +172,78 @@ extension ErrorLogForegroundConnectTests {
         try await waitUntil { lifecycle.hasConfirmedServerSnapshot(for: context) }
 
         XCTAssertFalse(inbox.presentsConnectionFailure)
+        XCTAssertNil(launch.foregroundConnectFailureKey)
         XCTAssertNil(inbox.connectionWarning)
+        XCTAssertNil(lifecycle.refreshFailureMessage(for: context))
         XCTAssertFalse(showsLiveUpdatesPaused(log))
         XCTAssertEqual(unresolvedSync(in: log), [])
         XCTAssertEqual(Set(log.records.filter(\.isResolved).map(\.operation)),
                        ["catch_up", "change_feed", "foreground_connect"])
 
+        // A stale .live from a replaced transport cannot clear even when the
+        // current transport really is live.
+        let replacementFailure = cancelledReplay(attempt: UUID(), transport: attempt)
+        launch.recordForegroundConnectProgress(replacementFailure, operationSnapshot: .unavailable)
+        let replacementKey = try XCTUnwrap(launch.foregroundConnectFailureKey)
+        launch.dismissForegroundConnectFailure(replacementKey)
+        await lifecycle.v2FeedStateChanged(.live, context: context, attempt: UUID())
+        XCTAssertEqual(launch.foregroundConnectFailureKey, replacementKey)
+        XCTAssertFalse(inbox.presentsConnectionFailure)
+        XCTAssertEqual(unresolvedSync(in: log), ["foreground_connect"])
+        await lifecycle.v2FeedStateChanged(.live, context: context, attempt: attempt)
+        XCTAssertNil(launch.foregroundConnectFailureKey)
+
         transport.feedEvents.finish(throwing: URLError(.networkConnectionLost))
         try await waitUntil { self.showsLiveUpdatesPaused(log) }
         XCTAssertEqual(unresolvedSync(in: log), ["change_feed"])
+        XCTAssertFalse(inbox.presentsConnectionFailure, "A drop cannot present the earlier dismissed attempt.")
+        await lifecycle.deactivate()
+    }
+
+    func testFeedOpeningPreservesAccountAndActionFailures() async throws {
+        let log = makeLog()
+        let context = ProfileContext(identity: ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+            personID: ExactText("person"), deviceID: ExactText("device")), transportMode: .relay)
+        let repository = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        let store = try LivePresentationStore(store: repository, context: context)
+        let launch = NativeAppLaunch(arguments: ["Harklight"], initialState: .live(store), errorLog: log)
+        let lifecycle = NativeRelayLifecycle()
+        launch.observeV2Connection(lifecycle)
+        let attempt = UUID()
+        let transport = ReconnectingFeedTransport()
+        defer { transport.feedEvents.finish() }
+        let connection = try ClientAPIv2Connection(transport: transport, repository: repository, context: context,
+            directory: nil, errors: log, foregroundOnlyWrites: true, onLiveState: { state in
+                Task { @MainActor in await lifecycle.v2FeedStateChanged(state, context: context, attempt: attempt) }
+            })
+        lifecycle.installV2Connection(connection, context: context, attempt: attempt)
+        try connection.model.apply([], cursor: 1)
+        transport.restoreRequests()
+        lifecycle.sceneActivityChanged(isActive: true)
+
+        _ = try await connection.outbox.submit(target: "item:refused", operation: "mark_seen",
+            write: FrozenWrite(method: .put, path: "/v2/items/refused/seen"))
+        try await waitUntil { await connection.outbox.failedWrites.count == 1 }
+        let failedBefore = await connection.outbox.failedWrites
+        XCTAssertEqual(failedBefore.count, 1)
+        for reason in ["internal_error", "account_paused", "revoked"] {
+            log.report(ErrorLogReport(concern: .sync, connectionRole: .stream,
+                operation: "catch_up", phase: "batch", reason: .serverReason(reason),
+                initiator: .serverClosed, retryable: true))
+        }
+        log.report(ErrorLogReport(concern: .sync, connectionRole: .stream,
+            operation: "catch_up", phase: "batch", reason: .urlError(NSURLErrorNotConnectedToInternet),
+            initiator: .osNetwork, retryable: true))
+        transport.feedEvents.yield(.opened(requestID: "feed-opened"))
+        try await waitUntil { lifecycle.hasConfirmedServerSnapshot(for: context) }
+
+        let active = log.records.filter { !$0.isResolved }
+        XCTAssertEqual(Set(active.filter { $0.concern == .sync }.map(\.code)),
+                       ["internal_error", "account_paused", "revoked"])
+        XCTAssertTrue(showsLiveUpdatesPaused(log))
+        XCTAssertEqual(active.filter { $0.concern == .actions }.map(\.operation), ["mark_seen"])
+        let failedAfter = await connection.outbox.failedWrites
+        XCTAssertEqual(failedAfter, failedBefore)
         await lifecycle.deactivate()
     }
 
@@ -189,9 +258,9 @@ extension ErrorLogForegroundConnectTests {
         return false
     }
 
-    private func waitUntil(_ condition: () -> Bool) async throws {
+    private func waitUntil(_ condition: () async -> Bool) async throws {
         let deadline = ContinuousClock.now + .seconds(5)
-        while !condition() {
+        while !(await condition()) {
             guard ContinuousClock.now < deadline else { throw URLError(.timedOut) }
             try await Task.sleep(for: .milliseconds(5))
         }
@@ -211,6 +280,9 @@ private final class ReconnectingFeedTransport: ClientAPITransport, @unchecked Se
     var successfulWrites: Int { lock.withLock { writes } }
 
     func send(_ request: APIRequest) async throws -> APIResponse {
+        if request.method == .put, request.path == "/v2/items/refused/seen" {
+            throw APIError(status: 422, token: .invalidField, retryable: false, requestID: "refused")
+        }
         guard request.method == .put, request.path == "/v2/items/one/seen" else {
             throw URLError(.notConnectedToInternet)
         }

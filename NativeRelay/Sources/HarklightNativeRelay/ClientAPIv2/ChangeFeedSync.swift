@@ -44,7 +44,7 @@ public actor ChangeFeedSync {
     }
 
     static let feedOperation = "change_feed"
-    static let catchUpOperation = "catch_up"
+    public static let catchUpOperation = "catch_up"
 
     private var foregroundAttempt: Task<FeedEnd, Never>?
     private var internalError: APIError?
@@ -217,8 +217,8 @@ public actor ChangeFeedSync {
                 case let .opened(requestID):
                     openedThisRound = true
                     feedRequestID = requestID
-                    liveState = .live
                     errors.resolve(concern: .sync, operation: Self.feedOperation)
+                    liveState = .live
                 case .heartbeat:
                     // The transport's 60 s no-bytes timeout is reset by it.
                     continue

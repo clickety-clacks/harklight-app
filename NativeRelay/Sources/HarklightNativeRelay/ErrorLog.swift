@@ -481,6 +481,13 @@ public final class ErrorLogStore: ErrorLogging, @unchecked Sendable {
     }
 
     public func resolve(concern: ErrorLogConcern, operation: String, resolvedBy: String?) {
+        resolve(concern: concern, operation: operation, resolvedBy: resolvedBy, matching: { _ in true })
+    }
+
+    /// Filters and resolves under the same lock so a new report cannot slip in
+    /// between selecting the recovered failures and marking them resolved.
+    public func resolve(concern: ErrorLogConcern, operation: String, resolvedBy: String?,
+                        matching: (ErrorLogRecord) -> Bool) {
         let token = ErrorLogRedactor.operationToken(operation)
         let by = resolvedBy.flatMap { ErrorLogRedactor.simpleID($0) ?? ErrorLogRedactor.identifier($0) } ?? "success"
         lock.lock()
@@ -488,7 +495,7 @@ public final class ErrorLogStore: ErrorLogging, @unchecked Sendable {
         let at = now()
         var changed = false
         for index in stored.indices where !stored[index].isResolved &&
-            stored[index].concern == concern && stored[index].operation == token {
+            stored[index].concern == concern && stored[index].operation == token && matching(stored[index]) {
             stored[index].resolvedAt = at
             stored[index].resolvedBy = by
             changed = true

@@ -220,9 +220,6 @@ final class NativeAppLaunch {
             }
             let reached = connect.outcome == .confirmed
             if reached { try self.enrollment.markForegroundRelayConfirmed(for: record.deviceID) }
-            if case let .live(presentation) = self.state {
-                presentation.connectionWarning = reached ? nil : connect.userFacingMessage
-            }
             return reached
         }
         guidedJoin.notificationChoice = { [weak self] enabled in
@@ -902,9 +899,7 @@ final class NativeAppLaunch {
                                 build: Self.errorLogBuild())
         v2ErrorLog = (log, ErrorLogModel(store: log))
         NativeRelayLifecycle.shared.errorLog = errorLog
-        NativeRelayLifecycle.shared.onV2AccountAccessChanged = { [weak self] access, context in
-            self?.applyV2AccountAccess(access, for: context)
-        }
+        observeV2Connection(NativeRelayLifecycle.shared)
         do {
             try NativeRelayLifecycle.shared.activate(store: store,
                                                       context: installation.context,
@@ -1024,15 +1019,42 @@ final class NativeAppLaunch {
         await lifecycle.deactivate()
         guard activeEnrollmentRecord?.sameNotificationProfile(as: record) == true,
               case let .live(current) = state, current === presentation else { return }
-        lifecycle.onV2AccountAccessChanged = { [weak self] access, context in
-            self?.applyV2AccountAccess(access, for: context)
-        }
+        observeV2Connection(lifecycle)
         try lifecycle.activate(store: presentation.attentionStore, context: context,
                                      deviceURL: installation.deviceURL, clientIdentity: installation.keychainIdentity,
                                      trustedRootDER: installation.trustedRootDER)
         if let access = lifecycle.v2AccountAccess {
             applyV2AccountAccess(access, for: context)
         }
+    }
+
+    func observeV2Connection(_ lifecycle: NativeRelayLifecycle) {
+        lifecycle.onV2AccountAccessChanged = { [weak self] access, context in
+            self?.applyV2AccountAccess(access, for: context)
+        }
+        lifecycle.onV2FeedOpened = { [weak self] context, attempt in
+            self?.applyV2FeedOpening(for: context, attempt: attempt)
+        }
+    }
+
+    private func applyV2FeedOpening(for context: ProfileContext, attempt: UUID) {
+        guard case let .live(presentation) = state, !presentation.isReadOnly,
+              presentation.notificationContext == context, !presentation.v2AccountPaused else { return }
+        // The feed opens after its own catch-up from the durable cursor.
+        // Resolve connectivity records in this account's log. A retryable
+        // transport failure can be left over from a previous app launch.
+        for operation in [ChangeFeedSync.catchUpOperation, ErrorLogForegroundConnectBridge.operation] {
+            errorLog.resolve(concern: .sync, operation: operation, resolvedBy: attempt.uuidString.lowercased()) { record in
+                record.retryable && record.initiator != .deviceRevoked && record.httpStatus != 401 &&
+                    !["internal_error", "account_paused", "revoked", "device_revoked"].contains(record.code) &&
+                    !(record.domain == "URLError" && [
+                        String(NSURLErrorClientCertificateRejected), String(NSURLErrorClientCertificateRequired)
+                    ].contains(record.code))
+            }
+        }
+        guard foregroundConnectProgress == nil || foregroundConnectProgress?.transportAttemptID == attempt else { return }
+        presentation.connectionWarning = nil
+        clearForegroundConnectionDetails()
     }
 
     private func clearForegroundConnectionDetails() {
@@ -1143,7 +1165,10 @@ final class NativeAppLaunch {
         notificationSynchronized = false
         let result = await refreshOperation(checkBlockedPush)
         guard case let .live(current) = state, current === presentation else { return }
-        presentation.applyRefreshResult(result)
+        if result.relayConfirmed ||
+            !NativeRelayLifecycle.shared.hasRecoveredRefreshFailure(for: presentation.notificationContext) {
+            presentation.applyRefreshResult(result)
+        }
         notificationSynchronized = result.relayConfirmed && result.confirmedContext == presentation.notificationContext
         await resolveMessageDeepLink(synchronized: notificationSynchronized)
     }
