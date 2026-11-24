@@ -674,7 +674,11 @@ struct LiveContentView: View {
                             } else {
                                 ProgressMessageDetail(title: request.title?.rawValue ?? "Message",
                                     sender: request.senderDisplayName?.rawValue ?? key.senderID.rawValue,
-                                    bodyText: request.body?.rawValue, progress: progress)
+                                    bodyText: request.body?.rawValue, progress: progress,
+                                    seenPending: request.informationalSeenStatus == .pending,
+                                    onSeen: store.inboxRow(for: key)?.canMarkFYISeen == true
+                                        ? { store.markProgressFYISeen(key, requestRevision: request.requestRevision) }
+                                        : nil)
                             }
                         } else {
                         LiveRequestDetail(request: request, store: store, context: context,
@@ -1787,8 +1791,13 @@ struct LiveRequestDetail: View {
         }
     }
 
+    private var progressSeenAlreadySet: Bool {
+        request.messageProgress != nil && request.informationalSeenStatus == .available &&
+            store.inboxRow(for: request.key)?.fyiServerSeen == true
+    }
+
     private var availableSeenAction: ExactText? {
-        guard request.informationalSeenStatus == .available,
+        guard request.informationalSeenStatus == .available, !progressSeenAlreadySet,
               case let .compatibility(actions) = request.projection else { return nil }
         return actions.first?.id
     }
@@ -2321,7 +2330,7 @@ struct LiveRequestDetail: View {
                     }
                     InformationalSeenControl(status: seenStatus,
                         locallyCompleted: localExample?.localSeenSelected == true,
-                        hidden: isSupersedesReadOnly,
+                        hidden: isSupersedesReadOnly || progressSeenAlreadySet,
                         sendDisabled: sendControlsDisabled,
                         textColor: detailColors.text,
                         secondaryTextColor: detailColors.secondary,
@@ -2438,12 +2447,12 @@ struct LiveRequestDetail: View {
             ToolbarItem(placement: .confirmationAction) {
                 if isSupersedesReadOnly {
                     if request.informationalSeenStatus != nil {
-                        finishSeenButton.disabled(true)
+                        if !progressSeenAlreadySet { finishSeenButton.disabled(true) }
                     } else {
                         submitReplyButton.disabled(true)
                     }
                 } else if request.informationalSeenStatus != nil {
-                    finishSeenButton
+                    if !progressSeenAlreadySet { finishSeenButton }
                 } else if let localExample {
                     Button {
                         closeReplyEditor()
@@ -3914,7 +3923,10 @@ private struct LiveCompatibilityActions: View {
         if let seenStatus = request.informationalSeenStatus {
             InformationalSeenControl(status: seenStatus,
                 locallyCompleted: localExample?.localSeenSelected == true,
-                hidden: hideAnswerControls, sendDisabled: sendDisabled,
+                hidden: hideAnswerControls ||
+                    (seenStatus == .available && request.messageProgress != nil &&
+                        store.inboxRow(for: request.key)?.isUnseenFYI == false),
+                sendDisabled: sendDisabled,
                 textColor: detailColors.text,
                 secondaryTextColor: detailColors.secondary,
                 onSeen: {

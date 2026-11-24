@@ -88,6 +88,31 @@ final class SampleWorkspaceUITests: XCTestCase {
     }
 
 
+    func testFinishedProgressSeenButtonShowsPendingWithoutOfferingAnotherSwipe() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--harklight-test-fyi-list", "--harklight-test-fyi-finished-progress"]
+        app.launch()
+        defer { app.terminate() }
+        openFYIListIfNeeded(app)
+
+        let list = app.collectionViews["fyi-list"]
+        let row = list.staticTexts["Progress with a Seen response"]
+        XCTAssertTrue(row.waitForExistence(timeout: 5))
+        row.tap()
+        let seen = app.buttons["request-seen-action"]
+        XCTAssertTrue(seen.waitForExistence(timeout: 5))
+        seen.tap()
+        XCTAssertTrue(app.staticTexts["Seen pending confirmation"].waitForExistence(timeout: 5))
+        XCTAssertFalse(seen.exists)
+        app.navigationBars.buttons["FYIs"].tap()
+        let pending = list.descendants(matching: .any)
+            .matching(NSPredicate(format: "label == %@", "Seen pending confirmation")).firstMatch
+        XCTAssertTrue(pending.waitForExistence(timeout: 5), app.debugDescription)
+        capture("Progress FYI Seen pending in list", app)
+        row.swipeLeft()
+        XCTAssertFalse(app.buttons["Seen"].exists)
+    }
+
     private func openFYIListIfNeeded(_ app: XCUIApplication) {
         let sort = app.buttons["fyi-sort"]
         if sort.exists { return }

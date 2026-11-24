@@ -281,13 +281,82 @@ final class InboxVisualRulesTests: XCTestCase {
     }
 
     @MainActor
-    func testProgressFYIWithAnExplicitSeenResponseHasNoEligibleSeenWrite() throws {
-        let store = try NativeAppLaunch.makeFYITestStore(includeProgress: true)
-        let progress = try XCTUnwrap(store.inboxRows.first { $0.key.messageID == ExactText("progress-fyi") })
-        XCTAssertNotNil(progress.progress)
-        XCTAssertEqual(progress.informationalSeenStatus, .available)
-        XCTAssertTrue(progress.isUnseenFYI)
-        XCTAssertFalse(progress.canMarkFYISeen)
+    func testProgressWithSeparateSeenOffersAnActionAndTrustsTheServerFlag() throws {
+        func row(percent: Int?, seen: Bool, terminal: String = "") throws -> InboxRequestRow {
+            let store = try NativeAppLaunch.makeFYITestStore(includeProgress: true,
+                progressPercent: percent, progressSeen: seen, progressTerminal: terminal)
+            return try XCTUnwrap(store.inboxRows.first { $0.key.messageID == ExactText("progress-fyi") })
+        }
+        for percent in [nil, 40, 100] {
+            let unseen = try row(percent: percent, seen: false)
+            XCTAssertTrue(unseen.isUnseenFYI)
+            XCTAssertEqual(unseen.fyiSeenAction, percent == 100 ? .answer : .openedFlag)
+            let seen = try row(percent: percent, seen: true)
+            XCTAssertFalse(seen.isUnseenFYI)
+            XCTAssertFalse(seen.canMarkFYISeen)
+        }
+        let answered = try row(percent: 100, seen: false,
+            terminal: #"{"state":"answered","at_ms":1700000003000,"answer":{"kind":"seen"}}"#)
+        XCTAssertFalse(answered.isUnseenFYI)
+        XCTAssertFalse(answered.canMarkFYISeen)
+        let closed = try row(percent: 100, seen: false,
+            terminal: #"{"state":"expired","at_ms":1700000003000}"#)
+        XCTAssertFalse(closed.isUnseenFYI)
+        XCTAssertNil(closed.fyiSeenAction)
+    }
+
+    @MainActor
+    func testProgressFYIQueuesOnlyItsRuledOperationAndDoesNotAnswerOnOpen() throws {
+        let plainStore = try NativeAppLaunch.makeFYITestStore()
+        let plain = try XCTUnwrap(plainStore.inboxRows.first { $0.key.messageID == ExactText("i-204") })
+        plainStore.reportMessageContentOpened(try XCTUnwrap(plainStore.request(for: plain.key)))
+        XCTAssertEqual(try plainStore.fyiTestSnapshot().pendingMessageOpens.map(\.requestKey), [plain.key])
+        for percent in [nil, 40, 100] {
+            let store = try NativeAppLaunch.makeFYITestStore(includeProgress: true, progressPercent: percent)
+            let row = try XCTUnwrap(store.inboxRows.first { $0.isProgressFYI })
+            let request = try XCTUnwrap(store.request(for: row.key))
+            store.reportMessageContentOpened(request)
+            XCTAssertTrue(try store.fyiTestSnapshot().pendingMessageOpens.isEmpty)
+
+            XCTAssertTrue(store.markProgressFYISeen(row.key, requestRevision: row.requestRevision))
+            let snapshot = try store.fyiTestSnapshot()
+            if percent == 100 {
+                let answer = try XCTUnwrap(snapshot.intents.values.first)
+                XCTAssertEqual(answer.typedInputs, [.compatibilityValue(action: ExactText("seen"))])
+                XCTAssertTrue(snapshot.pendingMessageOpens.isEmpty)
+                let pending = try XCTUnwrap(store.inboxRow(for: row.key))
+                XCTAssertEqual(pending.informationalSeenStatus, .pending)
+                XCTAssertNil(pending.fyiSeenAction)
+                XCTAssertFalse(store.markProgressFYISeen(row.key, requestRevision: row.requestRevision))
+            } else {
+                XCTAssertTrue(snapshot.intents.isEmpty)
+                XCTAssertEqual(snapshot.pendingMessageOpens.map(\.requestKey), [row.key])
+            }
+        }
+    }
+
+    @MainActor
+    func testProgressUpdatesUseServerSeenAndLatestCompletionState() throws {
+        let store = try NativeAppLaunch.makeFYITestStore(includeProgress: true,
+            progressPercent: 40, progressSeen: true)
+        let original = try XCTUnwrap(store.inboxRows.first { $0.isProgressFYI })
+        XCTAssertFalse(original.isUnseenFYI)
+        XCTAssertFalse(store.markProgressFYISeen(original.key, requestRevision: original.requestRevision))
+
+        try store.applyFYIProgressTestSnapshot(percent: 70, seen: false, revision: 6)
+        let updated = try XCTUnwrap(store.inboxRow(for: original.key))
+        XCTAssertTrue(updated.isUnseenFYI, "Server 0.2.8 clears Seen on a substantive Progress update")
+        XCTAssertEqual(updated.fyiSeenAction, .openedFlag)
+        XCTAssertFalse(store.markProgressFYISeen(original.key, requestRevision: original.requestRevision))
+
+        try store.applyFYIProgressTestSnapshot(percent: 100, seen: true, revision: 7)
+        XCTAssertNil(store.inboxRow(for: original.key)?.fyiSeenAction, "A carried flag survives finishing")
+        try store.applyFYIProgressTestSnapshot(percent: 100, seen: false, revision: 8)
+        XCTAssertEqual(store.inboxRow(for: original.key)?.fyiSeenAction, .answer)
+        try store.applyFYIProgressTestSnapshot(percent: 60, seen: true, revision: 9)
+        XCTAssertNil(store.inboxRow(for: original.key)?.fyiSeenAction, "A carried flag survives regression")
+        try store.applyFYIProgressTestSnapshot(percent: 60, seen: false, revision: 10)
+        XCTAssertEqual(store.inboxRow(for: original.key)?.fyiSeenAction, .openedFlag)
     }
 
     func testEqualFYIPriorityUsesPostedOrder() {

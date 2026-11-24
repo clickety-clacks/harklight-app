@@ -604,6 +604,11 @@ struct InboxRowSubmissionProgress: Equatable {
     let since: Date
 }
 
+enum FYISeenAction: Equatable {
+    case openedFlag
+    case answer
+}
+
 struct InboxRequestRow: Identifiable {
     let key: RequestKey
     var requestRevision: UInt64 = 1
@@ -652,6 +657,8 @@ struct InboxRequestRow: Identifiable {
     var defaultAnswerStatus: String? = nil
     var fyiPostedAt: Date? = nil
     var fyiServerSeen: Bool? = nil
+    var fyiProgressIsFinished = false
+    var canAnswerProgressFYISeen = false
     var fyiPriority: InboxMessagePriority? = nil
     var fyiPriorityScore: Double? = nil
     var id: RequestKey { key }
@@ -661,15 +668,28 @@ struct InboxRequestRow: Identifiable {
             (declaredMessageType == nil && informationalSeenStatus != nil)
     }
 
+    var isProgressFYI: Bool { hasProgressMarker && declaredMessageType == .fyi }
+
     var isUnseenFYI: Bool {
         guard !isRetracted, !localSeenSelected else { return false }
+        if isProgressFYI, fyiServerSeen == true { return false }
         if let informationalSeenStatus {
             return informationalSeenStatus == .available || informationalSeenStatus == .pending
         }
         return fyiServerSeen != true
     }
 
-    var canMarkFYISeen: Bool { isUnseenFYI && (canMarkSeen || canReportFYISeen) }
+    var fyiSeenAction: FYISeenAction? {
+        guard isUnseenFYI, informationalSeenStatus != .pending else { return nil }
+        if isProgressFYI {
+            if fyiProgressIsFinished { return canAnswerProgressFYISeen ? .answer : nil }
+            return canReportFYISeen ? .openedFlag : nil
+        }
+        if canMarkSeen { return .answer }
+        return canReportFYISeen ? .openedFlag : nil
+    }
+
+    var canMarkFYISeen: Bool { fyiSeenAction != nil }
     var canReportFYISeen = false
 
 
@@ -1081,8 +1101,11 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
 
     private func markFYISeen(_ row: InboxRequestRow) {
         guard let current = fyis.first(where: { $0.key == row.key }),
-              current.requestRevision == row.requestRevision, current.canMarkFYISeen else { return }
-        if current.canMarkSeen {
+              current.requestRevision == row.requestRevision,
+              let action = current.fyiSeenAction else { return }
+        if current.isProgressFYI {
+            conversationStore?.markProgressFYISeen(current.key, requestRevision: current.requestRevision)
+        } else if action == .answer {
             markSeenRequest(current.key, current.requestRevision)
         } else {
             reportMessageContentOpen(for: current.key)
