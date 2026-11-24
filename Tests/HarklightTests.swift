@@ -164,6 +164,12 @@ final class HarklightTests: XCTestCase {
         catch is CancellationError {}
         XCTAssertEqual(cancelledTransport.counts.entryReads, 1, "Do not attempt the second item after URL cancellation.")
         XCTAssertEqual(cancelled.model.snapshot.handoffCaptionRefreshItems.count, 2)
+        let transportCancelled = V2ScenePushTransport()
+        let closed = try connection(transportCancelled)
+        transportCancelled.failEntryReads(.cancelled)
+        do { _ = try await closed.refreshMe(); XCTFail("Transport cancellation also stops the loop.") }
+        catch is CancellationError {}
+        XCTAssertEqual(transportCancelled.counts.entryReads, 1)
     }
 
     @MainActor

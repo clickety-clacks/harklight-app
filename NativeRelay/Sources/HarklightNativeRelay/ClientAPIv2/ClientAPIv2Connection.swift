@@ -232,7 +232,9 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
                 try await modelWriter.loadEntries(of: item)
                 publishModel()
             } catch {
-                if Task.isCancelled || error is CancellationError { throw CancellationError() }
+                if Task.isCancelled || error is CancellationError || (error as? URLError)?.code == .cancelled {
+                    throw CancellationError()
+                }
                 guard access.state == .available else { break }
                 // A failed optional refresh keeps the cached conversation usable.
                 errors.report(ErrorLogReport(concern: .snapshot, connectionRole: .request,
