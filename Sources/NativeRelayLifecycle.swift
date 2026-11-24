@@ -850,6 +850,11 @@ final class NativeRelayLifecycle {
     private let v2LegacyAddressStore: @MainActor () throws -> DevelopmentAPNsAddressStore
     var onV2AccountAccessChanged: ((ClientAPIAccessState, ProfileContext) -> Void)?
     var v2AccountAccess: ClientAPIAccessState? { v2Connection?.access.state }
+    func inboxItems(for expected: ProfileContext) -> [ExactText: APIItem] {
+        guard context == expected, let v2Connection else { return [:] }
+        return v2Connection.model.snapshot.items
+    }
+
     var shouldPollV2PausedAccount: Bool {
         v2Connection?.access.state == .paused && v2Connection?.canPollMe == true
     }

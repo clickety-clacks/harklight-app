@@ -367,13 +367,16 @@ final class NewMessageAreaStore {
     }
 }
 
-private enum OnDeviceMessageSummarizer {
-    static func summarize(_ text: String) async -> String? {
+enum OnDeviceMessageSummarizer {
+    static func summarize(
+        _ text: String,
+        instructions: String = "Summarize the message in no more than two short lines. Keep its main request and important facts. Do not invent details."
+    ) async -> String? {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
         #if canImport(FoundationModels)
         if #available(iOS 26.0, *) {
             guard case .available = SystemLanguageModel.default.availability else { return nil }
-            let session = LanguageModelSession(instructions: "Summarize the message in no more than two short lines. Keep its main request and important facts. Do not invent details.")
+            let session = LanguageModelSession(instructions: instructions)
             do {
                 let response = try await session.respond(to: text)
                 let result = response.content.trimmingCharacters(in: .whitespacesAndNewlines)

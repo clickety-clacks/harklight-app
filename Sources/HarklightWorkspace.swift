@@ -648,7 +648,28 @@ struct InboxRequestRow: Identifiable {
     var duePhrase: InboxDuePhrase.Presentation? = nil
     var orderingReason: String? = nil
     var defaultAnswerStatus: String? = nil
+    var fyiPostedAt: Date? = nil
+    var fyiServerSeen: Bool? = nil
+    var fyiPriority: InboxMessagePriority? = nil
+    var fyiPriorityScore: Double? = nil
     var id: RequestKey { key }
+
+    var isFYI: Bool {
+        declaredMessageType == .fyi ||
+            (declaredMessageType == nil && informationalSeenStatus != nil)
+    }
+
+    var isUnseenFYI: Bool {
+        guard !isRetracted, !localSeenSelected else { return false }
+        if let informationalSeenStatus {
+            return informationalSeenStatus == .available || informationalSeenStatus == .pending
+        }
+        return fyiServerSeen != true
+    }
+
+    var canMarkFYISeen: Bool { isUnseenFYI && (canMarkSeen || canReportFYISeen) }
+    var canReportFYISeen = false
+
 
     var visibleStatus: String {
         status.components(separatedBy: " · ")
@@ -805,6 +826,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     @State private var splitPresentation = InboxSplitPresentation()
     @State private var relatedMessageNavigationPath: [RelatedMessageTarget] = []
     @State private var settings = false
+    @State private var showsFYIs = false
     @State private var selectedTab: InboxMessageTab = .inbox
     @State private var workspaceTab: InboxWorkspaceTab = .inbox
     @State private var rootTab: InboxRootTab = .inbox
@@ -823,6 +845,8 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     private var rows: [InboxItem] {
         showsLocalExamples ? samples.inboxItems(appendingTo: requests) : requests.map { .request($0) }
     }
+
+    private var fyis: [InboxRequestRow] { requests.filter(\.isFYI) }
 
     private var visibleWarnings: [String] {
         let messages = warnings + [samples.loadError].compactMap { $0 }
@@ -1049,6 +1073,16 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         }
     }
 
+    private func markFYISeen(_ row: InboxRequestRow) {
+        guard let current = fyis.first(where: { $0.key == row.key }),
+              current.requestRevision == row.requestRevision, current.canMarkFYISeen else { return }
+        if current.canMarkSeen {
+            markSeenRequest(current.key, current.requestRevision)
+        } else {
+            reportMessageContentOpen(for: current.key)
+        }
+    }
+
     private func markNoComment(_ id: InboxSelection) {
         switch id {
         case let .request(key):
@@ -1220,11 +1254,18 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                  for: .tabBar)
     }
 
+    private var fyiInboxRow: FYIInboxRow? {
+        let items = fyis
+        guard !items.isEmpty else { return nil }
+        return FYIInboxRow(items: items) { showsFYIs = true }
+    }
+
     @ViewBuilder
     private func inboxSplitView(for tab: InboxWorkspaceTab, inlineChat: Bool,
                                 geometry: GeometryProxy, searching: Bool = false) -> some View {
         let splitView = NavigationSplitView(preferredCompactColumn: $preferredCompactColumn) {
             InboxList(tab: tab, rows: rows, warnings: visibleWarnings,
+                  fyiInboxRow: tab == .inbox && !searching ? fyiInboxRow : nil,
                   showsBasicOrderMarker: showsBasicOrderMarker, isRefreshing: isRefreshing,
                   refreshInbox: refreshInbox,
                   conversationStore: conversationStore,
@@ -1516,6 +1557,9 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             .uiDiagnostics("inbox-ui-diagnostics", diagnosticSummary(landscape: landscape))
             .background(WorkspaceWindowReader { windowSize = $0 })
         }
+        .sheet(isPresented: $showsFYIs) {
+            FYIList(items: fyis, markSeen: markFYISeen)
+        }
         .sheet(isPresented: $settings) {
             settingsContent()
                 .environment(\.openCatalogueMessage, { key in
@@ -1595,6 +1639,7 @@ struct InboxList: View {
     let tab: InboxWorkspaceTab
     let rows: [InboxItem]
     let warnings: [String]
+    var fyiInboxRow: FYIInboxRow? = nil
     var showsBasicOrderMarker = false
     var isRefreshing = false
     var refreshInbox: (@MainActor () async -> Void)? = nil
@@ -1739,11 +1784,17 @@ struct InboxList: View {
 
     private var normalListEntries: [InboxNormalListDisplayEntry] {
         InboxNormalListProjection.entries(
-            rows: rows,
+            rows: rows.filter { !isBundledFYI($0) },
             serverItems: conversationStore?.presentation.inboxViewListItems,
             freeOrderVersion: conversationStore?.presentation.inboxFreeOrderVersion,
             in: tab,
             search: search)
+    }
+
+    private func isBundledFYI(_ item: InboxItem) -> Bool {
+        guard fyiInboxRow != nil, search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              case let .request(row) = item else { return false }
+        return row.isFYI
     }
 
     private var matchingExpiredRetractionRows: [InboxRequestRow] {
@@ -1769,7 +1820,7 @@ struct InboxList: View {
         guard tab == .inbox, let newMessageAreaStore else { return [] }
         var requestRows: [RequestKey: InboxRequestRow] = [:]
         for item in rows {
-            guard case let .request(row) = item else { continue }
+            guard !isBundledFYI(item), case let .request(row) = item else { continue }
             requestRows[row.key] = row
         }
         let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2470,6 +2521,9 @@ struct InboxList: View {
         let areaRows = combinedNewMessageAreaRows
         let shownAreaRows = isNewMessageAreaExpanded ? areaRows : Array(areaRows.prefix(5))
         List(selection: listSelection) {
+            if search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, let fyiInboxRow {
+                fyiInboxRow
+            }
             if tab == .inbox { ErrorLogInboxBannerRows() }
             ForEach(warnings.indices, id: \.self) { index in
                 Text(warnings[index])
@@ -3520,6 +3574,186 @@ private struct InboxListSearchFieldModifier: ViewModifier {
             content.searchable(text: text, placement: .sidebar, prompt: "Search messages")
         } else {
             content
+        }
+    }
+}
+
+enum FYIOrder: String, CaseIterable, Identifiable {
+    case priority = "Priority"
+    case posted = "Posted"
+
+    var id: Self { self }
+
+    func sorted(_ items: [InboxRequestRow]) -> [InboxRequestRow] {
+        items.sorted { left, right in
+            if self == .priority, left.fyiRankScore != right.fyiRankScore {
+                return left.fyiRankScore > right.fyiRankScore
+            }
+            let leftDate = left.fyiPostedAt ?? left.createdAt ?? .distantPast
+            let rightDate = right.fyiPostedAt ?? right.createdAt ?? .distantPast
+            if leftDate != rightDate { return leftDate > rightDate }
+            return (left.key.senderID.rawValue, left.key.messageID.rawValue) <
+                (right.key.senderID.rawValue, right.key.messageID.rawValue)
+        }
+    }
+}
+
+private extension InboxRequestRow {
+    var fyiRankScore: Double {
+        if let score = fyiPriorityScore ?? inboxScore, score.isFinite, (0...1).contains(score) {
+            return score
+        }
+        return switch fyiPriority ?? inboxPriority {
+        case .now: 1
+        case .high: 0.75
+        case .low: 0
+        case .normal, nil: 0.5
+        }
+    }
+}
+
+struct FYIInboxRow: View {
+    let items: [InboxRequestRow]
+    let open: () -> Void
+    @State private var finishedHighlights: [Highlight] = []
+    @State private var summary: String?
+
+    private struct Highlight: Equatable {
+        let key: RequestKey
+        let revision: UInt64
+        let text: String
+    }
+
+    private var highlights: [Highlight] {
+        FYIOrder.priority.sorted(items)
+            .filter { !$0.isRetracted && $0.fyiRankScore >= 0.7 }
+            .prefix(4)
+            .map { Highlight(key: $0.key, revision: $0.requestRevision,
+                             text: [$0.title, $0.bodyText ?? ""].joined(separator: "\n")) }
+    }
+
+    var body: some View {
+        let inputs = highlights
+        let latest = FYIOrder.posted.sorted(items).first
+        let unseen = items.filter(\.isUnseenFYI).count
+        Button(action: open) {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text("FYI").font(.headline)
+                    Text(unseen.formatted())
+                        .font(.caption.monospacedDigit())
+                        .padding(.horizontal, 8).padding(.vertical, 3)
+                        .background(.hkRaised, in: Capsule())
+                        .accessibilityLabel("\(unseen) unseen")
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(.footnote)
+                        .accessibilityHidden(true)
+                }
+                if finishedHighlights == inputs, let summary {
+                    Text(summary).font(.subheadline).lineLimit(4)
+                } else if let latest {
+                    let preview = latest.bodyText.flatMap { $0.isEmpty ? nil : $0 } ?? latest.title
+                    Text(MessageMarkdown.attributed(preview))
+                        .font(.subheadline)
+                        .lineLimit(4)
+                }
+            }
+            .foregroundStyle(.hkText)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("inbox-fyi")
+        .task(id: inputs) {
+            var lines: [String] = []
+            for input in inputs {
+                guard !Task.isCancelled else { return }
+                if let line = await OnDeviceMessageSummarizer.summarize(
+                    input.text,
+                    instructions: "Give the main informational highlight in a few words, on one line. Do not invent details."
+                ) {
+                    lines.append(line.split(whereSeparator: \.isNewline).joined(separator: " "))
+                }
+            }
+            guard !Task.isCancelled else { return }
+            finishedHighlights = inputs
+            summary = lines.isEmpty ? nil : lines.joined(separator: "\n")
+        }
+    }
+}
+
+private struct FYIList: View {
+    let items: [InboxRequestRow]
+    let markSeen: (InboxRequestRow) -> Void
+    @State private var order = FYIOrder.priority
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List(order.sorted(items)) { item in
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(MessageMarkdown.attributed(item.title)).font(.headline)
+                    HStack {
+                        Text(item.senderLabel)
+                        if let date = item.fyiPostedAt ?? item.createdAt {
+                            Text(date.formatted(date: .abbreviated, time: .shortened))
+                        }
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.hkSecondary)
+                    if let body = item.bodyText {
+                        Text(MessageMarkdown.attributed(body))
+                            .font(.body)
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    if item.informationalSeenStatus == .pending {
+                        Text("Seen pending confirmation").font(.caption)
+                    } else if item.hasDeliveryWarning, let status = item.localStatus {
+                        Text(status).font(.caption)
+                    }
+                }
+                .foregroundStyle(.hkText)
+                .accessibilityIdentifier("fyi-row-\(item.key.messageID.rawValue)")
+                .swipeActions(edge: .leading, allowsFullSwipe: false) { seenAction(for: item) }
+                .swipeActions(edge: .trailing, allowsFullSwipe: false) { seenAction(for: item) }
+            }
+            .harklightListSurface(.sheet)
+            .navigationTitle("FYI")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    HarklightDoneButton { dismiss() }
+                }
+                ToolbarItemGroup(placement: .primaryAction) {
+                    Menu {
+                        Picker("Sort FYIs", selection: $order) {
+                            ForEach(FYIOrder.allCases) { choice in
+                                Text(choice.rawValue).tag(choice)
+                            }
+                        }
+                    } label: {
+                        Label("Sort", systemImage: "arrow.up.arrow.down")
+                    }
+                    .accessibilityValue(order.rawValue)
+                    Button("Mark All Seen") {
+                        for item in items where item.canMarkFYISeen { markSeen(item) }
+                    }
+                    .disabled(!items.contains { $0.canMarkFYISeen })
+                }
+            }
+        }
+        .harklightSheetSurface()
+    }
+
+    @ViewBuilder
+    private func seenAction(for item: InboxRequestRow) -> some View {
+        if item.canMarkFYISeen {
+            Button { markSeen(item) } label: {
+                Label("Seen", systemImage: "checkmark")
+            }
+            .tint(.accentColor)
         }
     }
 }

@@ -2397,6 +2397,7 @@ final class LivePresentationStore {
 
     var inboxRows: [InboxRequestRow] {
         let skippedMessageRequestTags = completedSkippedMessageRequestTags
+        let items = NativeRelayLifecycle.shared.inboxItems(for: profileContext)
         return presentation.requests
             .filter { $0.lifecycleStatus != .superseded }
             .filter { request in
@@ -2404,7 +2405,18 @@ final class LivePresentationStore {
                 return !Self.isRetractionExpired(
                     retractionDate: retractionDate(request), at: retractionVisibilityTime)
             }
-            .compactMap { makeInboxRow(for: $0, skippedMessageRequestTags: skippedMessageRequestTags) }
+            .compactMap { request in
+                guard var row = makeInboxRow(for: request, skippedMessageRequestTags: skippedMessageRequestTags)
+                else { return nil }
+                if row.isFYI, let item = items[request.key.messageID], item.sender == request.key.senderID {
+                    row.fyiPostedAt = item.createdAtMs.map { Date(timeIntervalSince1970: Double($0) / 1_000) }
+                    row.fyiServerSeen = item.seen
+                    row.canReportFYISeen = row.informationalSeenStatus == nil && canSendToCurrentServer
+                    row.fyiPriority = InboxMessagePriority(rawValue: item.rank.level ?? "")
+                    row.fyiPriorityScore = item.rank.score.flatMap { Double($0.lexeme) }
+                }
+                return row
+            }
     }
 
     var expiredRetractionSearchRows: [InboxRequestRow] {
