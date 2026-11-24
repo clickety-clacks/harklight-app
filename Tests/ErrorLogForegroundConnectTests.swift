@@ -203,8 +203,12 @@ extension ErrorLogForegroundConnectTests {
                        ["catch_up", "change_feed", "foreground_connect"])
 
         transport.feedEvents.finish(throwing: URLError(.networkConnectionLost))
-        try await waitUntil { !connection.sync.hasOpenFeed && self.showsLiveUpdatesPaused(log) }
-        XCTAssertEqual(unresolvedSync(in: log), ["change_feed"])
+        try await waitUntil { !connection.sync.hasOpenFeed && self.unresolvedSync(in: log) == ["change_feed"] }
+        let firstDrop = try XCTUnwrap(log.records.first { $0.operation == "change_feed" && !$0.isResolved })
+        XCTAssertEqual(firstDrop.phase, "stream")
+        XCTAssertEqual(firstDrop.count, 1)
+        XCTAssertEqual(firstDrop.correlation.requestID, "feed-opened")
+        XCTAssertFalse(showsLiveUpdatesPaused(log), "The first opened-feed drop stays in diagnostics without a banner.")
         XCTAssertTrue(lifecycle.didRecover(oldRefresh, for: context))
         release.finish()
         let delayedFailure = await lateRefresh.value
@@ -221,6 +225,7 @@ extension ErrorLogForegroundConnectTests {
         XCTAssertFalse(lifecycle.didRecover(failedAfterDrop, for: context))
         XCTAssertNotNil(lifecycle.refreshFailureMessage(for: context))
         XCTAssertEqual(unresolvedSync(in: log), ["catch_up", "change_feed"])
+        XCTAssertTrue(showsLiveUpdatesPaused(log), "The next failed refresh makes the failure visible immediately.")
 
         retry.yield(())
         transport.reopenedFeedEvents.yield(.opened(requestID: "feed-reopened"))
@@ -230,6 +235,7 @@ extension ErrorLogForegroundConnectTests {
         XCTAssertNil(inbox.connectionWarning)
         XCTAssertFalse(inbox.presentsConnectionFailure)
         XCTAssertNil(launch.foregroundConnectFailureKey)
+        XCTAssertFalse(showsLiveUpdatesPaused(log))
 
         // A stale .live from a replaced transport cannot clear even when the
         // current transport really is live.
