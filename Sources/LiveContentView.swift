@@ -769,9 +769,8 @@ struct LiveContentView: View {
         if arguments.contains("--harklight-test-settings-diagnostics"), let launch {
             launch.errorLog.report(ErrorLogReport(concern: .sync, connectionRole: .stream,
                 operation: "catch_up", phase: "batch",
-                reason: .api(APIError(status: 500, token: .internalError,
-                                      retryable: false, requestID: nil)),
-                initiator: .unknown, retryable: false))
+                reason: .serverReason(APIErrorToken.internalError.rawValue),
+                initiator: .unknown, retryable: false, httpStatus: 500))
             launch.errorLogModel.refresh()
         }
         if arguments.contains("--harklight-test-refreshing") {
