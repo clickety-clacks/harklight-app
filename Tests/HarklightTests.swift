@@ -15,6 +15,8 @@ private final class V2ScenePushTransport: ClientAPITransport, @unchecked Sendabl
     private var cancelEntryRead = false
     private var pausedAccount = false
     private var pauseOnEntryRead = false
+    private var internalEntryError = false
+    func failEntryReadsInternally() { lock.withLock { internalEntryError = true } }
     func pauseDuringEntryRead() { lock.withLock { pauseOnEntryRead = true } }
 
     func failEntryReads(_ code: URLError.Code, cancelling: Bool = false) {
@@ -22,6 +24,7 @@ private final class V2ScenePushTransport: ClientAPITransport, @unchecked Sendabl
     }
 
     func setPaused() { lock.withLock { pausedAccount = true } }
+    func recoverEntryReads() { lock.withLock { entryFailure = nil; cancelEntryRead = false; internalEntryError = false } }
 
     func advertiseHandoff(page: String) {
         lock.withLock { handoffFeature = true; handoffPage = page }
@@ -45,6 +48,10 @@ private final class V2ScenePushTransport: ClientAPITransport, @unchecked Sendabl
     }
 
     func send(_ request: APIRequest) async throws -> APIResponse {
+        if request.path.hasSuffix("/entries"), lock.withLock({ internalEntryError }) {
+            lock.withLock { entryReads += 1 }
+            throw APIError(status: 500, token: .internalError, retryable: false, requestID: "test")
+        }
         if request.path.hasSuffix("/entries"), lock.withLock({ pauseOnEntryRead }) {
             lock.withLock { entryReads += 1 }
             throw APIError(status: 403, token: .accountPaused, retryable: false, requestID: nil)
@@ -115,6 +122,47 @@ private final class V2ScenePushTransport: ClientAPITransport, @unchecked Sendabl
 
 final class HarklightTests: XCTestCase {
     @MainActor
+    func testHandoffRefreshFailureResolvesAfterExplicitRetryAndAcrossRelaunch() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+            personID: ExactText("person"), deviceID: ExactText("device"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let repository = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        let transport = V2ScenePushTransport()
+        let logURL = directory.appendingPathComponent("errors.json")
+        let build = ErrorLogBuild(version: "test", build: "1", commit: "test")
+        let errors = ErrorLogStore(fileURL: logURL, build: build)
+        let connection = try ClientAPIv2Connection(transport: transport, repository: repository, context: context,
+            directory: directory, errors: errors)
+        let item = try JSONValue.parse(Data(#"{"item_id":"item","rev":1,"sender":"sender","request_revision":1,"message":{"title":"Hello"},"files":[],"seen":false,"chat":{"available":true,"started":true},"rank":{"key":"a","section":"current"}}"#.utf8))
+        try connection.model.apply([.init(rev: 1, kind: "item", data: Data(item.jsonString.utf8))], cursor: 1)
+        let entry = #"{"entry_id":"sent","item_id":"item","rev":2,"position":1,"kind":"reply","author":"person","request_revision":1,"text":"Hello","files":[],"delivery":{"delivered":true}}"#
+        let page = "{\"rev\":2,\"entries\":[" + entry + "],\"older\":false}"
+        try connection.model.apply(APIEntriesPage(json: JSONValue.parse(Data(page.utf8))), of: ExactText("item"))
+        transport.advertiseHandoff(page: page.replacingOccurrences(of: "\"delivered\":true", with: "\"delivered\":true,\"legacy_caption\":true"))
+        transport.failEntryReadsInternally()
+        _ = try await connection.refreshMe()
+        let record = try XCTUnwrap(errors.records.first { $0.operation == "handoff_projection" && !$0.isResolved })
+        XCTAssertEqual(transport.counts.entryReads, 1)
+        errors.flush()
+        let reopenedErrors = ErrorLogStore(fileURL: logURL, build: build)
+        let reopened = try ClientAPIv2Connection(transport: transport, repository: repository, context: context,
+            directory: directory, errors: reopenedErrors)
+        XCTAssertTrue(reopenedErrors.records.contains { $0.operation == "handoff_projection" && !$0.isResolved },
+                      "An unsuccessful optional refresh remains an actionable failure across relaunch.")
+        transport.recoverEntryReads()
+        try await reopened.retryInternalError(record)
+        XCTAssertEqual(transport.counts.entryReads, 2, "Try again must reread the failed projection.")
+        XCTAssertTrue(reopened.model.snapshot.handoffCaptionRefreshItems.isEmpty)
+        XCTAssertFalse(reopenedErrors.records.contains { $0.operation == "handoff_projection" && !$0.isResolved })
+        reopenedErrors.flush()
+        let recovered = ErrorLogStore(fileURL: logURL, build: build)
+        XCTAssertFalse(recovered.records.contains { $0.operation == "handoff_projection" && !$0.isResolved },
+                       "The old Inbox failure banner must not return after successful recovery and relaunch.")
+    }
+
+    @MainActor
     func testOptionalHandoffRefreshDoesNotFailCachedOpenOrRunWhilePausedOrCancelled() async throws {
         func connection(_ transport: V2ScenePushTransport) throws -> ClientAPIv2Connection {
             let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
@@ -167,8 +215,7 @@ final class HarklightTests: XCTestCase {
         let transportCancelled = V2ScenePushTransport()
         let closed = try connection(transportCancelled)
         transportCancelled.failEntryReads(.cancelled)
-        do { _ = try await closed.refreshMe(); XCTFail("Transport cancellation also stops the loop.") }
-        catch is CancellationError {}
+        _ = try await closed.refreshMe() // /me succeeded; transport-only cancellation stops optional work.
         XCTAssertEqual(transportCancelled.counts.entryReads, 1)
     }
 
