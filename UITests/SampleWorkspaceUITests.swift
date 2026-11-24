@@ -93,6 +93,37 @@ final class SampleWorkspaceUITests: XCTestCase {
         assertInboxDate(1_700_432_000_000, in: reply)
     }
 
+    func testInboxDatesAgreeInPriorityPostedSearchAndReplied() {
+        if UIDevice.current.userInterfaceIdiom == .pad { XCUIDevice.shared.orientation = .landscapeLeft }
+        let app = XCUIApplication()
+        app.launchArguments = ["--harklight-test-fyi-list", "--harklight-test-inbox-sort-dates"]
+        app.launch()
+        defer { app.terminate() }
+
+        let sort = app.buttons["inbox-sort"]
+        XCTAssertTrue(sort.waitForExistence(timeout: 5))
+        let message = app.buttons["request-row-reply-parent"]
+        let reply = app.buttons["normal-reply-item-reply-parent"]
+        func assertDates() {
+            XCTAssertTrue(message.waitForExistence(timeout: 5))
+            XCTAssertTrue(reply.waitForExistence(timeout: 5))
+            assertInboxDate(1_700_000_000_000, in: message)
+            assertInboxDate(1_700_172_800_000, in: reply)
+        }
+
+        assertDates()
+        sort.tap()
+        app.buttons["Posted"].tap()
+        assertDates()
+        enterSearch("Shared date fixture", in: app)
+        XCTAssertFalse(sort.exists)
+        assertDates()
+        clearSearch(in: app)
+        workspaceTab("Replied", in: app).tap()
+        XCTAssertFalse(sort.exists)
+        assertDates()
+    }
+
     func testInboxSortScrollsToASelectedThreadMemberWhenItRegroups() throws {
         guard UIDevice.current.userInterfaceIdiom == .pad else {
             throw XCTSkip("A split Inbox is needed to sort while the detail stays visible.")

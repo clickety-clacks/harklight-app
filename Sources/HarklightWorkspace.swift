@@ -543,20 +543,54 @@ private struct InboxNotificationPendingStatusContent: View {
     }
 }
 
-private struct InboxListRowScrollTarget: Hashable {
+struct InboxListRowScrollTarget: Hashable {
     let tab: InboxWorkspaceTab
     let selection: InboxSelection
     var placement: InboxListRowPlacement = .normal
 }
 
-private enum InboxSortScrollTarget: Equatable {
+enum InboxSortScrollTarget: Equatable {
     case row(InboxListRowScrollTarget)
     case thread(group: InboxListRowScrollTarget, member: InboxListRowScrollTarget)
+}
 
-    var selection: InboxSelection {
-        switch self {
-        case let .row(row), let .thread(_, row): row.selection
+struct InboxSortScrollState {
+    struct Context: Equatable {
+        let selection: InboxSelection?
+        let search: String
+        let tab: InboxWorkspaceTab
+        let order: InboxOrder?
+    }
+
+    struct Request: Equatable {
+        let target: InboxSortScrollTarget
+        let context: Context
+        private let identity = UUID()
+
+        init(target: InboxSortScrollTarget, context: Context) {
+            self.target = target
+            self.context = context
         }
+    }
+
+    private(set) var pending: Request?
+
+    mutating func start(_ target: InboxSortScrollTarget, in context: Context) {
+        pending = Request(target: target, context: context)
+    }
+
+    mutating func cancel() {
+        pending = nil
+    }
+
+    mutating func contextDidChange(to context: Context) {
+        if pending?.context != context {
+            cancel()
+        }
+    }
+
+    func accepts(_ request: Request, in context: Context) -> Bool {
+        pending == request && request.context == context
     }
 }
 
@@ -567,7 +601,7 @@ private struct InboxThreadListMember: Identifiable {
     var id: InboxListRowScrollTarget { .init(tab: tab, selection: item.id) }
 }
 
-private enum InboxListRowPlacement: Hashable {
+enum InboxListRowPlacement: Hashable {
     case normal
     case threadGroup
     case normalReplyItem
@@ -2013,7 +2047,7 @@ struct InboxList: View {
     @State private var requestedInGesture = false
     @State private var isFetchingOlderPage = false
     @State private var expandedThreadGroups: Set<InboxListEntryID> = []
-    @State private var sortScrollTarget: InboxSortScrollTarget?
+    @State private var sortScroll = InboxSortScrollState()
     @State private var isNewMessageAreaExpanded = false
     @State private var isProgressExpanded = false
     @State private var visibleMessagePlacements: Set<NewMessageAreaVisibility> = []
@@ -2124,6 +2158,10 @@ struct InboxList: View {
 
     private var showsInboxSort: Bool {
         tab == .inbox && inboxOrder != nil && search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var sortScrollContext: InboxSortScrollState.Context {
+        .init(selection: selected, search: search, tab: workspaceTab, order: inboxOrder?.wrappedValue)
     }
 
     private var normalOrder: InboxOrder {
@@ -2425,9 +2463,7 @@ struct InboxList: View {
                 projection: item.projection,
                 parentTitle: item.parentTitle,
                 senderLabel: item.senderLabel,
-                date: showsInboxSort
-                    ? reference.postedAt(fallingBackTo: item.projection?.receivedAt)
-                    : item.projection?.receivedAt,
+                date: reference.postedAt(fallingBackTo: item.projection?.receivedAt),
                 selected: isSelected)
         }
         .buttonStyle(.plain)
@@ -2568,13 +2604,13 @@ struct InboxList: View {
         expandedThreadGroups.insert(group.id)
     }
 
-    private func scrollAfterSort(using proxy: ScrollViewProxy, in tab: InboxWorkspaceTab) async {
-        guard let target = sortScrollTarget else { return }
+    private func scrollAfterSort(_ request: InboxSortScrollState.Request,
+                                 using proxy: ScrollViewProxy, in tab: InboxWorkspaceTab) async {
         // Each order has its own list positions. Scroll after the new list is installed.
         await Task.yield()
-        guard !Task.isCancelled, sortScrollTarget == target, selected == target.selection,
+        guard !Task.isCancelled, sortScroll.accepts(request, in: sortScrollContext),
               workspaceTab == tab, showsInboxSort else { return }
-        switch target {
+        switch request.target {
         case let .row(row):
             // Use the data ID so the list can find a row that has not been laid out yet.
             let displayID: InboxNormalListDisplayEntry.ID
@@ -2584,7 +2620,7 @@ struct InboxList: View {
                 displayID = .message(.row(row.selection))
             }
             proxy.scrollTo(displayID, anchor: .center)
-            sortScrollTarget = nil
+            sortScroll.cancel()
         case let .thread(group, _):
             proxy.scrollTo(group, anchor: .center)
         }
@@ -2664,7 +2700,7 @@ struct InboxList: View {
             case let .request(request): request
             case let .example(_, response): response.inboxRow
             }
-            if showsInboxSort { request?.createdAt = row.postedAt }
+            request?.createdAt = row.postedAt
             return request
         }()
         if let request = renderedRow {
@@ -2864,23 +2900,26 @@ struct InboxList: View {
             case let .row(row):
                 listRow(for: row, in: tab)
             case let .thread(_, members):
+                let request = sortScroll.pending
+                let group = InboxListRowScrollTarget(tab: tab, selection: members[0].id, placement: .threadGroup)
                 DisclosureGroup(isExpanded: threadExpansionBinding(for: messageEntry.id)) {
                     ForEach(members.map { InboxThreadListMember(item: $0, tab: tab) }) { member in
                         listRow(for: member.item, in: tab)
                             .onScrollVisibilityChange(threshold: 0.001) { isVisible in
                                 // The children are ready to scroll once the first one is visible.
                                 guard isVisible, member.item.id == members[0].id,
-                                      case let .thread(_, target) = sortScrollTarget, selected == target.selection,
+                                      let request, case let .thread(expectedGroup, target) = request.target,
+                                      expectedGroup == group, sortScroll.accepts(request, in: sortScrollContext),
                                       members.contains(where: { $0.id == target.selection }),
                                       workspaceTab == tab, showsInboxSort else { return }
                                 proxy.scrollTo(target, anchor: .center)
-                                sortScrollTarget = nil
+                                sortScroll.cancel()
                             }
                     }
                 } label: {
                     threadGroupLabel(members: members)
                 }
-                .id(InboxListRowScrollTarget(tab: tab, selection: members[0].id, placement: .threadGroup))
+                .id(group)
                 .accessibilityIdentifier("inbox-thread-group-\(members[0].accessibilityID)")
                 .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
                 .listRowSeparator(.hidden)
@@ -2903,6 +2942,7 @@ struct InboxList: View {
             : []
         let shownProgressRows = ProgressInboxProjection.shown(progressRows, expanded: isProgressExpanded)
         let normalEntries = normalListEntries
+        let pendingSortScroll = sortScroll.pending
         let historyIDs = freeHistoryIDs
         let historyRows = matchingExpiredRetractionRows
         let areaRows = combinedNewMessageAreaRows
@@ -3146,7 +3186,7 @@ struct InboxList: View {
             }
         }
         .onChange(of: inboxOrder?.wrappedValue) { _, _ in
-            sortScrollTarget = nil
+            sortScroll.cancel()
             guard workspaceTab == tab, showsInboxSort, let selected else { return }
             let placement: InboxListRowPlacement
             if case let .request(key) = selected, lastViewedReplyTarget == key,
@@ -3158,19 +3198,23 @@ struct InboxList: View {
             }).first(where: { $0.members.contains { $0.id == selected } }) {
                 if case let .thread(_, members) = message {
                     expandedThreadGroups.insert(message.id)
-                    sortScrollTarget = .thread(
+                    let target = InboxSortScrollTarget.thread(
                         group: .init(tab: tab, selection: members[0].id, placement: .threadGroup),
                         member: .init(tab: tab, selection: selected))
+                    sortScroll.start(target, in: sortScrollContext)
                     return
                 }
                 placement = .normal
             } else {
                 return
             }
-            sortScrollTarget = .row(.init(tab: tab, selection: selected, placement: placement))
+            sortScroll.start(.row(.init(tab: tab, selection: selected, placement: placement)),
+                             in: sortScrollContext)
         }
-        .task(id: sortScrollTarget) {
-            await scrollAfterSort(using: proxy, in: tab)
+        .task(id: pendingSortScroll) {
+            if let pendingSortScroll {
+                await scrollAfterSort(pendingSortScroll, using: proxy, in: tab)
+            }
         }
         .onChange(of: normalEntries.map(\.id)) { _, _ in
             guard workspaceTab == tab, restoreLastViewed else { return }
@@ -3213,6 +3257,10 @@ struct InboxList: View {
                 renderedList(using: proxy)
             }
         }
+        .onChange(of: sortScrollContext) { _, context in
+            sortScroll.contextDidChange(to: context)
+        }
+        .onDisappear { sortScroll.cancel() }
     }
 }
 

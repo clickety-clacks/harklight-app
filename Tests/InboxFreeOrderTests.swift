@@ -5,6 +5,53 @@ import XCTest
 @testable import Harklight
 
 final class InboxFreeOrderTests: XCTestCase {
+    func testDelayedThreadSortScrollIsAbandonedWhenLeavingAndReturning() throws {
+        let child = InboxSelection.sample("thread-child")
+        let target = InboxSortScrollTarget.thread(
+            group: .init(tab: .inbox, selection: .sample("thread-first"), placement: .threadGroup),
+            member: .init(tab: .inbox, selection: child))
+        let current = InboxSortScrollState.Context(selection: child, search: "", tab: .inbox, order: .priority)
+        let interruptions: [InboxSortScrollState.Context] = [
+            .init(selection: .sample("next-row"), search: "", tab: .inbox, order: .priority),
+            .init(selection: child, search: "filter", tab: .inbox, order: .priority),
+            .init(selection: child, search: "", tab: .replied, order: .priority),
+            .init(selection: child, search: "", tab: .inbox, order: .posted),
+        ]
+        var scroll = InboxSortScrollState()
+        for interruption in interruptions {
+            scroll.start(target, in: current)
+            let delayed = try XCTUnwrap(scroll.pending)
+            XCTAssertTrue(scroll.accepts(delayed, in: current))
+            // The task or first-child callback can arrive before the view observes the change.
+            XCTAssertFalse(scroll.accepts(delayed, in: interruption))
+            scroll.contextDidChange(to: interruption)
+            scroll.contextDidChange(to: current)
+            XCTAssertNil(scroll.pending)
+            XCTAssertFalse(scroll.accepts(delayed, in: current), "Returning must not revive \(interruption).")
+        }
+
+        scroll.start(target, in: current)
+        let beforeDisappearance = try XCTUnwrap(scroll.pending)
+        scroll.cancel()
+        XCTAssertFalse(scroll.accepts(beforeDisappearance, in: current))
+    }
+
+    func testNewSortScrollRejectsAnEarlierCallbackEvenForTheSameThreadAndSelection() throws {
+        let child = InboxSelection.sample("thread-child")
+        let target = InboxSortScrollTarget.thread(
+            group: .init(tab: .inbox, selection: .sample("thread-first"), placement: .threadGroup),
+            member: .init(tab: .inbox, selection: child))
+        let context = InboxSortScrollState.Context(selection: child, search: "", tab: .inbox, order: .priority)
+        var scroll = InboxSortScrollState()
+        scroll.start(target, in: context)
+        let earlier = try XCTUnwrap(scroll.pending)
+
+        scroll.start(target, in: context)
+        let replacement = try XCTUnwrap(scroll.pending)
+        XCTAssertFalse(scroll.accepts(earlier, in: context))
+        XCTAssertTrue(scroll.accepts(replacement, in: context))
+    }
+
     private static func reopenWithServerCache(_ source: ClientRepository, context: ProfileContext,
                                        persistence: MemoryPendingActionPersistence) async throws -> ClientRepository {
         let inbox = try source.snapshot(context: context)
