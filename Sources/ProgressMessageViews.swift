@@ -100,6 +100,8 @@ struct ProgressMessageDetail: View {
     let sender: String
     let bodyText: String?
     let progress: MessageProgress
+    var seenPending = false
+    var onSeen: (() -> Void)? = nil
 
     var body: some View {
         ScrollView {
@@ -118,6 +120,9 @@ struct ProgressMessageDetail: View {
                         .harklightType(.messageBody)
                         .foregroundStyle(.hkSecondary)
                 }
+                if seenPending {
+                    Text("Seen pending confirmation").font(.caption)
+                }
                 if let bodyText, !bodyText.isEmpty {
                     Text(bodyText)
                         .harklightType(.messageBody)
@@ -131,6 +136,14 @@ struct ProgressMessageDetail: View {
         .background(.hkBackground)
         .navigationTitle("Progress")
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            if let onSeen {
+                ToolbarItem(placement: .primaryAction) {
+                    Button("Seen", systemImage: "eye", action: onSeen)
+                        .accessibilityIdentifier("request-seen-action")
+                }
+            }
+        }
         .accessibilityIdentifier("progress.detail")
     }
 

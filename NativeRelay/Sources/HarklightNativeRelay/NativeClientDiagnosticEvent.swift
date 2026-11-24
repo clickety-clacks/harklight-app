@@ -425,7 +425,10 @@ public enum NativeDiagnosticCauseCode {
         "original_operation_state_unavailable", "saved_server_state_rebuilt", "unprojectable_request_shown_unsupported",
         "pending_actions_partly_recovered", "pending_actions_replaced_unreadable", "pending_actions_replaced_foreign",
         "legacy_pending_actions_partly_imported", "legacy_pending_actions_unreadable", "legacy_pending_actions_foreign",
-        "conversation_ack_refused_after_rebuild"
+        "conversation_ack_refused_after_rebuild",
+        "model_unsupported_device", "model_intelligence_disabled", "model_not_ready", "model_unavailable",
+        "model_guardrail", "model_unsupported_language", "model_context_too_long", "model_rate_limited",
+        "model_concurrent_requests", "model_empty_output", "model_generation_failed"
     ]
 
     private static let serverReasons: Set<String> = [

@@ -26,6 +26,7 @@ final class UIDiagnostics {
         switch selection {
         case let .request(key): "request:" + key.messageID.rawValue
         case let .sample(id): "sample:" + id
+        case .fyis: "fyis"
         case let .notificationPending(serial): "notification-pending:\(serial)"
         case nil: "nil"
         }

@@ -334,6 +334,7 @@ public struct PresentedRequest: Equatable, Sendable {
     public let attentionTier: AttentionTier
     /// Current fields from the server's account inbox view. Absence means the
     /// server has not supplied a usable entry for this row.
+    public let fyiInboxEntry: InboxViewEntry?
     public let inboxPriority: InboxMessagePriority?
     public let inboxScore: Double?
     public let inboxThread: ExactText?
@@ -396,6 +397,7 @@ public struct PresentedRequest: Equatable, Sendable {
                 accountAnswerOutcome: AccountAnswerOutcome? = nil,
                 defaultAnswerAction: ProjectedActionReference? = nil,
                 attentionTier: AttentionTier = .middle,
+                fyiInboxEntry: InboxViewEntry? = nil,
                 inboxPriority: InboxMessagePriority? = nil,
                 inboxScore: Double? = nil,
                 inboxThread: ExactText? = nil,
@@ -438,6 +440,7 @@ public struct PresentedRequest: Equatable, Sendable {
         self.accountAnswerOutcome = accountAnswerOutcome
         self.defaultAnswerAction = defaultAnswerAction
         self.attentionTier = attentionTier
+        self.fyiInboxEntry = fyiInboxEntry
         self.inboxPriority = inboxPriority
         self.inboxScore = inboxScore
         self.inboxThread = inboxThread
@@ -1415,6 +1418,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
                                 accountAnswerOutcome: remote?.accountAnswerOutcome,
                                 defaultAnswerAction: defaultAnswerAction,
                                 attentionTier: .middle,
+                                fyiInboxEntry: inboxViewEntry,
                                 inboxPriority: status == .open || status == .pending
                                     ? inboxViewEntry?.priority : nil,
                                 inboxScore: status == .open || status == .pending

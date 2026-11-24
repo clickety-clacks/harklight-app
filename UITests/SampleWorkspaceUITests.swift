@@ -11,6 +11,169 @@ final class SampleWorkspaceUITests: XCTestCase {
         XCUIDevice.shared.orientation = .portrait
     }
 
+    func testFYIDigestOpensListInNavigationAndSortChangesOrder() {
+        if UIDevice.current.userInterfaceIdiom == .pad { XCUIDevice.shared.orientation = .landscapeLeft }
+        let app = XCUIApplication()
+        app.launchArguments = ["--harklight-test-fyi-list", "--harklight-ui-diagnostics"]
+        app.launch()
+        defer { app.terminate() }
+
+        openFYIListIfNeeded(app)
+        let sort = app.buttons["fyi-sort"]
+        XCTAssertTrue(sort.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertFalse(app.buttons["Done"].exists)
+        let list = app.collectionViews["fyi-list"]
+        let garden = list.staticTexts["Community garden"]
+        let museum = list.staticTexts["Museum hours"]
+        XCTAssertTrue(garden.exists)
+        XCTAssertTrue(museum.exists)
+        XCTAssertLessThan(garden.frame.minY, museum.frame.minY)
+        capture("FYI list in its navigation pane", app)
+        sort.tap()
+        app.buttons["Posted"].tap()
+        XCTAssertLessThan(museum.frame.minY, garden.frame.minY)
+        XCTAssertTrue(sort.label.contains("Posted"))
+
+        garden.tap()
+        XCTAssertTrue(app.buttons["request-heading"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.staticTexts["1 of 2"].exists,
+                       "FYI detail should not expose ordinary Inbox paging.")
+        capture("FYI normal detail in its navigation pane", app)
+        let back = app.navigationBars.buttons["FYIs"].firstMatch
+        XCTAssertTrue(back.exists)
+        back.tap()
+        XCTAssertTrue(sort.waitForExistence(timeout: 5))
+        XCTAssertTrue(sort.label.contains("Posted"))
+
+        let firstBody = list.textViews.matching(NSPredicate(format: "label BEGINSWITH %@", "The museum is open")).firstMatch
+        XCTAssertTrue(firstBody.waitForExistence(timeout: 5))
+        firstBody.coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.2)).tap()
+        XCTAssertTrue(app.buttons["request-heading"].waitForExistence(timeout: 5))
+        back.tap()
+        XCTAssertTrue(sort.waitForExistence(timeout: 5))
+        XCTAssertTrue(sort.label.contains("Posted"))
+
+        let blank = list.cells.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.91, dy: 0.36))
+        blank.tap()
+        XCTAssertTrue(app.buttons["request-heading"].waitForExistence(timeout: 5))
+        back.tap()
+        XCTAssertTrue(sort.waitForExistence(timeout: 5))
+
+        capture("FYI list with posted order", app)
+        app.terminate()
+        app.launch()
+        XCTAssertTrue(sort.waitForExistence(timeout: 10), "The FYI list should reopen for the same account.")
+    }
+
+    func testFYISeenCanBeRevealedFromEitherEdgeOnTheBodyWithoutFullSwipe() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--harklight-test-fyi-list"]
+        app.launch()
+        defer { app.terminate() }
+        openFYIListIfNeeded(app)
+        let list = app.collectionViews["fyi-list"]
+        let seen = app.buttons["Seen"].firstMatch
+        for text in ["The community garden reopened", "The museum is open"] {
+            let body = list.textViews.matching(NSPredicate(format: "label BEGINSWITH %@", text)).firstMatch
+            XCTAssertTrue(body.waitForExistence(timeout: 5), app.debugDescription)
+            XCTAssertTrue(app.buttons["Mark All Seen"].isEnabled)
+            body.swipeRight()
+            XCTAssertTrue(seen.waitForExistence(timeout: 3), "Leading swipe on \(text)")
+            list.coordinate(withNormalizedOffset: CGVector(dx: 0.8, dy: 0.77)).tap()
+            body.swipeLeft()
+            XCTAssertTrue(seen.waitForExistence(timeout: 3), "Trailing swipe on \(text)")
+            list.coordinate(withNormalizedOffset: CGVector(dx: 0.8, dy: 0.77)).tap()
+            XCTAssertTrue(app.buttons["Mark All Seen"].isEnabled, "A swipe alone cannot mark a FYI Seen.")
+        }
+    }
+
+
+    func testFinishedProgressSeenButtonShowsPendingWithoutOfferingAnotherSwipe() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--harklight-test-fyi-list", "--harklight-test-fyi-finished-progress"]
+        app.launch()
+        defer { app.terminate() }
+        openFYIListIfNeeded(app)
+
+        let list = app.collectionViews["fyi-list"]
+        let row = list.staticTexts["Progress with a Seen response"]
+        XCTAssertTrue(row.waitForExistence(timeout: 5))
+        row.tap()
+        let seen = app.buttons["request-seen-action"]
+        XCTAssertTrue(seen.waitForExistence(timeout: 5))
+        seen.tap()
+        XCTAssertTrue(app.staticTexts["Seen pending confirmation"].waitForExistence(timeout: 5))
+        XCTAssertFalse(seen.exists)
+        app.navigationBars.buttons["FYIs"].tap()
+        let pending = list.descendants(matching: .any)
+            .matching(NSPredicate(format: "label == %@", "Seen pending confirmation")).firstMatch
+        XCTAssertTrue(pending.waitForExistence(timeout: 5), app.debugDescription)
+        capture("Progress FYI Seen pending in list", app)
+        row.swipeLeft()
+        XCTAssertFalse(app.buttons["Seen"].exists)
+    }
+
+    func testFYIBodyDoubleTapSelectsWord() {
+        assertFYINativeSelection("FYI word selected") { _, point in point.doubleTap() }
+    }
+
+    func testFYIBodyTripleTapKeepsTheListOpen() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--harklight-test-fyi-list"]
+        app.launch()
+        defer { app.terminate() }
+        openFYIListIfNeeded(app)
+
+        let body = fyiGardenBody(in: app)
+        XCTAssertTrue(body.waitForExistence(timeout: 5))
+        body.tap(withNumberOfTaps: 3, numberOfTouches: 1)
+        XCTAssertTrue(app.buttons["fyi-sort"].exists)
+        XCTAssertFalse(app.buttons["request-heading"].exists)
+    }
+
+    func testFYIBodyLongPressShowsCopy() {
+        assertFYINativeSelection("FYI long press Copy", copy: true) { _, point in
+            point.press(forDuration: 1)
+        }
+    }
+
+    private func assertFYINativeSelection(_ captureName: String, copy: Bool = false,
+                                          gesture: (XCUIElement, XCUICoordinate) -> Void) {
+        let app = XCUIApplication()
+        app.launchArguments = ["--harklight-test-fyi-list"]
+        app.launch()
+        defer { app.terminate() }
+        openFYIListIfNeeded(app)
+
+        let body = fyiGardenBody(in: app)
+        guard body.waitForExistence(timeout: 5) else {
+            XCTFail("The garden FYI body is missing.")
+            return
+        }
+        gesture(body, body.coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.4)))
+        let copyAction = app.menuItems["Copy"]
+        XCTAssertTrue(copyAction.waitForExistence(timeout: 5), app.debugDescription)
+        capture(captureName, app)
+        if copy, copyAction.exists { copyAction.tap() }
+        XCTAssertTrue(app.buttons["fyi-sort"].exists)
+        XCTAssertFalse(app.buttons["request-heading"].exists)
+    }
+
+    private func fyiGardenBody(in app: XCUIApplication) -> XCUIElement {
+        app.collectionViews["fyi-list"].textViews.matching(NSPredicate(
+            format: "label BEGINSWITH %@", "The community garden reopened")).firstMatch
+    }
+
+    private func openFYIListIfNeeded(_ app: XCUIApplication) {
+        let sort = app.buttons["fyi-sort"]
+        if sort.exists { return }
+        let digest = app.descendants(matching: .any)["inbox-fyi"].firstMatch
+        if digest.waitForExistence(timeout: 5) {
+            digest.coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.2)).tap()
+        }
+        XCTAssertTrue(sort.waitForExistence(timeout: 5), app.debugDescription)
+    }
+
     func testSuccessMessageKindAppearsInInboxAndDetail() {
         for (motionLabel, motionArgument) in [
             ("off", "--harklight-test-reduce-motion-off"),

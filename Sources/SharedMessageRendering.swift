@@ -304,6 +304,7 @@ enum MessageMarkdown {
 struct SystemDetectedMessageBody: UIViewRepresentable {
     let text: String
     let foregroundColor: Color
+    var onPlainTap: (() -> Void)? = nil
 
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
@@ -382,8 +383,50 @@ struct SystemDetectedMessageBody: UIViewRepresentable {
     }
 
     @MainActor
-    final class Coordinator {
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
         private var text: String?
+        private static let detector = try? NSDataDetector(types:
+            NSTextCheckingResult.CheckingType.link.rawValue |
+            NSTextCheckingResult.CheckingType.phoneNumber.rawValue |
+            NSTextCheckingResult.CheckingType.address.rawValue |
+            NSTextCheckingResult.CheckingType.date.rawValue |
+            NSTextCheckingResult.CheckingType.transitInformation.rawValue)
+        private var detectedItems: [NSTextCheckingResult] = []
+
+        @objc func plainTap(_ recognizer: UITapGestureRecognizer) {
+            guard let view = recognizer.view as? MessageTextView else { return }
+            view.onPlainTap?()
+        }
+
+        func gestureRecognizerShouldBegin(_ recognizer: UIGestureRecognizer) -> Bool {
+            guard let view = recognizer.view as? MessageTextView,
+                  view.onPlainTap != nil, view.selectedRange.length == 0 else { return false }
+            let point = recognizer.location(in: view)
+            guard let position = view.closestPosition(to: point), view.attributedText.length > 0 else { return true }
+            let offset = view.offset(from: view.beginningOfDocument, to: position)
+            let index = min(offset, view.attributedText.length - 1)
+            guard let start = view.position(from: view.beginningOfDocument, offset: index),
+                  let end = view.position(from: start, offset: 1),
+                  let hit = view.textRange(from: start, to: end),
+                  view.firstRect(for: hit).insetBy(dx: -3, dy: -3).contains(point) else { return true }
+            if view.attributedText.attribute(.link, at: index, effectiveRange: nil) != nil { return false }
+            return !detectedItems.contains { NSLocationInRange(index, $0.range) }
+        }
+
+        func gestureRecognizer(_ recognizer: UIGestureRecognizer,
+                               shouldRequireFailureOf other: UIGestureRecognizer) -> Bool {
+            // Let UIKit's word and paragraph selection take precedence over navigation.
+            guard let view = recognizer.view,
+                  let multiTap = other as? UITapGestureRecognizer,
+                  multiTap.numberOfTapsRequired > 1 else { return false }
+            return multiTap.view?.isDescendant(of: view) == true
+        }
+
+        func gestureRecognizer(_ recognizer: UIGestureRecognizer,
+                               shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
+            true
+        }
+
         private var bodyFont: UIFont?
         private var foregroundColor: UIColor?
 
@@ -399,6 +442,11 @@ struct SystemDetectedMessageBody: UIViewRepresentable {
             textView.font = bodyFont
             textView.attributedText = SystemDetectedMessageBody.attributedMessage(
                 text, foregroundColor: foregroundColor, bodyFont: bodyFont)
+            if let view = textView as? MessageTextView, view.onPlainTap != nil {
+                let body = textView.attributedText.string
+                detectedItems = Self.detector?.matches(in: body,
+                    range: NSRange(body.startIndex..<body.endIndex, in: body)) ?? []
+            }
         }
     }
 
@@ -408,6 +456,14 @@ struct SystemDetectedMessageBody: UIViewRepresentable {
     /// Keep the standard selection and Copy implementations, but make whole
     /// message selection available alongside copying a selected passage.
     final class MessageTextView: UITextView {
+        var onPlainTap: (() -> Void)?
+
+        override func accessibilityActivate() -> Bool {
+            guard let onPlainTap else { return super.accessibilityActivate() }
+            onPlainTap()
+            return true
+        }
+
         override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
             if action == #selector(selectAll(_:)) {
                 return hasText && selectedRange.length < (text as NSString).length
@@ -418,6 +474,14 @@ struct SystemDetectedMessageBody: UIViewRepresentable {
 
     func makeUIView(context: Context) -> UITextView {
         let textView = MessageTextView()
+        textView.onPlainTap = onPlainTap
+        if onPlainTap != nil {
+            let tap = UITapGestureRecognizer(target: context.coordinator,
+                action: #selector(Coordinator.plainTap(_:)))
+            tap.delegate = context.coordinator
+            tap.cancelsTouchesInView = false
+            textView.addGestureRecognizer(tap)
+        }
         textView.isEditable = false
         textView.isSelectable = true
         textView.dataDetectorTypes = .all
@@ -435,6 +499,7 @@ struct SystemDetectedMessageBody: UIViewRepresentable {
     }
 
     func updateUIView(_ textView: UITextView, context: Context) {
+        (textView as? MessageTextView)?.onPlainTap = onPlainTap
         let bodyFont = preferredBodyFont(for: textView)
         context.coordinator.updateText(text, bodyFont: bodyFont,
             foregroundColor: UIColor(foregroundColor), in: textView)

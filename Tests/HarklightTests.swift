@@ -30,7 +30,7 @@ private final class V2ScenePushTransport: ClientAPITransport, @unchecked Sendabl
     func advertiseHandoff(page: String) {
         lock.withLock { handoffFeature = true; handoffPage = page }
     }
-    private var focusScreens: [String] = []
+    private var focusPayloads: [JSONValue] = []
     private var fileReads: [String] = []
     private var showReads = 0
     private let holdShowLookup: AsyncStream<Void>?
@@ -41,7 +41,10 @@ private final class V2ScenePushTransport: ClientAPITransport, @unchecked Sendabl
 
     var showLookupCount: Int { lock.withLock { showReads } }
 
-    var reportedFocusScreens: [String] { lock.withLock { focusScreens } }
+    var reportedFocus: [JSONValue] { lock.withLock { focusPayloads } }
+    var reportedFocusScreens: [String] {
+        reportedFocus.compactMap { $0.uniqueValue(named: "screen")?.stringValue?.rawValue }
+    }
     var requestedFiles: [String] { lock.withLock { fileReads } }
 
     var counts: (opened: Int, closed: Int, batches: Int, entryReads: Int) {
@@ -65,9 +68,8 @@ private final class V2ScenePushTransport: ClientAPITransport, @unchecked Sendabl
         let body: String
         switch request.path {
         case "/v2/devices/me/focus":
-            if let data = request.body, let json = try? JSONValue.parse(data),
-               let screen = json.uniqueValue(named: "screen")?.stringValue?.rawValue {
-                lock.withLock { focusScreens.append(screen) }
+            if let data = request.body, let json = try? JSONValue.parse(data) {
+                lock.withLock { focusPayloads.append(json) }
             }
             body = "{}"
         case "/v2/me":
@@ -560,6 +562,72 @@ final class HarklightTests: XCTestCase {
         try await expect(["not_in_front", "inbox", "settings"])
         lifecycle.v2FocusScenePhaseChanged(.background)
         try await expect(["not_in_front", "inbox", "settings", "not_in_front"])
+        await lifecycle.deactivate()
+    }
+
+    @MainActor
+    func testFYIDetailFocusUsesOnlyTheActiveLiveProfile() async throws {
+        let liveIdentity = ProfileIdentity(trustedRelayAuthority: ExactText("live.example"),
+            personID: ExactText("person"), deviceID: ExactText("device"))
+        let active = ProfileContext(identity: liveIdentity, transportMode: .relay)
+        let repository = try ClientRepository(context: active, persistence: MemoryPendingActionPersistence())
+        let transport = V2ScenePushTransport()
+        let connection = try ClientAPIv2Connection(transport: transport, repository: repository,
+            context: active, directory: nil, errors: NoopErrorLog())
+        let reporter = NativeFocusReporter()
+        let lifecycle = NativeRelayLifecycle(v2FocusReporter: reporter)
+        let attempt = UUID()
+        lifecycle.installV2Connection(connection, context: active, attempt: attempt)
+        lifecycle.installV2FocusChannel(ClientAPIFocusChannel(transport: transport,
+            errors: NoopErrorLog()) { _, _ in }, attempt: attempt)
+        lifecycle.v2FocusScenePhaseChanged(.active)
+
+        let live = try LivePresentationStore(store: repository, context: active)
+        let archiveIdentity = ProfileIdentity(trustedRelayAuthority: ExactText("archive.example"),
+            personID: liveIdentity.personID, deviceID: liveIdentity.deviceID)
+        let archived = ProfileContext(identity: archiveIdentity, transportMode: .relay)
+        let archiveRepository = try ClientRepository(context: archived,
+            persistence: MemoryPendingActionPersistence())
+        let archive = try LivePresentationStore(disconnectedStore: archiveRepository, context: archived)
+        let obsolete = ProfileContext(identity: liveIdentity, transportMode: .relay)
+        let obsoleteRepository = try ClientRepository(context: obsolete,
+            persistence: MemoryPendingActionPersistence())
+        let obsoleteLive = try LivePresentationStore(store: obsoleteRepository, context: obsolete)
+        let key = RequestKey(accountScope: liveIdentity.personID, senderID: ExactText("sender"),
+                             messageID: ExactText("same-item"))
+
+        func expectFocus(_ report: FocusReport) async {
+            let count = transport.reportedFocus.count
+            reporter.selectionChanged(to: report)
+            XCTAssertEqual(reporter.currentFocus, report)
+            let deadline = ContinuousClock.now + .seconds(2)
+            while ContinuousClock.now < deadline {
+                if transport.reportedFocus.count > count, transport.reportedFocusScreens.last == report.screen.rawValue {
+                    break
+                }
+                try? await Task.sleep(for: .milliseconds(5))
+            }
+            let payload = transport.reportedFocus.last
+            XCTAssertGreaterThan(transport.reportedFocus.count, count)
+            XCTAssertEqual(payload?.uniqueValue(named: "screen")?.stringValue?.rawValue, report.screen.rawValue)
+            XCTAssertEqual(payload?.uniqueValue(named: "item_id")?.stringValue?.rawValue, report.messageID)
+        }
+
+        let item = FocusReport.message(senderID: "sender", messageID: "same-item")
+        let liveFocus = NativeFocusSelection.fyiDetailReport(for: key, in: live, relay: lifecycle)
+        XCTAssertEqual(liveFocus, item)
+        await expectFocus(liveFocus)
+
+        let archiveFocus = NativeFocusSelection.fyiDetailReport(for: key, in: archive, relay: lifecycle)
+        XCTAssertEqual(archiveFocus, .inbox)
+        await expectFocus(archiveFocus)
+        XCTAssertEqual(NativeFocusSelection.fyiDetailReport(for: key, in: obsoleteLive, relay: lifecycle), .inbox)
+
+        // The ordinary detail still reports its item; archive suppression is limited to FYIs.
+        await expectFocus(NativeFocusSelection.report(for: .request(key)))
+        live.enterReadOnlyMode()
+        XCTAssertEqual(NativeFocusSelection.fyiDetailReport(for: key, in: live, relay: lifecycle), .inbox)
+
         await lifecycle.deactivate()
     }
 
