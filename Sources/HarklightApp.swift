@@ -12,6 +12,15 @@ struct HarklightApp: App {
     @State private var showsRevokedText = false
     @State private var releaseNotes: ReleaseNotesPresentation
 
+    private var diagnosticsFixtureLaunch: NativeAppLaunch? {
+        #if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("--harklight-test-settings-diagnostics") {
+            return launch
+        }
+        #endif
+        return nil
+    }
+
     init() {
         HarklightTypography.configureNavigationTitles()
         let arguments = ProcessInfo.processInfo.arguments
@@ -119,7 +128,7 @@ struct HarklightApp: App {
                     case let .fixture(store):
                         if let presentation = store.presentationStore {
                             LiveContentView(store: presentation, samples: samples,
-                                            fixtureStore: store)
+                                            launch: diagnosticsFixtureLaunch, fixtureStore: store)
                         } else {
                             ContentUnavailableView(
                                 store.loadError ?? "The local example could not be opened.",

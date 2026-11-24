@@ -65,52 +65,37 @@ private func errorLogTime(_ date: Date) -> String {
     date.formatted(date: .abbreviated, time: .shortened)
 }
 
-/// The in-context failure for one surface: the newest unresolved failure of its
-/// concern, or "last failure <time> (resolved)" for 24 hours after recovery.
-/// Tapping opens selectable details with Copy details.
+/// A current failure and its recovery action. History and details live in Settings.
 struct ErrorLogContextBanner: View {
     let surface: ErrorLogSurface
     @Environment(\.errorLogModel) private var model
-    @State private var presented: ErrorLogRecord?
 
     var body: some View {
         if let model,
-           let status = ErrorLogDisplay.inContext(records: model.records, surface: surface, now: Date()) {
-            Button { presented = status.record } label: { label(for: status) }
-                .buttonStyle(.plain)
-                .accessibilityIdentifier("error-log-banner-\(status.record.concern.rawValue)")
-                .sheet(item: $presented) { record in
-                    NavigationStack { ErrorLogDetailsContent(record: record, showsDone: true) }
-                        .harklightSheetSurface()
-                }
-        }
-    }
-
-    @ViewBuilder
-    private func label(for status: ErrorLogContextStatus) -> some View {
-        let record = status.record
-        HStack(alignment: .top, spacing: 8) {
-            Image(systemName: record.concern.symbol)
-                .foregroundStyle(status.isFailing ? .hkCoral : .hkSecondary)
-            VStack(alignment: .leading, spacing: 2) {
-                switch status {
-                case .failing:
-                    Text(record.concern == .actions && record.code == APIErrorToken.internalError.rawValue
-                         ? "Delivery unconfirmed" : record.concern.failureTitle).font(.callout.weight(.semibold))
-                    Text("\(record.domain) \(record.code) · \(errorLogTime(record.lastAt)) · Tap for details")
-                        .font(.footnote).foregroundStyle(.hkSecondary)
-                case .resolved:
-                    Text("Last failure \(errorLogTime(record.lastAt)) (resolved)")
-                        .font(.footnote).foregroundStyle(.hkSecondary)
+           case let .failing(record)? = ErrorLogDisplay.inContext(
+               records: model.records, surface: surface, now: Date()) {
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: record.concern.symbol)
+                    .foregroundStyle(.hkCoral)
+                    .accessibilityHidden(true)
+                Text(record.concern == .actions && record.code == APIErrorToken.internalError.rawValue
+                     ? "Delivery unconfirmed" : record.concern.failureTitle)
+                    .font(.callout.weight(.semibold))
+                Spacer(minLength: 0)
+                if record.code == APIErrorToken.internalError.rawValue {
+                    Button("Try again") {
+                        Task { await NativeRelayLifecycle.shared.retryV2InternalError(record) }
+                    }
+                    .buttonStyle(.borderless)
                 }
             }
-            Spacer(minLength: 0)
+            .foregroundStyle(.hkText)
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.hkRaised, in: RoundedRectangle(cornerRadius: 10))
+            .padding(.horizontal, 12).padding(.top, 6)
+            .accessibilityIdentifier("error-log-banner-\(record.concern.rawValue)")
         }
-        .foregroundStyle(.hkText)
-        .padding(10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.hkRaised, in: RoundedRectangle(cornerRadius: 10))
-        .padding(.horizontal, 12).padding(.top, 6)
     }
 }
 
@@ -127,7 +112,10 @@ struct ErrorLogInboxBannerRows: View {
     }
 
     private func shows(_ surface: ErrorLogSurface, in model: ErrorLogModel) -> Bool {
-        ErrorLogDisplay.inContext(records: model.records, surface: surface, now: Date()) != nil
+        if case .failing? = ErrorLogDisplay.inContext(records: model.records, surface: surface, now: Date()) {
+            return true
+        }
+        return false
     }
 
     private func bannerRow(_ surface: ErrorLogSurface) -> some View {
@@ -138,17 +126,9 @@ struct ErrorLogInboxBannerRows: View {
     }
 }
 
-private extension ErrorLogContextStatus {
-    var isFailing: Bool {
-        if case .failing = self { return true }
-        return false
-    }
-}
-
 /// Selectable plain `key: value` text for one record, with Copy details.
 struct ErrorLogDetailsContent: View {
     let record: ErrorLogRecord
-    var showsDone = false
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -178,9 +158,6 @@ struct ErrorLogDetailsContent: View {
                         dismiss()
                     }
                 }
-            }
-            if showsDone {
-                ToolbarItem(placement: .confirmationAction) { HarklightDoneButton { dismiss() } }
             }
         }
     }

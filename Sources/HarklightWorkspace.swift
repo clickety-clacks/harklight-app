@@ -804,7 +804,6 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     @State private var preferredCompactColumn: NavigationSplitViewColumn = .sidebar
     @State private var splitPresentation = InboxSplitPresentation()
     @State private var relatedMessageNavigationPath: [RelatedMessageTarget] = []
-    @State private var isWarningPresented = false
     @State private var settings = false
     @State private var selectedTab: InboxMessageTab = .inbox
     @State private var workspaceTab: InboxWorkspaceTab = .inbox
@@ -834,13 +833,6 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         }
     }
 
-    private func warningPresentationBinding(for tab: InboxWorkspaceTab) -> Binding<Bool> {
-        Binding(
-            get: { workspaceTab == tab && isWarningPresented && !visibleWarnings.isEmpty },
-            set: { isWarningPresented = $0 }
-        )
-    }
-
     private var staleAnswerPresentation: Binding<Bool> {
         Binding(
             get: { conversationStore?.staleAnswerDialog != nil },
@@ -848,10 +840,6 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                 if !isPresented { conversationStore?.dismissStaleAnswerDialog() }
             }
         )
-    }
-
-    private func dismissWarningWhenCleared(_ warnings: [String]) {
-        if warnings.isEmpty { isWarningPresented = false }
     }
 
     /// On iPhone search filters only the Search tab's list; Inbox and Replied
@@ -1243,7 +1231,6 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                   newMessageAreaStore: conversationStore?.newMessageAreaStore,
                   replyItemAreaStore: conversationStore?.replyItemAreaStore,
                   openReplyItem: openReplyItem,
-                  isWarningPresented: warningPresentationBinding(for: tab),
                   selected: navigationSelection,
                       workspaceTab: $workspaceTab,
                       search: searching || usesListSearch ? $search : .constant(""),
@@ -1447,8 +1434,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                 }
                 if newRootTab != .search, !search.isEmpty { search = "" }
             }
-            .onChange(of: workspaceTab) { oldTab, newTab in
-                if oldTab != newTab { isWarningPresented = false }
+            .onChange(of: workspaceTab) { _, newTab in
                 selectedTab = newTab.messageTab
                 guard newTab != .inbox,
                       let route = activeNotificationNavigation, route.request == nil,
@@ -1468,9 +1454,6 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             }
             .onChange(of: workspaceTab) { _, tab in
                 if rootTab != .search { rootTab = tab.rootTab }
-            }
-            .onChange(of: visibleWarnings, initial: true) { _, newWarnings in
-                dismissWarningWhenCleared(newWarnings)
             }
             tabs
             .onChange(of: activeNotificationNavigation, initial: true) { _, route in
@@ -1619,7 +1602,6 @@ struct InboxList: View {
     let newMessageAreaStore: NewMessageAreaStore?
     let replyItemAreaStore: ReplyItemAreaStore?
     let openReplyItem: (RequestKey, ExactText?, UInt64?) -> Void
-    @Binding var isWarningPresented: Bool
     @Binding var selected: InboxSelection?
     @Binding var workspaceTab: InboxWorkspaceTab
     @Binding var search: String
@@ -1646,7 +1628,6 @@ struct InboxList: View {
     @State private var isUserScrolling = false
     @State private var requestedInGesture = false
     @State private var isFetchingOlderPage = false
-    @State private var warningContentHeight: CGFloat = 0
     @State private var expandedThreadGroups: Set<InboxListEntryID> = []
     @State private var isNewMessageAreaExpanded = false
     @State private var isProgressExpanded = false
@@ -2073,48 +2054,6 @@ struct InboxList: View {
         }
     }
 
-    @ViewBuilder
-    private var warningButton: some View {
-        if !warnings.isEmpty {
-            Button {
-                isWarningPresented = true
-            } label: {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .foregroundStyle(designPalette.secondary)
-                    .frame(width: 44, height: 44)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Warnings")
-            .accessibilityIdentifier("inbox-warning-button")
-            .popover(isPresented: $isWarningPresented) {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 12) {
-                        Label("Harklight warning", systemImage: "exclamationmark.triangle.fill")
-                            .font(.headline)
-                            .foregroundStyle(designPalette.secondary)
-                        ForEach(warnings.indices, id: \.self) { index in
-                            Text(warnings[index])
-                                .font(.body)
-                                .fixedSize(horizontal: false, vertical: true)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .accessibilityIdentifier("inbox-warning-message")
-                        }
-                    }
-                    .padding(16)
-                    .onGeometryChange(for: CGFloat.self) { proxy in
-                        proxy.size.height
-                    } action: { height in
-                        warningContentHeight = height
-                    }
-                }
-                .frame(width: 320,
-                       height: min(max(warningContentHeight, 88), 440))
-                .presentationCompactAdaptation(.popover)
-            }
-        }
-    }
-
     private var settingsButton: some View {
         Button(action: showSettings) {
             Label("Settings", systemImage: "gearshape")
@@ -2532,6 +2471,12 @@ struct InboxList: View {
         let shownAreaRows = isNewMessageAreaExpanded ? areaRows : Array(areaRows.prefix(5))
         List(selection: listSelection) {
             if tab == .inbox { ErrorLogInboxBannerRows() }
+            ForEach(warnings.indices, id: \.self) { index in
+                Text(warnings[index])
+                    .font(.footnote)
+                    .foregroundStyle(.hkSecondary)
+                    .accessibilityIdentifier("inbox-warning-message")
+            }
             if tab == .inbox, let route = notificationNavigation, route.request == nil {
                 let rowState = notificationPendingPresentation.flatMap {
                     $0.serial == route.serial ? $0.listRowState : nil
@@ -2694,7 +2639,6 @@ struct InboxList: View {
             .sharedBackgroundVisibility(.hidden)
             ToolbarItemGroup(placement: .topBarTrailing) {
                 settingsButton
-                warningButton
             }
         }
         .toolbarMinimizationBehavior(.onScrollDown, for: .navigationBar)
@@ -3398,7 +3342,7 @@ struct InboxSettings: View {
     var body: some View {
         NavigationStack {
             Form {
-                if let launch, launch.hasDiagnosticsToShow {
+                if let launch {
                     InboxDiagnosticsSettingsSection(launch: launch, closeSettings: { dismiss() })
                 }
                 ReleaseNotesSettingsSection(notes: HarklightReleaseNotes.settingsHistory(

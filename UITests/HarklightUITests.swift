@@ -167,20 +167,33 @@ final class HarklightUITests: XCTestCase {
                       "Reviewing the changed message returns to its answer control.\n\(app.debugDescription)")
     }
 
-    func testConnectionWarningButtonShowsPendingConnectionStatus() throws {
-        let app = launchFreshApp(additionalArguments: ["--harklight-test-connection-warning"])
-        let warningButton = app.buttons["inbox-warning-button"]
-        let message = app.staticTexts["inbox-warning-message"]
-        if message.waitForExistence(timeout: 1) {
-            app.coordinate(withNormalizedOffset: CGVector(dx: 0.05, dy: 0.10)).tap()
-            XCTAssertFalse(message.waitForExistence(timeout: 1), app.debugDescription)
-        }
-        XCTAssertTrue(warningButton.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(warningButton.isHittable, app.debugDescription)
-        warningButton.tap()
-        XCTAssertTrue(message.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertEqual(message.label, "Waiting for the server. Your pending actions are saved.")
-        attachScreenshot("Tapped connection warning shows pending status", from: app)
+    func testDiagnosticsDetailsAreAvailableOnlyThroughSettings() {
+        let app = launchFreshApp(additionalArguments: ["--harklight-test-settings-diagnostics"])
+        let status = app.staticTexts["Live updates paused"].firstMatch
+        XCTAssertTrue(status.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(app.buttons["Try again"].firstMatch.isHittable)
+        XCTAssertFalse(app.buttons["inbox-warning-button"].exists)
+        XCTAssertFalse(app.buttons["error-log-banner-sync"].exists)
+        XCTAssertFalse(app.staticTexts["error-log-details-text"].exists)
+
+        let settings = app.buttons["inbox-settings"].firstMatch
+        XCTAssertTrue(settings.isHittable)
+        XCTAssertEqual(settings.label, "Settings")
+        settings.tap()
+        let log = app.descendants(matching: .any)["error-log-open"].firstMatch
+        for _ in 0..<6 where !log.isHittable { app.swipeUp() }
+        XCTAssertTrue(log.isHittable, app.debugDescription)
+        XCTAssertTrue(log.label.contains("Error log"))
+        log.tap()
+        XCTAssertTrue(app.navigationBars["Error log"].waitForExistence(timeout: 5))
+
+        let record = app.descendants(matching: .any)["error-log-record"].firstMatch
+        XCTAssertTrue(record.waitForExistence(timeout: 5))
+        XCTAssertTrue(record.isHittable)
+        record.tap()
+        XCTAssertTrue(app.navigationBars["Error details"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["error-log-details-text"].label.contains("internal_error"))
+        XCTAssertTrue(app.buttons["error-log-copy-details"].exists)
     }
 
     func testVisibleSettingsAndChatTapsOpenTheirPanelsWhileWarningsArePresent() throws {
@@ -194,11 +207,9 @@ final class HarklightUITests: XCTestCase {
         }
 
         let app = launchFreshApp(additionalArguments: ["--harklight-test-connection-warning"])
-        let warning = app.staticTexts["inbox-warning-message"]
-        let warningButton = app.buttons["inbox-warning-button"]
-        XCTAssertTrue(warningButton.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertFalse(warning.waitForExistence(timeout: 1),
-                       "The warning stays available from its toolbar button without covering other actions.")
+        let warning = app.staticTexts["inbox-warning-message"].firstMatch
+        XCTAssertTrue(warning.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertFalse(app.buttons["inbox-warning-button"].exists)
         attachScreenshot("toolbar-actions-with-connection-warning", from: app)
         attachHierarchy("toolbar-actions-with-connection-warning-hierarchy", from: app)
 
@@ -343,7 +354,7 @@ final class HarklightUITests: XCTestCase {
         if !inbox.isSelected { inbox.tap() }
         XCTAssertTrue(inbox.isSelected,
                       "The Inbox tab remains available after the later accepted result.")
-        XCTAssertFalse(app.buttons["inbox-warning-button"].exists,
+        XCTAssertFalse(app.staticTexts["Submission unconfirmed · saved draft retained"].exists,
                        "A resolved send raises no unresolved-send warning.")
         attachScreenshot("Accepted answer removed from Inbox", from: app)
 
@@ -433,15 +444,11 @@ final class HarklightUITests: XCTestCase {
         XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(row.label.contains("Submission unconfirmed · saved draft retained"),
                       "A failed or unresolved send is shown on its Inbox row.")
-        let warningButton = app.buttons["inbox-warning-button"]
-        XCTAssertTrue(warningButton.waitForExistence(timeout: 5), app.debugDescription)
-        warningButton.tap()
-        XCTAssertTrue(message.waitForExistence(timeout: 5),
-                      "A send left without a confirmed result remains available in the Inbox warning.")
-        XCTAssertEqual(message.label,
-                       "Submission unconfirmed · saved draft retained",
-                       "The warning explains the unresolved send in plain language.")
-        attachScreenshot("Unresolved send warning opened from Inbox", from: app)
+        XCTAssertTrue(message.firstMatch.waitForExistence(timeout: 5),
+                      "The unresolved send status is visible in the Inbox.")
+        XCTAssertTrue(app.staticTexts.containing(
+            NSPredicate(format: "identifier == %@ AND label == %@",
+                        "inbox-warning-message", "Submission unconfirmed · saved draft retained")).firstMatch.exists)
     }
 
     func testFailedResponseDialogShowsCopyForVisibleSummaryAndDetail() throws {

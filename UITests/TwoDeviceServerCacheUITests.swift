@@ -312,7 +312,7 @@ final class TwoDeviceServerCacheUITests: XCTestCase {
         // focus, layout and refresh timing. Only disposable content is allowed.
         var lines = ["time=\(ISO8601DateFormatter().string(from: Date())) stage=\(stage)"]
         for identifier in ["inbox-refreshing-badge", "inbox-status-unrefreshed",
-                           "inbox-warning-button", "request-seen-action", "request-finish-seen",
+                           "inbox-warning-message", "request-seen-action", "request-finish-seen",
                            "request-finish", "inbox-mark-seen", "inbox-no-comment",
                            "inbox-list-diagnostics", "request-delivery-warning",
                            "request-action-error", "request-action-unavailable",
@@ -336,11 +336,6 @@ final class TwoDeviceServerCacheUITests: XCTestCase {
         }
         let back = workspaceBackButton(in: app)
         if back.exists && back.isHittable { back.tap() }
-        if app.buttons["inbox-warning-button"].isHittable {
-            app.buttons["inbox-warning-button"].tap()
-            snapshot("warning-text", app)
-            app.descendants(matching: .any)["inbox-brand"].firstMatch.tap()
-        }
         let settings = app.buttons["inbox-settings"]
         guard settings.isHittable else {
             print("DIAGNOSTIC_OBSERVATION_LIMIT settings_unreachable")
