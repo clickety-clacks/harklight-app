@@ -69,6 +69,7 @@ struct NativeRelayRefreshResult: Equatable, Sendable {
     struct ConnectivityFailure: Equatable, Sendable {
         let context: ProfileContext
         let transportAttemptID: UUID
+        let feed: ChangeFeedSync.FeedStatus
     }
 
     let relayConfirmed: Bool
@@ -1472,7 +1473,7 @@ final class NativeRelayLifecycle {
                 let connectivityFailure = attempt.flatMap { attempt in
                     reason.isConnectivityFailure
                         ? NativeRelayRefreshResult.ConnectivityFailure(
-                            context: context, transportAttemptID: attempt)
+                            context: context, transportAttemptID: attempt, feed: connection.sync.feedStatus)
                         : nil
                 }
                 let result = NativeRelayRefreshResult.failed(error: error, connectivityFailure: connectivityFailure)
@@ -1780,8 +1781,10 @@ final class NativeRelayLifecycle {
     }
 
     func didRecover(_ result: NativeRelayRefreshResult, for expected: ProfileContext) -> Bool {
-        guard let failure = result.connectivityFailure, failure.context == expected else { return false }
-        return hasOpenFeed(for: expected, attempt: failure.transportAttemptID)
+        guard let failure = result.connectivityFailure, failure.context == expected, context == expected,
+              activeTransportAttemptID == failure.transportAttemptID, let connection = v2Connection else { return false }
+        // A later feed drop cannot undo recovery of an earlier failure.
+        return failure.feed.isOpen || failure.feed.openingID != connection.sync.feedStatus.openingID
     }
 
     private func hasOpenFeed(for expected: ProfileContext, attempt: UUID) -> Bool {

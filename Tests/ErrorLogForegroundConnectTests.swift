@@ -140,6 +140,7 @@ extension ErrorLogForegroundConnectTests {
         defer {
             lifecycle.sceneActivityChanged(isActive: false)
             transport.feedEvents.finish()
+            transport.reopenedFeedEvents.finish()
             retry.finish()
         }
         try connection.model.apply([], cursor: 1)
@@ -188,6 +189,33 @@ extension ErrorLogForegroundConnectTests {
         XCTAssertEqual(Set(log.records.filter(\.isResolved).map(\.operation)),
                        ["catch_up", "change_feed", "foreground_connect"])
 
+        transport.failNextBatch()
+        let failedWhileOpen = await lifecycle.refreshResultFromTrustedRelay()
+        XCTAssertTrue(lifecycle.didRecover(failedWhileOpen, for: context))
+        transport.feedEvents.finish(throwing: URLError(.networkConnectionLost))
+        try await waitUntil { !connection.sync.hasOpenFeed && self.showsLiveUpdatesPaused(log) }
+        XCTAssertEqual(unresolvedSync(in: log), ["change_feed"])
+        XCTAssertTrue(lifecycle.didRecover(oldRefresh, for: context))
+        XCTAssertTrue(lifecycle.didRecover(failedWhileOpen, for: context))
+        XCTAssertNil(inbox.connectionWarning)
+        XCTAssertFalse(inbox.presentsConnectionFailure)
+        XCTAssertNil(launch.foregroundConnectFailureKey)
+
+        transport.failNextBatch()
+        let failedAfterDrop = await lifecycle.refreshResultFromTrustedRelay()
+        XCTAssertFalse(lifecycle.didRecover(failedAfterDrop, for: context))
+        XCTAssertNotNil(lifecycle.refreshFailureMessage(for: context))
+        XCTAssertEqual(unresolvedSync(in: log), ["catch_up", "change_feed"])
+
+        retry.yield(())
+        transport.reopenedFeedEvents.yield(.opened(requestID: "feed-reopened"))
+        try await waitUntil { self.unresolvedSync(in: log).isEmpty }
+        XCTAssertTrue(lifecycle.didRecover(failedAfterDrop, for: context))
+        XCTAssertNil(lifecycle.refreshFailureMessage(for: context))
+        XCTAssertNil(inbox.connectionWarning)
+        XCTAssertFalse(inbox.presentsConnectionFailure)
+        XCTAssertNil(launch.foregroundConnectFailureKey)
+
         // A stale .live from a replaced transport cannot clear even when the
         // current transport really is live.
         let replacementFailure = cancelledReplay(attempt: UUID(), transport: attempt)
@@ -198,12 +226,6 @@ extension ErrorLogForegroundConnectTests {
         XCTAssertEqual(launch.foregroundConnectFailureKey, replacementKey)
         XCTAssertFalse(inbox.presentsConnectionFailure)
         XCTAssertEqual(unresolvedSync(in: log), ["foreground_connect"])
-        transport.feedEvents.finish(throwing: URLError(.networkConnectionLost))
-        try await waitUntil { self.unresolvedSync(in: log).contains("change_feed") }
-        XCTAssertEqual(unresolvedSync(in: log), ["change_feed", "foreground_connect"])
-        XCTAssertTrue(showsLiveUpdatesPaused(log))
-        XCTAssertFalse(inbox.presentsConnectionFailure, "A drop cannot present the earlier dismissed attempt.")
-        XCTAssertFalse(lifecycle.didRecover(oldRefresh, for: context))
         await lifecycle.deactivate()
     }
 
@@ -306,8 +328,13 @@ private final class ReconnectingFeedTransport: ClientAPITransport, @unchecked Se
     private var failBatch = false
     private let feed: AsyncThrowingStream<FeedEvent, any Error>
     let feedEvents: AsyncThrowingStream<FeedEvent, any Error>.Continuation
+    private let reopenedFeed: AsyncThrowingStream<FeedEvent, any Error>
+    let reopenedFeedEvents: AsyncThrowingStream<FeedEvent, any Error>.Continuation
 
-    init() { (feed, feedEvents) = AsyncThrowingStream.makeStream() }
+    init() {
+        (feed, feedEvents) = AsyncThrowingStream.makeStream()
+        (reopenedFeed, reopenedFeedEvents) = AsyncThrowingStream.makeStream()
+    }
 
     func restoreRequests() { lock.withLock { online = true } }
     var successfulWrites: Int { lock.withLock { writes } }
@@ -340,7 +367,10 @@ private final class ReconnectingFeedTransport: ClientAPITransport, @unchecked Se
     }
 
     func changeFeed(after: Rev) -> AsyncThrowingStream<FeedEvent, any Error> {
-        lock.withLock { requestedFeed = true }
-        return feed
+        lock.withLock {
+            if requestedFeed { return reopenedFeed }
+            requestedFeed = true
+            return feed
+        }
     }
 }

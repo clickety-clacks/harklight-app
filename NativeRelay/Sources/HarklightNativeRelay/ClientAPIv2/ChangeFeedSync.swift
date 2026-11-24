@@ -47,8 +47,14 @@ public actor ChangeFeedSync {
     static let feedOperation = "change_feed"
     public static let catchUpOperation = "catch_up"
 
-    private let openFeed = OSAllocatedUnfairLock(initialState: false)
-    public nonisolated var hasOpenFeed: Bool { openFeed.withLock { $0 } }
+    public struct FeedStatus: Equatable, Sendable {
+        public fileprivate(set) var isOpen = false
+        public fileprivate(set) var openingID: UUID?
+    }
+
+    private let feedStatusLock = OSAllocatedUnfairLock(initialState: FeedStatus())
+    public nonisolated var feedStatus: FeedStatus { feedStatusLock.withLock { $0 } }
+    public nonisolated var hasOpenFeed: Bool { feedStatus.isOpen }
 
     private var foregroundAttempt: Task<FeedEnd, Never>?
     private var internalError: APIError?
@@ -199,7 +205,7 @@ public actor ChangeFeedSync {
 
     private func followFeedOnce() async -> FeedEnd {
         feedRequestID = nil
-        defer { openFeed.withLock { $0 = false } }
+        defer { feedStatusLock.withLock { $0.isOpen = false } }
         let after: Position
         do {
             after = try await startingPosition()
@@ -225,7 +231,10 @@ public actor ChangeFeedSync {
                 case let .opened(requestID):
                     openedThisRound = true
                     feedRequestID = requestID
-                    openFeed.withLock { $0 = true }
+                    feedStatusLock.withLock {
+                        $0.isOpen = true
+                        $0.openingID = UUID()
+                    }
                     liveState = .live
                     errors.resolve(concern: .sync, operation: Self.feedOperation)
                 case .heartbeat:
