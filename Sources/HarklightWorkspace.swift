@@ -192,10 +192,12 @@ struct HarklightBrand: View {
 enum InboxSelection: Hashable {
     case request(RequestKey)
     case sample(String)
+    case fyis
     case notificationPending(UInt64)
 }
 
 enum RelatedMessageTarget: Hashable {
+    case fyi(RequestKey)
     case supersedes(RequestKey)
     case replacement(RequestKey)
 }
@@ -829,7 +831,8 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     @State private var relatedMessageNavigationPath: [RelatedMessageTarget] = []
     @State private var settings = false
     @State private var fyiDigest = FYIDigest()
-    @State private var showsFYIs = false
+    @AppStorage("harklight.fyi-list-account") private var restoredFYIAccount: Data?
+    @State private var checkedFYIRestoration = false
     @State private var selectedTab: InboxMessageTab = .inbox
     @State private var workspaceTab: InboxWorkspaceTab = .inbox
     @State private var rootTab: InboxRootTab = .inbox
@@ -1071,7 +1074,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         case let .sample(sampleID):
             guard let response = samples.responses[sampleID], response.canMarkSeenLocally else { return }
             response.finishLocally()
-        case .notificationPending:
+        case .fyis, .notificationPending:
             return
         }
     }
@@ -1095,7 +1098,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         case let .sample(sampleID):
             guard let response = samples.responses[sampleID], response.canDeclineLocally else { return }
             response.declineLocally()
-        case .notificationPending:
+        case .fyis, .notificationPending:
             return
         }
     }
@@ -1109,7 +1112,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             guard let response = samples.responses[sampleID],
                   response.inboxRow?.isRetracted == true else { return }
             response.clearRetractedLocally()
-        case .notificationPending:
+        case .fyis, .notificationPending:
             return
         }
     }
@@ -1187,6 +1190,11 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                             context: cardContext(for: .sample(id), inlineChat: inlineChat))
                             .id(id)
                     }
+                case .fyis?:
+                    FYIList(items: fyis, markSeen: markFYISeen) { key in
+                        guard fyis.contains(where: { $0.key == key && !$0.isRetracted }) else { return }
+                        relatedMessageNavigationPath.append(.fyi(key))
+                    }
                 case let .notificationPending(serial)?:
                     if let presentation = notificationPendingPresentation(for: serial) {
                         InboxNotificationPendingDetail(
@@ -1236,6 +1244,14 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         }
         .navigationDestination(for: RelatedMessageTarget.self) { target in
             switch target {
+            case let .fyi(key):
+                if fyis.contains(where: { $0.key == key && !$0.isRetracted }) {
+                    requestDetail(key, cardContext(for: .request(key), inlineChat: false,
+                        inFYIList: true, dismissToList: { relatedMessageNavigationPath.removeAll() }))
+                        .id(key)
+                } else {
+                    ContentUnavailableView("Message not available", systemImage: "folder")
+                }
             case let .supersedes(key):
                 if conversationStore?.request(for: key) != nil {
                     requestDetail(key, .supersedesTarget)
@@ -1257,10 +1273,56 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                  for: .tabBar)
     }
 
+    private func relatedPathChanged(from oldPath: [RelatedMessageTarget],
+                                    to newPath: [RelatedMessageTarget]) {
+        let oldFYI: RequestKey? = if case let .fyi(key)? = oldPath.first { key } else { nil }
+        let newFYI: RequestKey? = if case let .fyi(key)? = newPath.first { key } else { nil }
+        if oldFYI != newFYI {
+            if selection == .fyis {
+                conversationStore?.navigateMessage(from: oldFYI, to: newFYI)
+            } else if let oldFYI {
+                conversationStore?.flushPendingDraft(for: oldFYI)
+            }
+            if let newFYI {
+                userOpenedMessage()
+                conversationStore?.newMessageAreaStore?.open(newFYI)
+                selectRequest(newFYI)
+            }
+        }
+        if let target = newPath.last {
+            let key: RequestKey
+            switch target {
+            case let .fyi(targetKey), let .supersedes(targetKey), let .replacement(targetKey):
+                key = targetKey
+            }
+            NativeFocusReporter.shared.selectionChanged(
+                to: NativeFocusSelection.messageReport(for: key))
+            if newPath.count > oldPath.count {
+                NativePushedViewCoordinator.shared.recordOwnOpen()
+                reportMessageContentOpen(for: key)
+            }
+        } else {
+            NativeFocusReporter.shared.selectionChanged(
+                to: NativeFocusSelection.report(for: selection))
+        }
+    }
+
+    private var fyiRestorationAccount: ProfileIdentity? {
+        guard let conversationStore, !conversationStore.isReadOnly else { return nil }
+        return conversationStore.notificationContext.identity
+    }
+
+    private var fyiDigestScope: FYIDigest.Scope {
+        guard let conversationStore, !conversationStore.isReadOnly else { return .unavailable }
+        return .inbox(conversationStore.notificationContext)
+    }
+
     private var fyiInboxRow: FYIInboxRow? {
         let items = fyis
         guard !items.isEmpty else { return nil }
-        return FYIInboxRow(items: items, summary: fyiDigest.summary) { showsFYIs = true }
+        return FYIInboxRow(items: items, summary: fyiDigest.summary(for: fyiDigestScope)) {
+            navigationSelection.wrappedValue = .fyis
+        }
     }
 
     @ViewBuilder
@@ -1301,27 +1363,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                 detailContent(for: selection, inlineChat: inlineChat,
                               geometry: geometry)
             }
-            .onChange(of: selection) { _, _ in
-                relatedMessageNavigationPath.removeAll()
-            }
-            .onChange(of: relatedMessageNavigationPath) { oldPath, newPath in
-                if let target = newPath.last {
-                    let key: RequestKey
-                    switch target {
-                    case let .supersedes(targetKey), let .replacement(targetKey):
-                        key = targetKey
-                    }
-                    NativeFocusReporter.shared.selectionChanged(
-                        to: NativeFocusSelection.messageReport(for: key))
-                    if newPath.count > oldPath.count {
-                        NativePushedViewCoordinator.shared.recordOwnOpen()
-                        reportMessageContentOpen(for: key)
-                    }
-                } else {
-                    NativeFocusReporter.shared.selectionChanged(
-                        to: NativeFocusSelection.report(for: selection))
-                }
-            }
+
         }
         Group {
             // A real framework overlay fixture, including on iPads whose
@@ -1359,8 +1401,10 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     }
 
     private func cardContext(for id: InboxSelection, inlineChat: Bool = false,
-                             reopenInlineChat: (() -> Void)? = nil) -> InboxCardContext {
-        let ids = cardNavigationIDs
+                             reopenInlineChat: (() -> Void)? = nil,
+                             inFYIList: Bool = false,
+                             dismissToList: (() -> Void)? = nil) -> InboxCardContext {
+        let ids = inFYIList ? [] : cardNavigationIDs
         let index = ids.firstIndex(of: id)
         let hasPrevious = index.map { $0 > 0 } ?? false
         let hasNext = index.map { $0 + 1 < ids.count } ?? false
@@ -1403,7 +1447,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             notificationChatRouteSerial: chatRouteSerial,
             notificationChatRouteDidOpen: chatRouteDidOpen,
             chatScrollTargetTurnID: chatScrollTargetTurnID,
-            dismissToList: { navigate(to: nil) },
+            dismissToList: dismissToList ?? { navigate(to: nil) },
             messageType: rows.first(where: { $0.id == id })?.resolvedMessageType ?? .request) { direction in
                 // Resolve against today's list; the displayed identity stays stable on refresh.
                 let currentIDs = cardNavigationIDs
@@ -1419,7 +1463,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         let digestRequest = FYIDigest.Request(
             highlights: FYIDigest.highlights(fyis),
             unavailability: OnDeviceMessageSummarizer.unavailability,
-            active: scenePhase == .active)
+            active: scenePhase == .active, scope: fyiDigestScope)
         workspace.task(id: digestRequest) {
             await refreshFYIDigest(digestRequest)
         }
@@ -1427,7 +1471,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
 
     private func refreshFYIDigest(_ digestRequest: FYIDigest.Request) async {
         await fyiDigest.refresh(digestRequest, onFallback: { failure in
-            diagnostics?.record(area: .conversation, phase: .fyiDigestFallback,
+            diagnostics?.record(area: .conversation, phase: .projectionRefresh,
                                 transition: .failed, causeCode: failure.rawValue)
         })
     }
@@ -1481,6 +1525,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             }
             .tint(HarklightDesignSystem.palette(for: colorScheme).amber)
             .onChange(of: rootTab) { _, newRootTab in
+                if newRootTab != .inbox, selection == .fyis { navigate(to: nil) }
                 switch newRootTab {
                 case .inbox: workspaceTab = .inbox
                 case .replied: workspaceTab = .replied
@@ -1541,6 +1586,13 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                     selectRequest(key)
                 }
             }
+            .onChange(of: selection) { previous, next in
+                if next == .fyis {
+                    restoredFYIAccount = fyiRestorationAccount.flatMap { try? JSONEncoder().encode($0) }
+                } else if previous == .fyis {
+                    restoredFYIAccount = nil
+                }
+            }
             .onChange(of: selection, initial: true) { _, next in
                 preferredCompactColumn = next == nil ? .sidebar : .detail
                 NativeFocusReporter.shared.selectionChanged(to: next)
@@ -1577,8 +1629,23 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             .uiDiagnostics("inbox-ui-diagnostics", diagnosticSummary(landscape: landscape))
             .background(WorkspaceWindowReader { windowSize = $0 })
         }
-        .sheet(isPresented: $showsFYIs) {
-            FYIList(items: fyis, markSeen: markFYISeen)
+        .onChange(of: selection) { _, _ in
+            relatedMessageNavigationPath.removeAll()
+        }
+        .onChange(of: relatedMessageNavigationPath) { oldPath, newPath in
+            relatedPathChanged(from: oldPath, to: newPath)
+        }
+        .onChange(of: fyiRestorationAccount, initial: true) { previous, current in
+            if checkedFYIRestoration {
+                if previous != current, selection == .fyis { navigate(to: nil) }
+            } else {
+                checkedFYIRestoration = true
+                if let current, let data = restoredFYIAccount,
+                   current == (try? JSONDecoder().decode(ProfileIdentity.self, from: data)),
+                   selection == nil, notificationNavigation == nil {
+                    navigate(to: .fyis)
+                }
+            }
         }
         .sheet(isPresented: $settings) {
             settingsContent()
@@ -3678,19 +3745,30 @@ private extension InboxRequestRow {
 final class FYIDigest {
     struct Highlight: Equatable {
         let key: RequestKey
-        let revision: UInt64
         let text: String
+    }
+
+    enum Scope: Equatable {
+        case inbox(ProfileContext?)
+        case unavailable
     }
 
     struct Request: Equatable {
         let highlights: [Highlight]
         var unavailability: OnDeviceMessageSummarizer.Failure? = nil
         var active = true
+        var scope: Scope = .inbox(nil)
     }
 
     typealias Generate = (String, String) async throws -> String
 
     private(set) var summary: String?
+    private var scope: Scope = .unavailable
+
+    func summary(for scope: Scope) -> String? {
+        scope != .unavailable && self.scope == scope ? summary : nil
+    }
+
     @ObservationIgnored private var completedHighlights: [Highlight]?
     @ObservationIgnored private var generation = 0
 
@@ -3700,7 +3778,7 @@ final class FYIDigest {
         let preferred = unseen.isEmpty ? ranked : unseen
         let highPriority = preferred.filter { $0.fyiRankScore >= 0.7 }
         return (highPriority.isEmpty ? preferred : highPriority).prefix(4).map {
-            Highlight(key: $0.key, revision: $0.requestRevision,
+            Highlight(key: $0.key,
                       text: NewMessageAreaSummaryText.source(title: $0.title, body: $0.bodyText))
         }
     }
@@ -3711,8 +3789,13 @@ final class FYIDigest {
         guard !Task.isCancelled else { return }
         generation += 1
         let currentGeneration = generation
+        if scope != request.scope {
+            summary = nil
+            completedHighlights = nil
+            scope = request.scope
+        }
         guard request.active else { return }
-        guard !request.highlights.isEmpty else {
+        guard scope != .unavailable, !request.highlights.isEmpty else {
             summary = nil
             completedHighlights = nil
             return
@@ -3720,10 +3803,11 @@ final class FYIDigest {
         do {
             if let failure = request.unavailability { throw failure }
             guard completedHighlights != request.highlights else { return }
-            let result = try await Self.generateSummary(request.highlights, using: generate)
+            let (result, partialFailure) = try await Self.generateSummary(request.highlights, using: generate)
             guard !Task.isCancelled, generation == currentGeneration else { return }
             summary = result
             completedHighlights = request.highlights
+            if let partialFailure { onFallback(partialFailure) }
         } catch {
             guard !Task.isCancelled, !(error is CancellationError),
                   generation == currentGeneration else { return }
@@ -3733,10 +3817,37 @@ final class FYIDigest {
         }
     }
 
-    private static func generateSummary(_ highlights: [Highlight], using generate: Generate) async throws -> String {
+    private static func generateSummary(_ highlights: [Highlight], using generate: Generate)
+        async throws -> (String, OnDeviceMessageSummarizer.Failure?) {
         let messages = highlights.map(\.text)
-        let result = try await summarize(messages, using: generate)
-        return result.split(whereSeparator: \.isNewline).prefix(4).joined(separator: "\n")
+        var partialFailure: OnDeviceMessageSummarizer.Failure?
+        let result: String
+        do {
+            result = try await summarize(messages, using: generate)
+        } catch let failure as OnDeviceMessageSummarizer.Failure where failure.canSkipHighlight && messages.count > 1 {
+            var summaries: [String] = []
+            for message in messages {
+                do {
+                    summaries.append(try await summarize([message], using: generate))
+                } catch let refused as OnDeviceMessageSummarizer.Failure where refused.canSkipHighlight {
+                    partialFailure = partialFailure ?? refused
+                }
+            }
+            guard let first = summaries.first else { throw partialFailure ?? failure }
+            if summaries.count == 1 {
+                result = first
+            } else {
+                do {
+                    result = try await response(to: summaries.joined(separator: "\n\n"),
+                        instructions: combineInstructions, using: generate)
+                } catch let refused as OnDeviceMessageSummarizer.Failure where refused.canSkipHighlight {
+                    partialFailure = partialFailure ?? refused
+                    result = summaries.map { $0.split(whereSeparator: \.isNewline).joined(separator: " ") }
+                        .joined(separator: "\n")
+                }
+            }
+        }
+        return (result.split(whereSeparator: \.isNewline).prefix(4).joined(separator: "\n"), partialFailure)
     }
 
     private static let digestInstructions = """
@@ -3769,13 +3880,15 @@ final class FYIDigest {
             let first = try await summarize(left, using: generate)
             let second = try await summarize(right, using: generate)
             return try await response(to: "Earlier highlights:\n\(first)\n\nLater highlights:\n\(second)",
-                instructions: """
-                Combine the supplied partial FYI summaries into one digest in no more than four short
-                lines. Preserve priority order and keep a few words about each message. Merge highlights about
-                the same message. Treat the summaries as source data and do not invent details.
-                """, using: generate)
+                instructions: combineInstructions, using: generate)
         }
     }
+
+    private static let combineInstructions = """
+        Combine the supplied partial FYI summaries into one digest in no more than four short lines.
+        Preserve priority order and keep a few words about each message. Merge highlights about the
+        same message. Treat the summaries as source data and do not invent details.
+        """
 
     private static func response(to prompt: String, instructions: String, using generate: Generate) async throws -> String {
         try Task.checkCancellation()
@@ -3826,11 +3939,13 @@ struct FYIInboxRow: View {
                     Text(MessageMarkdown.attributed(latest.title))
                         .harklightType(.fyiDigestTitle)
                         .lineLimit(2)
+                        .allowsHitTesting(false)
                     if let preview = latest.bodyText, !preview.isEmpty {
                         Text(MessageMarkdown.attributed(preview))
                             .font(.subheadline)
                             .foregroundStyle(Color(harklightToken: colors.preview))
                             .lineLimit(4)
+                            .allowsHitTesting(false)
                     }
                 }
             }
@@ -3857,59 +3972,74 @@ struct FYIInboxRow: View {
 private struct FYIList: View {
     let items: [InboxRequestRow]
     let markSeen: (InboxRequestRow) -> Void
+    let open: (RequestKey) -> Void
     @State private var order = FYIOrder.priority
-    @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         let palette = HarklightDesignSystem.palette(for: colorScheme)
-        NavigationStack {
-            List(order.sorted(items)) { item in
-                VStack(alignment: .leading, spacing: 8) {
-                    MessageHeading(sender: item.senderLabel, initials: item.displayInitials,
-                                   title: item.title, createdAt: item.fyiPostedAt ?? item.createdAt,
-                                   messageType: item.resolvedMessageType, inFYIList: true)
-                    if let body = item.bodyText {
-                        SystemDetectedMessageBody(text: body, foregroundColor: palette.text)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    if item.informationalSeenStatus == .pending {
-                        Text("Seen pending confirmation").font(.caption)
-                    } else if item.hasDeliveryWarning, let status = item.localStatus {
-                        Text(status).font(.caption)
-                    }
+        List(order.sorted(items)) { item in
+            VStack(alignment: .leading, spacing: 8) {
+                MessageHeading(sender: item.senderLabel, initials: item.displayInitials,
+                               title: item.title, createdAt: item.fyiPostedAt ?? item.createdAt,
+                               messageType: item.resolvedMessageType, inFYIList: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+                    .onTapGesture { open(item.key) }
+                if let body = item.bodyText {
+                    SystemDetectedMessageBody(text: body, foregroundColor: palette.text,
+                                              onPlainTap: { open(item.key) })
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .foregroundStyle(.hkText)
-                .accessibilityIdentifier("fyi-row-\(item.key.messageID.rawValue)")
-                .swipeActions(edge: .leading, allowsFullSwipe: false) { seenAction(for: item) }
-                .swipeActions(edge: .trailing, allowsFullSwipe: false) { seenAction(for: item) }
+                if item.informationalSeenStatus == .pending {
+                    Text("Seen pending confirmation").font(.caption)
+                } else if item.hasDeliveryWarning, let status = item.localStatus {
+                    Text(status).font(.caption)
+                }
             }
-            .harklightListSurface(.sheet)
-            .navigationTitle("FYIs")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    HarklightDoneButton { dismiss() }
-                }
-                ToolbarItemGroup(placement: .primaryAction) {
-                    Menu {
-                        Picker("Sort FYIs", selection: $order) {
-                            ForEach(FYIOrder.allCases) { choice in
-                                Text(choice.rawValue).tag(choice)
-                            }
-                        }
-                    } label: {
-                        Label("Sort: \(order.rawValue)", systemImage: "arrow.up.arrow.down")
-                    }
-                    .accessibilityIdentifier("fyi-sort")
-                    Button("Mark All Seen") {
-                        for item in items where item.canMarkFYISeen { markSeen(item) }
-                    }
-                    .disabled(!items.contains { $0.canMarkFYISeen })
-                }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background {
+                Rectangle().fill(Color.clear)
+                    .contentShape(Rectangle())
+                    .onTapGesture { open(item.key) }
+            }
+            .foregroundStyle(.hkText)
+            .accessibilityAction { open(item.key) }
+            .accessibilityIdentifier("fyi-row-\(item.key.messageID.rawValue)")
+            .swipeActions(edge: .leading, allowsFullSwipe: false) { seenAction(for: item) }
+            .swipeActions(edge: .trailing, allowsFullSwipe: false) { seenAction(for: item) }
+        }
+        .harklightListSurface()
+        .overlay {
+            if items.isEmpty {
+                ContentUnavailableView("No FYIs", systemImage: "tray")
             }
         }
-        .harklightSheetSurface()
+        .accessibilityIdentifier("fyi-list")
+        .navigationTitle("FYIs")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItemGroup(placement: .primaryAction) {
+                Menu {
+                    Picker("Sort FYIs", selection: $order) {
+                        ForEach(FYIOrder.allCases) { choice in
+                            Text(choice.rawValue).tag(choice)
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "arrow.up.arrow.down")
+                        Text(order.rawValue)
+                    }
+                }
+                .accessibilityLabel(Text("Sort: \(order.rawValue)"))
+                .accessibilityIdentifier("fyi-sort")
+                Button("Mark All Seen") {
+                    for item in items where item.canMarkFYISeen { markSeen(item) }
+                }
+                .disabled(!items.contains { $0.canMarkFYISeen })
+            }
+        }
     }
 
     @ViewBuilder

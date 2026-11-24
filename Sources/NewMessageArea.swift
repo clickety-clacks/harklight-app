@@ -387,6 +387,10 @@ enum OnDeviceMessageSummarizer {
         case concurrentRequests = "model_concurrent_requests"
         case emptyOutput = "model_empty_output"
         case generationFailed = "model_generation_failed"
+
+        var canSkipHighlight: Bool {
+            self == .guardrail || self == .unsupportedLanguage || self == .contextTooLong
+        }
     }
 
     // Reading this in a SwiftUI body tracks the observable system model.

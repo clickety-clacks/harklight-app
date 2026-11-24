@@ -29,7 +29,7 @@ struct HarklightApp: App {
         let isReleaseNotesUITest = ProcessInfo.processInfo.environment["HARKLIGHT_RELEASE_NOTES_UI_TEST"] == "1"
         #if DEBUG
         let isReferenceOrFixtureRun = !isReleaseNotesUITest && (arguments.contains("--reset-attention-fixture") ||
-            arguments.contains("--attention-fixture") ||
+            arguments.contains("--attention-fixture") || arguments.contains("--harklight-test-fyi-list") ||
             arguments.contains("--harklight-tier-reference"))
         #else
         let isReferenceOrFixtureRun = false

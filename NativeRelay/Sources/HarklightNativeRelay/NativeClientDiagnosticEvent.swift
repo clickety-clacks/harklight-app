@@ -31,7 +31,6 @@ public enum NativeDiagnosticPhase: String, Codable, Sendable {
     case messageOpen
     case conversationReplay
     case conversationReadPosition
-    case fyiDigestFallback
     case acknowledgement
     case pushRegistration
     case originalOperationDelivery

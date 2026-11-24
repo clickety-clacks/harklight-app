@@ -227,7 +227,8 @@ public enum ServerModelV2Projection {
             guard let key = keys[item.itemID] else { return nil }
             return InboxViewEntry(key: key, priority: Self.priority(item.rank.level),
                                   score: item.rank.score.flatMap { Double($0.lexeme) },
-                                  dueAtMilliseconds: item.rank.dueAtMs.map { Int($0) })
+                                  dueAtMilliseconds: item.rank.dueAtMs.map { Int($0) },
+                                  itemCreatedAtMilliseconds: item.createdAtMs, itemSeen: item.seen)
         }
         // Item rows and unread-reply rows share Rank.key's space.
         var rows: [(sortKey: [UInt8], item: InboxViewListItem)] = []

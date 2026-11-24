@@ -332,19 +332,24 @@ public struct InboxViewEntry: Equatable, Codable, Sendable {
     public let thread: ExactText?
     public let dueAtMilliseconds: Int?
     public let reason: ExactText?
+    public let itemCreatedAtMilliseconds: UInt64?
+    public let itemSeen: Bool?
 
     public init(key: RequestKey,
                 priority: InboxMessagePriority? = nil,
                 score: Double? = nil,
                 thread: ExactText? = nil,
                 dueAtMilliseconds: Int? = nil,
-                reason: ExactText? = nil) {
+                reason: ExactText? = nil,
+                itemCreatedAtMilliseconds: UInt64? = nil, itemSeen: Bool? = nil) {
         self.key = key
         self.priority = priority
         self.score = score
         self.thread = thread
         self.dueAtMilliseconds = dueAtMilliseconds
         self.reason = reason
+        self.itemCreatedAtMilliseconds = itemCreatedAtMilliseconds
+        self.itemSeen = itemSeen
     }
 }
 

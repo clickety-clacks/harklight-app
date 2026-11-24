@@ -166,6 +166,7 @@ struct InboxListColumnCaptureHost: View {
         switch selected {
         case let .request(key): return key.messageID.rawValue
         case let .sample(id): return "sample:\(id)"
+        case .fyis: return "fyis"
         case let .notificationPending(serial): return "notification-pending:\(serial)"
         }
     }

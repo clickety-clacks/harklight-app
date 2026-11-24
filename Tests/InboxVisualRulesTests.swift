@@ -96,7 +96,7 @@ final class InboxVisualRulesTests: XCTestCase {
     }
 
     @MainActor
-    func testDigestMakesOneCallAndFallsBackWhenItFails() async {
+    func testDigestFallsBackWhenTheModelRefusesAllHighlights() async {
         let digest = FYIDigest()
         let request = FYIDigest.Request(highlights: FYIDigest.highlights([fyiRow("Garden"), fyiRow("Museum")]))
         var calls: [String] = []
@@ -105,7 +105,7 @@ final class InboxVisualRulesTests: XCTestCase {
             calls.append(text)
             throw OnDeviceMessageSummarizer.Failure.guardrail
         }, onFallback: { failures.append($0) })
-        XCTAssertEqual(calls.count, 1)
+        XCTAssertEqual(calls.count, 3)
         XCTAssertTrue(calls.first?.contains("Garden") == true)
         XCTAssertTrue(calls.first?.contains("Museum") == true)
         XCTAssertNil(digest.summary)
@@ -207,13 +207,96 @@ final class InboxVisualRulesTests: XCTestCase {
         let journal = NativeClientDiagnosticJournal(fileURL: nil)
         let request = FYIDigest.Request(highlights: FYIDigest.highlights([fyiRow("Garden")]))
         await digest.refresh(request, using: { _, _ in "   " }, onFallback: { failure in
-            journal.record(area: .conversation, phase: .fyiDigestFallback,
+            journal.record(area: .conversation, phase: .projectionRefresh,
                            transition: .failed, causeCode: failure.rawValue)
         })
         XCTAssertEqual(journal.events.map(\.causeCode), ["model_empty_output"])
         XCTAssertNil(digest.summary)
         await digest.refresh(request, using: { _, _ in "One\nTwo\nThree\nFour\nFive" })
         XCTAssertEqual(digest.summary, "One\nTwo\nThree\nFour")
+    }
+
+    @MainActor
+    func testDigestDoesNotCacheAcrossAccountViews() async {
+        let digest = FYIDigest()
+        let highlights = FYIDigest.highlights([fyiRow("Garden")])
+        func scope(_ account: String) -> FYIDigest.Scope {
+            .inbox(ProfileContext(identity: ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                personID: ExactText(account), deviceID: ExactText("device")), transportMode: .relay))
+        }
+        let firstScope = scope("first")
+        let secondScope = scope("second")
+        await digest.refresh(.init(highlights: highlights, scope: firstScope),
+                             using: { _, _ in "First account summary" })
+        XCTAssertEqual(digest.summary(for: firstScope), "First account summary")
+        XCTAssertNil(digest.summary(for: secondScope))
+        XCTAssertNil(digest.summary(for: .unavailable))
+        await digest.refresh(.init(highlights: highlights, scope: .unavailable),
+                             using: { _, _ in XCTFail("Read-only inbox must not generate"); return "" })
+        XCTAssertNil(digest.summary(for: firstScope))
+    }
+
+    @MainActor
+    func testDigestKeepsOtherHighlightsWhenOneMessageIsRefused() async {
+        let digest = FYIDigest()
+        let request = FYIDigest.Request(highlights: FYIDigest.highlights([fyiRow("Garden"), fyiRow("Museum")]))
+        var failures: [OnDeviceMessageSummarizer.Failure] = []
+        await digest.refresh(request, using: { text, _ in
+            if text.contains("Garden") { throw OnDeviceMessageSummarizer.Failure.unsupportedLanguage }
+            return "Museum open late."
+        }, onFallback: { failures.append($0) })
+        XCTAssertEqual(digest.summary, "Museum open late.")
+        XCTAssertEqual(failures, [.unsupportedLanguage])
+    }
+
+    @MainActor
+    func testUnrelatedChangesDoNotRegenerateDigest() async {
+        let digest = FYIDigest()
+        let first = fyiRow("Garden")
+        var second = fyiRow("Museum")
+        await digest.refresh(.init(highlights: FYIDigest.highlights([first, second])),
+                             using: { _, _ in "Summary" })
+        second.requestRevision += 1
+        second.hasDeliveryWarning = true
+        await digest.refresh(.init(highlights: FYIDigest.highlights([second, first])),
+                             using: { _, _ in XCTFail("The selected text and priority order are unchanged"); return "" })
+        XCTAssertEqual(digest.summary, "Summary")
+    }
+
+    @MainActor
+    func testCachedFYIsUseMetadataAcrossPagesWhenRelayIsDetached() throws {
+        let rows = try NativeAppLaunch.makeFYITestStore().inboxRows
+        let garden = try XCTUnwrap(rows.first { $0.title == "Community garden" })
+        let museum = try XCTUnwrap(rows.first { $0.title == "Museum hours" })
+        XCTAssertFalse(rows.contains { $0.key.messageID == ExactText("gone") })
+        XCTAssertEqual(garden.key.messageID.rawValue, "legacy/fyi-garden")
+        XCTAssertEqual(museum.key.messageID.rawValue, "i-204")
+        XCTAssertEqual(garden.key.senderID.rawValue, "app:fixture/community")
+        XCTAssertEqual(museum.key.senderID.rawValue, "fixture:community")
+        XCTAssertEqual(garden.fyiPriorityScore, 0.9)
+        XCTAssertEqual(museum.fyiPriorityScore, 0.5)
+        XCTAssertEqual(garden.fyiServerSeen, false)
+        XCTAssertEqual(FYIOrder.priority.sorted(rows).map(\.key), [garden.key, museum.key])
+        XCTAssertEqual(FYIOrder.posted.sorted(rows).map(\.key), [museum.key, garden.key])
+    }
+
+    @MainActor
+    func testProgressFYIWithAnExplicitSeenResponseHasNoEligibleSeenWrite() throws {
+        let store = try NativeAppLaunch.makeFYITestStore(includeProgress: true)
+        let progress = try XCTUnwrap(store.inboxRows.first { $0.key.messageID == ExactText("progress-fyi") })
+        XCTAssertNotNil(progress.progress)
+        XCTAssertEqual(progress.informationalSeenStatus, .available)
+        XCTAssertTrue(progress.isUnseenFYI)
+        XCTAssertFalse(progress.canMarkFYISeen)
+    }
+
+    func testEqualFYIPriorityUsesPostedOrder() {
+        var earlier = fyiRow("Earlier")
+        var later = fyiRow("Later")
+        earlier.fyiPostedAt = Date(timeIntervalSince1970: 1)
+        later.fyiPostedAt = Date(timeIntervalSince1970: 2)
+        let rows = [earlier, later]
+        XCTAssertEqual(FYIOrder.priority.sorted(rows).map(\.key), FYIOrder.posted.sorted(rows).map(\.key))
     }
 
     private func fyiRow(_ id: String) -> InboxRequestRow {
