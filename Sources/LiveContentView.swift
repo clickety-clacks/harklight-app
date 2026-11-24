@@ -700,6 +700,7 @@ struct LiveContentView: View {
                     .compactMap { $0 },
                 isRefreshing: store.isRefreshing,
                 conversationStore: store,
+                diagnostics: launch?.diagnostics,
                 refreshInbox: inboxRefreshAction,
                 showsLocalExamples: showsSampleMessages && !store.isReadOnly,
                 notificationNavigation: testNotificationNavigation ?? launch?.notificationNavigation,
