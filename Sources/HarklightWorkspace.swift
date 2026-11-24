@@ -1266,31 +1266,34 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             }
         }
         .navigationDestination(for: RelatedMessageTarget.self) { target in
-            switch target {
-            case let .fyi(key):
-                if fyis.contains(where: { $0.key == key && !$0.isRetracted }) {
-                    requestDetail(key, cardContext(for: .request(key), inlineChat: false,
-                        inFYIList: true, dismissToList: { relatedMessageNavigationPath.removeAll() }))
-                        .id(key)
-                } else {
-                    ContentUnavailableView("Message not available", systemImage: "folder")
-                }
-            case let .supersedes(key):
-                if conversationStore?.request(for: key) != nil {
-                    requestDetail(key, .supersedesTarget)
-                } else {
-                    ContentUnavailableView("Message not available", systemImage: "questionmark.folder")
-                }
-            case let .replacement(key):
-                if conversationStore?.request(for: key) != nil {
-                    requestDetail(key, cardContext(for: .request(key), inlineChat: inlineChat))
-                        .id(key)
-                } else {
-                    ContentUnavailableView("Replacement not available yet",
-                        systemImage: "clock",
-                        description: Text("The original message is still available."))
+            Group {
+                switch target {
+                case let .fyi(key):
+                    if fyis.contains(where: { $0.key == key && !$0.isRetracted }) {
+                        requestDetail(key, cardContext(for: .request(key), inlineChat: false,
+                            inFYIList: true, dismissToList: { relatedMessageNavigationPath.removeAll() }))
+                            .id(key)
+                    } else {
+                        ContentUnavailableView("Message not available", systemImage: "folder")
+                    }
+                case let .supersedes(key):
+                    if conversationStore?.request(for: key) != nil {
+                        requestDetail(key, .supersedesTarget)
+                    } else {
+                        ContentUnavailableView("Message not available", systemImage: "questionmark.folder")
+                    }
+                case let .replacement(key):
+                    if conversationStore?.request(for: key) != nil {
+                        requestDetail(key, cardContext(for: .request(key), inlineChat: inlineChat))
+                            .id(key)
+                    } else {
+                        ContentUnavailableView("Replacement not available yet",
+                            systemImage: "clock",
+                            description: Text("The original message is still available."))
+                    }
                 }
             }
+            .environment(\.isFYIDetail, item == .fyis)
         }
         .toolbar(horizontalSizeClass == .compact && item != nil ? .hidden : .automatic,
                  for: .tabBar)
@@ -1318,8 +1321,12 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             case let .fyi(targetKey), let .supersedes(targetKey), let .replacement(targetKey):
                 key = targetKey
             }
-            NativeFocusReporter.shared.selectionChanged(
-                to: NativeFocusSelection.messageReport(for: key))
+            let focus = if newFYI != nil {
+                NativeFocusSelection.fyiDetailReport(for: key, in: conversationStore)
+            } else {
+                NativeFocusSelection.messageReport(for: key)
+            }
+            NativeFocusReporter.shared.selectionChanged(to: focus)
             if newPath.count > oldPath.count {
                 NativePushedViewCoordinator.shared.recordOwnOpen()
                 reportMessageContentOpen(for: key)
@@ -1327,6 +1334,17 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         } else {
             NativeFocusReporter.shared.selectionChanged(
                 to: NativeFocusSelection.report(for: selection))
+        }
+    }
+
+    private struct FYIRoutePresentation: Equatable {
+        let store: ObjectIdentifier
+        let isReadOnly: Bool
+    }
+
+    private var fyiRoutePresentation: FYIRoutePresentation? {
+        conversationStore.map {
+            FYIRoutePresentation(store: ObjectIdentifier($0), isReadOnly: $0.isReadOnly)
         }
     }
 
@@ -1658,16 +1676,19 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         .onChange(of: relatedMessageNavigationPath) { oldPath, newPath in
             relatedPathChanged(from: oldPath, to: newPath)
         }
-        .onChange(of: fyiRestorationAccount, initial: true) { previous, current in
-            if checkedFYIRestoration {
-                if previous != current, selection == .fyis { navigate(to: nil) }
-            } else {
-                checkedFYIRestoration = true
-                if let current, let data = restoredFYIAccount,
-                   current == (try? JSONDecoder().decode(ProfileIdentity.self, from: data)),
-                   selection == nil, notificationNavigation == nil {
-                    navigate(to: .fyis)
-                }
+        // Archived presentations share the view and have no persistence key.
+        .onChange(of: fyiRoutePresentation) { _, _ in
+            guard selection == .fyis else { return }
+            relatedMessageNavigationPath.removeAll()
+            navigate(to: nil)
+        }
+        .onChange(of: fyiRestorationAccount, initial: true) { _, current in
+            guard !checkedFYIRestoration else { return }
+            checkedFYIRestoration = true
+            if let current, let data = restoredFYIAccount,
+               current == (try? JSONDecoder().decode(ProfileIdentity.self, from: data)),
+               selection == nil, notificationNavigation == nil {
+                navigate(to: .fyis)
             }
         }
         .sheet(isPresented: $settings) {

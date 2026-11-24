@@ -414,6 +414,15 @@ struct SystemDetectedMessageBody: UIViewRepresentable {
         }
 
         func gestureRecognizer(_ recognizer: UIGestureRecognizer,
+                               shouldRequireFailureOf other: UIGestureRecognizer) -> Bool {
+            // Let UIKit's word and paragraph selection take precedence over navigation.
+            guard let view = recognizer.view,
+                  let multiTap = other as? UITapGestureRecognizer,
+                  multiTap.numberOfTapsRequired > 1 else { return false }
+            return multiTap.view?.isDescendant(of: view) == true
+        }
+
+        func gestureRecognizer(_ recognizer: UIGestureRecognizer,
                                shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
             true
         }

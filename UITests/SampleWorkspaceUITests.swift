@@ -113,6 +113,57 @@ final class SampleWorkspaceUITests: XCTestCase {
         XCTAssertFalse(app.buttons["Seen"].exists)
     }
 
+    func testFYIBodyDoubleTapSelectsWord() {
+        assertFYINativeSelection("FYI word selected") { _, point in point.doubleTap() }
+    }
+
+    func testFYIBodyTripleTapKeepsTheListOpen() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--harklight-test-fyi-list"]
+        app.launch()
+        defer { app.terminate() }
+        openFYIListIfNeeded(app)
+
+        let body = fyiGardenBody(in: app)
+        XCTAssertTrue(body.waitForExistence(timeout: 5))
+        body.tap(withNumberOfTaps: 3, numberOfTouches: 1)
+        XCTAssertTrue(app.buttons["fyi-sort"].exists)
+        XCTAssertFalse(app.buttons["request-heading"].exists)
+    }
+
+    func testFYIBodyLongPressShowsCopy() {
+        assertFYINativeSelection("FYI long press Copy", copy: true) { _, point in
+            point.press(forDuration: 1)
+        }
+    }
+
+    private func assertFYINativeSelection(_ captureName: String, copy: Bool = false,
+                                          gesture: (XCUIElement, XCUICoordinate) -> Void) {
+        let app = XCUIApplication()
+        app.launchArguments = ["--harklight-test-fyi-list"]
+        app.launch()
+        defer { app.terminate() }
+        openFYIListIfNeeded(app)
+
+        let body = fyiGardenBody(in: app)
+        guard body.waitForExistence(timeout: 5) else {
+            XCTFail("The garden FYI body is missing.")
+            return
+        }
+        gesture(body, body.coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.4)))
+        let copyAction = app.menuItems["Copy"]
+        XCTAssertTrue(copyAction.waitForExistence(timeout: 5), app.debugDescription)
+        capture(captureName, app)
+        if copy, copyAction.exists { copyAction.tap() }
+        XCTAssertTrue(app.buttons["fyi-sort"].exists)
+        XCTAssertFalse(app.buttons["request-heading"].exists)
+    }
+
+    private func fyiGardenBody(in app: XCUIApplication) -> XCUIElement {
+        app.collectionViews["fyi-list"].textViews.matching(NSPredicate(
+            format: "label BEGINSWITH %@", "The community garden reopened")).firstMatch
+    }
+
     private func openFYIListIfNeeded(_ app: XCUIApplication) {
         let sort = app.buttons["fyi-sort"]
         if sort.exists { return }

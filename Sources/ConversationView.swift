@@ -89,6 +89,10 @@ private struct FocusVisibleGeometryKey: PreferenceKey {
     }
 }
 
+extension EnvironmentValues {
+    @Entry var isFYIDetail = false
+}
+
 @MainActor
 struct ConversationPanel: View {
     let store: LivePresentationStore
@@ -111,6 +115,11 @@ struct ConversationPanel: View {
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.isFYIDetail) private var isFYIDetail
+
+    private var canReportItemFocus: Bool {
+        !isFYIDetail || NativeFocusSelection.canReportFYIItem(in: store)
+    }
 
     private var thread: ConversationThread? { store.conversation(for: key) }
     private var revision: UInt64 { thread?.currentRevision ?? 1 }
@@ -292,8 +301,10 @@ struct ConversationPanel: View {
         }
         .onDisappear {
             NativeNotificationRouter.shared.conversationBecameHidden(key)
-            NativeFocusReporter.shared.conversationDismissed(
-                senderID: key.senderID.rawValue, messageID: key.messageID.rawValue)
+            if canReportItemFocus {
+                NativeFocusReporter.shared.conversationDismissed(
+                    senderID: key.senderID.rawValue, messageID: key.messageID.rawValue)
+            }
         }
         .onChange(of: key) { oldKey, newKey in
             NativeNotificationRouter.shared.conversationBecameHidden(oldKey)
@@ -361,7 +372,7 @@ struct ConversationPanel: View {
     }
 
     private func reportEmptyChatFocusIfNeeded() {
-        guard !store.isLocalExample, thread == nil else { return }
+        guard canReportItemFocus, !store.isLocalExample, thread == nil else { return }
         NativeFocusReporter.shared.conversationAppeared(
             senderID: key.senderID.rawValue,
             messageID: key.messageID.rawValue,
@@ -387,6 +398,11 @@ private struct ConversationHistoryContent: View, Equatable {
     @State private var visibleAgentReplyTurnIDs = Set<ExactText>()
     @State private var focusTurnTracker = NativeFocusVisibleTurnTracker()
     @State private var focusScrollSampling = NativeFocusScrollSampling()
+    @Environment(\.isFYIDetail) private var isFYIDetail
+
+    private var canReportItemFocus: Bool {
+        !isFYIDetail || NativeFocusSelection.canReportFYIItem(in: store)
+    }
 
     nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
         // Read cursors change as replies cross the visibility threshold, but
@@ -519,7 +535,7 @@ private struct ConversationHistoryContent: View, Equatable {
             }
             .onScrollPhaseChange { _, phase in
                 focusScrollSampling.phaseChanged(isIdle: phase == .idle)
-                if phase != .idle {
+                if canReportItemFocus, phase != .idle {
                     NativeFocusReporter.shared.conversationScrollBegan(
                         senderID: key.senderID.rawValue,
                         messageID: key.messageID.rawValue)
@@ -563,7 +579,7 @@ private struct ConversationHistoryContent: View, Equatable {
 
     @discardableResult
     private func reportVisibleChatTurn() -> Bool {
-        guard !local else { return false }
+        guard canReportItemFocus, !local else { return false }
         guard let visibility = focusTurnTracker.chatVisibility(for: thread.turns) else { return false }
         let reporter = NativeFocusReporter.shared
         if reporter.currentFocus?.screen == .chat,
