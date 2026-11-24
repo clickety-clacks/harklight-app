@@ -1,4 +1,4 @@
-import AttentionDomain
+@testable import AttentionDomain
 import CryptoKit
 import Foundation
 import SwiftUI
