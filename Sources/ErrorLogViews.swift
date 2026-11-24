@@ -94,7 +94,6 @@ struct ErrorLogContextBanner: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(.hkRaised, in: RoundedRectangle(cornerRadius: 10))
             .padding(.horizontal, 12).padding(.top, 6)
-            .accessibilityIdentifier("error-log-banner-\(record.concern.rawValue)")
         }
     }
 }
