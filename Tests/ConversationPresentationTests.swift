@@ -10,6 +10,55 @@ import HarklightNativeRelay
 
 @MainActor
 final class ConversationPresentationTests: XCTestCase {
+    func testCachedServedTurnKeepsCaptionUntilSameRevisionContractRefresh() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let store = ServerModelV2Store(fileURL: url)
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+            personID: ExactText("person"), deviceID: ExactText("device"))
+        let item = try JSONValue.parse(Data(#"{"item_id":"item","rev":1,"sender":"Studio","request_revision":1,"message":{"title":"Hello","body":"Message"},"files":[],"seen":false,"chat":{"available":true,"started":true,"read_position":"sent"},"rank":{"key":"a","section":"current"}}"#.utf8))
+        try store.apply([.init(rev: 1, kind: "item", data: Data(item.jsonString.utf8))], cursor: 1)
+        func page(_ delivery: String) throws -> APIEntriesPage {
+            let entry = try receiptJSON(delivery)
+            return try APIEntriesPage(json: JSONValue.parse(Data(("{\"rev\":2,\"entries\":[" + entry.jsonString + "],\"older\":false}").utf8)))
+        }
+        try store.apply(page(#"{"delivered":true,"acted":true}"#), of: ExactText("item"))
+        let supporting = try APIMe(json: JSONValue.parse(Data(#"{"features":{"handoff_captions":true}}"#.utf8)))
+        try store.setHandoffCaptionsEnabled(true)
+        let presentation = ServerModelV2Presentation(savedMe: supporting)
+        XCTAssertEqual(store.snapshot.handoffCaptionRefreshItems, [ExactText("item")])
+        func thread(_ store: ServerModelV2Store) throws -> ConversationThread {
+            try XCTUnwrap(presentation.cachedState(store.snapshot, identity: identity).conversations.values.first)
+        }
+        func caption(_ thread: ConversationThread) throws -> ConversationSentChatStatusPresentation.Delivery {
+            let turn = try XCTUnwrap(thread.turns.first)
+            return ConversationSentChatStatusPresentation.delivery(for: turn,
+                facts: try XCTUnwrap(thread.facts[turn.id]), hasReply: false,
+                conversationAgentName: "Studio", nowMilliseconds: 10,
+                personFeed: true, handoffCaptions: thread.handoffCaptions == true)
+        }
+        XCTAssertEqual(try caption(thread(store)), .delivered,
+                       "A cached served turn must not turn Sending before its contract projection is refreshed.")
+        let offline = ServerModelV2Store(fileURL: url)
+        XCTAssertEqual(try caption(thread(offline)), .delivered)
+        try offline.apply(page(#"{"delivered":true,"legacy_caption":true}"#), of: ExactText("item"))
+        XCTAssertEqual(offline.snapshot.entries[ExactText("item")]?[ExactText("sent")]?.delivery?.legacyCaption, true,
+                       "The entries route must upgrade a cached projection even at the same revision.")
+        XCTAssertEqual(try thread(offline).accountReadThroughConversationSequence, 1)
+        XCTAssertEqual(offline.heldCursor, 1)
+        XCTAssertEqual(offline.snapshot.entries[ExactText("item")]?.count, 1)
+        XCTAssertTrue(offline.snapshot.handoffCaptionRefreshItems.isEmpty)
+        let relaunched = ServerModelV2Store(fileURL: url)
+        XCTAssertTrue(relaunched.snapshot.handoffCaptionRefreshItems.isEmpty)
+        // A second equal-revision page is a duplicate, not an ongoing bypass.
+        try relaunched.apply(page(#"{"delivered":true,"outcome":"not_handed","reason":"stale"}"#), of: ExactText("item"))
+        XCTAssertEqual(relaunched.snapshot.entries[ExactText("item")]?[ExactText("sent")]?.delivery?.legacyCaption, true)
+        let otherAccount = ServerModelV2Store(fileURL: nil)
+        try otherAccount.setHandoffCaptionsEnabled(true)
+        XCTAssertTrue(otherAccount.snapshot.handoffCaptionRefreshItems.isEmpty)
+    }
+
+
     func testHandoffCaptionContractRequiresSameTurnEvidenceAndConfirmedIncapableReceipt() throws {
         let binding = ConversationBinding(request: RequestKey(accountScope: ExactText("person"),
             senderID: ExactText("Studio"), messageID: ExactText("item")), revision: 1)
@@ -87,6 +136,7 @@ final class ConversationPresentationTests: XCTestCase {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
             personID: ExactText("person"), deviceID: ExactText("device"))
         let model = ServerModelV2Store(fileURL: nil)
+        try model.setHandoffCaptionsEnabled(true)
         let item = try JSONValue.parse(Data(#"{"item_id":"item","rev":1,"sender":"Studio","request_revision":1,"message":{"title":"Hello","body":"Message"},"files":[],"seen":false,"chat":{"available":true,"started":true},"rank":{"key":"a","section":"current"}}"#.utf8))
         try model.apply([.init(rev: 1, kind: "item", data: Data(item.jsonString.utf8))], cursor: 1)
         try model.apply(APIEntriesPage(json: JSONValue.parse(Data(#"{"rev":1,"entries":[],"older":false}"#.utf8))), of: ExactText("item"))
@@ -145,7 +195,7 @@ final class ConversationPresentationTests: XCTestCase {
         return ConversationSentChatStatusPresentation.delivery(for: turn,
             facts: try XCTUnwrap(thread.facts[turn.id]), availability: availability,
             hasReply: hasReply, conversationAgentName: "Studio", nowMilliseconds: 9_000_000,
-            personFeed: thread.chatNeverCloses == true)
+            personFeed: thread.chatNeverCloses == true, handoffCaptions: thread.handoffCaptions == true)
     }
 
     func testPersonFeedDeliveryDecodesOptionalAndFutureOutcomes() throws {
@@ -179,13 +229,14 @@ final class ConversationPresentationTests: XCTestCase {
             try target.apply([.init(rev: rev, kind: "entry", data: Data(json.jsonString.utf8))], cursor: rev)
         }
         func thread(_ target: ServerModelV2Store) throws -> ConversationThread {
-            try XCTUnwrap(ServerModelV2Projection.cachedState(target.snapshot, identity: identity).conversations.values.first)
+            try XCTUnwrap(ServerModelV2Projection.cachedState(target.snapshot, identity: identity, handoffCaptions: true).conversations.values.first)
         }
         // This saves exactly the delivery fields written before handoff outcomes existed.
         try apply(#"{"delivered":true,"acted":true}"#, rev: 2, to: store)
         let old = ServerModelV2Store(fileURL: url)
         XCTAssertEqual(old.snapshot.orderedEntries(of: ExactText("item")).count, 1)
         XCTAssertEqual(try receiptStatus(thread(old)), .delivered)
+        try old.setHandoffCaptionsEnabled(true)
         try apply(#"{"delivered":true,"acted":true,"outcome":"not_handed","reason":"Agent unavailable","agent":"Studio"}"#, rev: 3, to: old)
         let negative = try thread(old)
         XCTAssertEqual(negative.facts[ExactText("sent")]?.deliveryAck2,
@@ -216,7 +267,7 @@ final class ConversationPresentationTests: XCTestCase {
                     personFeed: Bool = true) -> ConversationSentChatStatusPresentation.Delivery {
             ConversationSentChatStatusPresentation.delivery(for: turn, facts: facts,
                 availability: availability, hasReply: reply, conversationAgentName: "Studio",
-                nowMilliseconds: 10, personFeed: personFeed)
+                nowMilliseconds: 10, personFeed: personFeed, handoffCaptions: personFeed)
         }
         XCTAssertEqual(status(), .notDelivered("Try later"))
         for state: ConversationAvailability in [.gone, .unsupported(reason: ExactText("old"))] {
@@ -236,6 +287,9 @@ final class ConversationPresentationTests: XCTestCase {
                 acknowledgerSystem: nil, acknowledgerAgent: ExactText("Release"))
             XCTAssertEqual(status(), rerouted ? .deliveredTo("Release") : .deliveredAck)
         }
+        XCTAssertEqual(ConversationSentChatStatusPresentation.delivery(for: turn, facts: facts,
+            hasReply: false, conversationAgentName: "Studio", nowMilliseconds: 10,
+            personFeed: true, handoffCaptions: false), .delivered)
         facts.deliveryAck2 = nil
         facts.delivered = false
         facts.actedBy = ExactText("action")

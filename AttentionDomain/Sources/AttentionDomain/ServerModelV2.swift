@@ -29,6 +29,24 @@ public struct ServerModelV2: Equatable, Codable, Sendable {
     public internal(set) var arrivalOrder: [ExactText: UInt64] = [:]
     public internal(set) var lastArrival: UInt64 = 0
 
+    /// Per-account projection bookkeeping. Nil identifies pre-contract caches,
+    /// including caches written by an older App against an advertising Server.
+    public internal(set) var handoffCaptionsEnabled: Bool?
+    public internal(set) var handoffCaptionEntries: Set<ExactText>?
+
+    public func needsHandoffCaptionRefresh(_ entry: APIEntry) -> Bool {
+        entry.author == "person" && entry.kind == "reply" &&
+            handoffCaptionEntries?.contains(entry.entryID) != true
+    }
+
+    public var handoffCaptionRefreshItems: [ExactText] {
+        guard handoffCaptionsEnabled == true else { return [] }
+        return orderedItems.compactMap { item in
+            (entries[item.itemID] ?? [:]).values.contains(where: needsHandoffCaptionRefresh)
+                ? item.itemID : nil
+        }
+    }
+
     public init() {}
 
     /// Items with agent chat replies whose newest reply is not held yet: the
@@ -105,7 +123,7 @@ public struct ServerModelV2: Equatable, Codable, Sendable {
     }
 
     @discardableResult
-    mutating func put(_ entry: APIEntry, fromFeed: Bool = false) -> Bool {
+    mutating func put(_ entry: APIEntry, fromFeed: Bool = false, refreshingCaption: Bool = false) -> Bool {
         // Entries of a removed item are not kept, nor feed entries of an item
         // whose entries were never read.
         guard !gate.isRemoved(Self.itemKey(entry.itemID)) else { return false }
@@ -114,8 +132,16 @@ public struct ServerModelV2: Equatable, Codable, Sendable {
         // open. Only a full entries page marks an item loaded.
         if fromFeed, !loadedEntryItems.contains(entry.itemID),
            items[entry.itemID]?.chat.replyGroup == nil { return false }
-        guard gate.admit(Self.entryKey(entry.entryID), rev: entry.rev) else { return false }
+        let sameRevisionRefresh = refreshingCaption && handoffCaptionsEnabled == true &&
+            needsHandoffCaptionRefresh(entry) && entries[entry.itemID]?[entry.entryID]?.rev == entry.rev
+        guard sameRevisionRefresh || gate.admit(Self.entryKey(entry.entryID), rev: entry.rev) else { return false }
         entries[entry.itemID, default: [:]][entry.entryID] = entry
+        if handoffCaptionsEnabled == true {
+            if handoffCaptionEntries == nil { handoffCaptionEntries = [] }
+            handoffCaptionEntries?.insert(entry.entryID)
+        } else {
+            handoffCaptionEntries?.remove(entry.entryID)
+        }
         return true
     }
 
@@ -130,6 +156,7 @@ public struct ServerModelV2: Equatable, Codable, Sendable {
     }
 
     private mutating func forgetEntry(_ entryID: ExactText) {
+        handoffCaptionEntries?.remove(entryID)
         gate.forget(Self.entryKey(entryID))
     }
 
@@ -215,6 +242,10 @@ public final class ServerModelV2Store: @unchecked Sendable {
     }
 
     public var snapshot: ServerModelV2 { lock.withLock { model } }
+
+    public func setHandoffCaptionsEnabled(_ enabled: Bool) throws {
+        try mutate { $0.handoffCaptionsEnabled = enabled }
+    }
 
     public func seal() { lock.withLock { sealed = true } }
 
@@ -340,7 +371,9 @@ public final class ServerModelV2Store: @unchecked Sendable {
                       generation: UInt64? = nil) throws {
         try mutate(generation: generation) { model in
             model.loadedEntryItems.insert(itemID)
-            for page in pages { for entry in page.entries { model.put(entry) } }
+            for page in pages { for entry in page.entries {
+                model.put(entry, refreshingCaption: complete && pages.allSatisfy { $0.unreadable.isEmpty })
+            } }
             if !complete || pages.contains(where: { !$0.unreadable.isEmpty }) {
                 model.loadedEntryItems.remove(itemID)
             }

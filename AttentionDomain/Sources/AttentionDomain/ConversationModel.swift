@@ -264,6 +264,8 @@ public struct ConversationTurnFacts: Equatable, Codable, Sendable {
     public var deliveryAck2: ConversationDeliveryAcknowledgement?
     /// Per-entry person-feed evidence; legacy delivered/acted stay separate.
     public var personDelivery: APIEntryDelivery?
+    /// Keeps the cached caption until its pre-contract entry has been reread.
+    public var handoffCaptionRefreshPending: Bool?
     public var fileTransfers: [ExactText: ConversationFileTransfer] = [:]
     public var fileUses: [ExactText: ConversationFileUse] = [:]
 

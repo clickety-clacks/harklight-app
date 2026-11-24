@@ -52,6 +52,11 @@ public enum ServerModelV2Projection {
             let entries = model.orderedEntries(of: item.itemID)
             var conversation = thread(for: item, key: key, entries: entries)
             conversation.handoffCaptions = handoffCaptions
+            if handoffCaptions {
+                for entry in entries where model.needsHandoffCaptionRefresh(entry) {
+                    conversation.facts[entry.entryID]?.handoffCaptionRefreshPending = true
+                }
+            }
             conversations[key] = conversation
             if let read = item.chat.readPosition,
                let position = entries.first(where: { $0.entryID == read })?.position {

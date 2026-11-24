@@ -1125,6 +1125,10 @@ enum ConversationSentChatStatusPresentation {
         // On 0.2 Delivered records Server delivery, independently of handoff.
         // Keep 0.1 receipt/acted precedence below unchanged.
         if personFeed, turn.author == .person, turn.kind == .discussion {
+            if !handoffCaptions || facts.handoffCaptionRefreshPending == true {
+                return delivery(for: facts, availability: availability, hasReply: hasReply,
+                                nowMilliseconds: nowMilliseconds)
+            }
             if hasReply || (handoffCaptions && (facts.personDelivery?.agentSeen == true ||
                                                 facts.personDelivery?.agentActed == true)) {
                 return .deliveredAck

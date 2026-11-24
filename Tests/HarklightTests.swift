@@ -9,6 +9,12 @@ private final class V2ScenePushTransport: ClientAPITransport, @unchecked Sendabl
     private var closed = 0
     private var batches = 0
     private var entryReads = 0
+    private var handoffFeature = false
+    private var handoffPage: String?
+
+    func advertiseHandoff(page: String) {
+        lock.withLock { handoffFeature = true; handoffPage = page }
+    }
     private var focusScreens: [String] = []
     private var fileReads: [String] = []
     private var showReads = 0
@@ -53,7 +59,10 @@ private final class V2ScenePushTransport: ClientAPITransport, @unchecked Sendabl
         default:
             body = #"{"rev":0,"items":[],"counts":{"unresolved":0}}"#
         }
-        return APIResponse(status: 200, requestID: "test", body: Data(body.utf8))
+        let responseBody = request.path == "/v2/me" && lock.withLock({ handoffFeature })
+            ? body.replacingOccurrences(of: "\"features\":{}", with: "\"features\":{\"handoff_captions\":true}")
+            : request.path == "/v2/items/item/entries" ? lock.withLock { handoffPage ?? body } : body
+        return APIResponse(status: 200, requestID: "test", body: Data(responseBody.utf8))
     }
 
     func download(_ request: APIRequest, to destination: URL) async throws -> APIResponse {
@@ -83,6 +92,61 @@ private final class V2ScenePushTransport: ClientAPITransport, @unchecked Sendabl
 }
 
 final class HarklightTests: XCTestCase {
+    @MainActor
+    func testHandoffUpgradeRereadsCachedEntriesOnceAndOlderAppCacheAlsoRefreshes() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+            personID: ExactText("person"), deviceID: ExactText("device"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let repository = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        let transport = V2ScenePushTransport()
+        let connection = try ClientAPIv2Connection(transport: transport, repository: repository, context: context,
+            directory: directory, errors: NoopErrorLog())
+        _ = try await connection.refreshMe()
+        let item = try JSONValue.parse(Data(#"{"item_id":"item","rev":1,"sender":"sender","request_revision":1,"message":{"title":"Hello"},"files":[],"seen":false,"chat":{"available":true,"started":true,"read_position":"sent"},"rank":{"key":"a","section":"current"}}"#.utf8))
+        try connection.model.apply([.init(rev: 1, kind: "item", data: Data(item.jsonString.utf8))], cursor: 1)
+        let entry = #"{"entry_id":"sent","item_id":"item","rev":2,"position":1,"kind":"reply","author":"person","request_revision":1,"text":"Hello","files":[],"delivery":{"delivered":true}}"#
+        let page = "{\"rev\":2,\"entries\":[" + entry + "],\"older\":false}"
+        try connection.model.apply(APIEntriesPage(json: JSONValue.parse(Data(page.utf8))), of: ExactText("item"))
+        transport.advertiseHandoff(page: page.replacingOccurrences(of: "\"delivered\":true", with: "\"delivered\":true,\"legacy_caption\":true"))
+        _ = try await connection.refreshMe()
+        XCTAssertEqual(transport.counts.entryReads, 1)
+        XCTAssertEqual(connection.model.snapshot.entries[ExactText("item")]?[ExactText("sent")]?.delivery?.legacyCaption, true)
+        _ = try await connection.refreshMe()
+        XCTAssertEqual(transport.counts.entryReads, 1, "A successful same-revision refresh is durable and runs once.")
+        let reopened = try ClientAPIv2Connection(transport: transport, repository: repository, context: context,
+            directory: directory, errors: NoopErrorLog())
+        _ = try await reopened.refreshMe()
+        XCTAssertEqual(transport.counts.entryReads, 1)
+        // An older App could save /me with the feature already true but could
+        // not decode or mark contract projections. Retain the rest of its model.
+        let modelURL = directory.appendingPathComponent("server-model-v2.json")
+        var saved = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: modelURL)) as? [String: Any])
+        var model = try XCTUnwrap(saved["model"] as? [String: Any])
+        model.removeValue(forKey: "handoffCaptionEntries")
+        model.removeValue(forKey: "handoffCaptionsEnabled")
+        func olderProjection(_ value: Any) -> Any {
+            if let object = value as? [String: Any] {
+                return object.filter { $0.key != "legacyCaption" }.mapValues(olderProjection)
+            }
+            if let array = value as? [Any] { return array.map(olderProjection) }
+            return value
+        }
+        saved["model"] = olderProjection(model)
+        try JSONSerialization.data(withJSONObject: saved).write(to: modelURL)
+        let upgradedApp = try ClientAPIv2Connection(transport: transport, repository: repository, context: context,
+            directory: directory, errors: NoopErrorLog())
+        XCTAssertEqual(upgradedApp.model.snapshot.handoffCaptionRefreshItems, [ExactText("item")])
+        XCTAssertNil(upgradedApp.model.snapshot.entries[ExactText("item")]?[ExactText("sent")]?.delivery?.legacyCaption)
+        _ = try await upgradedApp.refreshMe()
+        XCTAssertEqual(transport.counts.entryReads, 2)
+        XCTAssertTrue(upgradedApp.model.snapshot.handoffCaptionRefreshItems.isEmpty)
+        XCTAssertEqual(upgradedApp.model.heldCursor, 1)
+        let projected = try upgradedApp.presentation.cachedState(upgradedApp.model.snapshot, identity: identity)
+        XCTAssertEqual(projected.conversations.values.first?.accountReadThroughConversationSequence, 1)
+    }
+
     @MainActor
     func testV2PreviewDownloadsTheProjectedFileRefAndVerifiesItsBytes() async throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
