@@ -782,8 +782,16 @@ public enum ErrorLogDisplay {
               record.retryable, record.correlation.requestID != nil else { return false }
         // An open failure can also have phase stream. Its earlier unresolved
         // drop (or a coalesced count > 1) makes the reconnect failure visible.
-        return record.domain == "URLError" || record.domain == "POSIX" ||
-            (record.domain == "app" && ["ended_without_closing", "idle_timeout"].contains(record.code))
+        switch record.domain {
+        case "URLError":
+            return [NSURLErrorTimedOut, NSURLErrorNetworkConnectionLost, NSURLErrorNotConnectedToInternet]
+                .contains(Int(record.code) ?? 0)
+        case "POSIX":
+            return [EPIPE, ECONNRESET, ECONNABORTED, ENETRESET, ENETDOWN, ENETUNREACH, ETIMEDOUT]
+                .contains(Int32(record.code) ?? 0)
+        case "app": return ["ended_without_closing", "idle_timeout"].contains(record.code)
+        default: return false
+        }
     }
 
     private static func isThreadRead(_ record: ErrorLogRecord) -> Bool {

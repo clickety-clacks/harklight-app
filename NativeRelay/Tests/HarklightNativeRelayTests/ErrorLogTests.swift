@@ -556,6 +556,8 @@ final class ErrorLogTests: XCTestCase {
             ("change_feed", "closing", .serverReason("storage_unavailable"), .request("opened")),
             ("change_feed", "closing", .serverReason("cursor_expired"), .request("opened")),
             ("change_feed", "stream", .app("decode_failed"), .request("opened")),
+            ("change_feed", "stream", .urlError(NSURLErrorCannotParseResponse), .request("opened")),
+            ("change_feed", "stream", .urlError(NSURLErrorClientCertificateRejected), .request("opened")),
             ("change_feed", "apply", .app("decode_failed"), .request("opened")),
             ("change_feed", "stream", .urlError(-1004), .none),
             ("subscribe_conversation", "stream", .urlError(-1005), .request("opened")),
