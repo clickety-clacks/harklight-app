@@ -104,11 +104,17 @@ final class HarklightTests: XCTestCase {
         let connection = try ClientAPIv2Connection(transport: transport, repository: repository, context: context,
             directory: directory, errors: NoopErrorLog())
         _ = try await connection.refreshMe()
-        let item = try JSONValue.parse(Data(#"{"item_id":"item","rev":1,"sender":"sender","request_revision":1,"message":{"title":"Hello"},"files":[],"seen":false,"chat":{"available":true,"started":true,"read_position":"sent"},"rank":{"key":"a","section":"current"}}"#.utf8))
+        let item = try JSONValue.parse(Data(#"{"item_id":"item","rev":1,"sender":"sender","request_revision":1,"message":{"title":"Hello"},"files":[],"seen":false,"chat":{"available":true,"started":true,"read_position":"sent","last_origin_reply":"reply","unread_replies":1,"reply_group":"earlier_chat_replies","reply_rank_key":"b"},"rank":{"key":"a","section":"current"}}"#.utf8))
         try connection.model.apply([.init(rev: 1, kind: "item", data: Data(item.jsonString.utf8))], cursor: 1)
         let entry = #"{"entry_id":"sent","item_id":"item","rev":2,"position":1,"kind":"reply","author":"person","request_revision":1,"text":"Hello","files":[],"delivery":{"delivered":true}}"#
-        let page = "{\"rev\":2,\"entries\":[" + entry + "],\"older\":false}"
+        let reply = #"{"entry_id":"reply","item_id":"item","rev":3,"position":2,"kind":"reply","author":"origin","request_revision":1,"text":"Agent reply","files":[]}"#
+        let page = "{\"rev\":3,\"entries\":[" + entry + "," + reply + "],\"older\":false}"
         try connection.model.apply(APIEntriesPage(json: JSONValue.parse(Data(page.utf8))), of: ExactText("item"))
+        connection.publishModel()
+        let key = RequestKey(accountScope: identity.personID, senderID: ExactText("sender"), messageID: ExactText("item"))
+        let binding = ConversationBinding(request: key, revision: 1)
+        try repository.saveConversationDraft(ConversationDraft(binding: binding, text: ExactText("Unsent draft")), context: context)
+        let rowsBefore = try connection.presentation.cachedState(connection.model.snapshot, identity: identity).inboxView?.listItems
         transport.advertiseHandoff(page: page.replacingOccurrences(of: "\"delivered\":true", with: "\"delivered\":true,\"legacy_caption\":true"))
         _ = try await connection.refreshMe()
         XCTAssertEqual(transport.counts.entryReads, 1)
@@ -145,6 +151,10 @@ final class HarklightTests: XCTestCase {
         XCTAssertEqual(upgradedApp.model.heldCursor, 1)
         let projected = try upgradedApp.presentation.cachedState(upgradedApp.model.snapshot, identity: identity)
         XCTAssertEqual(projected.conversations.values.first?.accountReadThroughConversationSequence, 1)
+        XCTAssertEqual(projected.inboxView?.listItems, rowsBefore)
+        XCTAssertEqual(projected.inboxView?.listItems?.map(\.kind), [.message, .reply])
+        XCTAssertEqual(try repository.conversationSnapshot(context: context).threads[key]?.drafts[1]?.text,
+                       ExactText("Unsent draft"))
     }
 
     @MainActor

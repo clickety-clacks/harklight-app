@@ -270,6 +270,10 @@ final class ConversationPresentationTests: XCTestCase {
                 nowMilliseconds: 10, personFeed: personFeed, handoffCaptions: personFeed)
         }
         XCTAssertEqual(status(), .notDelivered("Try later"))
+        XCTAssertEqual(ConversationSentChatStatusPresentation.delivery(for: turn, facts: facts,
+            hasReply: false, conversationAgentName: "Studio", nowMilliseconds: 10,
+            personFeed: true, handoffCaptions: false), .delivered,
+            "Feature off ignores outcome captions as well as the new evidence fields.")
         for state: ConversationAvailability in [.gone, .unsupported(reason: ExactText("old"))] {
             let availability = ConversationAvailabilityObservation(state: state)
             XCTAssertEqual(status(availability), .noOneWillGetThis)
