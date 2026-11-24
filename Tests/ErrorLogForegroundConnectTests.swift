@@ -1,3 +1,4 @@
+import AttentionDomain
 import Foundation
 import HarklightNativeRelay
 import XCTest
@@ -105,4 +106,125 @@ final class ErrorLogForegroundConnectTests: XCTestCase {
         XCTAssertEqual(kept.code, "89")
         XCTAssertTrue(kept.isResolved)
     }
+}
+
+extension ErrorLogForegroundConnectTests {
+    func testOfflineForegroundConnectRecoversWhenTheFeedOpensByItself() async throws {
+        let log = makeLog()
+        let record = NativeEnrollmentRecord(host: "relay.example", enrollmentPort: 18444, relayPort: 18443,
+            trustedRootDER: Data([1]), identityLabel: "test", deviceID: "device",
+            approvalCode: "TEST", statusSecret: "test", expiresAt: nil, statusExpiresAt: nil, personID: "person")
+        let context = ProfileContext(identity: ProfileIdentity(trustedRelayAuthority: ExactText(record.profileAuthority),
+            personID: ExactText("person"), deviceID: ExactText("device")), transportMode: .relay)
+        let repository = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        let store = try LivePresentationStore(store: repository, context: context)
+        let lifecycle = NativeRelayLifecycle()
+        lifecycle.errorLog = log
+        let launch = NativeAppLaunch(arguments: ["Harklight"], initialState: .live(store),
+            initialEnrollmentRecord: record, errorLog: log)
+        let inbox = LiveContentView(store: store, samples: SampleLibrary(), launch: launch)
+        let attempt = UUID()
+        let transport = ReconnectingFeedTransport()
+        let (retries, retry) = AsyncStream<Void>.makeStream()
+        let connection = try ClientAPIv2Connection(transport: transport, repository: repository, context: context,
+            directory: nil, errors: log, foregroundOnlyWrites: true, waitBeforeRetry: { _ in
+                var iterator = retries.makeAsyncIterator()
+                guard await iterator.next() != nil else { throw CancellationError() }
+            }, onLiveState: { state in
+                Task { @MainActor in await lifecycle.v2FeedStateChanged(state, context: context, attempt: attempt) }
+            })
+        lifecycle.installV2Connection(connection, context: context, attempt: attempt)
+        defer {
+            transport.feedEvents.finish()
+            retry.finish()
+        }
+        try connection.model.apply([], cursor: 1)
+        lifecycle.sceneActivityChanged(isActive: true)
+        _ = await lifecycle.confirmForegroundProgress(for: context) { progress in
+            launch.recordForegroundConnectProgress(progress, operationSnapshot: .unavailable)
+            store.connectionWarning = progress.outcome == .confirmed ? nil : progress.userFacingMessage
+        }
+        try await waitUntil { self.unresolvedSync(in: log).contains("change_feed") }
+
+        XCTAssertTrue(inbox.presentsConnectionFailure)
+        XCTAssertEqual(inbox.connectionWarning, "Can't reach the server. Your pending actions are saved.")
+        XCTAssertTrue(showsLiveUpdatesPaused(log))
+        XCTAssertEqual(unresolvedSync(in: log), ["catch_up", "change_feed", "foreground_connect"])
+
+        transport.restoreRequests()
+        _ = try await connection.outbox.submit(target: "item:one", operation: "mark_seen",
+            write: FrozenWrite(method: .put, path: "/v2/items/one/seen"))
+        await connection.outbox.flush()
+        let pending = await connection.outbox.pending
+        XCTAssertTrue(pending.isEmpty)
+        XCTAssertEqual(transport.successfulWrites, 1)
+        XCTAssertTrue(inbox.presentsConnectionFailure, "A successful write does not reopen the feed.")
+        XCTAssertTrue(showsLiveUpdatesPaused(log))
+
+        retry.yield(())
+        transport.feedEvents.yield(.opened(requestID: "feed-opened"))
+        try await waitUntil { lifecycle.hasConfirmedServerSnapshot(for: context) }
+
+        XCTAssertFalse(inbox.presentsConnectionFailure)
+        XCTAssertNil(inbox.connectionWarning)
+        XCTAssertFalse(showsLiveUpdatesPaused(log))
+        XCTAssertEqual(unresolvedSync(in: log), [])
+        XCTAssertEqual(Set(log.records.filter(\.isResolved).map(\.operation)),
+                       ["catch_up", "change_feed", "foreground_connect"])
+
+        transport.feedEvents.finish(throwing: URLError(.networkConnectionLost))
+        try await waitUntil { self.showsLiveUpdatesPaused(log) }
+        XCTAssertEqual(unresolvedSync(in: log), ["change_feed"])
+        await lifecycle.deactivate()
+    }
+
+    private func unresolvedSync(in log: ErrorLogStore) -> Set<String> {
+        Set(log.records.filter { $0.concern == .sync && !$0.isResolved }.map(\.operation))
+    }
+
+    private func showsLiveUpdatesPaused(_ log: ErrorLogStore) -> Bool {
+        if case .failing? = ErrorLogDisplay.inContext(records: log.records, surface: .liveIndicator, now: Date()) {
+            return true
+        }
+        return false
+    }
+
+    private func waitUntil(_ condition: () -> Bool) async throws {
+        let deadline = ContinuousClock.now + .seconds(5)
+        while !condition() {
+            guard ContinuousClock.now < deadline else { throw URLError(.timedOut) }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+    }
+}
+
+private final class ReconnectingFeedTransport: ClientAPITransport, @unchecked Sendable {
+    private let lock = NSLock()
+    private var online = false
+    private var writes = 0
+    private let feed: AsyncThrowingStream<FeedEvent, any Error>
+    let feedEvents: AsyncThrowingStream<FeedEvent, any Error>.Continuation
+
+    init() { (feed, feedEvents) = AsyncThrowingStream.makeStream() }
+
+    func restoreRequests() { lock.withLock { online = true } }
+    var successfulWrites: Int { lock.withLock { writes } }
+
+    func send(_ request: APIRequest) async throws -> APIResponse {
+        guard request.method == .put, request.path == "/v2/items/one/seen" else {
+            throw URLError(.notConnectedToInternet)
+        }
+        return try lock.withLock {
+            guard online else { throw URLError(.notConnectedToInternet) }
+            writes += 1
+            return APIResponse(status: 200, requestID: "write", body: Data(#"{"rev":1}"#.utf8))
+        }
+    }
+
+    func changeBatch(after: Rev) async throws -> FeedBatch {
+        guard lock.withLock({ online }) else { throw URLError(.notConnectedToInternet) }
+        return FeedBatch(changes: [], rev: after, more: false)
+    }
+
+    func changeFeed(after: Rev) -> AsyncThrowingStream<FeedEvent, any Error> { feed }
 }

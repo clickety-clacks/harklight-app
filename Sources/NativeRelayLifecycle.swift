@@ -1004,14 +1004,7 @@ final class NativeRelayLifecycle {
             onLiveState: { [weak self] state in
                 guard state == .live else { return }
                 Task { @MainActor [weak self] in
-                    guard let self, self.activeTransportAttemptID == attempt else { return }
-                    self.confirmedRelayContext = context
-                    self.conversationAvailability.confirm(for: context, conversationsUnavailable: false)
-                    if let connection = self.v2Connection, connection.priorityLevelsEditorWasOpened {
-                        await connection.refreshPriorityLevels(userInitiated: false)
-                        guard self.activeTransportAttemptID == attempt else { return }
-                        self.publishPriorityLevelsUpdate(for: context)
-                    }
+                    await self?.v2FeedStateChanged(state, context: context, attempt: attempt)
                 }
             }, onShow: { data in
                 await focus.received(feedShow: data)
@@ -1036,15 +1029,26 @@ final class NativeRelayLifecycle {
             })
         repository = store
         diagnosticJournal = diagnostics
-        foregroundProgress.beginSession(transportAttemptID: attempt)
         installV2Connection(connection, context: context, attempt: attempt)
         installV2FocusChannel(focus, attempt: attempt)
+    }
+
+    func v2FeedStateChanged(_ state: ChangeFeedSync.LiveState, context: ProfileContext, attempt: UUID) async {
+        guard state == .live, activeTransportAttemptID == attempt else { return }
+        confirmedRelayContext = context
+        conversationAvailability.confirm(for: context, conversationsUnavailable: false)
+        if let connection = v2Connection, connection.priorityLevelsEditorWasOpened {
+            await connection.refreshPriorityLevels(userInitiated: false)
+            guard activeTransportAttemptID == attempt else { return }
+            publishPriorityLevelsUpdate(for: context)
+        }
     }
 
     func installV2Connection(_ connection: ClientAPIv2Connection, context: ProfileContext, attempt: UUID = UUID()) {
         guard v2Connection == nil else { return }
         self.context = context
         activeTransportAttemptID = attempt
+        foregroundProgress.beginSession(transportAttemptID: attempt)
         v2Connection = connection
         featureFlags.connect(context: context, connectionID: attempt)
         startV2Foreground()
