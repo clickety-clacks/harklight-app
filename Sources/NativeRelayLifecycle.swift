@@ -1485,7 +1485,8 @@ final class NativeRelayLifecycle {
     /// Attempts durable message-open reports on the current authenticated
     /// relay session. With no active session, the store keeps them for the
     /// ordinary reconnect drain.
-    func sendPendingMessageOpens() async {
+    func sendPendingMessageOpens(expected: ProfileContext) async {
+        guard context == expected else { return }
         await v2Connection?.sendSavedContentOpens()
     }
 

@@ -239,7 +239,7 @@ enum InboxListProjection {
     static func filteredRows(_ rows: [InboxItem], in tab: InboxWorkspaceTab,
                              search: String) -> [InboxItem] {
         let messageTab = tab.messageTab
-        let inTab = rows.filter { !$0.isProgress && $0.belongsToReplied == (messageTab == .replied) }
+        let inTab = rows.filter { $0.usesNormalMessageList && $0.belongsToReplied == (messageTab == .replied) }
         let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else { return inTab }
         return inTab.filter { $0.matchesSearch(query) }
@@ -251,7 +251,7 @@ enum InboxListProjection {
         let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
         return InboxThreadListProjection.grouped(rows).compactMap { entry in
             let matches = entry.members.filter { item in
-                !item.isProgress && item.belongsToReplied == isRepliedTab &&
+                item.usesNormalMessageList && item.belongsToReplied == isRepliedTab &&
                     (query.isEmpty || item.matchesSearch(query))
             }
             guard !matches.isEmpty else { return nil }
@@ -657,6 +657,10 @@ struct InboxRequestRow: Identifiable {
     var defaultAnswerStatus: String? = nil
     var fyiPostedAt: Date? = nil
     var fyiServerSeen: Bool? = nil
+    var fyiHasEnded = false
+    var fyiOpenedFlagPending = false
+    var canRetryFYISeen = false
+    var fyiUsesRepliedForProgress = false
     var fyiProgressIsFinished = false
     var canAnswerProgressFYISeen = false
     var fyiPriority: InboxMessagePriority? = nil
@@ -679,8 +683,23 @@ struct InboxRequestRow: Identifiable {
         return fyiServerSeen != true
     }
 
+    var isActiveFYI: Bool {
+        isFYI && !fyiHasEnded && (isFYISeenPending || isUnseenFYI)
+    }
+
+    var isFYISeenPending: Bool {
+        informationalSeenStatus == .pending || (fyiOpenedFlagPending && fyiServerSeen != true)
+    }
+
+    var isWaitingForFYISeen: Bool { isFYISeenPending && (!hasFailedResponse || canRetryFYISeen) }
+
+    // Ended, unanswered Progress has no normal list or search destination.
+    var needsFYIHistoryAccess: Bool {
+        isFYI && progress != nil && fyiHasEnded && !fyiUsesRepliedForProgress
+    }
+
     var fyiSeenAction: FYISeenAction? {
-        guard isUnseenFYI, informationalSeenStatus != .pending else { return nil }
+        guard !fyiHasEnded, isUnseenFYI, !isFYISeenPending else { return nil }
         if isProgressFYI {
             if fyiProgressIsFinished { return canAnswerProgressFYISeen ? .answer : nil }
             return canReportFYISeen ? .openedFlag : nil
@@ -851,6 +870,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     @State private var relatedMessageNavigationPath: [RelatedMessageTarget] = []
     @State private var settings = false
     @State private var fyiDigest = FYIDigest()
+    @State private var fyiSeenActionError: String?
     @AppStorage("harklight.fyi-list-account") private var restoredFYIAccount: Data?
     @State private var checkedFYIRestoration = false
     @State private var selectedTab: InboxMessageTab = .inbox
@@ -872,7 +892,14 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         showsLocalExamples ? samples.inboxItems(appendingTo: requests) : requests.map { .request($0) }
     }
 
-    private var fyis: [InboxRequestRow] { requests.filter(\.isFYI) }
+    private var activeFYIsOnly: Bool { conversationStore?.isReadOnly != true }
+    private var fyis: [InboxRequestRow] {
+        guard activeFYIsOnly else { return requests.filter(\.isFYI) }
+        return requests.filter { $0.isActiveFYI || $0.needsFYIHistoryAccess }
+    }
+    private var digestFYIs: [InboxRequestRow] {
+        requests.filter(activeFYIsOnly ? \.isActiveFYI : \.isFYI)
+    }
 
     private var visibleWarnings: [String] {
         let messages = warnings + [samples.loadError].compactMap { $0 }
@@ -1100,16 +1127,16 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     }
 
     private func markFYISeen(_ row: InboxRequestRow) {
-        guard let current = fyis.first(where: { $0.key == row.key }),
-              current.requestRevision == row.requestRevision,
-              let action = current.fyiSeenAction else { return }
-        if current.isProgressFYI {
-            conversationStore?.markProgressFYISeen(current.key, requestRevision: current.requestRevision)
-        } else if action == .answer {
-            markSeenRequest(current.key, current.requestRevision)
-        } else {
-            reportMessageContentOpen(for: current.key)
+        guard let store = conversationStore else { return }
+        if !store.markFYISeen(row.key, requestRevision: row.requestRevision) {
+            fyiSeenActionError = store.actionError ?? "Seen could not be saved. Try again."
         }
+    }
+
+    private func retryFYISeen(_ row: InboxRequestRow) {
+        guard let store = conversationStore else { return }
+        fyiSeenActionError = store.retryFYISeen(row.key, requestRevision: row.requestRevision)
+            ? nil : "This FYI changed. Review its latest status before retrying."
     }
 
     private func markNoComment(_ id: InboxSelection) {
@@ -1214,7 +1241,10 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                             .id(id)
                     }
                 case .fyis?:
-                    FYIList(items: fyis, markSeen: markFYISeen) { key in
+                    FYIList(items: fyis, activeFYIsOnly: activeFYIsOnly,
+                            actionError: fyiSeenActionError,
+                            clearActionError: { fyiSeenActionError = nil },
+                            markSeen: markFYISeen, retrySeen: retryFYISeen) { key in
                         guard fyis.contains(where: { $0.key == key && !$0.isRetracted }) else { return }
                         relatedMessageNavigationPath.append(.fyi(key))
                     }
@@ -1269,7 +1299,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             Group {
                 switch target {
                 case let .fyi(key):
-                    if fyis.contains(where: { $0.key == key && !$0.isRetracted }) {
+                    if let store = conversationStore, store.request(for: key) != nil, !store.isRetracted(key) {
                         requestDetail(key, cardContext(for: .request(key), inlineChat: false,
                             inFYIList: true, dismissToList: { relatedMessageNavigationPath.removeAll() }))
                             .id(key)
@@ -1359,9 +1389,10 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     }
 
     private var fyiInboxRow: FYIInboxRow? {
-        let items = fyis
-        guard !items.isEmpty else { return nil }
-        return FYIInboxRow(items: items, summary: fyiDigest.summary(for: fyiDigestScope)) {
+        let items = digestFYIs
+        guard !items.isEmpty || (activeFYIsOnly && !fyis.isEmpty) else { return nil }
+        let summary = fyiDigest.summary(for: fyiDigestScope, visibleKeys: Set(items.map(\.key)))
+        return FYIInboxRow(items: items, summary: summary) {
             navigationSelection.wrappedValue = .fyis
         }
     }
@@ -1372,6 +1403,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         let splitView = NavigationSplitView(preferredCompactColumn: $preferredCompactColumn) {
             InboxList(tab: tab, rows: rows, warnings: visibleWarnings,
                   fyiInboxRow: tab == .inbox && !searching ? fyiInboxRow : nil,
+                  activeFYIsOnly: activeFYIsOnly,
                   showsBasicOrderMarker: showsBasicOrderMarker, isRefreshing: isRefreshing,
                   refreshInbox: refreshInbox,
                   conversationStore: conversationStore,
@@ -1502,7 +1534,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
 
     var body: some View {
         let digestRequest = FYIDigest.Request(
-            highlights: FYIDigest.highlights(fyis),
+            highlights: FYIDigest.highlights(digestFYIs),
             unavailability: OnDeviceMessageSummarizer.unavailability,
             active: scenePhase == .active, scope: fyiDigestScope)
         workspace.task(id: digestRequest) {
@@ -1671,6 +1703,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             .background(WorkspaceWindowReader { windowSize = $0 })
         }
         .onChange(of: selection) { _, _ in
+            fyiSeenActionError = nil
             relatedMessageNavigationPath.removeAll()
         }
         .onChange(of: relatedMessageNavigationPath) { oldPath, newPath in
@@ -1771,6 +1804,7 @@ struct InboxList: View {
     let rows: [InboxItem]
     let warnings: [String]
     var fyiInboxRow: FYIInboxRow? = nil
+    var activeFYIsOnly = false
     var showsBasicOrderMarker = false
     var isRefreshing = false
     var refreshInbox: (@MainActor () async -> Void)? = nil
@@ -1923,9 +1957,11 @@ struct InboxList: View {
     }
 
     private func isBundledFYI(_ item: InboxItem) -> Bool {
-        guard fyiInboxRow != nil, search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              case let .request(row) = item else { return false }
-        return row.isFYI
+        guard tab == .inbox, search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              case let .request(row) = item, row.isFYI else { return false }
+        if activeFYIsOnly, row.fyiHasEnded, row.belongsToReplied { return true }
+        guard fyiInboxRow != nil else { return false }
+        return !activeFYIsOnly || row.isActiveFYI
     }
 
     private var matchingExpiredRetractionRows: [InboxRequestRow] {
@@ -3809,19 +3845,21 @@ final class FYIDigest {
     private(set) var summary: String?
     private var scope: Scope = .unavailable
 
-    func summary(for scope: Scope) -> String? {
-        scope != .unavailable && self.scope == scope ? summary : nil
+    func summary(for scope: Scope, visibleKeys: Set<RequestKey>? = nil) -> String? {
+        guard scope != .unavailable, self.scope == scope else { return nil }
+        if let visibleKeys, completedHighlights?.allSatisfy({ visibleKeys.contains($0.key) }) != true {
+            return nil
+        }
+        return summary
     }
 
-    @ObservationIgnored private var completedHighlights: [Highlight]?
+    private var completedHighlights: [Highlight]?
     @ObservationIgnored private var generation = 0
 
     static func highlights(_ items: [InboxRequestRow]) -> [Highlight] {
-        let ranked = FYIOrder.priority.sorted(items.filter { !$0.isRetracted })
-        let unseen = ranked.filter(\.isUnseenFYI)
-        let preferred = unseen.isEmpty ? ranked : unseen
-        let highPriority = preferred.filter { $0.fyiRankScore >= 0.7 }
-        return (highPriority.isEmpty ? preferred : highPriority).prefix(4).map {
+        let ranked = FYIOrder.priority.sorted(items.filter(\.isActiveFYI))
+        let highPriority = ranked.filter { $0.fyiRankScore >= 0.7 }
+        return (highPriority.isEmpty ? ranked : highPriority).prefix(4).map {
             Highlight(key: $0.key,
                       text: NewMessageAreaSummaryText.source(title: $0.title, body: $0.bodyText))
         }
@@ -3957,12 +3995,12 @@ struct FYIInboxRow: View {
                 HStack(alignment: .top, spacing: 8) {
                     ViewThatFits(in: .horizontal) {
                         HStack(spacing: 8) {
-                            Text("FYI digest").font(.caption.weight(.semibold))
-                            unseenBadge(unseen, border: colors.badgeBorder)
+                            Text(items.isEmpty ? "FYIs" : "FYI digest").font(.caption.weight(.semibold))
+                            if !items.isEmpty { unseenBadge(unseen, border: colors.badgeBorder) }
                         }
                         VStack(alignment: .leading, spacing: 4) {
-                            Text("FYI digest").font(.caption.weight(.semibold))
-                            unseenBadge(unseen, border: colors.badgeBorder)
+                            Text(items.isEmpty ? "FYIs" : "FYI digest").font(.caption.weight(.semibold))
+                            if !items.isEmpty { unseenBadge(unseen, border: colors.badgeBorder) }
                         }
                     }
                     Spacer(minLength: 0)
@@ -4015,48 +4053,44 @@ struct FYIInboxRow: View {
 
 private struct FYIList: View {
     let items: [InboxRequestRow]
+    let activeFYIsOnly: Bool
+    let actionError: String?
+    let clearActionError: () -> Void
     let markSeen: (InboxRequestRow) -> Void
+    let retrySeen: (InboxRequestRow) -> Void
     let open: (RequestKey) -> Void
     @State private var order = FYIOrder.priority
     @Environment(\.colorScheme) private var colorScheme
 
+    private var markAllDisabledReason: LocalizedStringKey? {
+        guard !items.contains(where: \.canMarkFYISeen) else { return nil }
+        guard activeFYIsOnly else { return nil }
+        let active = items.filter(\.isActiveFYI)
+        if active.isEmpty { return "All FYIs are seen" }
+        if active.allSatisfy(\.isWaitingForFYISeen) { return "Waiting for confirmation" }
+        return "Seen is unavailable for these FYIs"
+    }
+
     var body: some View {
         let palette = HarklightDesignSystem.palette(for: colorScheme)
+        let disabledReason = markAllDisabledReason
         List(order.sorted(items)) { item in
-            VStack(alignment: .leading, spacing: 8) {
-                MessageHeading(sender: item.senderLabel, initials: item.displayInitials,
-                               title: item.title, createdAt: item.fyiPostedAt ?? item.createdAt,
-                               messageType: item.resolvedMessageType, inFYIList: true)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .contentShape(Rectangle())
-                    .onTapGesture { open(item.key) }
-                if let body = item.bodyText {
-                    SystemDetectedMessageBody(text: body, foregroundColor: palette.text,
-                                              onPlainTap: { open(item.key) })
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                if item.informationalSeenStatus == .pending {
-                    Text("Seen pending confirmation").font(.caption)
-                } else if item.hasDeliveryWarning, let status = item.localStatus {
-                    Text(status).font(.caption)
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background {
-                Rectangle().fill(Color.clear)
-                    .contentShape(Rectangle())
-                    .onTapGesture { open(item.key) }
-            }
-            .foregroundStyle(.hkText)
-            .accessibilityAction { open(item.key) }
-            .accessibilityIdentifier("fyi-row-\(item.key.messageID.rawValue)")
-            .swipeActions(edge: .leading, allowsFullSwipe: false) { seenAction(for: item) }
-            .swipeActions(edge: .trailing, allowsFullSwipe: false) { seenAction(for: item) }
+            fyiRow(item, foregroundColor: palette.text)
         }
         .harklightListSurface()
         .overlay {
             if items.isEmpty {
-                ContentUnavailableView("No FYIs", systemImage: "tray")
+                ContentUnavailableView(activeFYIsOnly ? "All FYIs are seen" : "No FYIs", systemImage: "tray")
+            }
+        }
+        .safeAreaInset(edge: .top, spacing: 0) {
+            if actionError != nil || (!items.isEmpty && disabledReason != nil) {
+                (actionError.map { Text($0) } ?? Text(disabledReason ?? ""))
+                    .font(.caption)
+                    .foregroundStyle(.hkSecondary)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 6)
+                    .accessibilityIdentifier("fyi-mark-all-reason")
             }
         }
         .accessibilityIdentifier("fyi-list")
@@ -4079,17 +4113,64 @@ private struct FYIList: View {
                 .accessibilityLabel(Text("Sort: \(order.rawValue)"))
                 .accessibilityIdentifier("fyi-sort")
                 Button("Mark All Seen") {
+                    clearActionError()
                     for item in items where item.canMarkFYISeen { markSeen(item) }
                 }
-                .disabled(!items.contains { $0.canMarkFYISeen })
+                .disabled(!activeFYIsOnly || disabledReason != nil)
+                .accessibilityHint(Text(disabledReason ?? ""))
             }
         }
+    }
+
+    private func fyiRow(_ item: InboxRequestRow, foregroundColor: Color) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            MessageHeading(sender: item.senderLabel, initials: item.displayInitials,
+                           title: item.title, createdAt: item.fyiPostedAt ?? item.createdAt,
+                           messageType: item.resolvedMessageType, inFYIList: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+                .onTapGesture { open(item.key) }
+            if let body = item.bodyText {
+                SystemDetectedMessageBody(text: body, foregroundColor: foregroundColor,
+                                          onPlainTap: { open(item.key) })
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            if activeFYIsOnly ? item.isWaitingForFYISeen : item.isFYISeenPending {
+                HStack {
+                    Text("Seen pending confirmation")
+                    if item.canRetryFYISeen {
+                        Button("Retry") { retrySeen(item) }
+                            .buttonStyle(.borderless)
+                            .accessibilityLabel("Retry Seen")
+                    }
+                }
+                .font(.caption)
+            } else if activeFYIsOnly, item.hasFailedResponse, !item.fyiHasEnded {
+                Text("Seen could not be confirmed.").font(.caption)
+            } else if item.hasDeliveryWarning, let status = item.localStatus {
+                Text(status).font(.caption)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background {
+            Rectangle().fill(Color.clear)
+                .contentShape(Rectangle())
+                .onTapGesture { open(item.key) }
+        }
+        .foregroundStyle(.hkText)
+        .accessibilityAction { open(item.key) }
+        .accessibilityIdentifier("fyi-row-\(item.key.messageID.rawValue)")
+        .swipeActions(edge: .leading, allowsFullSwipe: false) { seenAction(for: item) }
+        .swipeActions(edge: .trailing, allowsFullSwipe: false) { seenAction(for: item) }
     }
 
     @ViewBuilder
     private func seenAction(for item: InboxRequestRow) -> some View {
         if item.canMarkFYISeen {
-            Button { markSeen(item) } label: {
+            Button {
+                clearActionError()
+                markSeen(item)
+            } label: {
                 Label("Seen", systemImage: "checkmark")
             }
             .tint(.accentColor)

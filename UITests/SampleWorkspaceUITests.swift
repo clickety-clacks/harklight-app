@@ -90,7 +90,8 @@ final class SampleWorkspaceUITests: XCTestCase {
 
     func testFinishedProgressSeenButtonShowsPendingWithoutOfferingAnotherSwipe() {
         let app = XCUIApplication()
-        app.launchArguments = ["--harklight-test-fyi-list", "--harklight-test-fyi-finished-progress"]
+        app.launchArguments = ["--harklight-test-fyi-list", "--harklight-test-fyi-finished-progress",
+                               "--harklight-test-fyi-plain-seen"]
         app.launch()
         defer { app.terminate() }
         openFYIListIfNeeded(app)
@@ -108,9 +109,62 @@ final class SampleWorkspaceUITests: XCTestCase {
         let pending = list.descendants(matching: .any)
             .matching(NSPredicate(format: "label == %@", "Seen pending confirmation")).firstMatch
         XCTAssertTrue(pending.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(app.staticTexts["Waiting for confirmation"].exists)
+        XCTAssertFalse(app.buttons["Mark All Seen"].isEnabled)
         capture("Progress FYI Seen pending in list", app)
         row.swipeLeft()
         XCTAssertFalse(app.buttons["Seen"].exists)
+    }
+
+    func testConfirmedFYILeavesTheRestoredListAndLastSeenLeavesAnEmptyState() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--harklight-test-fyi-list"]
+        app.launch()
+        defer { app.terminate() }
+
+        openFYIListIfNeeded(app)
+        let list = app.collectionViews["fyi-list"]
+        XCTAssertTrue(list.staticTexts["Community garden"].waitForExistence(timeout: 5))
+        capture("FYIs before confirmed Seen", app)
+
+        app.terminate()
+        app.launchArguments.append("--harklight-test-fyi-garden-seen")
+        app.launch()
+        XCTAssertTrue(app.buttons["fyi-sort"].waitForExistence(timeout: 5))
+        XCTAssertFalse(list.staticTexts["Community garden"].exists)
+        XCTAssertTrue(list.staticTexts["Museum hours"].exists)
+        capture("FYIs after one confirmed Seen", app)
+
+        app.terminate()
+        app.launchArguments.append("--harklight-test-fyi-plain-seen")
+        app.launch()
+        XCTAssertTrue(app.staticTexts["All FYIs are seen"].waitForExistence(timeout: 5))
+        XCTAssertFalse(list.staticTexts["Museum hours"].exists)
+        XCTAssertFalse(app.buttons["Mark All Seen"].isEnabled)
+        XCTAssertFalse(app.descendants(matching: .any)["inbox-fyi"].firstMatch.exists)
+        capture("Empty FYIs and disabled Mark All Seen", app)
+    }
+
+    func testLargeFYIListOpensAndScrolls() {
+        if UIDevice.current.userInterfaceIdiom == .pad { XCUIDevice.shared.orientation = .landscapeLeft }
+        let app = XCUIApplication()
+        app.launchArguments = ["--harklight-test-fyi-list", "--harklight-test-fyi-bulk"]
+        app.launch()
+        defer { app.terminate() }
+
+        let digest = app.descendants(matching: .any)["inbox-fyi"].firstMatch
+        XCTAssertTrue(digest.waitForExistence(timeout: 10))
+        XCTAssertTrue(digest.label.contains("137 unseen") || app.staticTexts["137 unseen"].exists)
+        let start = ProcessInfo.processInfo.systemUptime
+        openFYIListIfNeeded(app)
+        let list = app.collectionViews["fyi-list"]
+        let garden = list.staticTexts["Community garden"]
+        XCTAssertTrue(garden.isHittable)
+        let opened = ProcessInfo.processInfo.systemUptime
+        list.swipeUp()
+        XCTAssertFalse(garden.isHittable)
+        let scrolled = ProcessInfo.processInfo.systemUptime
+        print("FYI 842-item fixture: open \((opened - start) * 1000) ms, swipe and inspect \((scrolled - opened) * 1000) ms")
     }
 
     func testFYIBodyDoubleTapSelectsWord() {

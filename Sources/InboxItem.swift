@@ -80,6 +80,11 @@ enum InboxItem: Identifiable {
         return false
     }
 
+    var usesNormalMessageList: Bool {
+        if case let .request(row) = self { return row.progress == nil || row.fyiUsesRepliedForProgress }
+        return true
+    }
+
     var hasProgressMarker: Bool {
         if case let .request(row) = self { return row.hasProgressMarker || row.progress != nil }
         return false
@@ -332,8 +337,8 @@ enum InboxNormalListProjection {
         for item in serverItems {
             switch item.kind {
             case .message:
-                guard let row = rowsByKey[item.key], row.progress == nil,
-                      isFree || row.belongsToReplied == (tab.messageTab == .replied),
+                guard let row = rowsByKey[item.key], InboxItem.request(row).usesNormalMessageList,
+                      (isFree && !row.fyiUsesRepliedForProgress) || row.belongsToReplied == (tab.messageTab == .replied),
                       query.isEmpty || InboxItem.request(row).matchesSearch(query) else {
                     flushMessages()
                     continue
