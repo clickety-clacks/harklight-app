@@ -3728,9 +3728,9 @@ private struct FYIList: View {
                             }
                         }
                     } label: {
-                        Label("Sort", systemImage: "arrow.up.arrow.down")
+                        Label("Sort: \(order.rawValue)", systemImage: "arrow.up.arrow.down")
                     }
-                    .accessibilityValue(order.rawValue)
+                    .accessibilityIdentifier("fyi-sort")
                     Button("Mark All Seen") {
                         for item in items where item.canMarkFYISeen { markSeen(item) }
                     }
