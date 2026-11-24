@@ -768,10 +768,29 @@ public enum ErrorLogDisplay {
         case .thread:
             return inContext(records: records.filter(isThreadRead), concern: .snapshot, now: now)
         case .liveIndicator:
+            let failures = records.filter { $0.concern == .sync && !$0.isResolved }
+            if failures.count == 1, let first = failures.first, isFirstOpenedFeedDrop(first) { return nil }
             return inContext(records: records, concern: .sync, now: now)
         case let .item(clientOperationID):
             return inContext(records: records, concern: .actions,
                              clientOperationID: clientOperationID, now: now)
+        }
+    }
+
+    private static func isFirstOpenedFeedDrop(_ record: ErrorLogRecord) -> Bool {
+        guard record.operation == "change_feed", record.phase == "stream", record.count == 1,
+              record.retryable, record.correlation.requestID != nil else { return false }
+        // An open failure can also have phase stream. Its earlier unresolved
+        // drop (or a coalesced count > 1) makes the reconnect failure visible.
+        switch record.domain {
+        case "URLError":
+            return [NSURLErrorTimedOut, NSURLErrorNetworkConnectionLost, NSURLErrorNotConnectedToInternet]
+                .contains(Int(record.code) ?? 0)
+        case "POSIX":
+            return [EPIPE, ECONNRESET, ECONNABORTED, ENETRESET, ENETDOWN, ENETUNREACH, ETIMEDOUT]
+                .contains(Int32(record.code) ?? 0)
+        case "app": return ["ended_without_closing", "idle_timeout"].contains(record.code)
+        default: return false
         }
     }
 
