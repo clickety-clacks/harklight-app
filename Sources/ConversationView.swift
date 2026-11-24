@@ -1130,7 +1130,7 @@ enum ConversationSentChatStatusPresentation {
         if personFeed, turn.author == .person, turn.kind == .discussion {
             if hasReply { return .deliveredAck }
             if case let .handed(_, rerouted, _, agent)? = facts.deliveryAck2 {
-                return rerouted ? (agent.map { .deliveredTo($0.rawValue) } ?? .deliveredAck) : .deliveredAck
+                return rerouted ? (agent.flatMap { $0.rawValue.isEmpty ? nil : .deliveredTo($0.rawValue) } ?? .deliveredAck) : .deliveredAck
             }
             if case let .notHanded(_, reason, _, _)? = facts.deliveryAck2 {
                 if let availability {
@@ -1139,7 +1139,7 @@ enum ConversationSentChatStatusPresentation {
                     default: break
                     }
                 }
-                return reason.rawValue.isEmpty ? .notDeliveredYet : .notDelivered(reason.rawValue)
+                return .notDelivered(reason.rawValue)
             }
             var legacyFacts = facts
             legacyFacts.actedBy = nil
@@ -1174,6 +1174,10 @@ enum ConversationSentChatStatusPresentation {
         if case .listenerReceived(_, true, _, _)? = facts.deliveryAck1 { return .sending }
         if case .notListening? = availability?.state { return .noListenerPickedThisUp }
         return .sending
+    }
+
+    static func failureCaption(_ reason: String) -> String {
+        reason.isEmpty ? "Not delivered" : "Not delivered: " + reason
     }
 
     static func usesDeliveryAckPresentation(turn: ConversationTurn,
@@ -1284,7 +1288,8 @@ private struct ConversationSentChatStatus: View {
             Text("Waiting for \(agent)")
                 .foregroundStyle(.hkSecondary)
         case let .notDelivered(reason):
-            Text("Not delivered: \(reason)")
+            Text(verbatim: ConversationSentChatStatusPresentation.failureCaption(reason))
+                .accessibilityLabel(Text(verbatim: ConversationSentChatStatusPresentation.failureCaption(reason)))
                 .fontWeight(.semibold)
                 .foregroundStyle(.hkCoral)
         case .deliveredAck:

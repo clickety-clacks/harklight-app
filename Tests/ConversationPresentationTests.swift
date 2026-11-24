@@ -107,7 +107,10 @@ final class ConversationPresentationTests: XCTestCase {
         XCTAssertEqual(status(personFeed: false), .deliveredAck)
         facts.deliveryAck2 = .notHanded(atMilliseconds: 10, reason: ExactText(""),
             acknowledgerSystem: nil, acknowledgerAgent: nil)
-        XCTAssertEqual(status(), .notDeliveredYet)
+        XCTAssertEqual(status(), .notDelivered(""))
+        XCTAssertEqual(ConversationSentChatStatusPresentation.failureCaption(""), "Not delivered")
+        let reason = "**bold** [link](https://example.test) _text_ <tag>"
+        XCTAssertEqual(ConversationSentChatStatusPresentation.failureCaption(reason), "Not delivered: " + reason)
         for rerouted in [false, true] {
             facts.deliveryAck2 = .handed(atMilliseconds: 10, rerouted: rerouted,
                 acknowledgerSystem: nil, acknowledgerAgent: ExactText("Release"))
