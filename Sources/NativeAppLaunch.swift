@@ -184,7 +184,7 @@ final class NativeAppLaunch {
             try await self.activate(material)
             let epoch = self.activationGeneration
             let checkBlockedPush = self.takeForegroundActivationPushCheck()
-            let connect = await NativeRelayLifecycle.shared.confirmForegroundProgress(
+            let (connect, refresh) = await NativeRelayLifecycle.shared.confirmForegroundProgress(
                 for: material.context, checkBlockedPush: checkBlockedPush) { [weak self] progress in
                 guard let self else { return }
                 self.recordForegroundConnectProgress(
@@ -220,6 +220,10 @@ final class NativeAppLaunch {
             }
             let reached = connect.outcome == .confirmed
             if reached { try self.enrollment.markForegroundRelayConfirmed(for: record.deviceID) }
+            if case let .live(presentation) = self.state,
+               refresh.map({ NativeRelayLifecycle.shared.didRecover($0, for: material.context) }) != true {
+                presentation.connectionWarning = reached ? nil : connect.userFacingMessage
+            }
             return reached
         }
         guidedJoin.notificationChoice = { [weak self] enabled in
@@ -1032,27 +1036,40 @@ final class NativeAppLaunch {
         lifecycle.onV2AccountAccessChanged = { [weak self] access, context in
             self?.applyV2AccountAccess(access, for: context)
         }
-        lifecycle.onV2FeedOpened = { [weak self] context, attempt in
-            self?.applyV2FeedOpening(for: context, attempt: attempt)
+        lifecycle.onV2FeedOpened = { [weak self] context, attempt, completedAt in
+            self?.applyV2FeedOpening(for: context, attempt: attempt, catchUpCompletedAt: completedAt)
         }
     }
 
-    private func applyV2FeedOpening(for context: ProfileContext, attempt: UUID) {
+    private func applyV2FeedOpening(for context: ProfileContext, attempt: UUID, catchUpCompletedAt: Date) {
         guard case let .live(presentation) = state, !presentation.isReadOnly,
               presentation.notificationContext == context, !presentation.v2AccountPaused else { return }
-        // The feed opens after its own catch-up from the durable cursor.
-        // Resolve connectivity records in this account's log. A retryable
-        // transport failure can be left over from a previous app launch.
-        for operation in [ChangeFeedSync.catchUpOperation, ErrorLogForegroundConnectBridge.operation] {
-            errorLog.resolve(concern: .sync, operation: operation, resolvedBy: attempt.uuidString.lowercased()) { record in
-                record.retryable && record.initiator != .deviceRevoked && record.httpStatus != 401 &&
-                    !["internal_error", "account_paused", "revoked", "device_revoked"].contains(record.code) &&
-                    !(record.domain == "URLError" && [
-                        String(NSURLErrorClientCertificateRejected), String(NSURLErrorClientCertificateRequired)
-                    ].contains(record.code))
-            }
+        let resolvedBy = attempt.uuidString.lowercased()
+        // The feed's catch-up can settle an earlier connection failure. A
+        // failure observed after that batch belongs to a newer operation.
+        let catchUpFailures = errorLog.records.filter {
+            $0.concern == .sync && $0.operation == ChangeFeedSync.catchUpOperation
         }
-        guard foregroundConnectProgress == nil || foregroundConnectProgress?.transportAttemptID == attempt else { return }
+        errorLog.resolve(concern: .sync, operation: ChangeFeedSync.catchUpOperation, resolvedBy: resolvedBy) {
+            $0.retryable && $0.lastAt <= catchUpCompletedAt &&
+                ErrorLogForegroundConnectBridge.isConnectivityFailure(domain: $0.domain, code: $0.code)
+        }
+        errorLog.resolve(concern: .sync, operation: ErrorLogForegroundConnectBridge.operation, resolvedBy: resolvedBy) { record in
+            guard record.retryable, record.lastAt <= catchUpCompletedAt else { return false }
+            if ErrorLogForegroundConnectBridge.isConnectivityFailure(domain: record.domain, code: record.code) {
+                return true
+            }
+            // Older foreground records omitted the underlying catch-up error.
+            guard record.code == "relay_context_unconfirmed", record.phase == "none_confirmed",
+                  let preceding = catchUpFailures.filter({ $0.lastAt <= record.lastAt })
+                    .max(by: { $0.lastAt < $1.lastAt }) else { return false }
+            return ErrorLogForegroundConnectBridge.isConnectivityFailure(domain: preceding.domain, code: preceding.code)
+        }
+        guard foregroundConnectProgress == nil || foregroundConnectProgress?.transportAttemptID == attempt,
+              !errorLog.records.contains(where: {
+                  $0.concern == .sync && $0.operation == ErrorLogForegroundConnectBridge.operation &&
+                      $0.correlation.attemptID == foregroundConnectProgress?.attemptID && !$0.isResolved
+              }) else { return }
         presentation.connectionWarning = nil
         clearForegroundConnectionDetails()
     }
@@ -1165,10 +1182,7 @@ final class NativeAppLaunch {
         notificationSynchronized = false
         let result = await refreshOperation(checkBlockedPush)
         guard case let .live(current) = state, current === presentation else { return }
-        if result.relayConfirmed ||
-            !NativeRelayLifecycle.shared.hasRecoveredRefreshFailure(for: presentation.notificationContext) {
-            presentation.applyRefreshResult(result)
-        }
+        presentation.applyRefreshResult(result)
         notificationSynchronized = result.relayConfirmed && result.confirmedContext == presentation.notificationContext
         await resolveMessageDeepLink(synchronized: notificationSynchronized)
     }
@@ -3410,9 +3424,11 @@ final class LivePresentationStore {
         let confirmedForCurrentContext = result.confirms(
             notificationContext, transportAttemptID: result.confirmedTransportAttemptID)
         refreshPriorityLevelsRelayStatus()
-        connectionWarning = confirmedForCurrentContext ? nil :
-            result.failureMessage ??
-                "The relay could not be refreshed. Saved requests, answers and confirmed receipts remain on this device."
+        if !NativeRelayLifecycle.shared.didRecover(result, for: notificationContext) {
+            connectionWarning = confirmedForCurrentContext ? nil :
+                result.failureMessage ??
+                    "The relay could not be refreshed. Saved requests, answers and confirmed receipts remain on this device."
+        }
         if confirmedForCurrentContext {
             confirmedRelayRefresh?()
             pushRegistrationWarning = result.pushRegistration == .unconfirmed ?

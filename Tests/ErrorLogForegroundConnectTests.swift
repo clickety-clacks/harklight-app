@@ -118,39 +118,45 @@ extension ErrorLogForegroundConnectTests {
             personID: ExactText("person"), deviceID: ExactText("device")), transportMode: .relay)
         let repository = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
         let store = try LivePresentationStore(store: repository, context: context)
-        let lifecycle = NativeRelayLifecycle()
+        let attempt = UUID()
+        let tracker = ForegroundConnectProgressTracker()
+        tracker.beginSession(transportAttemptID: attempt)
+        let lifecycle = NativeRelayLifecycle(foregroundProgress: tracker)
         lifecycle.errorLog = log
         let launch = NativeAppLaunch(arguments: ["Harklight"], initialState: .live(store),
             initialEnrollmentRecord: record, errorLog: log)
         let inbox = LiveContentView(store: store, samples: SampleLibrary(), launch: launch)
-        let attempt = UUID()
         let transport = ReconnectingFeedTransport()
         let (retries, retry) = AsyncStream<Void>.makeStream()
         let connection = try ClientAPIv2Connection(transport: transport, repository: repository, context: context,
             directory: nil, errors: log, foregroundOnlyWrites: true, waitBeforeRetry: { _ in
                 var iterator = retries.makeAsyncIterator()
-                guard await iterator.next() != nil else { throw CancellationError() }
+                _ = await iterator.next()
             }, onLiveState: { state in
                 Task { @MainActor in await lifecycle.v2FeedStateChanged(state, context: context, attempt: attempt) }
             })
         launch.observeV2Connection(lifecycle)
         lifecycle.installV2Connection(connection, context: context, attempt: attempt)
         defer {
+            lifecycle.sceneActivityChanged(isActive: false)
             transport.feedEvents.finish()
             retry.finish()
         }
         try connection.model.apply([], cursor: 1)
         lifecycle.sceneActivityChanged(isActive: true)
-        _ = await lifecycle.confirmForegroundProgress(for: context) { progress in
+        let (_, failedRefresh) = await lifecycle.confirmForegroundProgress(for: context) { progress in
             launch.recordForegroundConnectProgress(progress, operationSnapshot: .unavailable)
             store.connectionWarning = progress.outcome == .confirmed ? nil : progress.userFacingMessage
         }
+        let oldRefresh = try XCTUnwrap(failedRefresh)
         try await waitUntil { self.unresolvedSync(in: log).contains("change_feed") }
 
         XCTAssertTrue(inbox.presentsConnectionFailure)
         XCTAssertEqual(inbox.connectionWarning, "Can't reach the server. Your pending actions are saved.")
         XCTAssertTrue(showsLiveUpdatesPaused(log))
         XCTAssertEqual(unresolvedSync(in: log), ["catch_up", "change_feed", "foreground_connect"])
+        XCTAssertEqual(log.records.first { $0.operation == "foreground_connect" }?.code,
+                       "relay_context_unconfirmed")
 
         transport.restoreRequests()
         _ = try await connection.outbox.submit(target: "item:one", operation: "mark_seen",
@@ -169,12 +175,14 @@ extension ErrorLogForegroundConnectTests {
 
         retry.yield(())
         transport.feedEvents.yield(.opened(requestID: "feed-opened"))
-        try await waitUntil { lifecycle.hasConfirmedServerSnapshot(for: context) }
+        try await waitUntil { self.unresolvedSync(in: log).isEmpty }
+        XCTAssertTrue(lifecycle.hasConfirmedServerSnapshot(for: context))
 
         XCTAssertFalse(inbox.presentsConnectionFailure)
         XCTAssertNil(launch.foregroundConnectFailureKey)
         XCTAssertNil(inbox.connectionWarning)
         XCTAssertNil(lifecycle.refreshFailureMessage(for: context))
+        XCTAssertTrue(lifecycle.didRecover(oldRefresh, for: context))
         XCTAssertFalse(showsLiveUpdatesPaused(log))
         XCTAssertEqual(unresolvedSync(in: log), [])
         XCTAssertEqual(Set(log.records.filter(\.isResolved).map(\.operation)),
@@ -190,13 +198,12 @@ extension ErrorLogForegroundConnectTests {
         XCTAssertEqual(launch.foregroundConnectFailureKey, replacementKey)
         XCTAssertFalse(inbox.presentsConnectionFailure)
         XCTAssertEqual(unresolvedSync(in: log), ["foreground_connect"])
-        await lifecycle.v2FeedStateChanged(.live, context: context, attempt: attempt)
-        XCTAssertNil(launch.foregroundConnectFailureKey)
-
         transport.feedEvents.finish(throwing: URLError(.networkConnectionLost))
-        try await waitUntil { self.showsLiveUpdatesPaused(log) }
-        XCTAssertEqual(unresolvedSync(in: log), ["change_feed"])
+        try await waitUntil { self.unresolvedSync(in: log).contains("change_feed") }
+        XCTAssertEqual(unresolvedSync(in: log), ["change_feed", "foreground_connect"])
+        XCTAssertTrue(showsLiveUpdatesPaused(log))
         XCTAssertFalse(inbox.presentsConnectionFailure, "A drop cannot present the earlier dismissed attempt.")
+        XCTAssertTrue(lifecycle.didRecover(oldRefresh, for: context))
         await lifecycle.deactivate()
     }
 
@@ -219,6 +226,12 @@ extension ErrorLogForegroundConnectTests {
         lifecycle.installV2Connection(connection, context: context, attempt: attempt)
         try connection.model.apply([], cursor: 1)
         transport.restoreRequests()
+        log.report(ErrorLogReport(concern: .sync, connectionRole: .stream,
+            operation: "catch_up", phase: "batch", reason: .urlError(NSURLErrorSecureConnectionFailed),
+            initiator: .unknown, retryable: true))
+        log.report(ErrorLogReport(concern: .sync, connectionRole: .stream,
+            operation: "foreground_connect", phase: "none_confirmed", reason: .app("relay_context_unconfirmed"),
+            retryable: true, correlation: .init(attemptID: UUID(), transportAttemptID: UUID())))
         lifecycle.sceneActivityChanged(isActive: true)
 
         _ = try await connection.outbox.submit(target: "item:refused", operation: "mark_seen",
@@ -226,21 +239,29 @@ extension ErrorLogForegroundConnectTests {
         try await waitUntil { await connection.outbox.failedWrites.count == 1 }
         let failedBefore = await connection.outbox.failedWrites
         XCTAssertEqual(failedBefore.count, 1)
-        for reason in ["internal_error", "account_paused", "revoked"] {
+        for reason in ["internal_error", "account_paused", "revoked", "apply_failed"] {
             log.report(ErrorLogReport(concern: .sync, connectionRole: .stream,
                 operation: "catch_up", phase: "batch", reason: .serverReason(reason),
                 initiator: .serverClosed, retryable: true))
         }
-        log.report(ErrorLogReport(concern: .sync, connectionRole: .stream,
-            operation: "catch_up", phase: "batch", reason: .urlError(NSURLErrorNotConnectedToInternet),
-            initiator: .osNetwork, retryable: true))
+        try await waitUntil { transport.feedRequested }
+        transport.failNextBatch()
+        let newerRefresh = await lifecycle.refreshResultFromTrustedRelay()
         transport.feedEvents.yield(.opened(requestID: "feed-opened"))
-        try await waitUntil { lifecycle.hasConfirmedServerSnapshot(for: context) }
+        try await waitUntil {
+            log.records.contains {
+                $0.operation == "foreground_connect" && $0.isResolved
+            }
+        }
+        XCTAssertTrue(lifecycle.hasConfirmedServerSnapshot(for: context))
 
         let active = log.records.filter { !$0.isResolved }
         XCTAssertEqual(Set(active.filter { $0.concern == .sync }.map(\.code)),
-                       ["internal_error", "account_paused", "revoked"])
+                       ["internal_error", "account_paused", "revoked", "apply_failed",
+                        String(NSURLErrorCannotConnectToHost)])
         XCTAssertTrue(showsLiveUpdatesPaused(log))
+        XCTAssertFalse(lifecycle.didRecover(newerRefresh, for: context))
+        XCTAssertNotNil(lifecycle.refreshFailureMessage(for: context))
         XCTAssertEqual(active.filter { $0.concern == .actions }.map(\.operation), ["mark_seen"])
         let failedAfter = await connection.outbox.failedWrites
         XCTAssertEqual(failedAfter, failedBefore)
@@ -258,10 +279,14 @@ extension ErrorLogForegroundConnectTests {
         return false
     }
 
-    private func waitUntil(_ condition: () async -> Bool) async throws {
+    private func waitUntil(file: StaticString = #filePath, line: UInt = #line,
+                           _ condition: () async -> Bool) async throws {
         let deadline = ContinuousClock.now + .seconds(5)
         while !(await condition()) {
-            guard ContinuousClock.now < deadline else { throw URLError(.timedOut) }
+            guard ContinuousClock.now < deadline else {
+                XCTFail("Timed out waiting for the condition.", file: file, line: line)
+                throw URLError(.timedOut)
+            }
             try await Task.sleep(for: .milliseconds(5))
         }
     }
@@ -271,6 +296,8 @@ private final class ReconnectingFeedTransport: ClientAPITransport, @unchecked Se
     private let lock = NSLock()
     private var online = false
     private var writes = 0
+    private var requestedFeed = false
+    private var failBatch = false
     private let feed: AsyncThrowingStream<FeedEvent, any Error>
     let feedEvents: AsyncThrowingStream<FeedEvent, any Error>.Continuation
 
@@ -278,6 +305,8 @@ private final class ReconnectingFeedTransport: ClientAPITransport, @unchecked Se
 
     func restoreRequests() { lock.withLock { online = true } }
     var successfulWrites: Int { lock.withLock { writes } }
+    var feedRequested: Bool { lock.withLock { requestedFeed } }
+    func failNextBatch() { lock.withLock { failBatch = true } }
 
     func send(_ request: APIRequest) async throws -> APIResponse {
         if request.method == .put, request.path == "/v2/items/refused/seen" {
@@ -294,9 +323,18 @@ private final class ReconnectingFeedTransport: ClientAPITransport, @unchecked Se
     }
 
     func changeBatch(after: Rev) async throws -> FeedBatch {
-        guard lock.withLock({ online }) else { throw URLError(.notConnectedToInternet) }
-        return FeedBatch(changes: [], rev: after, more: false)
+        try lock.withLock {
+            guard online else { throw URLError(.notConnectedToInternet) }
+            if failBatch {
+                failBatch = false
+                throw URLError(.cannotConnectToHost)
+            }
+            return FeedBatch(changes: [], rev: after, more: false)
+        }
     }
 
-    func changeFeed(after: Rev) -> AsyncThrowingStream<FeedEvent, any Error> { feed }
+    func changeFeed(after: Rev) -> AsyncThrowingStream<FeedEvent, any Error> {
+        lock.withLock { requestedFeed = true }
+        return feed
+    }
 }

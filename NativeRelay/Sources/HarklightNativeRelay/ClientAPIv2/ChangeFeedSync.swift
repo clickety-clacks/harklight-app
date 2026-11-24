@@ -207,6 +207,7 @@ public actor ChangeFeedSync {
             // The backlog comes by batch (one write per batch); the stream
             // then carries only live changes.
             let caughtUp = try await drainBatches(from: after)
+            let completedAt = Date()
             generation = caughtUp.generation
             var last = caughtUp.revision
             try checkGeneration(generation)
@@ -217,8 +218,9 @@ public actor ChangeFeedSync {
                 case let .opened(requestID):
                     openedThisRound = true
                     feedRequestID = requestID
-                    errors.resolve(concern: .sync, operation: Self.feedOperation)
+                    catchUpCompletedAt = completedAt
                     liveState = .live
+                    errors.resolve(concern: .sync, operation: Self.feedOperation)
                 case .heartbeat:
                     // The transport's 60 s no-bytes timeout is reset by it.
                     continue
@@ -387,6 +389,10 @@ public actor ChangeFeedSync {
     }
 
     /// The open feed's Request-Id, which correlates every report about it.
+    public var liveCatchUpCompletedAt: Date? {
+        liveState == .live ? catchUpCompletedAt : nil
+    }
+    private var catchUpCompletedAt: Date?
     private var feedRequestID: String?
     /// The server accepted the feed in the current attempt.
     private var openedThisRound = false
