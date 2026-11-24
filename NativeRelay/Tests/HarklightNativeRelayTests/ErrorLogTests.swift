@@ -472,6 +472,104 @@ final class ErrorLogTests: XCTestCase {
 
     // MARK: In-context display
 
+    private func showsLiveFailure(_ store: ErrorLogStore, at now: Date) -> Bool {
+        if case .failing? = ErrorLogDisplay.inContext(records: store.records, surface: .liveIndicator, now: now) {
+            return true
+        }
+        return false
+    }
+
+    func testMinuteIdleDropAndReopenNeverShowsLiveFailureAndKeepsDiagnostics() {
+        let clock = Clock(Date(timeIntervalSince1970: 1_000_000))
+        let store = makeStore(clock: clock)
+        for cycle in 0..<3 {
+            XCTAssertFalse(showsLiveFailure(store, at: clock.now))
+            clock.advance(60)
+            store.report(report(.sync, operation: "change_feed", phase: "stream",
+                reason: .app("ended_without_closing"), initiator: .unknown,
+                correlation: .request("opened-\(cycle)")))
+            let held = store.records
+            XCTAssertEqual(held.filter { !$0.isResolved }.first?.count, 1)
+            XCTAssertFalse(showsLiveFailure(store, at: clock.now), "The first drop stays quiet in the shared live surface.")
+            XCTAssertNil(ErrorLogDisplay.inContext(records: held, surface: .inbox, now: clock.now))
+            XCTAssertNil(ErrorLogDisplay.inContext(records: held, surface: .thread, now: clock.now))
+            XCTAssertEqual(ErrorLogDisplay.inContext(records: held, concern: .sync, now: clock.now)?.record.operation,
+                           "change_feed", "Settings and diagnostics still see the failure.")
+            XCTAssertEqual(store.records, held, "Choosing a caption never edits the Error Log.")
+            clock.advance(2)
+            store.resolve(concern: .sync, operation: "change_feed") // The reopened feed reports success.
+            XCTAssertFalse(showsLiveFailure(store, at: clock.now))
+        }
+        XCTAssertEqual(store.records.count, 3, "Each resolved/drop cycle starts a new count-one record.")
+        XCTAssertTrue(store.records.allSatisfy(\.isResolved))
+    }
+
+    func testFailedReconnectShowsForBatchOrOpenWithMergedOrDifferentError() {
+        for (phase, code) in [("batch", -1005), ("stream", -1005), ("stream", -1004)] {
+            let clock = Clock(Date(timeIntervalSince1970: 1_000_000))
+            let store = makeStore(clock: clock)
+            store.report(report(.sync, operation: "change_feed", phase: "stream", reason: .urlError(-1005),
+                                correlation: .request("opened-feed")))
+            XCTAssertFalse(showsLiveFailure(store, at: clock.now))
+            clock.advance(1)
+            // A failed stream open also uses phase stream, but has no opened-feed Request-Id.
+            store.report(report(.sync, operation: "change_feed", phase: phase, reason: .urlError(code)))
+            XCTAssertTrue(showsLiveFailure(store, at: clock.now), "Reconnect \(phase)/\(code) fails immediately visibly.")
+            if code == -1005 {
+                XCTAssertEqual(store.records.count, 1)
+                XCTAssertEqual(store.records[0].count, 2)
+                XCTAssertEqual(store.records[0].phase, phase, "Coalescing replaces the phase with the latest failure.")
+            } else {
+                XCTAssertEqual(store.records.filter { !$0.isResolved }.count, 2,
+                               "A new error code must not look like a fresh first drop.")
+            }
+        }
+    }
+
+    func testOutageRemainsVisibleAcrossRetriesAndReopenClearsWithoutErasure() {
+        let clock = Clock(Date(timeIntervalSince1970: 1_000_000))
+        let store = makeStore(clock: clock)
+        store.report(report(.sync, operation: "change_feed", phase: "stream",
+                            reason: .app("idle_timeout"), correlation: .request("opened-feed")))
+        XCTAssertFalse(showsLiveFailure(store, at: clock.now))
+        for (phase, code) in [("batch", -1009), ("stream", -1004), ("stream", -1004), ("batch", -1009)] {
+            clock.advance(2)
+            store.report(report(.sync, operation: "change_feed", phase: phase, reason: .urlError(code)))
+            XCTAssertTrue(showsLiveFailure(store, at: clock.now))
+        }
+        let count = store.records.count
+        store.resolve(concern: .sync, operation: "change_feed")
+        XCTAssertFalse(showsLiveFailure(store, at: clock.now))
+        XCTAssertEqual(store.records.count, count)
+        clock.advance(60)
+        store.report(report(.sync, operation: "change_feed", phase: "stream",
+                            reason: .app("idle_timeout"), correlation: .request("reopened-feed")))
+        XCTAssertFalse(showsLiveFailure(store, at: clock.now), "A later healthy-open/drop cycle is again only a first drop.")
+    }
+
+    func testAttentionAndOtherSyncFailuresAreNeverHiddenAsAFirstDrop() {
+        let cases: [(String, String, ErrorLogReason, ErrorLogCorrelation)] = [
+            ("change_feed", "stream", .serverReason("internal_error"), .request("opened")),
+            ("change_feed", "open", .serverReason("account_paused"), .none),
+            ("change_feed", "open", .serverReason("revoked"), .none),
+            ("change_feed", "closing", .serverReason("server_shutdown"), .request("opened")),
+            ("change_feed", "closing", .serverReason("storage_unavailable"), .request("opened")),
+            ("change_feed", "closing", .serverReason("cursor_expired"), .request("opened")),
+            ("change_feed", "stream", .app("decode_failed"), .request("opened")),
+            ("change_feed", "apply", .app("decode_failed"), .request("opened")),
+            ("change_feed", "stream", .urlError(-1004), .none),
+            ("subscribe_conversation", "stream", .urlError(-1005), .request("opened")),
+            ("catch_up", "batch", .urlError(-1009), .none)
+        ]
+        for (operation, phase, reason, correlation) in cases {
+            let clock = Clock(Date(timeIntervalSince1970: 1_000_000))
+            let store = makeStore(clock: clock)
+            store.report(report(.sync, operation: operation, phase: phase, reason: reason, correlation: correlation))
+            XCTAssertTrue(showsLiveFailure(store, at: clock.now), "\(operation)/\(phase)/\(reason.code) needs attention.")
+        }
+    }
+
+
     func testInContextShowsNewestUnresolvedRecordOfItsOwnConcernOnly() {
         let clock = Clock(Date(timeIntervalSince1970: 1_000_000))
         let store = makeStore(clock: clock)
