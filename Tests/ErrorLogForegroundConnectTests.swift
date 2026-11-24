@@ -104,6 +104,5 @@ final class ErrorLogForegroundConnectTests: XCTestCase {
         let kept = try XCTUnwrap(launch.errorLogModel.records.first)
         XCTAssertEqual(kept.code, "89")
         XCTAssertTrue(kept.isResolved)
-        XCTAssertTrue(launch.hasDiagnosticsToShow)
     }
 }

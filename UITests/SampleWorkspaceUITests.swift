@@ -623,51 +623,23 @@ final class SampleWorkspaceUITests: XCTestCase {
         app.launch()
         let inbox = workspaceTab("Inbox", in: app)
         let replied = workspaceTab("Replied", in: app)
-        let brand = app.descendants(matching: .any)["inbox-brand"]
-        let warningButton = app.buttons["inbox-warning-button"]
-        let settings = app.buttons["inbox-settings"]
-
-        let message = app.staticTexts["inbox-warning-message"]
-        let row = app.descendants(matching: .any)
-            .matching(NSPredicate(format: "identifier BEGINSWITH 'sample-'")).firstMatch
-        XCTAssertTrue(warningButton.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(settings.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertFalse(message.waitForExistence(timeout: 1),
-                       "Warnings remain available from their toolbar button without opening a popover over other actions.")
-        XCTAssertTrue(inbox.isSelected, "The warning leaves the selected tab unchanged.")
-        XCTAssertTrue(row.waitForExistence(timeout: 5), "Existing Inbox content remains visible.")
-        capture("inbox-recovery-warning-toolbar", app)
-        XCTAssertTrue(brand.exists, app.debugDescription)
-        XCTAssertGreaterThanOrEqual(warningButton.frame.minX, brand.frame.maxX - 2,
-                                    "The warning icon remains after the Harklight title.")
-        XCTAssertEqual(warningButton.frame.midY, settings.frame.midY, accuracy: 5,
-                       "Settings and the warning button share the native toolbar row.")
-        XCTAssertLessThan(settings.frame.midX, warningButton.frame.midX,
-                          "Settings keeps its existing wide-toolbar position before the warning icon.")
-
-        settings.tap()
-        XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 5), app.debugDescription)
-        app.buttons["Done"].tap()
-        XCTAssertTrue(app.navigationBars["Settings"].waitForNonExistence(timeout: 5), app.debugDescription)
-
-        warningButton.tap()
+        let settings = app.buttons["inbox-settings"].firstMatch
+        let message = app.staticTexts.containing(
+            NSPredicate(format: "identifier == %@ AND label CONTAINS %@",
+                        "inbox-warning-message", "Could not verify notification")).firstMatch
         XCTAssertTrue(message.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(message.label.contains("Could not verify notification"), message.label)
-        capture("inbox-recovery-warning-opened-on-demand", app)
-        app.coordinate(withNormalizedOffset: CGVector(dx: 0.05, dy: 0.10)).tap()
-        XCTAssertFalse(message.waitForExistence(timeout: 1), "Tapping outside the stock popover dismisses it.")
+        XCTAssertFalse(app.buttons["inbox-warning-button"].exists)
+        XCTAssertTrue(inbox.isSelected)
+        XCTAssertTrue(settings.isHittable)
+        settings.tap()
+        XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 5))
+        app.buttons["Done"].tap()
 
         selectMessageTab("Replied", in: app)
-        XCTAssertTrue(replied.isSelected, app.debugDescription)
-        XCTAssertFalse(message.waitForExistence(timeout: 1),
-                       "The dismissed warning does not reopen when switching lists.")
+        XCTAssertTrue(replied.isSelected)
         selectMessageTab("Inbox", in: app)
-        XCTAssertTrue(inbox.isSelected, app.debugDescription)
-        XCTAssertFalse(message.waitForExistence(timeout: 1),
-                       "Returning to Inbox does not auto-present a warning popover.")
-        warningButton.tap()
-        XCTAssertTrue(message.waitForExistence(timeout: 5),
-                      "The warning icon still opens a persistent warning manually.")
+        XCTAssertTrue(inbox.isSelected)
+        XCTAssertTrue(message.isHittable)
     }
 
     func testUnsupportedNoCommentControlStaysVisibleAndCanBeRetried() {

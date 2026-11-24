@@ -1,4 +1,5 @@
 import AttentionDomain
+import HarklightNativeRelay
 import Observation
 import SwiftUI
 import UIKit
@@ -765,6 +766,13 @@ struct LiveContentView: View {
         guard !didApplyPresentationTestFixture else { return }
         didApplyPresentationTestFixture = true
         let arguments = ProcessInfo.processInfo.arguments
+        if arguments.contains("--harklight-test-settings-diagnostics"), let launch {
+            launch.errorLog.report(ErrorLogReport(concern: .sync, connectionRole: .stream,
+                operation: "catch_up", phase: "batch",
+                reason: .serverReason(APIErrorToken.internalError.rawValue),
+                initiator: .unknown, retryable: false, httpStatus: 500))
+            launch.errorLogModel.refresh()
+        }
         if arguments.contains("--harklight-test-refreshing") {
             store.beginRefresh()
         }
@@ -1048,7 +1056,7 @@ struct LiveInboxSettings: View {
                     PriorityLevelsSettingsSection(store: store)
                         .id("priority-levels-settings")
                 }
-                if let launch, launch.hasDiagnosticsToShow {
+                if let launch {
                     InboxDiagnosticsSettingsSection(launch: launch, isReadOnly: store.isReadOnly,
                                                     closeSettings: { dismiss() })
                 }

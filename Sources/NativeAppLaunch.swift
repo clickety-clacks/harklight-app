@@ -1071,11 +1071,6 @@ final class NativeAppLaunch {
                              commit: NativeDiagnosticSourceProvenance.current.commit)
     }
 
-    /// Whether Settings has any diagnostics to offer.
-    var hasDiagnosticsToShow: Bool {
-        diagnostics.hasEvents || foregroundConnectDiagnostic != nil || !errorLogModel.records.isEmpty
-    }
-
     func recordForegroundConnectProgress(_ progress: NativeForegroundConnectProgress,
                                          operationSnapshot: NativeForegroundOperationSnapshot) {
         ErrorLogForegroundConnectBridge.record(progress, in: errorLog)
