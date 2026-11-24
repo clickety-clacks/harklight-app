@@ -317,6 +317,137 @@ extension ErrorLogForegroundConnectTests {
         await lifecycle.deactivate()
     }
 
+    func testLiveCatchUpInternalErrorShowsBanner() async throws {
+        try await withOpenFeed { connection, transport, log in
+            let error = APIError(status: 500, body: Data(#"{"error":"internal_error","retryable":false}"#.utf8),
+                                 requestID: "internal-failure", retryAfter: nil)
+            transport.nextBatch { _ in throw error }
+            let failure = try await catchUpFailure(connection)
+            XCTAssertEqual(failure as? APIError, error)
+            assertCatchUpBanner(log, phase: "batch", code: "internal_error", status: 500)
+        }
+    }
+
+    func testLiveCatchUpMalformedBatchShowsBanner() async throws {
+        try await withOpenFeed { connection, transport, log in
+            // A batch claiming more data without advancing the cursor is invalid.
+            transport.nextBatch { cursor in FeedBatch(changes: [], rev: cursor, more: true) }
+            let failure = try await catchUpFailure(connection)
+            XCTAssertEqual(failure as? FeedDecodingError, .outOfOrder)
+            assertCatchUpBanner(log, phase: "batch")
+        }
+    }
+
+    func testLiveCatchUpSaveFailureShowsBanner() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try await withOpenFeed(directory: directory) { connection, transport, log in
+            let modelFile = directory.appendingPathComponent("server-model-v2.json")
+            try FileManager.default.removeItem(at: modelFile)
+            try FileManager.default.createDirectory(at: modelFile, withIntermediateDirectories: false)
+            try Data([1]).write(to: modelFile.appendingPathComponent("occupied"))
+            transport.nextBatch { cursor in FeedBatch(changes: [], rev: cursor + 1, more: false) }
+            let failure = try await catchUpFailure(connection)
+            XCTAssertEqual((failure as NSError).domain, NSCocoaErrorDomain)
+            XCTAssertEqual(connection.model.heldCursor, 1, "A failed save must leave the durable cursor unchanged.")
+            assertCatchUpBanner(log, phase: "apply")
+        }
+    }
+
+    func testLiveCatchUpConnectivityWarnsOnlyAfterFeedDrops() async throws {
+        try await withOpenFeed { connection, transport, log in
+            transport.failNextBatch()
+            let whileOpen = try await catchUpFailure(connection)
+            XCTAssertEqual((whileOpen as? URLError)?.code, .cannotConnectToHost)
+            XCTAssertTrue(log.records.isEmpty, "A live feed suppresses the redundant connectivity diagnostic.")
+            XCTAssertFalse(showsLiveUpdatesPaused(log))
+
+            transport.feedEvents.finish(throwing: URLError(.networkConnectionLost))
+            try await waitUntil { !connection.sync.hasOpenFeed }
+            XCTAssertEqual(unresolvedSync(in: log), ["change_feed"])
+            XCTAssertFalse(showsLiveUpdatesPaused(log), "A single drop of an opened feed is quiet.")
+
+            transport.failNextBatch()
+            let afterDrop = try await catchUpFailure(connection)
+            XCTAssertEqual((afterDrop as? URLError)?.code, .cannotConnectToHost)
+            assertCatchUpBanner(log, phase: "batch", code: String(NSURLErrorCannotConnectToHost))
+        }
+    }
+
+    func testLiveCatchUpPausedAccountShowsBanner() async throws {
+        try await assertLiveCatchUpAccessFailure(status: 403, token: .accountPaused, access: .paused)
+    }
+
+    func testLiveCatchUpRevokedDeviceShowsBanner() async throws {
+        try await assertLiveCatchUpAccessFailure(status: 401, token: .unauthorized, access: .revoked)
+    }
+
+    private func assertLiveCatchUpAccessFailure(status: Int, token: APIErrorToken,
+                                               access: ClientAPIAccessState) async throws {
+        try await withOpenFeed { connection, transport, log in
+            let error = APIError(status: status, token: token, retryable: false, requestID: "access-failure")
+            transport.nextBatch { _ in throw error }
+            let failure = try await catchUpFailure(connection)
+            XCTAssertEqual(failure as? APIError, error)
+            XCTAssertEqual(connection.access.state, access)
+            assertCatchUpBanner(log, phase: "batch", code: token.rawValue, status: status)
+        }
+    }
+
+    private func withOpenFeed(
+        directory: URL? = nil,
+        exercise: (ClientAPIv2Connection, ReconnectingFeedTransport, ErrorLogStore) async throws -> Void
+    ) async throws {
+        let log = makeLog()
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+            personID: ExactText("person"), deviceID: ExactText("device"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let repository = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        let transport = ReconnectingFeedTransport()
+        transport.restoreRequests()
+        let connection = try ClientAPIv2Connection(transport: transport, repository: repository, context: context,
+            directory: directory, errors: log, foregroundOnlyWrites: true, waitBeforeRetry: { _ in
+                throw CancellationError()
+            })
+        try connection.model.apply([], cursor: 1)
+        let feed = Task { await connection.sync.runForeground() }
+        defer {
+            feed.cancel()
+            transport.feedEvents.finish()
+            transport.reopenedFeedEvents.finish()
+        }
+        transport.feedEvents.yield(.opened(requestID: "established-feed"))
+        try await waitUntil { connection.sync.hasOpenFeed }
+        XCTAssertTrue(log.records.isEmpty)
+        try await exercise(connection, transport, log)
+    }
+
+    private func catchUpFailure(_ connection: ClientAPIv2Connection) async throws -> Error {
+        do {
+            try await connection.catchUp()
+        } catch {
+            return error
+        }
+        XCTFail("The injected catch-up failure must reach the caller.")
+        throw URLError(.unknown)
+    }
+
+    private func assertCatchUpBanner(_ log: ErrorLogStore, phase: String, code: String? = nil,
+                                     status: Int? = nil, file: StaticString = #filePath, line: UInt = #line) {
+        let record = log.records.first { $0.concern == .sync && $0.operation == "catch_up" && !$0.isResolved }
+        XCTAssertNotNil(record, "The failed catch-up must be recorded.", file: file, line: line)
+        XCTAssertEqual(record?.phase, phase, file: file, line: line)
+        if let code { XCTAssertEqual(record?.code, code, file: file, line: line) }
+        if let status { XCTAssertEqual(record?.httpStatus, status, file: file, line: line) }
+        guard case let .failing(shown)? = ErrorLogDisplay.inContext(
+            records: log.records, surface: .liveIndicator, now: Date()
+        ) else {
+            XCTFail("The failed catch-up must show the Live updates paused banner.", file: file, line: line)
+            return
+        }
+        XCTAssertEqual(shown.id, record?.id, file: file, line: line)
+    }
+
     private func unresolvedSync(in log: ErrorLogStore) -> Set<String> {
         Set(log.records.filter { $0.concern == .sync && !$0.isResolved }.map(\.operation))
     }
@@ -346,7 +477,7 @@ private final class ReconnectingFeedTransport: ClientAPITransport, @unchecked Se
     private var online = false
     private var writes = 0
     private var requestedFeed = false
-    private var failBatch = false
+    private var batchOverride: (@Sendable (Rev) throws -> FeedBatch)?
     private var heldBatch: AsyncStream<Void>?
     private var startedHeldBatch = false
     private let feed: AsyncThrowingStream<FeedEvent, any Error>
@@ -362,7 +493,10 @@ private final class ReconnectingFeedTransport: ClientAPITransport, @unchecked Se
     func restoreRequests() { lock.withLock { online = true } }
     var successfulWrites: Int { lock.withLock { writes } }
     var feedRequested: Bool { lock.withLock { requestedFeed } }
-    func failNextBatch() { lock.withLock { failBatch = true } }
+    func failNextBatch() { nextBatch { _ in throw URLError(.cannotConnectToHost) } }
+    func nextBatch(_ response: @escaping @Sendable (Rev) throws -> FeedBatch) {
+        lock.withLock { batchOverride = response }
+    }
     func holdNextBatch(until release: AsyncStream<Void>) { lock.withLock { heldBatch = release } }
     var heldBatchStarted: Bool { lock.withLock { startedHeldBatch } }
 
@@ -393,9 +527,9 @@ private final class ReconnectingFeedTransport: ClientAPITransport, @unchecked Se
         }
         return try lock.withLock {
             guard online else { throw URLError(.notConnectedToInternet) }
-            if failBatch {
-                failBatch = false
-                throw URLError(.cannotConnectToHost)
+            if let response = batchOverride {
+                batchOverride = nil
+                return try response(after)
             }
             return FeedBatch(changes: [], rev: after, more: false)
         }
