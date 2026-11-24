@@ -24,6 +24,7 @@ private final class V2ScenePushTransport: ClientAPITransport, @unchecked Sendabl
     }
 
     func setPaused() { lock.withLock { pausedAccount = true } }
+    func disableHandoff() { lock.withLock { handoffFeature = false } }
     func recoverEntryReads() { lock.withLock { entryFailure = nil; cancelEntryRead = false; internalEntryError = false } }
 
     func advertiseHandoff(page: String) {
@@ -122,17 +123,13 @@ private final class V2ScenePushTransport: ClientAPITransport, @unchecked Sendabl
 
 final class HarklightTests: XCTestCase {
     @MainActor
-    func testHandoffRefreshFailureResolvesAfterExplicitRetryAndAcrossRelaunch() async throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: directory) }
+    private func handoffFailureFixture(directory: URL?, errors: any ErrorLogging)
+        throws -> (ClientAPIv2Connection, V2ScenePushTransport) {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
             personID: ExactText("person"), deviceID: ExactText("device"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
         let repository = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
         let transport = V2ScenePushTransport()
-        let logURL = directory.appendingPathComponent("errors.json")
-        let build = ErrorLogBuild(version: "test", build: "1", commit: "test")
-        let errors = ErrorLogStore(fileURL: logURL, build: build)
         let connection = try ClientAPIv2Connection(transport: transport, repository: repository, context: context,
             directory: directory, errors: errors)
         let item = try JSONValue.parse(Data(#"{"item_id":"item","rev":1,"sender":"sender","request_revision":1,"message":{"title":"Hello"},"files":[],"seen":false,"chat":{"available":true,"started":true},"rank":{"key":"a","section":"current"}}"#.utf8))
@@ -141,25 +138,76 @@ final class HarklightTests: XCTestCase {
         let page = "{\"rev\":2,\"entries\":[" + entry + "],\"older\":false}"
         try connection.model.apply(APIEntriesPage(json: JSONValue.parse(Data(page.utf8))), of: ExactText("item"))
         transport.advertiseHandoff(page: page.replacingOccurrences(of: "\"delivered\":true", with: "\"delivered\":true,\"legacy_caption\":true"))
+        return (connection, transport)
+    }
+
+    @MainActor
+    func testBestEffortHandoffReadFailureIsSilentAndRecoversOnOrdinaryPass() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let logURL = directory.appendingPathComponent("errors.json")
+        let build = ErrorLogBuild(version: "test", build: "1", commit: "test")
+        let errors = ErrorLogStore(fileURL: logURL, build: build)
+        let (connection, transport) = try handoffFailureFixture(directory: directory, errors: errors)
         transport.failEntryReadsInternally()
         _ = try await connection.refreshMe()
-        let record = try XCTUnwrap(errors.records.first { $0.operation == "handoff_projection" && !$0.isResolved })
         XCTAssertEqual(transport.counts.entryReads, 1)
+        XCTAssertEqual(connection.model.snapshot.handoffCaptionRefreshItems, [ExactText("item")])
+        XCTAssertFalse(errors.records.contains { !$0.isResolved }, "A best-effort re-read must not raise an Inbox failure or Try again.")
+        XCTAssertNil(ErrorLogDisplay.inContext(records: errors.records, surface: .inbox, now: .now))
         errors.flush()
         let reopenedErrors = ErrorLogStore(fileURL: logURL, build: build)
-        let reopened = try ClientAPIv2Connection(transport: transport, repository: repository, context: context,
-            directory: directory, errors: reopenedErrors)
-        XCTAssertTrue(reopenedErrors.records.contains { $0.operation == "handoff_projection" && !$0.isResolved },
-                      "An unsuccessful optional refresh remains an actionable failure across relaunch.")
+        XCTAssertFalse(reopenedErrors.records.contains { !$0.isResolved })
         transport.recoverEntryReads()
-        try await reopened.retryInternalError(record)
-        XCTAssertEqual(transport.counts.entryReads, 2, "Try again must reread the failed projection.")
-        XCTAssertTrue(reopened.model.snapshot.handoffCaptionRefreshItems.isEmpty)
-        XCTAssertFalse(reopenedErrors.records.contains { $0.operation == "handoff_projection" && !$0.isResolved })
-        reopenedErrors.flush()
-        let recovered = ErrorLogStore(fileURL: logURL, build: build)
-        XCTAssertFalse(recovered.records.contains { $0.operation == "handoff_projection" && !$0.isResolved },
-                       "The old Inbox failure banner must not return after successful recovery and relaunch.")
+        _ = try await connection.refreshMe()
+        XCTAssertEqual(transport.counts.entryReads, 2, "The next ordinary pass retries pending metadata.")
+        XCTAssertTrue(connection.model.snapshot.handoffCaptionRefreshItems.isEmpty)
+        XCTAssertFalse(errors.records.contains { !$0.isResolved })
+        XCTAssertNil(ErrorLogDisplay.inContext(records: errors.records, surface: .inbox, now: .now))
+        errors.flush()
+        XCTAssertFalse(ErrorLogStore(fileURL: logURL, build: build).records.contains { !$0.isResolved })
+    }
+
+    @MainActor
+    func testHandoffFlagSaveFailureResolvesEvenWhileEntryReadRemainsPending() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let errors = ErrorLogStore(fileURL: nil, build: .init(version: "test", build: "1", commit: "test"))
+        let (connection, transport) = try handoffFailureFixture(directory: directory, errors: errors)
+        let modelURL = directory.appendingPathComponent("server-model-v2.json")
+        try FileManager.default.removeItem(at: modelURL)
+        try FileManager.default.createDirectory(at: modelURL, withIntermediateDirectories: false)
+        _ = try await connection.refreshMe()
+        XCTAssertTrue(errors.records.contains { $0.operation == "handoff_caption_save" && !$0.isResolved })
+        try FileManager.default.removeItem(at: modelURL)
+        transport.failEntryReadsInternally()
+        _ = try await connection.refreshMe()
+        XCTAssertEqual(connection.model.snapshot.handoffCaptionRefreshItems, [ExactText("item")])
+        XCTAssertFalse(errors.records.contains { $0.operation == "handoff_caption_save" && !$0.isResolved },
+                       "A successful flag save resolves independently of the best-effort item read.")
+        XCTAssertFalse(errors.records.contains { $0.operation == "handoff_projection" && !$0.isResolved })
+    }
+
+    @MainActor
+    func testAbsentHandoffFeatureSkipsMutationAndSealedFlagSaveReportsNothing() async throws {
+        let empty = ServerModelV2Store(fileURL: nil)
+        try empty.setHandoffCaptionsEnabled(false)
+        XCTAssertEqual(empty.saveCount, 0, "An absent feature is already false; it needs no mutation.")
+        let errors = ErrorLogStore(fileURL: nil, build: .init(version: "test", build: "1", commit: "test"))
+        let (connection, transport) = try handoffFailureFixture(directory: nil, errors: errors)
+        transport.disableHandoff()
+        _ = try await connection.refreshMe()
+        let saved = connection.model.saveCount
+        _ = try await connection.refreshMe()
+        XCTAssertEqual(connection.model.saveCount, saved, "An unchanged absent feature causes no further model write.")
+        XCTAssertEqual(transport.counts.entryReads, 0)
+        connection.model.seal()
+        try connection.model.setHandoffCaptionsEnabled(false) // Unchanged skips even the sealed mutation.
+        transport.advertiseHandoff(page: #"{"rev":0,"entries":[],"older":false}"#)
+        _ = try await connection.refreshMe()
+        XCTAssertFalse(errors.records.contains { $0.operation == "handoff_caption_save" },
+                       "The optional flag saver must ignore the sealed model's CancellationError.")
+        XCTAssertEqual(connection.model.saveCount, saved)
     }
 
     @MainActor

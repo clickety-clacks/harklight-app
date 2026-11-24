@@ -244,7 +244,10 @@ public final class ServerModelV2Store: @unchecked Sendable {
     public var snapshot: ServerModelV2 { lock.withLock { model } }
 
     public func setHandoffCaptionsEnabled(_ enabled: Bool) throws {
-        try mutate { $0.handoffCaptionsEnabled = enabled }
+        try lock.withLock {
+            guard (model.handoffCaptionsEnabled ?? false) != enabled else { return }
+            try mutateLocked(cursor: nil, replacingCursor: false) { $0.handoffCaptionsEnabled = enabled }
+        }
     }
 
     public func seal() { lock.withLock { sealed = true } }
