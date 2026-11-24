@@ -8,6 +8,9 @@ import UIKit
 enum HarklightTextStyle: String, CaseIterable, Sendable {
     case brand
     case rowTitle
+    case inboxMessageTitle
+    case rowByline
+    case fyiDigestTitle
     case messageTitle
     case sheetTitle
     case messageBody
@@ -133,6 +136,7 @@ enum HarklightTypography {
         case 400: .regular
         case 500: .medium
         case 600: .semibold
+        case 650: UIFont.Weight(rawValue: (UIFont.Weight.semibold.rawValue + UIFont.Weight.bold.rawValue) / 2)
         case 700: .bold
         default: preconditionFailure("Unsupported type weight token: \(weight).")
         }

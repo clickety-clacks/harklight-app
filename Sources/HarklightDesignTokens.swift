@@ -90,6 +90,7 @@ extension Color {
 struct HarklightDesignSource: Decodable, Sendable {
     let light: Appearance
     let dark: Appearance
+    let fyiDigest: FYIDigest
     let type: HarklightTypeTokens
     let shape: [String: Double]
 
@@ -123,7 +124,24 @@ struct HarklightDesignSource: Decodable, Sendable {
         let sheetDim: String
     }
 
+    struct InboxRow: Decodable, Sendable {
+        let requestInk: String
+        let requestFill: String
+        let answeredInk: String
+        let answeredFill: String
+    }
+
+    struct FYIDigest: Decodable, Sendable {
+        let background: String
+        let foreground: String
+        let preview: String
+        let badgeBorder: String
+        let disclosureBackground: String
+        let disclosureBorder: String
+    }
+
     struct Appearance: Decodable, Sendable {
+        let inboxRow: InboxRow
         let color: Colors
         let derived: Derived
 
