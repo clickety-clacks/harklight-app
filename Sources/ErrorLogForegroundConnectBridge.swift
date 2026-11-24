@@ -1,4 +1,3 @@
-import Foundation
 import HarklightNativeRelay
 
 /// Reports the foreground connection attempt (today's single connection) to the
@@ -36,21 +35,6 @@ enum ErrorLogForegroundConnectBridge {
         } else if isConfirmed(progress) {
             log.resolve(concern: .sync, operation: operation,
                         resolvedBy: progress.attemptID?.uuidString.lowercased())
-        }
-    }
-
-    static func isConnectivityFailure(domain: String, code: String) -> Bool {
-        guard let value = Int(code) else { return false }
-        switch domain {
-        case "URLError":
-            return [NSURLErrorTimedOut, NSURLErrorCannotFindHost, NSURLErrorCannotConnectToHost,
-                    NSURLErrorNetworkConnectionLost, NSURLErrorDNSLookupFailed,
-                    NSURLErrorNotConnectedToInternet, NSURLErrorSecureConnectionFailed,
-                    NSURLErrorDataNotAllowed].contains(value)
-        case "POSIX":
-            return [ENETDOWN, ENETUNREACH, ENETRESET, ECONNRESET, ECONNREFUSED, ETIMEDOUT].contains(Int32(clamping: value))
-        default:
-            return false
         }
     }
 

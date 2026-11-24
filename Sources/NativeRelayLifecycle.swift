@@ -69,7 +69,6 @@ struct NativeRelayRefreshResult: Equatable, Sendable {
     struct ConnectivityFailure: Equatable, Sendable {
         let context: ProfileContext
         let transportAttemptID: UUID
-        let observedAt: Date
     }
 
     let relayConfirmed: Bool
@@ -857,7 +856,7 @@ final class NativeRelayLifecycle {
     private var v2PushRetryAttempt = 0
     private let v2NotificationPermission: NativeNotificationPermission
     private let v2LegacyAddressStore: @MainActor () throws -> DevelopmentAPNsAddressStore
-    var onV2FeedOpened: ((ProfileContext, UUID, Date) -> Void)?
+    var onV2FeedOpened: ((ProfileContext, UUID) -> Void)?
     var onV2AccountAccessChanged: ((ClientAPIAccessState, ProfileContext) -> Void)?
     var v2AccountAccess: ClientAPIAccessState? { v2Connection?.access.state }
     func inboxItems(for expected: ProfileContext) -> [ExactText: APIItem] {
@@ -876,7 +875,6 @@ final class NativeRelayLifecycle {
         get { snapshotState.confirmedContext }
         set { snapshotState.confirmedContext = newValue }
     }
-    private var feedRecoveredThrough: Date?
     private var activeTransportAttemptID: UUID?
     private let foregroundProgress: ForegroundConnectProgressTracker
     private var diagnosticJournal: NativeClientDiagnosticJournal?
@@ -1062,15 +1060,12 @@ final class NativeRelayLifecycle {
     }
 
     private func settleV2FeedRecovery(for expected: ProfileContext, attempt: UUID) async {
-        guard activeTransportAttemptID == attempt, context == expected,
-              let connection = v2Connection, let completedAt = await connection.sync.liveCatchUpCompletedAt,
-              v2Connection === connection, sceneIsActive, v2DepartureTask == nil,
-              connection.access.state == .available else { return }
-        feedRecoveredThrough = completedAt
+        guard let sync = v2Connection?.sync, await sync.liveState == .live,
+              hasOpenFeed(for: expected, attempt: attempt) else { return }
         if let failure = snapshotState.failure, didRecover(failure.result, for: expected) {
             snapshotState.failure = nil
         }
-        onV2FeedOpened?(expected, attempt, completedAt)
+        onV2FeedOpened?(expected, attempt)
     }
 
     func installV2Connection(_ connection: ClientAPIv2Connection, context: ProfileContext, attempt: UUID = UUID()) {
@@ -1422,7 +1417,6 @@ final class NativeRelayLifecycle {
         repository = nil
         conversationAvailability.reset()
         snapshotState.failure = nil
-        feedRecoveredThrough = nil
         confirmedRelayContext = nil
         activeTransportAttemptID = nil
         foregroundDiagnosticContext = nil
@@ -1476,9 +1470,9 @@ final class NativeRelayLifecycle {
                 guard v2Connection === connection else { return .unavailable }
                 let reason = ErrorLogReason.from(error: error)
                 let connectivityFailure = attempt.flatMap { attempt in
-                    ErrorLogForegroundConnectBridge.isConnectivityFailure(domain: reason.domain, code: reason.code)
+                    reason.isConnectivityFailure
                         ? NativeRelayRefreshResult.ConnectivityFailure(
-                            context: context, transportAttemptID: attempt, observedAt: Date())
+                            context: context, transportAttemptID: attempt)
                         : nil
                 }
                 let result = NativeRelayRefreshResult.failed(error: error, connectivityFailure: connectivityFailure)
@@ -1785,13 +1779,15 @@ final class NativeRelayLifecycle {
         confirmedRelayContext == expected && context == expected
     }
 
-    /// A result can arrive at the presentation after the feed recovered.
-    /// Fence it by the failure's own transport and catch-up cutoff.
     func didRecover(_ result: NativeRelayRefreshResult, for expected: ProfileContext) -> Bool {
-        guard context == expected, let failure = result.connectivityFailure,
-              failure.context == expected, failure.transportAttemptID == activeTransportAttemptID,
-              let feedRecoveredThrough else { return false }
-        return failure.observedAt <= feedRecoveredThrough
+        guard let failure = result.connectivityFailure, failure.context == expected else { return false }
+        return hasOpenFeed(for: expected, attempt: failure.transportAttemptID)
+    }
+
+    private func hasOpenFeed(for expected: ProfileContext, attempt: UUID) -> Bool {
+        context == expected && activeTransportAttemptID == attempt && sceneIsActive &&
+            v2DepartureTask == nil && v2Connection?.access.state == .available &&
+            v2Connection?.sync.hasOpenFeed == true
     }
 
     func refreshFailureMessage(for expected: ProfileContext) -> String? {

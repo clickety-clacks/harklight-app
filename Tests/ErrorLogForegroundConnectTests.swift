@@ -203,7 +203,7 @@ extension ErrorLogForegroundConnectTests {
         XCTAssertEqual(unresolvedSync(in: log), ["change_feed", "foreground_connect"])
         XCTAssertTrue(showsLiveUpdatesPaused(log))
         XCTAssertFalse(inbox.presentsConnectionFailure, "A drop cannot present the earlier dismissed attempt.")
-        XCTAssertTrue(lifecycle.didRecover(oldRefresh, for: context))
+        XCTAssertFalse(lifecycle.didRecover(oldRefresh, for: context))
         await lifecycle.deactivate()
     }
 
@@ -257,11 +257,17 @@ extension ErrorLogForegroundConnectTests {
 
         let active = log.records.filter { !$0.isResolved }
         XCTAssertEqual(Set(active.filter { $0.concern == .sync }.map(\.code)),
-                       ["internal_error", "account_paused", "revoked", "apply_failed",
-                        String(NSURLErrorCannotConnectToHost)])
+                       ["internal_error", "account_paused", "revoked", "apply_failed"])
         XCTAssertTrue(showsLiveUpdatesPaused(log))
-        XCTAssertFalse(lifecycle.didRecover(newerRefresh, for: context))
-        XCTAssertNotNil(lifecycle.refreshFailureMessage(for: context))
+        XCTAssertTrue(lifecycle.didRecover(newerRefresh, for: context))
+        XCTAssertNil(lifecycle.refreshFailureMessage(for: context))
+
+        transport.failNextBatch()
+        let whileOpen = await lifecycle.refreshResultFromTrustedRelay()
+        XCTAssertTrue(lifecycle.didRecover(whileOpen, for: context))
+        XCTAssertNil(lifecycle.refreshFailureMessage(for: context))
+        XCTAssertEqual(Set(log.records.filter { $0.concern == .sync && !$0.isResolved }.map(\.code)),
+                       ["internal_error", "account_paused", "revoked", "apply_failed"])
         XCTAssertEqual(active.filter { $0.concern == .actions }.map(\.operation), ["mark_seen"])
         let failedAfter = await connection.outbox.failedWrites
         XCTAssertEqual(failedAfter, failedBefore)

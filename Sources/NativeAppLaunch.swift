@@ -1036,34 +1036,33 @@ final class NativeAppLaunch {
         lifecycle.onV2AccountAccessChanged = { [weak self] access, context in
             self?.applyV2AccountAccess(access, for: context)
         }
-        lifecycle.onV2FeedOpened = { [weak self] context, attempt, completedAt in
-            self?.applyV2FeedOpening(for: context, attempt: attempt, catchUpCompletedAt: completedAt)
+        lifecycle.onV2FeedOpened = { [weak self] context, attempt in
+            self?.applyV2FeedOpening(for: context, attempt: attempt)
         }
     }
 
-    private func applyV2FeedOpening(for context: ProfileContext, attempt: UUID, catchUpCompletedAt: Date) {
+    private func applyV2FeedOpening(for context: ProfileContext, attempt: UUID) {
         guard case let .live(presentation) = state, !presentation.isReadOnly,
               presentation.notificationContext == context, !presentation.v2AccountPaused else { return }
         let resolvedBy = attempt.uuidString.lowercased()
-        // The feed's catch-up can settle an earlier connection failure. A
-        // failure observed after that batch belongs to a newer operation.
-        let catchUpFailures = errorLog.records.filter {
+        let records = errorLog.records.reversed()
+        let isCatchUpFailure: (ErrorLogRecord) -> Bool = {
             $0.concern == .sync && $0.operation == ChangeFeedSync.catchUpOperation
         }
+        let isTransportFailure: (ErrorLogRecord) -> Bool = {
+            $0.retryable && ErrorLogReason.isConnectivityFailure(domain: $0.domain, code: $0.code)
+        }
         errorLog.resolve(concern: .sync, operation: ChangeFeedSync.catchUpOperation, resolvedBy: resolvedBy) {
-            $0.retryable && $0.lastAt <= catchUpCompletedAt &&
-                ErrorLogForegroundConnectBridge.isConnectivityFailure(domain: $0.domain, code: $0.code)
+            $0.phase == "batch" && isTransportFailure($0)
         }
         errorLog.resolve(concern: .sync, operation: ErrorLogForegroundConnectBridge.operation, resolvedBy: resolvedBy) { record in
-            guard record.retryable, record.lastAt <= catchUpCompletedAt else { return false }
-            if ErrorLogForegroundConnectBridge.isConnectivityFailure(domain: record.domain, code: record.code) {
-                return true
-            }
+            if isTransportFailure(record) { return true }
             // Older foreground records omitted the underlying catch-up error.
-            guard record.code == "relay_context_unconfirmed", record.phase == "none_confirmed",
-                  let preceding = catchUpFailures.filter({ $0.lastAt <= record.lastAt })
-                    .max(by: { $0.lastAt < $1.lastAt }) else { return false }
-            return ErrorLogForegroundConnectBridge.isConnectivityFailure(domain: preceding.domain, code: preceding.code)
+            guard record.retryable, record.code == "relay_context_unconfirmed", record.phase == "none_confirmed",
+                  let preceding = records.prefix(while: { $0.id != record.id }).last(where: isCatchUpFailure) else {
+                return false
+            }
+            return preceding.phase == "batch" && isTransportFailure(preceding)
         }
         guard foregroundConnectProgress == nil || foregroundConnectProgress?.transportAttemptID == attempt,
               !errorLog.records.contains(where: {

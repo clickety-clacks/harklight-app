@@ -1,5 +1,6 @@
 import AttentionDomain
 import Foundation
+import os
 
 /// The local model as Sync writes it. The model holds Sync's one cursor (the
 /// last applied `rev`) with its data, so the two are saved together and a
@@ -45,6 +46,9 @@ public actor ChangeFeedSync {
 
     static let feedOperation = "change_feed"
     public static let catchUpOperation = "catch_up"
+
+    private let openFeed = OSAllocatedUnfairLock(initialState: false)
+    public nonisolated var hasOpenFeed: Bool { openFeed.withLock { $0 } }
 
     private var foregroundAttempt: Task<FeedEnd, Never>?
     private var internalError: APIError?
@@ -130,8 +134,11 @@ public actor ChangeFeedSync {
             errors.resolve(concern: .sync, operation: Self.catchUpOperation)
         } catch {
             let cause = (error as? ApplyFailure)?.underlying ?? error
-            report(Self.catchUpOperation, phase: error is ApplyFailure ? "apply" : "batch", error: cause,
-                   initiator: .forFailure(cause))
+            let isApplyFailure = error is ApplyFailure
+            if isApplyFailure || !hasOpenFeed || !ErrorLogReason.from(error: cause).isConnectivityFailure {
+                report(Self.catchUpOperation, phase: isApplyFailure ? "apply" : "batch", error: cause,
+                       initiator: .forFailure(cause))
+            }
             if let api = cause as? APIError, api.token == .internalError {
                 _ = pauseForInternalError(api)
                 foregroundAttempt?.cancel()
@@ -192,6 +199,7 @@ public actor ChangeFeedSync {
 
     private func followFeedOnce() async -> FeedEnd {
         feedRequestID = nil
+        defer { openFeed.withLock { $0 = false } }
         let after: Position
         do {
             after = try await startingPosition()
@@ -207,7 +215,6 @@ public actor ChangeFeedSync {
             // The backlog comes by batch (one write per batch); the stream
             // then carries only live changes.
             let caughtUp = try await drainBatches(from: after)
-            let completedAt = Date()
             generation = caughtUp.generation
             var last = caughtUp.revision
             try checkGeneration(generation)
@@ -218,7 +225,7 @@ public actor ChangeFeedSync {
                 case let .opened(requestID):
                     openedThisRound = true
                     feedRequestID = requestID
-                    catchUpCompletedAt = completedAt
+                    openFeed.withLock { $0 = true }
                     liveState = .live
                     errors.resolve(concern: .sync, operation: Self.feedOperation)
                 case .heartbeat:
@@ -389,10 +396,6 @@ public actor ChangeFeedSync {
     }
 
     /// The open feed's Request-Id, which correlates every report about it.
-    public var liveCatchUpCompletedAt: Date? {
-        liveState == .live ? catchUpCompletedAt : nil
-    }
-    private var catchUpCompletedAt: Date?
     private var feedRequestID: String?
     /// The server accepted the feed in the current attempt.
     private var openedThisRound = false
