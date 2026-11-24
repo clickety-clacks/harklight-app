@@ -49,7 +49,7 @@ public actor ChangeFeedSync {
 
     public struct FeedStatus: Equatable, Sendable {
         public fileprivate(set) var isOpen = false
-        public fileprivate(set) var openingID: UUID?
+        public fileprivate(set) var openingCount = 0
     }
 
     private let feedStatusLock = OSAllocatedUnfairLock(initialState: FeedStatus())
@@ -130,6 +130,7 @@ public actor ChangeFeedSync {
     public func catchUp(userInitiated: Bool = false) async throws {
         if userInitiated { internalError = nil }
         if let internalError { throw internalError }
+        let openingCount = feedStatus.openingCount
         do {
             let start = try await startingPosition()
             do {
@@ -141,7 +142,9 @@ public actor ChangeFeedSync {
         } catch {
             let cause = (error as? ApplyFailure)?.underlying ?? error
             let isApplyFailure = error is ApplyFailure
-            if isApplyFailure || !hasOpenFeed || !ErrorLogReason.from(error: cause).isConnectivityFailure {
+            let feed = feedStatus
+            let recovered = feed.isOpen || feed.openingCount > openingCount
+            if isApplyFailure || !recovered || !ErrorLogReason.from(error: cause).isConnectivityFailure {
                 report(Self.catchUpOperation, phase: isApplyFailure ? "apply" : "batch", error: cause,
                        initiator: .forFailure(cause))
             }
@@ -233,7 +236,7 @@ public actor ChangeFeedSync {
                     feedRequestID = requestID
                     feedStatusLock.withLock {
                         $0.isOpen = true
-                        $0.openingID = UUID()
+                        $0.openingCount += 1
                     }
                     liveState = .live
                     errors.resolve(concern: .sync, operation: Self.feedOperation)

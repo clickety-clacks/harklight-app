@@ -1045,10 +1045,6 @@ final class NativeAppLaunch {
         guard case let .live(presentation) = state, !presentation.isReadOnly,
               presentation.notificationContext == context, !presentation.v2AccountPaused else { return }
         let resolvedBy = attempt.uuidString.lowercased()
-        let records = errorLog.records.reversed()
-        let isCatchUpFailure: (ErrorLogRecord) -> Bool = {
-            $0.concern == .sync && $0.operation == ChangeFeedSync.catchUpOperation
-        }
         let isTransportFailure: (ErrorLogRecord) -> Bool = {
             $0.retryable && ErrorLogReason.isConnectivityFailure(domain: $0.domain, code: $0.code)
         }
@@ -1056,13 +1052,7 @@ final class NativeAppLaunch {
             $0.phase == "batch" && isTransportFailure($0)
         }
         errorLog.resolve(concern: .sync, operation: ErrorLogForegroundConnectBridge.operation, resolvedBy: resolvedBy) { record in
-            if isTransportFailure(record) { return true }
-            // Older foreground records omitted the underlying catch-up error.
-            guard record.retryable, record.code == "relay_context_unconfirmed", record.phase == "none_confirmed",
-                  let preceding = records.prefix(while: { $0.id != record.id }).last(where: isCatchUpFailure) else {
-                return false
-            }
-            return preceding.phase == "batch" && isTransportFailure(preceding)
+            record.retryable && (record.code == "relay_context_unconfirmed" || isTransportFailure(record))
         }
         guard foregroundConnectProgress == nil || foregroundConnectProgress?.transportAttemptID == attempt,
               !errorLog.records.contains(where: {

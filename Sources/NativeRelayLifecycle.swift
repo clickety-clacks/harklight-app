@@ -69,7 +69,8 @@ struct NativeRelayRefreshResult: Equatable, Sendable {
     struct ConnectivityFailure: Equatable, Sendable {
         let context: ProfileContext
         let transportAttemptID: UUID
-        let feed: ChangeFeedSync.FeedStatus
+        let openingCount: Int
+        let suppressedWhileOpen: Bool
     }
 
     let relayConfirmed: Bool
@@ -1455,6 +1456,7 @@ final class NativeRelayLifecycle {
     private func refreshSnapshot(userInitiated: Bool = false) async -> NativeRelayRefreshResult {
         if let connection = v2Connection, let context {
             let attempt = activeTransportAttemptID
+            let openingCount = connection.sync.feedStatus.openingCount
             do {
                 if connection.access.state == .paused {
                     try await connection.refreshMe(userInitiated: userInitiated)
@@ -1473,7 +1475,8 @@ final class NativeRelayLifecycle {
                 let connectivityFailure = attempt.flatMap { attempt in
                     reason.isConnectivityFailure
                         ? NativeRelayRefreshResult.ConnectivityFailure(
-                            context: context, transportAttemptID: attempt, feed: connection.sync.feedStatus)
+                            context: context, transportAttemptID: attempt, openingCount: openingCount,
+                            suppressedWhileOpen: connection.sync.hasOpenFeed)
                         : nil
                 }
                 let result = NativeRelayRefreshResult.failed(error: error, connectivityFailure: connectivityFailure)
@@ -1784,7 +1787,7 @@ final class NativeRelayLifecycle {
         guard let failure = result.connectivityFailure, failure.context == expected, context == expected,
               activeTransportAttemptID == failure.transportAttemptID, let connection = v2Connection else { return false }
         // A later feed drop cannot undo recovery of an earlier failure.
-        return failure.feed.isOpen || failure.feed.openingID != connection.sync.feedStatus.openingID
+        return failure.suppressedWhileOpen || connection.sync.feedStatus.openingCount > failure.openingCount
     }
 
     private func hasOpenFeed(for expected: ProfileContext, attempt: UUID) -> Bool {

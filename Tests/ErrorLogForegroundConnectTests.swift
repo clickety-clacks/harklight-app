@@ -159,6 +159,13 @@ extension ErrorLogForegroundConnectTests {
         XCTAssertEqual(log.records.first { $0.operation == "foreground_connect" }?.code,
                        "relay_context_unconfirmed")
 
+        _ = await lifecycle.refreshResultFromTrustedRelay()
+        let coalesced = try XCTUnwrap(log.records.first { $0.operation == "catch_up" })
+        let foreground = try XCTUnwrap(log.records.first { $0.operation == "foreground_connect" })
+        XCTAssertEqual(coalesced.count, 2)
+        XCTAssertLessThan(coalesced.occurredAt, foreground.occurredAt)
+        XCTAssertGreaterThan(coalesced.lastAt, foreground.occurredAt)
+
         transport.restoreRequests()
         _ = try await connection.outbox.submit(target: "item:one", operation: "mark_seen",
             write: FrozenWrite(method: .put, path: "/v2/items/one/seen"))
@@ -173,6 +180,12 @@ extension ErrorLogForegroundConnectTests {
         XCTAssertFalse(inbox.presentsConnectionFailure)
         XCTAssertEqual(launch.foregroundConnectFailureKey, dismissed)
         XCTAssertTrue(showsLiveUpdatesPaused(log))
+
+        let (releaseBatch, release) = AsyncStream<Void>.makeStream()
+        defer { release.finish() }
+        transport.holdNextBatch(until: releaseBatch)
+        let lateRefresh = Task { await lifecycle.refreshResultFromTrustedRelay() }
+        try await waitUntil { transport.heldBatchStarted }
 
         retry.yield(())
         transport.feedEvents.yield(.opened(requestID: "feed-opened"))
@@ -189,14 +202,16 @@ extension ErrorLogForegroundConnectTests {
         XCTAssertEqual(Set(log.records.filter(\.isResolved).map(\.operation)),
                        ["catch_up", "change_feed", "foreground_connect"])
 
-        transport.failNextBatch()
-        let failedWhileOpen = await lifecycle.refreshResultFromTrustedRelay()
-        XCTAssertTrue(lifecycle.didRecover(failedWhileOpen, for: context))
         transport.feedEvents.finish(throwing: URLError(.networkConnectionLost))
         try await waitUntil { !connection.sync.hasOpenFeed && self.showsLiveUpdatesPaused(log) }
         XCTAssertEqual(unresolvedSync(in: log), ["change_feed"])
         XCTAssertTrue(lifecycle.didRecover(oldRefresh, for: context))
-        XCTAssertTrue(lifecycle.didRecover(failedWhileOpen, for: context))
+        release.finish()
+        let delayedFailure = await lateRefresh.value
+        XCTAssertFalse(delayedFailure.relayConfirmed)
+        XCTAssertTrue(lifecycle.didRecover(delayedFailure, for: context))
+        XCTAssertEqual(unresolvedSync(in: log), ["change_feed"])
+        XCTAssertNil(lifecycle.refreshFailureMessage(for: context))
         XCTAssertNil(inbox.connectionWarning)
         XCTAssertFalse(inbox.presentsConnectionFailure)
         XCTAssertNil(launch.foregroundConnectFailureKey)
@@ -326,6 +341,8 @@ private final class ReconnectingFeedTransport: ClientAPITransport, @unchecked Se
     private var writes = 0
     private var requestedFeed = false
     private var failBatch = false
+    private var heldBatch: AsyncStream<Void>?
+    private var startedHeldBatch = false
     private let feed: AsyncThrowingStream<FeedEvent, any Error>
     let feedEvents: AsyncThrowingStream<FeedEvent, any Error>.Continuation
     private let reopenedFeed: AsyncThrowingStream<FeedEvent, any Error>
@@ -340,6 +357,8 @@ private final class ReconnectingFeedTransport: ClientAPITransport, @unchecked Se
     var successfulWrites: Int { lock.withLock { writes } }
     var feedRequested: Bool { lock.withLock { requestedFeed } }
     func failNextBatch() { lock.withLock { failBatch = true } }
+    func holdNextBatch(until release: AsyncStream<Void>) { lock.withLock { heldBatch = release } }
+    var heldBatchStarted: Bool { lock.withLock { startedHeldBatch } }
 
     func send(_ request: APIRequest) async throws -> APIResponse {
         if request.method == .put, request.path == "/v2/items/refused/seen" {
@@ -356,7 +375,17 @@ private final class ReconnectingFeedTransport: ClientAPITransport, @unchecked Se
     }
 
     func changeBatch(after: Rev) async throws -> FeedBatch {
-        try lock.withLock {
+        let release = lock.withLock {
+            let release = heldBatch
+            heldBatch = nil
+            if release != nil { startedHeldBatch = true }
+            return release
+        }
+        if let release {
+            for await _ in release {}
+            throw URLError(.cannotConnectToHost)
+        }
+        return try lock.withLock {
             guard online else { throw URLError(.notConnectedToInternet) }
             if failBatch {
                 failBatch = false
