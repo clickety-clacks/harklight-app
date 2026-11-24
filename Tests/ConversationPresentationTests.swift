@@ -29,7 +29,7 @@ final class ConversationPresentationTests: XCTestCase {
     }
 
     func testPersonFeedDeliveryDecodesOptionalAndFutureOutcomes() throws {
-        for fields in ["", #", "outcome":null"#, #", "outcome":"future"#] {
+        for fields in ["", #", "outcome":null"#, #", "outcome":"future""#] {
             let entry = try APIEntry(json: receiptJSON(#"{"delivered":true,"acted":true\#(fields)}"#))
             XCTAssertEqual(entry.entryID, ExactText("sent"))
             XCTAssertEqual(entry.delivery?.delivered, true)
