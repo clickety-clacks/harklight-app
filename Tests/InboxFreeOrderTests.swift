@@ -102,6 +102,127 @@ final class InboxFreeOrderTests: XCTestCase {
         entries.compactMap { if case .heading = $0 { return nil }; return $0.id }
     }
 
+    @MainActor
+    func testPostedOrderKeepsEveryFreeOrderRowAndUsesOriginalTimes() throws {
+        let view = try decode([
+            reference("older"), reference("newer"), reference("same-time"),
+            reference("without-date", group: "earlier_messages"),
+            reference("newest-reply", kind: "reply", group: "earlier_chat_replies"),
+            reference("undated-reply", kind: "reply", group: "earlier_chat_replies_unknown"),
+            reference("history", state: "history")
+        ])
+        let times = ["older": 100, "newer": 300, "same-time": 300, "history": 200]
+        let rows = rows(for: view).map { item -> InboxItem in
+            guard case var .request(row) = item else { return item }
+            row.createdAt = Date(timeIntervalSince1970: 600)
+            row.serverPostedAt = times[row.key.messageID.rawValue].map {
+                Date(timeIntervalSince1970: Double($0))
+            }
+            if ["older", "newer"].contains(row.key.messageID.rawValue) {
+                row.thread = ExactText("same-thread")
+            }
+            return .request(row)
+        }
+        let references = try XCTUnwrap(view.listItems).map { item in
+            guard item.key.messageID == ExactText("newest-reply") else { return item }
+            return InboxViewListItem(kind: .reply, key: item.key,
+                conversationSequence: item.conversationSequence,
+                openAtConversationSequence: item.openAtConversationSequence,
+                unseenCount: item.unseenCount, freeSection: item.freeSection,
+                postedAtMilliseconds: 400_000)
+        }
+        let priority = InboxNormalListProjection.entries(rows: rows, serverItems: references,
+            freeOrderVersion: 1, in: .inbox, search: "")
+        let posted = InboxNormalListProjection.entries(rows: rows, serverItems: references,
+            freeOrderVersion: 1, in: .inbox, search: "", order: .posted)
+        func ids(_ entries: [InboxNormalListDisplayEntry]) -> [String] {
+            entries.flatMap { entry -> [String] in
+                switch entry {
+                case let .message(message):
+                    return message.members.compactMap {
+                        guard case let .request(row) = $0 else { return nil }
+                        return row.key.messageID.rawValue
+                    }
+                case let .reply(item): return [item.key.messageID.rawValue]
+                case .heading: return []
+                }
+            }
+        }
+
+        XCTAssertGreaterThan(priority.count, rowIDs(priority).count)
+        XCTAssertEqual(posted.count, rows.count + 2, "No member should vanish inside a thread or section.")
+        XCTAssertEqual(ids(posted), ["newest-reply", "newer", "same-time", "history",
+                                     "older", "without-date", "undated-reply"])
+        XCTAssertEqual(Set(ids(posted)), Set(ids(priority)))
+    }
+
+    @MainActor
+    func testPostedOrderKeepsNonFreeInboxMembershipAndSearch() throws {
+        let view = try decode([
+            reference("first"), reference("later"),
+            reference("history", state: "history"),
+            reference("unread-reply", kind: "reply"),
+            reference("read-reply", kind: "reply", state: "history")
+        ], version: nil)
+        let rows = rows(for: view).map { item -> InboxItem in
+            guard case var .request(row) = item else { return item }
+            row.serverPostedAt = Date(timeIntervalSince1970: row.title == "later" ? 20 : 10)
+            row.bodyText = "Shared search terms"
+            return .request(row)
+        }
+        let priority = InboxNormalListProjection.entries(rows: rows, serverItems: view.listItems,
+            in: .inbox, search: "")
+        let posted = InboxNormalListProjection.entries(rows: rows, serverItems: view.listItems,
+            in: .inbox, search: "", order: .posted)
+        XCTAssertEqual(posted.map(\.id), [priority[1].id, priority[0].id, priority[2].id])
+        let matches = InboxNormalListProjection.entries(rows: rows, serverItems: view.listItems,
+            in: .inbox, search: "shared search", order: .posted)
+        XCTAssertEqual(matches.map(\.id), Array(priority.prefix(2).map(\.id)))
+        let replied = InboxNormalListProjection.entries(rows: rows, serverItems: view.listItems,
+            in: .replied, search: "", order: .posted)
+        let originalReplied = InboxNormalListProjection.entries(rows: rows, serverItems: view.listItems,
+            in: .replied, search: "")
+        XCTAssertEqual(replied.map(\.id), originalReplied.map(\.id))
+    }
+
+    @MainActor
+    func testPostedOrderUsesTheLiveReplyQuotesServerTime() throws {
+        let store = ServerModelV2Store(fileURL: nil)
+        let original = #"{"item_id":"parent","rev":1,"sender":"agent","request_revision":1,"created_at_ms":100,"message":{"title":"Parent","created_at":999},"files":[],"seen":false,"chat":{"started":true,"last_origin_reply":"first","unread_replies":1,"reply_group":"earlier_chat_replies","reply_rank_key":"b"},"rank":{"key":"a","section":"current"}}"#
+        let other = #"{"item_id":"other","rev":2,"sender":"agent","request_revision":1,"created_at_ms":200,"message":{"title":"Other"},"files":[],"seen":false,"chat":{"started":false},"rank":{"key":"c","section":"current"}}"#
+        let first = #"{"entry_id":"first","item_id":"parent","rev":2,"position":1,"at_ms":150,"kind":"reply","author":"origin","request_revision":1,"text":"First reply","files":[]}"#
+        let updated = #"{"item_id":"parent","rev":3,"sender":"agent","request_revision":1,"created_at_ms":100,"message":{"title":"Parent","created_at":999},"files":[],"seen":false,"chat":{"started":true,"last_origin_reply":"second","unread_replies":2,"reply_group":"earlier_chat_replies","reply_rank_key":"b"},"rank":{"key":"a","section":"current"}}"#
+        let second = #"{"entry_id":"second","item_id":"parent","rev":4,"position":2,"at_ms":250,"kind":"reply","author":"origin","request_revision":1,"text":"Second reply","files":[]}"#
+        func json(_ text: String) throws -> JSONValue { try JSONValue.parse(Data(text.utf8)) }
+        let items = try [original, other].map { try APIItem(json: json($0)) }
+        try store.rebaseline(items: items, counts: APICounts(unresolved: 2), position: 2)
+        try store.apply(APIEntriesPage(json: json(#"{"rev":2,"entries":[\#(first)],"older":false}"#)), of: ExactText("parent"))
+
+        func posted() throws -> [InboxNormalListDisplayEntry.ID] {
+            let cached = ServerModelV2Projection.cachedState(store.snapshot, identity: context.identity)
+            let repository = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+            try repository.restoreCachedServerState(cached, context: context)
+            let presentation = try LivePresentationStore(store: repository, context: context)
+            return InboxNormalListProjection.entries(rows: presentation.inboxRows.map(InboxItem.request),
+                serverItems: presentation.presentation.inboxViewListItems,
+                freeOrderVersion: presentation.presentation.inboxFreeOrderVersion,
+                in: .inbox, search: "", order: .posted).map(\.id)
+        }
+        let parentKey = RequestKey(accountScope: context.identity.personID,
+            senderID: ExactText("agent"), messageID: ExactText("parent"))
+        let otherKey = RequestKey(accountScope: context.identity.personID,
+            senderID: ExactText("agent"), messageID: ExactText("other"))
+        XCTAssertEqual(try posted(), [.message(.row(.request(otherKey))),
+                                      .reply(parentKey), .message(.row(.request(parentKey)))])
+
+        try store.apply([
+            .init(rev: 3, kind: "item", data: Data(updated.utf8)),
+            .init(rev: 4, kind: "entry", data: Data(second.utf8))
+        ], cursor: 4)
+        XCTAssertEqual(try posted(), [.reply(parentKey), .message(.row(.request(otherKey))),
+                                      .message(.row(.request(parentKey)))])
+    }
+
     func testCompleteFreeSectionsPreserveExactServerSequenceAndRevision() throws {
         let view = try decode([
             reference("reply-first", kind: "reply"), reference("parent"),

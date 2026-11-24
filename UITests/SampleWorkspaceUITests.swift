@@ -11,6 +11,96 @@ final class SampleWorkspaceUITests: XCTestCase {
         XCUIDevice.shared.orientation = .portrait
     }
 
+    func testInboxSortSwitchesBetweenServerPriorityAndOriginalPostingTime() {
+        let isPad = UIDevice.current.userInterfaceIdiom == .pad
+        if isPad { XCUIDevice.shared.orientation = .landscapeLeft }
+        let app = XCUIApplication()
+        app.launchArguments = ["--harklight-test-fyi-list", "--harklight-test-inbox-sort"]
+        app.launch()
+        defer { app.terminate() }
+
+        XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
+        let sort = app.buttons["inbox-sort"]
+        guard sort.waitForExistence(timeout: 5) else {
+            XCTFail("The main Inbox toolbar needs a Priority / Posted control.")
+            return
+        }
+        XCTAssertEqual(sort.label, "Sort: Priority")
+        let higher = app.buttons["request-row-sort-higher"]
+        let newer = app.buttons["request-row-sort-newer"]
+        XCTAssertTrue(higher.waitForExistence(timeout: 5))
+        XCTAssertTrue(newer.exists)
+        XCTAssertLessThan(higher.frame.minY, newer.frame.minY)
+        capture("Inbox Priority order", app)
+
+        if isPad {
+            higher.tap()
+            XCTAssertTrue(app.buttons["request-heading"].waitForExistence(timeout: 5))
+        }
+        sort.tap()
+        app.buttons["Posted"].tap()
+        XCTAssertEqual(sort.label, "Sort: Posted")
+        XCTAssertLessThan(newer.frame.minY, higher.frame.minY)
+        if isPad {
+            XCTAssertTrue(app.buttons["request-heading"].label.contains("Older priority message"))
+            XCTAssertTrue(higher.isSelected)
+        }
+        capture("Inbox Posted order", app)
+        if !isPad {
+            newer.tap()
+            let heading = app.buttons["request-heading"]
+            XCTAssertTrue(heading.waitForExistence(timeout: 5))
+            XCTAssertTrue(heading.label.contains("Newest posted message"))
+            showList(app)
+            XCTAssertTrue(sort.waitForExistence(timeout: 5))
+            XCTAssertEqual(sort.label, "Sort: Posted")
+        }
+
+        sort.tap()
+        app.buttons["Priority"].tap()
+        XCTAssertEqual(sort.label, "Sort: Priority")
+        XCTAssertLessThan(higher.frame.minY, newer.frame.minY)
+        sort.tap()
+        app.buttons["Posted"].tap()
+        app.terminate()
+        app.launch()
+        XCTAssertTrue(sort.waitForExistence(timeout: 5))
+        XCTAssertEqual(sort.label, "Sort: Priority")
+    }
+
+    func testInboxSortKeepsSearchAndRepliedBehavior() {
+        if UIDevice.current.userInterfaceIdiom == .pad { XCUIDevice.shared.orientation = .landscapeLeft }
+        let app = XCUIApplication()
+        app.launchArguments = ["--harklight-test-fyi-list", "--harklight-test-inbox-sort"]
+        app.launch()
+        defer { app.terminate() }
+
+        let sort = app.buttons["inbox-sort"]
+        guard sort.waitForExistence(timeout: 5) else {
+            XCTFail("The Inbox sort control is missing.")
+            return
+        }
+        sort.tap()
+        app.buttons["Posted"].tap()
+
+        enterSearch("Older priority message", in: app)
+        XCTAssertTrue(app.buttons["request-row-sort-higher"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["request-row-sort-newer"].exists)
+        XCTAssertFalse(sort.exists)
+        clearSearch(in: app)
+        let inbox = workspaceTab("Inbox", in: app)
+        if inbox.exists && !inbox.isSelected { inbox.tap() }
+
+        let replied = workspaceTab("Replied", in: app)
+        XCTAssertTrue(replied.waitForExistence(timeout: 5))
+        replied.tap()
+        XCTAssertFalse(sort.exists)
+        XCTAssertTrue(app.buttons["request-row-sort-answered"].waitForExistence(timeout: 5))
+        inbox.tap()
+        XCTAssertTrue(sort.waitForExistence(timeout: 5))
+        XCTAssertEqual(sort.label, "Sort: Posted")
+    }
+
     func testFYIDigestOpensListInNavigationAndSortChangesOrder() {
         if UIDevice.current.userInterfaceIdiom == .pad { XCUIDevice.shared.orientation = .landscapeLeft }
         let app = XCUIApplication()

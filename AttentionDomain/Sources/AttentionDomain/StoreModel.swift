@@ -445,6 +445,8 @@ public struct InboxViewListItem: Equatable, Codable, Sendable {
     public let score: Double?
     public let scoreKind: InboxViewScoreKind?
     public let freeSection: InboxFreeSection?
+    /// The quoted agent reply's original server time, when known.
+    public let postedAtMilliseconds: UInt64?
 
     public init(kind: InboxViewListItemKind,
                 key: RequestKey,
@@ -453,7 +455,8 @@ public struct InboxViewListItem: Equatable, Codable, Sendable {
                 unseenCount: Int? = nil,
                 score: Double? = nil,
                 scoreKind: InboxViewScoreKind? = nil,
-                freeSection: InboxFreeSection? = nil) {
+                freeSection: InboxFreeSection? = nil,
+                postedAtMilliseconds: UInt64? = nil) {
         self.kind = kind
         self.key = key
         self.conversationSequence = conversationSequence
@@ -462,6 +465,7 @@ public struct InboxViewListItem: Equatable, Codable, Sendable {
         self.score = score
         self.scoreKind = scoreKind
         self.freeSection = freeSection
+        self.postedAtMilliseconds = postedAtMilliseconds
     }
 }
 

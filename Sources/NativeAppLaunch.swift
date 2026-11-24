@@ -175,7 +175,8 @@ final class NativeAppLaunch {
                 museumSeen: arguments.contains("--harklight-test-fyi-plain-seen"),
                 includeBulk: arguments.contains("--harklight-test-fyi-bulk"),
                 repliedFixture: arguments.contains("--harklight-test-fyi-tab-switch"),
-                includeBulkReplied: arguments.contains("--harklight-test-fyi-bulk-replied")) {
+                includeBulkReplied: arguments.contains("--harklight-test-fyi-bulk-replied"),
+                includeInboxSortRows: arguments.contains("--harklight-test-inbox-sort")) {
                 state = .live(seeded)
                 isIsolatedRelayTestSeed = true
             } else {
@@ -2674,10 +2675,11 @@ final class LivePresentationStore {
             row.fyiUsesInboxSearchForProgress = !isReadOnly && row.hasProgressMarker &&
                 row.fyiHasEnded && !row.belongsToReplied
         }
-        if row.isFYI, let item = request.fyiInboxEntry {
-            row.fyiPostedAt = item.itemCreatedAtMilliseconds.map {
-                Date(timeIntervalSince1970: Double($0) / 1_000)
-            }
+        let inboxEntry = request.fyiInboxEntry
+        row.serverPostedAt = inboxEntry?.itemCreatedAtMilliseconds.map {
+            Date(timeIntervalSince1970: Double($0) / 1_000)
+        }
+        if row.isFYI, let item = inboxEntry {
             row.fyiServerSeen = item.itemSeen
             row.fyiPriority = item.priority
             row.fyiPriorityScore = item.score
@@ -4439,10 +4441,12 @@ extension NativeAppLaunch {
                                  progressSeen: Bool = false, progressTerminal: String = "",
                                  gardenSeen: Bool = false, museumSeen: Bool = false,
                                  includeBulk: Bool = false, repliedFixture: Bool = false,
-                                 includeBulkReplied: Bool = false) throws -> LivePresentationStore {
+                                 includeBulkReplied: Bool = false,
+                                 includeInboxSortRows: Bool = false) throws -> LivePresentationStore {
         // Measure the large list opening from Inbox, free of the other fixture's restored selection.
+        let fixtureID = includeInboxSortRows ? "inbox-order-fixture" : (repliedFixture ? "fyi-tab-fixture" : "fyi-fixture")
         let personID = includeBulk || includeBulkReplied || !progressTerminal.isEmpty
-            ? ExactText(UUID().uuidString) : ExactText(repliedFixture ? "fyi-tab-fixture" : "fyi-fixture")
+            ? ExactText(UUID().uuidString) : ExactText(fixtureID)
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("fixture.invalid"),
             personID: personID, deviceID: ExactText("fixture-device"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
@@ -4472,6 +4476,25 @@ extension NativeAppLaunch {
         if includeProgress {
             pages.append(fyiProgressTestPage(progressPercent: progressPercent, progressSeen: progressSeen,
                                              progressTerminal: progressTerminal, revision: 3))
+        }
+        if includeInboxSortRows {
+            pages.append(#"""
+            {"rev":3,"counts":{"unresolved":4},"items":[
+                {"item_id":"sort-higher","rev":3,"sender":"fixture:sort","request_revision":1,
+                 "created_at_ms":1700000000000,"seen":false,
+                 "message":{"title":"Older priority message","created_at":1700345600000},
+                 "files":[],"chat":{"started":false},"rank":{"key":"c","score":0.9,"section":"current"}},
+                {"item_id":"sort-newer","rev":3,"sender":"fixture:sort","request_revision":1,
+                 "created_at_ms":1700172800000,"seen":false,
+                 "message":{"title":"Newest posted message","created_at":1700086400000},
+                 "files":[],"chat":{"started":false},"rank":{"key":"d","score":0.2,"section":"current"}},
+                {"item_id":"sort-answered","rev":3,"sender":"fixture:sort","request_revision":1,
+                 "created_at_ms":1700000008000,"seen":true,
+                 "message":{"title":"Replied sort example"},
+                 "terminal":{"state":"answered","at_ms":1700000008001,"answer":{"kind":"reply","text":"Confirmed"}},
+                 "files":[],"chat":{"started":false},"rank":{"key":"e","score":0.1,"section":"resolved"}}
+            ]}
+            """#)
         }
         for page in pages {
             try model.apply(APIInboxPage(json: JSONValue.parse(Data(page.utf8))))
