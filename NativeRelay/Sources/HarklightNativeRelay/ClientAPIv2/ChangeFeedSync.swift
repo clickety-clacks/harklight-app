@@ -1,5 +1,6 @@
 import AttentionDomain
 import Foundation
+import os
 
 /// The local model as Sync writes it. The model holds Sync's one cursor (the
 /// last applied `rev`) with its data, so the two are saved together and a
@@ -44,7 +45,16 @@ public actor ChangeFeedSync {
     }
 
     static let feedOperation = "change_feed"
-    static let catchUpOperation = "catch_up"
+    public static let catchUpOperation = "catch_up"
+
+    public struct FeedStatus: Equatable, Sendable {
+        public fileprivate(set) var isOpen = false
+        public fileprivate(set) var openingCount = 0
+    }
+
+    private let feedStatusLock = OSAllocatedUnfairLock(initialState: FeedStatus())
+    public nonisolated var feedStatus: FeedStatus { feedStatusLock.withLock { $0 } }
+    public nonisolated var hasOpenFeed: Bool { feedStatus.isOpen }
 
     private var foregroundAttempt: Task<FeedEnd, Never>?
     private var internalError: APIError?
@@ -120,6 +130,7 @@ public actor ChangeFeedSync {
     public func catchUp(userInitiated: Bool = false) async throws {
         if userInitiated { internalError = nil }
         if let internalError { throw internalError }
+        let openingCount = feedStatus.openingCount
         do {
             let start = try await startingPosition()
             do {
@@ -130,8 +141,13 @@ public actor ChangeFeedSync {
             errors.resolve(concern: .sync, operation: Self.catchUpOperation)
         } catch {
             let cause = (error as? ApplyFailure)?.underlying ?? error
-            report(Self.catchUpOperation, phase: error is ApplyFailure ? "apply" : "batch", error: cause,
-                   initiator: .forFailure(cause))
+            let isApplyFailure = error is ApplyFailure
+            let feed = feedStatus
+            let recovered = feed.isOpen || feed.openingCount > openingCount
+            if isApplyFailure || !recovered || !ErrorLogReason.from(error: cause).isConnectivityFailure {
+                report(Self.catchUpOperation, phase: isApplyFailure ? "apply" : "batch", error: cause,
+                       initiator: .forFailure(cause))
+            }
             if let api = cause as? APIError, api.token == .internalError {
                 _ = pauseForInternalError(api)
                 foregroundAttempt?.cancel()
@@ -192,6 +208,7 @@ public actor ChangeFeedSync {
 
     private func followFeedOnce() async -> FeedEnd {
         feedRequestID = nil
+        defer { feedStatusLock.withLock { $0.isOpen = false } }
         let after: Position
         do {
             after = try await startingPosition()
@@ -217,6 +234,10 @@ public actor ChangeFeedSync {
                 case let .opened(requestID):
                     openedThisRound = true
                     feedRequestID = requestID
+                    feedStatusLock.withLock {
+                        $0.isOpen = true
+                        $0.openingCount += 1
+                    }
                     liveState = .live
                     errors.resolve(concern: .sync, operation: Self.feedOperation)
                 case .heartbeat:

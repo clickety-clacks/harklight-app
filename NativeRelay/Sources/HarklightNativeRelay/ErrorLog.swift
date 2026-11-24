@@ -136,6 +136,26 @@ public struct ErrorLogReason: Codable, Equatable, Sendable {
         Self(domain: "app", code: ErrorLogRedactor.identifier(token) ?? "other")
     }
 
+    public var isConnectivityFailure: Bool {
+        guard let value = Int(code) else { return false }
+        switch domain {
+        case "URLError":
+            return [NSURLErrorTimedOut, NSURLErrorCannotFindHost, NSURLErrorCannotConnectToHost,
+                    NSURLErrorNetworkConnectionLost, NSURLErrorDNSLookupFailed,
+                    NSURLErrorNotConnectedToInternet, NSURLErrorSecureConnectionFailed,
+                    NSURLErrorDataNotAllowed].contains(value)
+        case "POSIX":
+            return [ENETDOWN, ENETUNREACH, ENETRESET, ECONNRESET, ECONNREFUSED, ETIMEDOUT].contains(Int32(clamping: value))
+        default:
+            return false
+        }
+    }
+
+    /// Classifies a recorded system error using the same vocabulary as a request failure.
+    public static func isConnectivityFailure(domain: String, code: String) -> Bool {
+        Self(domain: domain, code: code).isConnectivityFailure
+    }
+
     /// Classifies a system error by domain and numeric code only. The error's
     /// message, userInfo and underlying errors are never read.
     public static func from(error: Error) -> Self {
@@ -481,6 +501,13 @@ public final class ErrorLogStore: ErrorLogging, @unchecked Sendable {
     }
 
     public func resolve(concern: ErrorLogConcern, operation: String, resolvedBy: String?) {
+        resolve(concern: concern, operation: operation, resolvedBy: resolvedBy, matching: { _ in true })
+    }
+
+    /// Filters and resolves under the same lock so a new report cannot slip in
+    /// between selecting the recovered failures and marking them resolved.
+    public func resolve(concern: ErrorLogConcern, operation: String, resolvedBy: String?,
+                        matching: (ErrorLogRecord) -> Bool) {
         let token = ErrorLogRedactor.operationToken(operation)
         let by = resolvedBy.flatMap { ErrorLogRedactor.simpleID($0) ?? ErrorLogRedactor.identifier($0) } ?? "success"
         lock.lock()
@@ -488,7 +515,7 @@ public final class ErrorLogStore: ErrorLogging, @unchecked Sendable {
         let at = now()
         var changed = false
         for index in stored.indices where !stored[index].isResolved &&
-            stored[index].concern == concern && stored[index].operation == token {
+            stored[index].concern == concern && stored[index].operation == token && matching(stored[index]) {
             stored[index].resolvedAt = at
             stored[index].resolvedBy = by
             changed = true

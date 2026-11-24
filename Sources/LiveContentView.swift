@@ -629,18 +629,27 @@ struct LiveContentView: View {
     }
     #endif
 
+    var connectionWarning: String? {
+        if !store.isReadOnly, !store.v2AccountPaused,
+           let progress = launch?.foregroundConnectProgress, progress.outcome != .confirmed {
+            return progress.userFacingMessage
+        }
+        return store.connectionWarning
+    }
+
+    var presentsConnectionFailure: Bool {
+        guard !store.isReadOnly, !store.v2AccountPaused,
+              let launch, launch.foregroundConnectDiagnostic != nil,
+              let key = launch.foregroundConnectFailureKey else { return false }
+        return launch.shouldPresentForegroundConnectFailure(key)
+    }
+
     var body: some View {
         let progress = launch?.foregroundConnectProgress
-        let showsRecovery = !store.isReadOnly && !store.v2AccountPaused &&
-            (progress.map { $0.outcome != .confirmed } ?? false)
         let failureKey = launch?.foregroundConnectFailureKey
         let diagnostic = launch?.foregroundConnectDiagnostic
-        let connectionStatus = showsRecovery ? progress?.userFacingMessage : store.connectionWarning
-        let connectionWarning = showsRecovery ? progress?.userFacingMessage : store.connectionWarning
-        let presentsFailureDetails = !store.isReadOnly && !store.v2AccountPaused && diagnostic != nil &&
-            (failureKey.map { launch?.shouldPresentForegroundConnectFailure($0) ?? false } ?? false)
         let failureAlertPresented = Binding<Bool>(
-            get: { presentsFailureDetails && !replyEditorFocused },
+            get: { presentsConnectionFailure && !replyEditorFocused },
             set: { isPresented in
                 guard !isPresented, let launch, let failureKey else { return }
                 launch.dismissForegroundConnectFailure(failureKey)
@@ -680,7 +689,7 @@ struct LiveContentView: View {
                 },
                 settingsContent: { LiveInboxSettings(store: store, launch: launch,
                                                       archiveDeparture: archiveDeparture,
-                                                      connectionStatus: connectionStatus) },
+                                                      connectionStatus: connectionWarning) },
                 warnings: [launch?.notificationNavigationMessage, connectionWarning,
                            store.observationError, store.notificationWarning,
                            store.pushRegistrationWarning, store.unresolvedSendWarning,
