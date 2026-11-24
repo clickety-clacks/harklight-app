@@ -77,7 +77,7 @@ enum InboxItem: Identifiable {
 
     var postedAt: Date? {
         switch self {
-        case let .request(row): row.serverPostedAt
+        case let .request(row): row.postedAt
         case let .example(sample, _):
             Date(timeIntervalSince1970: Double(sample.fixtureCreatedAtMilliseconds) / 1_000)
         }
@@ -297,8 +297,8 @@ enum InboxNormalListDisplayEntry: Identifiable {
 }
 
 extension InboxViewListItem {
-    var postedAt: Date? {
-        postedAtMilliseconds.map { Date(timeIntervalSince1970: Double($0) / 1_000) }
+    func postedAt(fallingBackTo receiptDate: @autoclosure () -> Date?) -> Date? {
+        postedAtMilliseconds.map { Date(timeIntervalSince1970: Double($0) / 1_000) } ?? receiptDate()
     }
 }
 
@@ -313,13 +313,14 @@ enum InboxNormalListProjection {
                         freeOrderVersion: Int? = nil,
                         in tab: InboxWorkspaceTab,
                         search: String,
-                        order: InboxOrder = .priority) -> [InboxNormalListDisplayEntry] {
+                        order: InboxOrder = .priority,
+                        replyReceiptDate: (InboxViewListItem) -> Date? = { _ in nil }) -> [InboxNormalListDisplayEntry] {
         let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
         let sortsByPosted = order == .posted && tab == .inbox && query.isEmpty
         guard let serverItems else {
             let visibleMessages = InboxListProjection.filteredRows(rows, in: tab, search: search)
             let entries = InboxThreadListProjection.grouped(visibleMessages).map(InboxNormalListDisplayEntry.message)
-            return sortsByPosted ? postedEntries(entries) : entries
+            return sortsByPosted ? postedEntries(entries, replyReceiptDate: replyReceiptDate) : entries
         }
 
         var rowsByKey: [RequestKey: InboxRequestRow] = [:]
@@ -400,10 +401,11 @@ enum InboxNormalListProjection {
             let examples = InboxListProjection.visibleEntries(localExamples, in: tab, search: search)
             result.append(contentsOf: examples.map { .message($0) })
         }
-        return sortsByPosted ? postedEntries(result) : result
+        return sortsByPosted ? postedEntries(result, replyReceiptDate: replyReceiptDate) : result
     }
 
-    private static func postedEntries(_ entries: [InboxNormalListDisplayEntry]) -> [InboxNormalListDisplayEntry] {
+    private static func postedEntries(_ entries: [InboxNormalListDisplayEntry],
+                                      replyReceiptDate: (InboxViewListItem) -> Date?) -> [InboxNormalListDisplayEntry] {
         // Section headings and thread groups express the Server's order. Give
         // each message its own chronological position while retaining the
         // Priority sequence for equal times and for all undated rows.
@@ -412,7 +414,7 @@ enum InboxNormalListProjection {
             case let .message(message):
                 return message.members.map { ($0.postedAt, .message(.row($0))) }
             case let .reply(reference):
-                return [(reference.postedAt, entry)]
+                return [(reference.postedAt(fallingBackTo: replyReceiptDate(reference)), entry)]
             case .heading:
                 return []
             }

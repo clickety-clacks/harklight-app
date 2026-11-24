@@ -103,9 +103,66 @@ final class InboxFreeOrderTests: XCTestCase {
     }
 
     @MainActor
+    func testPostedUsesAuthoredDatesWhenAnOlderSavedInboxIsReopenedOffline() async throws {
+        let older = RequestKey(accountScope: context.identity.personID,
+            senderID: ExactText("agent"), messageID: ExactText("saved-older"))
+        let newer = RequestKey(accountScope: context.identity.personID,
+            senderID: ExactText("agent"), messageID: ExactText("saved-newer"))
+        let storedView = InboxView(revision: ExactText("saved"),
+            entries: [.init(key: older, priority: .high), .init(key: newer, priority: .normal)],
+            listItems: [.init(kind: .message, key: older), .init(kind: .message, key: newer)])
+        let savedData = try JSONEncoder().encode(storedView)
+        XCTAssertFalse(String(decoding: savedData, as: UTF8.self).contains("itemCreatedAtMilliseconds"))
+        let savedView = try JSONDecoder().decode(InboxView.self, from: savedData)
+        let model = ServerModelV2Store(fileURL: nil)
+        let items = try [older, newer].enumerated().map { index, key in
+            try APIItem(json: JSONValue.parse(Data(#"""
+            {"item_id":"\#(key.messageID.rawValue)","rev":1,"sender":"agent","request_revision":1,
+             "message":{"title":"Saved message","created_at":\#((index + 1) * 1000)},
+             "files":[],"seen":false,"chat":{"started":false},"rank":{"key":"\#(index)","section":"current"}}
+            """#.utf8)))
+        }
+        try model.rebaseline(items: items, counts: APICounts(unresolved: 2), position: 1)
+        let cached = ServerModelV2Projection.cachedState(model.snapshot, identity: context.identity)
+        let initial = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        try initial.restoreCachedServerState(CachedAttentionServerState(identity: context.identity,
+            requests: cached.requests, remoteStates: cached.remoteStates, cursor: 1, conversationCursor: 0,
+            conversations: cached.conversations, inboxView: savedView,
+            currentRequestKeys: cached.currentRequestKeys), context: context)
+        let reopened = try await Self.reopenWithServerCache(initial, context: context,
+            persistence: MemoryPendingActionPersistence())
+        let presentation = try LivePresentationStore(disconnectedStore: reopened, context: context)
+        let rows = presentation.inboxRows.map(InboxItem.request)
+        let refs = try XCTUnwrap(presentation.presentation.inboxViewListItems)
+        let priority = InboxNormalListProjection.entries(rows: rows, serverItems: refs, in: .inbox, search: "")
+        let posted = InboxNormalListProjection.entries(rows: rows, serverItems: refs, in: .inbox, search: "", order: .posted)
+        XCTAssertEqual(priority.map(\.id), [.message(.row(.request(older))), .message(.row(.request(newer)))])
+        XCTAssertEqual(posted.map(\.id), [.message(.row(.request(newer))), .message(.row(.request(older)))])
+    }
+
+    @MainActor
+    func testPostedWithoutServerListUsesAvailableDatesAndKeepsUndatedRowsLast() throws {
+        let view = try decode([reference("older"), reference("undated-first"),
+                               reference("newer"), reference("undated-second")], version: nil)
+        let rows = rows(for: view).map { item -> InboxItem in
+            guard case var .request(row) = item else { return item }
+            switch row.title {
+            case "older": row.createdAt = Date(timeIntervalSince1970: 100)
+            case "newer": row.createdAt = Date(timeIntervalSince1970: 300)
+            default: break
+            }
+            return .request(row)
+        }
+        let priority = InboxNormalListProjection.entries(rows: rows, serverItems: nil, in: .inbox, search: "")
+        let posted = InboxNormalListProjection.entries(rows: rows, serverItems: nil, in: .inbox, search: "", order: .posted)
+        XCTAssertEqual(posted.map(\.id), [priority[2].id, priority[0].id, priority[1].id, priority[3].id])
+    }
+
+    @MainActor
     func testPostedOrderKeepsEveryFreeOrderRowAndUsesOriginalTimes() throws {
         let view = try decode([
             reference("older"), reference("newer"), reference("same-time"),
+            reference("authored-date", group: "earlier_messages"),
             reference("without-date", group: "earlier_messages"),
             reference("newest-reply", kind: "reply", group: "earlier_chat_replies"),
             reference("undated-reply", kind: "reply", group: "earlier_chat_replies_unknown"),
@@ -114,7 +171,11 @@ final class InboxFreeOrderTests: XCTestCase {
         let times = ["older": 100, "newer": 300, "same-time": 300, "history": 200]
         let rows = rows(for: view).map { item -> InboxItem in
             guard case var .request(row) = item else { return item }
-            row.createdAt = Date(timeIntervalSince1970: 600)
+            row.createdAt = switch row.title {
+            case "without-date": nil
+            case "authored-date": Date(timeIntervalSince1970: 350)
+            default: Date(timeIntervalSince1970: 600)
+            }
             row.serverPostedAt = times[row.key.messageID.rawValue].map {
                 Date(timeIntervalSince1970: Double($0))
             }
@@ -151,8 +212,8 @@ final class InboxFreeOrderTests: XCTestCase {
 
         XCTAssertGreaterThan(priority.count, rowIDs(priority).count)
         XCTAssertEqual(posted.count, rows.count + 2, "No member should vanish inside a thread or section.")
-        XCTAssertEqual(ids(posted), ["newest-reply", "newer", "same-time", "history",
-                                     "older", "without-date", "undated-reply"])
+        XCTAssertEqual(ids(posted), ["newest-reply", "authored-date", "newer", "same-time",
+                                     "history", "older", "without-date", "undated-reply"])
         XCTAssertEqual(Set(ids(posted)), Set(ids(priority)))
     }
 

@@ -549,8 +549,27 @@ private struct InboxListRowScrollTarget: Hashable {
     var placement: InboxListRowPlacement = .normal
 }
 
+private enum InboxSortScrollTarget: Equatable {
+    case row(InboxListRowScrollTarget)
+    case thread(group: InboxListRowScrollTarget, member: InboxListRowScrollTarget)
+
+    var selection: InboxSelection {
+        switch self {
+        case let .row(row), let .thread(_, row): row.selection
+        }
+    }
+}
+
+private struct InboxThreadListMember: Identifiable {
+    let item: InboxItem
+    let tab: InboxWorkspaceTab
+
+    var id: InboxListRowScrollTarget { .init(tab: tab, selection: item.id) }
+}
+
 private enum InboxListRowPlacement: Hashable {
     case normal
+    case threadGroup
     case normalReplyItem
     case newMessageArea
     case replyItemArea
@@ -662,6 +681,7 @@ struct InboxRequestRow: Identifiable {
     var orderingReason: String? = nil
     var defaultAnswerStatus: String? = nil
     var serverPostedAt: Date? = nil
+    var postedAt: Date? { serverPostedAt ?? createdAt }
     var fyiServerSeen: Bool? = nil
     var fyiHasEnded = false
     var fyiOpenedFlagPending = false
@@ -1993,6 +2013,7 @@ struct InboxList: View {
     @State private var requestedInGesture = false
     @State private var isFetchingOlderPage = false
     @State private var expandedThreadGroups: Set<InboxListEntryID> = []
+    @State private var sortScrollTarget: InboxSortScrollTarget?
     @State private var isNewMessageAreaExpanded = false
     @State private var isProgressExpanded = false
     @State private var visibleMessagePlacements: Set<NewMessageAreaVisibility> = []
@@ -2117,7 +2138,8 @@ struct InboxList: View {
             freeOrderVersion: conversationStore?.presentation.inboxFreeOrderVersion,
             in: tab,
             search: search,
-            order: normalOrder)
+            order: normalOrder,
+            replyReceiptDate: { normalReplyProjection(for: $0)?.receivedAt })
     }
 
     private func isBundledFYI(_ item: InboxItem) -> Bool {
@@ -2403,7 +2425,9 @@ struct InboxList: View {
                 projection: item.projection,
                 parentTitle: item.parentTitle,
                 senderLabel: item.senderLabel,
-                date: normalOrder == .posted ? reference.postedAt : item.projection?.receivedAt,
+                date: showsInboxSort
+                    ? reference.postedAt(fallingBackTo: item.projection?.receivedAt)
+                    : item.projection?.receivedAt,
                 selected: isSelected)
         }
         .buttonStyle(.plain)
@@ -2544,6 +2568,28 @@ struct InboxList: View {
         expandedThreadGroups.insert(group.id)
     }
 
+    private func scrollAfterSort(using proxy: ScrollViewProxy, in tab: InboxWorkspaceTab) async {
+        guard let target = sortScrollTarget else { return }
+        // Each order has its own list positions. Scroll after the new list is installed.
+        await Task.yield()
+        guard !Task.isCancelled, sortScrollTarget == target, selected == target.selection,
+              workspaceTab == tab, showsInboxSort else { return }
+        switch target {
+        case let .row(row):
+            // Use the data ID so the list can find a row that has not been laid out yet.
+            let displayID: InboxNormalListDisplayEntry.ID
+            if row.placement == .normalReplyItem, case let .request(key) = row.selection {
+                displayID = .reply(key)
+            } else {
+                displayID = .message(.row(row.selection))
+            }
+            proxy.scrollTo(displayID, anchor: .center)
+            sortScrollTarget = nil
+        case let .thread(group, _):
+            proxy.scrollTo(group, anchor: .center)
+        }
+    }
+
     private func openSettings() {
         showSettings()
     }
@@ -2618,7 +2664,7 @@ struct InboxList: View {
             case let .request(request): request
             case let .example(_, response): response.inboxRow
             }
-            if normalOrder == .posted { request?.createdAt = row.postedAt }
+            if showsInboxSort { request?.createdAt = row.postedAt }
             return request
         }()
         if let request = renderedRow {
@@ -2819,12 +2865,22 @@ struct InboxList: View {
                 listRow(for: row, in: tab)
             case let .thread(_, members):
                 DisclosureGroup(isExpanded: threadExpansionBinding(for: messageEntry.id)) {
-                    ForEach(members) { row in
-                        listRow(for: row, in: tab)
+                    ForEach(members.map { InboxThreadListMember(item: $0, tab: tab) }) { member in
+                        listRow(for: member.item, in: tab)
+                            .onScrollVisibilityChange(threshold: 0.001) { isVisible in
+                                // The children are ready to scroll once the first one is visible.
+                                guard isVisible, member.item.id == members[0].id,
+                                      case let .thread(_, target) = sortScrollTarget, selected == target.selection,
+                                      members.contains(where: { $0.id == target.selection }),
+                                      workspaceTab == tab, showsInboxSort else { return }
+                                proxy.scrollTo(target, anchor: .center)
+                                sortScrollTarget = nil
+                            }
                     }
                 } label: {
                     threadGroupLabel(members: members)
                 }
+                .id(InboxListRowScrollTarget(tab: tab, selection: members[0].id, placement: .threadGroup))
                 .accessibilityIdentifier("inbox-thread-group-\(members[0].accessibilityID)")
                 .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
                 .listRowSeparator(.hidden)
@@ -3007,6 +3063,7 @@ struct InboxList: View {
                     .listRowSeparator(.hidden)
             }
         }
+        .id(inboxOrder?.wrappedValue)
         .listStyle(.plain)
         .listSectionSeparator(.hidden)
         .contentMargins(.horizontal, 0, for: .scrollContent)
@@ -3089,19 +3146,31 @@ struct InboxList: View {
             }
         }
         .onChange(of: inboxOrder?.wrappedValue) { _, _ in
+            sortScrollTarget = nil
             guard workspaceTab == tab, showsInboxSort, let selected else { return }
             let placement: InboxListRowPlacement
             if case let .request(key) = selected, lastViewedReplyTarget == key,
                normalEntries.contains(where: { $0.id == .reply(key) }) {
                 placement = .normalReplyItem
-            } else if filteredRows(in: tab).contains(where: { $0.id == selected }) {
-                expandThreadContaining(selected, in: tab)
+            } else if let message = normalEntries.compactMap({
+                if case let .message(entry) = $0 { return entry }
+                return nil
+            }).first(where: { $0.members.contains { $0.id == selected } }) {
+                if case let .thread(_, members) = message {
+                    expandedThreadGroups.insert(message.id)
+                    sortScrollTarget = .thread(
+                        group: .init(tab: tab, selection: members[0].id, placement: .threadGroup),
+                        member: .init(tab: tab, selection: selected))
+                    return
+                }
                 placement = .normal
             } else {
                 return
             }
-            proxy.scrollTo(InboxListRowScrollTarget(tab: tab, selection: selected, placement: placement),
-                           anchor: .center)
+            sortScrollTarget = .row(.init(tab: tab, selection: selected, placement: placement))
+        }
+        .task(id: sortScrollTarget) {
+            await scrollAfterSort(using: proxy, in: tab)
         }
         .onChange(of: normalEntries.map(\.id)) { _, _ in
             guard workspaceTab == tab, restoreLastViewed else { return }
@@ -3995,8 +4064,8 @@ enum InboxOrder: String, CaseIterable, Identifiable {
             if self == .priority, left.fyiRankScore != right.fyiRankScore {
                 return left.fyiRankScore > right.fyiRankScore
             }
-            let leftDate = left.serverPostedAt ?? left.createdAt ?? .distantPast
-            let rightDate = right.serverPostedAt ?? right.createdAt ?? .distantPast
+            let leftDate = left.postedAt ?? .distantPast
+            let rightDate = right.postedAt ?? .distantPast
             if leftDate != rightDate { return leftDate > rightDate }
             return (left.key.senderID.rawValue, left.key.messageID.rawValue) <
                 (right.key.senderID.rawValue, right.key.messageID.rawValue)
@@ -4346,7 +4415,7 @@ private struct FYIList: View {
     private func fyiRow(_ item: InboxRequestRow, foregroundColor: Color) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             MessageHeading(sender: item.senderLabel, initials: item.displayInitials,
-                           title: item.title, createdAt: item.serverPostedAt ?? item.createdAt,
+                           title: item.title, createdAt: item.postedAt,
                            messageType: item.resolvedMessageType, inFYIList: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(Rectangle())
