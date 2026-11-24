@@ -2680,6 +2680,7 @@ struct InboxList: View {
     @ViewBuilder
     private func listRow(for row: InboxItem, in tab: InboxWorkspaceTab) -> some View {
         rowContent(for: row)
+            .accessibilityAddTraits(selected == row.id ? .isSelected : [])
             .tag(row.id)
             .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                 messageSwipeActions(for: row, in: tab)
