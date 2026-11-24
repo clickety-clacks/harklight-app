@@ -10,6 +10,116 @@ import HarklightNativeRelay
 
 @MainActor
 final class ConversationPresentationTests: XCTestCase {
+    private func receiptJSON(_ delivery: String, rev: UInt64 = 2) throws -> JSONValue {
+        try JSONValue.parse(Data("""
+        {"entry_id":"sent","item_id":"item","rev":\(rev),"position":1,
+         "kind":"reply","author":"person","at_ms":10,"request_revision":1,
+         "text":"Hello","files":[],"delivery":\(delivery)}
+        """.utf8))
+    }
+
+    private func receiptStatus(_ thread: ConversationThread, hasReply: Bool = false,
+                               availability: ConversationAvailabilityObservation? = nil)
+        throws -> ConversationSentChatStatusPresentation.Delivery {
+        let turn = try XCTUnwrap(thread.turns.first)
+        return ConversationSentChatStatusPresentation.delivery(for: turn,
+            facts: try XCTUnwrap(thread.facts[turn.id]), availability: availability,
+            hasReply: hasReply, conversationAgentName: "Studio", nowMilliseconds: 9_000_000,
+            personFeed: thread.chatNeverCloses == true)
+    }
+
+    func testPersonFeedDeliveryDecodesOptionalAndFutureOutcomes() throws {
+        for fields in ["", #", "outcome":null"#, #", "outcome":"future"#] {
+            let entry = try APIEntry(json: receiptJSON(#"{"delivered":true,"acted":true\#(fields)}"#))
+            XCTAssertEqual(entry.entryID, ExactText("sent"))
+            XCTAssertEqual(entry.delivery?.delivered, true)
+            let restored = try JSONDecoder().decode(APIEntry.self, from: JSONEncoder().encode(entry))
+            XCTAssertEqual(restored, entry)
+        }
+        let entry = try APIEntry(json: receiptJSON(
+            #"{"outcome":"not_handed","reason":"Try later","agent":"Release","rerouted":true}"#))
+        XCTAssertEqual(entry.delivery?.outcome, "not_handed")
+        XCTAssertEqual(entry.delivery?.reason, ExactText("Try later"))
+        XCTAssertEqual(entry.delivery?.agent, ExactText("Release"))
+        XCTAssertEqual(entry.delivery?.rerouted, true)
+    }
+
+    func testPersonFeedHandoffUpdatesLiveAndAfterReopeningOldCache() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+            personID: ExactText("person"), deviceID: ExactText("device"))
+        let store = ServerModelV2Store(fileURL: url)
+        let item = try JSONValue.parse(Data(#"{"item_id":"item","rev":1,"sender":"Studio","request_revision":1,"message":{"title":"Hello","body":"Message"},"files":[],"seen":false,"chat":{"available":true,"started":true},"rank":{"key":"a","score":1,"section":"current"}}"#.utf8))
+        try store.apply([.init(rev: 1, kind: "item", data: Data(item.jsonString.utf8))], cursor: 1)
+        let page = try APIEntriesPage(json: JSONValue.parse(Data(#"{"rev":1,"entries":[],"older":false}"#.utf8)))
+        try store.apply(page, of: ExactText("item"))
+        func apply(_ delivery: String, rev: UInt64, to target: ServerModelV2Store) throws {
+            let json = try receiptJSON(delivery, rev: rev)
+            try target.apply([.init(rev: rev, kind: "entry", data: Data(json.jsonString.utf8))], cursor: rev)
+        }
+        func thread(_ target: ServerModelV2Store) throws -> ConversationThread {
+            try XCTUnwrap(ServerModelV2Projection.cachedState(target.snapshot, identity: identity).conversations.values.first)
+        }
+        // This saves exactly the delivery fields written before handoff outcomes existed.
+        try apply(#"{"delivered":true,"acted":true}"#, rev: 2, to: store)
+        let old = ServerModelV2Store(fileURL: url)
+        XCTAssertEqual(old.snapshot.orderedEntries(of: ExactText("item")).count, 1)
+        XCTAssertEqual(try receiptStatus(thread(old)), .delivered)
+        try apply(#"{"delivered":true,"acted":true,"outcome":"not_handed","reason":"Agent unavailable","agent":"Studio"}"#, rev: 3, to: old)
+        let negative = try thread(old)
+        XCTAssertEqual(negative.facts[ExactText("sent")]?.deliveryAck2,
+            .notHanded(atMilliseconds: 10, reason: ExactText("Agent unavailable"),
+                       acknowledgerSystem: nil, acknowledgerAgent: ExactText("Studio")))
+        XCTAssertNil(negative.facts[ExactText("sent")]?.actedBy)
+        XCTAssertEqual(try receiptStatus(negative), .notDelivered("Agent unavailable"))
+        let reopened = ServerModelV2Store(fileURL: url)
+        XCTAssertEqual(try receiptStatus(thread(reopened)), .notDelivered("Agent unavailable"))
+        try apply(#"{"delivered":true,"outcome":"handed","agent":"Release","rerouted":true}"#, rev: 4, to: reopened)
+        XCTAssertEqual(try receiptStatus(thread(reopened)), .deliveredTo("Release"))
+        XCTAssertEqual(try receiptStatus(thread(ServerModelV2Store(fileURL: url))), .deliveredTo("Release"))
+        XCTAssertEqual(reopened.snapshot.orderedEntries(of: ExactText("item")).count, 1)
+        let rows = ServerModelV2Projection.cachedState(reopened.snapshot, identity: identity).inboxView?.listItems
+        XCTAssertEqual(rows?.map(\.kind), [.message], "Handoff changes do not manufacture an inbox reply row.")
+    }
+
+    func testPersonFeedCaptionPrecedenceKeepsLegacyReceiptRules() throws {
+        let binding = ConversationBinding(request: RequestKey(accountScope: ExactText("person"),
+            senderID: ExactText("Studio"), messageID: ExactText("item")), revision: 1)
+        let turn = ConversationTurn(id: ExactText("sent"), binding: binding, author: .person,
+            sessionHandle: ExactText("item"), text: ExactText("Hello"), kind: .discussion)
+        var facts = ConversationTurnFacts()
+        facts.delivered = true
+        facts.deliveryAck2 = .notHanded(atMilliseconds: 10, reason: ExactText("Try later"),
+            acknowledgerSystem: nil, acknowledgerAgent: nil)
+        func status(_ availability: ConversationAvailabilityObservation? = nil, reply: Bool = false,
+                    personFeed: Bool = true) -> ConversationSentChatStatusPresentation.Delivery {
+            ConversationSentChatStatusPresentation.delivery(for: turn, facts: facts,
+                availability: availability, hasReply: reply, conversationAgentName: "Studio",
+                nowMilliseconds: 10, personFeed: personFeed)
+        }
+        XCTAssertEqual(status(), .notDelivered("Try later"))
+        for state: ConversationAvailability in [.gone, .unsupported(reason: ExactText("old"))] {
+            let availability = ConversationAvailabilityObservation(state: state)
+            XCTAssertEqual(status(availability), .noOneWillGetThis)
+            XCTAssertEqual(status(availability, reply: true), .deliveredAck)
+        }
+        XCTAssertEqual(status(personFeed: false), .deliveredAck)
+        facts.deliveryAck2 = .notHanded(atMilliseconds: 10, reason: ExactText(""),
+            acknowledgerSystem: nil, acknowledgerAgent: nil)
+        XCTAssertEqual(status(), .notDeliveredYet)
+        for rerouted in [false, true] {
+            facts.deliveryAck2 = .handed(atMilliseconds: 10, rerouted: rerouted,
+                acknowledgerSystem: nil, acknowledgerAgent: ExactText("Release"))
+            XCTAssertEqual(status(), rerouted ? .deliveredTo("Release") : .deliveredAck)
+        }
+        facts.deliveryAck2 = nil
+        facts.delivered = false
+        facts.actedBy = ExactText("action")
+        XCTAssertEqual(status(), .sent, "Acted is never evidence of handoff on the person feed.")
+    }
+
+
     func testPastedNewlineRemainsInTheComposerWithoutSending() {
         var text = "Before "
         var sendCount = 0

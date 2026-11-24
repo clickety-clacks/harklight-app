@@ -138,6 +138,17 @@ public enum ServerModelV2Projection {
             if let delivery = entry.delivery {
                 var facts = ConversationTurnFacts(acceptedAtMilliseconds: entry.atMs)
                 facts.delivered = delivery.delivered ?? false
+                // The wire has no handoff timestamp; this is display-only metadata.
+                let at = entry.atMs ?? 0
+                switch delivery.outcome {
+                case "handed":
+                    facts.deliveryAck2 = .handed(atMilliseconds: at, rerouted: delivery.rerouted ?? false,
+                        acknowledgerSystem: nil, acknowledgerAgent: delivery.agent)
+                case "not_handed":
+                    facts.deliveryAck2 = .notHanded(atMilliseconds: at, reason: delivery.reason ?? ExactText(""),
+                        acknowledgerSystem: nil, acknowledgerAgent: delivery.agent)
+                default: break
+                }
                 thread.facts[entry.entryID] = facts
             }
         }

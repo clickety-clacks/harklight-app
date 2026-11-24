@@ -436,6 +436,7 @@ private struct ConversationHistoryContent: View, Equatable {
                     ForEach(thread.turns) { turn in
                         ConversationTurnView(turn: turn, facts: thread.facts[turn.id] ?? ConversationTurnFacts(),
                             sender: sender, local: local,
+                            personFeed: thread.chatNeverCloses == true,
                             availability: thread.latestReportedAvailabilityObservation,
                             hasReply: replyTargetIDs.contains(turn.id),
                             replyContext: turn.inReplyTo.flatMap { textByTurnID[$0] },
@@ -1122,7 +1123,29 @@ enum ConversationSentChatStatusPresentation {
 
     static func delivery(for turn: ConversationTurn, facts: ConversationTurnFacts,
                          availability: ConversationAvailabilityObservation? = nil, hasReply: Bool,
-                         conversationAgentName: String, nowMilliseconds: UInt64) -> Delivery {
+                         conversationAgentName: String, nowMilliseconds: UInt64,
+                         personFeed: Bool = false) -> Delivery {
+        // On 0.2 Delivered records Server delivery, independently of handoff.
+        // Keep 0.1 receipt/acted precedence below unchanged.
+        if personFeed, turn.author == .person, turn.kind == .discussion {
+            if hasReply { return .deliveredAck }
+            if case let .handed(_, rerouted, _, agent)? = facts.deliveryAck2 {
+                return rerouted ? (agent.map { .deliveredTo($0.rawValue) } ?? .deliveredAck) : .deliveredAck
+            }
+            if case let .notHanded(_, reason, _, _)? = facts.deliveryAck2 {
+                if let availability {
+                    switch availability.state {
+                    case .unsupported, .gone: return .noOneWillGetThis
+                    default: break
+                    }
+                }
+                return reason.rawValue.isEmpty ? .notDeliveredYet : .notDelivered(reason.rawValue)
+            }
+            var legacyFacts = facts
+            legacyFacts.actedBy = nil
+            return delivery(for: legacyFacts, availability: availability, hasReply: hasReply,
+                            nowMilliseconds: nowMilliseconds)
+        }
         guard usesDeliveryAckPresentation(turn: turn, facts: facts) else {
             return delivery(for: facts, availability: availability, hasReply: hasReply,
                             nowMilliseconds: nowMilliseconds)
@@ -1210,6 +1233,7 @@ private struct ConversationSentChatStatus: View {
     let hasReply: Bool
     let conversationAgentName: String
     let local: Bool
+    let personFeed: Bool
 
     // Unreceived turns use the latest reported conversation availability.
     // Receipt, action, and reply facts take precedence and remain independent.
@@ -1230,7 +1254,7 @@ private struct ConversationSentChatStatus: View {
         deliveryLabel(ConversationSentChatStatusPresentation.delivery(
             for: turn, facts: facts, availability: availability, hasReply: hasReply,
             conversationAgentName: conversationAgentName,
-            nowMilliseconds: Self.milliseconds(.now)))
+            nowMilliseconds: Self.milliseconds(.now), personFeed: personFeed))
     }
 
     @ViewBuilder
@@ -1292,6 +1316,7 @@ private struct ConversationTurnView: View {
     let facts: ConversationTurnFacts
     let sender: String
     let local: Bool
+    let personFeed: Bool
     let availability: ConversationAvailabilityObservation?
     let hasReply: Bool
     let replyContext: String?
@@ -1337,7 +1362,7 @@ private struct ConversationTurnView: View {
             }
             if turn.author == .person {
                 ConversationSentChatStatus(turn: turn, facts: facts, availability: availability,
-                    hasReply: hasReply, conversationAgentName: sender, local: local)
+                    hasReply: hasReply, conversationAgentName: sender, local: local, personFeed: personFeed)
             }
         }
         .accessibilityIdentifier("conversation-turn-" + turn.id.rawValue)

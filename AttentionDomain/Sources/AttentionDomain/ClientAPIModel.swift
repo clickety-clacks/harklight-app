@@ -153,6 +153,11 @@ public struct APIItem: Equatable, Codable, Sendable {
 public struct APIEntryDelivery: Equatable, Codable, Sendable {
     public let delivered: Bool?
     public let acted: Bool?
+    /// Unknown outcomes are retained for forward-compatible cached decoding.
+    public let outcome: String?
+    public let reason: ExactText?
+    public let agent: ExactText?
+    public let rerouted: Bool?
 }
 
 public struct APIEntry: Equatable, Codable, Sendable {
@@ -419,7 +424,11 @@ extension APIEntry {
         terminal = try reader.optionalObject("terminal").map(APITerminal.init)
         availability = try reader.optionalObject("availability").map(APIAvailability.init)
         delivery = try reader.optionalObject("delivery").map { delivery in
-            APIEntryDelivery(delivered: try delivery.optionalBool("delivered"), acted: try delivery.optionalBool("acted"))
+            APIEntryDelivery(delivered: try delivery.optionalBool("delivered"), acted: try delivery.optionalBool("acted"),
+                             outcome: try delivery.optionalString("outcome")?.rawValue,
+                             reason: try delivery.optionalString("reason"),
+                             agent: try delivery.optionalString("agent"),
+                             rerouted: try delivery.optionalBool("rerouted"))
         }
         result = try reader.optionalObject("result").map { result in
             APIOriginResult(status: try result.string("status"), resultRef: try result.optionalString("result_ref"),
