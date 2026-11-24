@@ -11,6 +11,24 @@ final class InboxSubmissionProgressTests: XCTestCase {
     private let sentAt = Date(timeIntervalSince1970: 100)
     private var binding: ConversationBinding { ConversationBinding(request: key, revision: 1) }
 
+    func testServedTurnSendingStaysAwaitingOnSupportingServer() throws {
+        var thread = makeThread()
+        thread.chatNeverCloses = true
+        thread.handoffCaptions = true
+        let own = turn("own", author: .person)
+        thread.turns = [own]
+        var facts = ConversationTurnFacts(acceptedAtMilliseconds: 10)
+        facts.delivered = true
+        thread.facts[own.id] = facts
+        thread.latestAvailabilityObservation = .init(state: .notListening(lastDetachedAt: nil))
+        XCTAssertEqual(project(thread)[key]?.state, .awaiting,
+                       "Sending is not a failed inbox row, even when nobody is listening now.")
+        facts.deliveryAck2 = .notHanded(atMilliseconds: 10, reason: ExactText("Try later"),
+            acknowledgerSystem: nil, acknowledgerAgent: nil)
+        thread.facts[own.id] = facts
+        XCTAssertEqual(project(thread)[key]?.state, .notSent)
+    }
+
     func testSavedComposerIsAbsentAndUncertainSendRemainsAwaitingWithoutAClock() throws {
         var thread = makeThread()
         let operation = UUID()

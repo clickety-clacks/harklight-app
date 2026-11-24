@@ -10,6 +10,106 @@ import HarklightNativeRelay
 
 @MainActor
 final class ConversationPresentationTests: XCTestCase {
+    func testHandoffCaptionContractRequiresSameTurnEvidenceAndConfirmedIncapableReceipt() throws {
+        let binding = ConversationBinding(request: RequestKey(accountScope: ExactText("person"),
+            senderID: ExactText("Studio"), messageID: ExactText("item")), revision: 1)
+        let turn = ConversationTurn(id: ExactText("sent"), binding: binding, author: .person,
+            sessionHandle: ExactText("item"), text: ExactText("Hello"), kind: .discussion)
+        let cases: [(String, ConversationSentChatStatusPresentation.Delivery)] = [
+            (#"{"delivered":true,"acted":true}"#, .sending),
+            (#"{"delivered":true,"ack2_expected":null}"#, .sending),
+            (#"{"delivered":true,"ack2_expected":true}"#, .sending),
+            (#"{"delivered":true,"ack2_expected":false}"#, .sending),
+            (#"{"delivered":true,"ack2_expected":false,"listener_received":false}"#, .sending),
+            (#"{"delivered":true,"ack2_expected":false,"listener_received":true}"#, .deliveredAck),
+            (#"{"delivered":true,"listener_received":true}"#, .sending),
+            (#"{"delivered":true,"legacy_caption":true}"#, .delivered),
+            (#"{"delivered":true,"legacy_caption":false}"#, .sending),
+            (#"{"delivered":true,"legacy_caption":null}"#, .sending),
+            (#"{"delivered":false,"acted":true}"#, .sent),
+            (#"{"delivered":true,"outcome":"not_handed","acted":true,"agent_seen":true}"#, .deliveredAck),
+            (#"{"delivered":true,"outcome":"not_handed","acted":true,"agent_acted":true}"#, .deliveredAck),
+            (#"{"delivered":true,"outcome":"not_handed","acted":true,"legacy_caption":true}"#, .notDelivered("")),
+            (#"{"delivered":true,"outcome":"not_handed","reason":"Try later"}"#, .notDelivered("Try later")),
+            (#"{"delivered":true,"outcome":"handed","rerouted":true,"agent":"Release"}"#, .deliveredTo("Release"))
+        ]
+        for (wire, expected) in cases {
+            let delivery = try XCTUnwrap(APIEntry(json: receiptJSON(wire)).delivery)
+            var facts = ConversationTurnFacts(acceptedAtMilliseconds: 10)
+            facts.personDelivery = delivery
+            facts.delivered = delivery.delivered ?? false
+            // The ordinary projection supplies the existing ack2 fact.
+            switch delivery.outcome {
+            case "handed": facts.deliveryAck2 = .handed(atMilliseconds: 10,
+                rerouted: delivery.rerouted ?? false, acknowledgerSystem: nil, acknowledgerAgent: delivery.agent)
+            case "not_handed": facts.deliveryAck2 = .notHanded(atMilliseconds: 10,
+                reason: delivery.reason ?? ExactText(""), acknowledgerSystem: nil, acknowledgerAgent: delivery.agent)
+            default: break
+            }
+            let status = ConversationSentChatStatusPresentation.delivery(for: turn, facts: facts,
+                hasReply: false, conversationAgentName: "Studio", nowMilliseconds: 9_000_000,
+                personFeed: true, handoffCaptions: true)
+            XCTAssertEqual(status, expected, wire)
+            if delivery.outcome == "not_handed" {
+                XCTAssertEqual(ConversationSentChatStatusPresentation.delivery(for: turn, facts: facts,
+                    hasReply: true, conversationAgentName: "Studio", nowMilliseconds: 9_000_000,
+                    personFeed: true, handoffCaptions: true), .deliveredAck)
+                XCTAssertEqual(facts.personDelivery?.outcome, "not_handed", "A reply never rewrites the receipt.")
+            }
+        }
+        var served = ConversationTurnFacts()
+        served.delivered = true
+        for state: ConversationAvailability in [.listening, .notListening(lastDetachedAt: nil), .gone,
+                                               .unsupported(reason: ExactText("old"))] {
+            let availability = ConversationAvailabilityObservation(state: state)
+            XCTAssertEqual(ConversationSentChatStatusPresentation.delivery(for: turn, facts: served,
+                availability: availability, hasReply: false, conversationAgentName: "Studio",
+                nowMilliseconds: 9_000_000, personFeed: true, handoffCaptions: true),
+                state == .gone || state == .unsupported(reason: ExactText("old")) ? .noOneWillGetThis : .sending)
+        }
+    }
+
+    func testHandoffFeatureRefreshIsConnectionScopedAndPreservesOlderServerHistory() throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+            personID: ExactText("person"), deviceID: ExactText("device"))
+        let model = ServerModelV2Store(fileURL: nil)
+        let item = try JSONValue.parse(Data(#"{"item_id":"item","rev":1,"sender":"Studio","request_revision":1,"message":{"title":"Hello","body":"Message"},"files":[],"seen":false,"chat":{"available":true,"started":true},"rank":{"key":"a","section":"current"}}"#.utf8))
+        try model.apply([.init(rev: 1, kind: "item", data: Data(item.jsonString.utf8))], cursor: 1)
+        try model.apply(APIEntriesPage(json: JSONValue.parse(Data(#"{"rev":1,"entries":[],"older":false}"#.utf8))), of: ExactText("item"))
+        let entry = try receiptJSON(#"{"delivered":true,"acted":true}"#)
+        try model.apply([.init(rev: 2, kind: "entry", data: Data(entry.jsonString.utf8))], cursor: 2)
+        func me(_ features: String) throws -> APIMe {
+            try APIMe(json: JSONValue.parse(Data(features.utf8)))
+        }
+        let older = try me(#"{}"#) // Server 0.2.5 has no feature signal.
+        let supporting = try me(#"{"features":{"handoff_captions":true}}"#)
+        let presentation = ServerModelV2Presentation(savedMe: older)
+        func projected(_ presentation: ServerModelV2Presentation) throws -> ConversationThread {
+            try XCTUnwrap(presentation.cachedState(model.snapshot, identity: identity).conversations.values.first)
+        }
+        func caption(_ thread: ConversationThread) throws -> ConversationSentChatStatusPresentation.Delivery {
+            let turn = try XCTUnwrap(thread.turns.first)
+            return ConversationSentChatStatusPresentation.delivery(for: turn,
+                facts: try XCTUnwrap(thread.facts[turn.id]), hasReply: false,
+                conversationAgentName: "Studio", nowMilliseconds: 10,
+                personFeed: thread.chatNeverCloses == true, handoffCaptions: thread.handoffCaptions == true)
+        }
+        XCTAssertEqual(try caption(projected(presentation)), .delivered)
+        presentation.apply(supporting)
+        XCTAssertEqual(try caption(projected(presentation)), .sending)
+        let saved = ServerModelV2Presentation(savedMe: supporting)
+        XCTAssertEqual(try caption(projected(saved)), .sending)
+        let oldEntry = try receiptJSON(#"{"delivered":true,"legacy_caption":true}"#, rev: 3)
+        try model.apply([.init(rev: 3, kind: "entry", data: Data(oldEntry.jsonString.utf8))], cursor: 3)
+        XCTAssertEqual(try caption(projected(saved)), .delivered)
+        // A second account/Server connection gets only its own /me, not a global switch.
+        let other = ServerModelV2Presentation(savedMe: older)
+        XCTAssertFalse(try XCTUnwrap(projected(other).handoffCaptions))
+        presentation.apply(try me(#"{"features":{"handoff_captions":false}}"#))
+        XCTAssertFalse(try XCTUnwrap(projected(presentation).handoffCaptions))
+    }
+
+
     private func receiptJSON(_ delivery: String, rev: UInt64 = 2) throws -> JSONValue {
         try JSONValue.parse(Data("""
         {"entry_id":"sent","item_id":"item","rev":\(rev),"position":1,
