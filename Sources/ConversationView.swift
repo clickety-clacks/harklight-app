@@ -399,6 +399,7 @@ private struct ConversationHistoryContent: View, Equatable {
         lhs.thread.turns == rhs.thread.turns &&
         lhs.pendingSubmissions == rhs.pendingSubmissions &&
         lhs.thread.facts == rhs.thread.facts &&
+        lhs.thread.handoffCaptions == rhs.thread.handoffCaptions &&
         lhs.thread.answerDrafts == rhs.thread.answerDrafts &&
         lhs.thread.latestReportedAvailabilityObservation == rhs.thread.latestReportedAvailabilityObservation &&
         lhs.thread.terminalTurn == rhs.thread.terminalTurn &&
@@ -1197,8 +1198,11 @@ enum ConversationSentChatStatusPresentation {
     static func replyTargets(in thread: ConversationThread) -> Set<ExactText> {
         Set(thread.turns.compactMap { turn -> ExactText? in
             guard turn.author != .person,
-                  thread.chatNeverCloses != true || turn.author == .origin || turn.author == .agent,
                   turn.kind == nil || turn.kind == .reply else { return nil }
+            if thread.chatNeverCloses == true && thread.handoffCaptions == true {
+                guard turn.author == .origin || turn.author == .agent,
+                      turn.contentRedacted != true else { return nil }
+            }
             return turn.inReplyTo
         })
     }

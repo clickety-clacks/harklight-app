@@ -372,7 +372,7 @@ public final class ServerModelV2Store: @unchecked Sendable {
         try mutate(generation: generation) { model in
             model.loadedEntryItems.insert(itemID)
             for page in pages { for entry in page.entries {
-                model.put(entry, refreshingCaption: complete && pages.allSatisfy { $0.unreadable.isEmpty })
+                model.put(entry, refreshingCaption: true)
             } }
             if !complete || pages.contains(where: { !$0.unreadable.isEmpty }) {
                 model.loadedEntryItems.remove(itemID)

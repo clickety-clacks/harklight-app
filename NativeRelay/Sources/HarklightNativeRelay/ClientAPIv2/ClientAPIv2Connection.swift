@@ -67,7 +67,11 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
         meURL = directory?.appendingPathComponent("me-v2.json")
         let savedMe = meURL.flatMap { try? Data(contentsOf: $0) }
             .flatMap { try? JSONValue.parse($0) }.flatMap { try? APIMe(json: $0) }
-        try model.setHandoffCaptionsEnabled(savedMe?.handoffCaptionsEnabled == true)
+        do { try model.setHandoffCaptionsEnabled(savedMe?.handoffCaptionsEnabled == true) }
+        catch {
+            errors.report(ErrorLogReport(concern: .snapshot, connectionRole: .request,
+                operation: "handoff_projection", phase: "save", reason: .from(error: error), retryable: true))
+        }
         let access = (transport as? ClientAPIAccess) ?? ClientAPIAccess(transport: transport)
         self.access = access
         let transport = access
@@ -170,10 +174,14 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
         }
         try Task.checkCancellation()
         let me = try APIMe(json: JSONValue.parse(response.body))
-        let update: (editingEnabled: Bool, resumed: Bool)? = try lock.withLock {
+        let update: (editingEnabled: Bool, resumed: Bool)? = lock.withLock {
             let wasPaused = access.state == .paused
             guard access.applyMeAccountState(me.accountState, check: check) else { return nil }
-            try model.setHandoffCaptionsEnabled(me.handoffCaptionsEnabled)
+            do { try model.setHandoffCaptionsEnabled(me.handoffCaptionsEnabled) }
+            catch {
+                errors.report(ErrorLogReport(concern: .snapshot, connectionRole: .request,
+                    operation: "handoff_projection", phase: "save", reason: .from(error: error), retryable: true))
+            }
             if meReadID == id {
                 pausedMeRead = nil
                 errors.resolve(concern: .snapshot, operation: "me")
@@ -218,9 +226,19 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
         }
         publishModel()
         for item in model.snapshot.handoffCaptionRefreshItems {
-            do { try await loadEntriesIfNeeded(itemID: item) }
-            catch is CancellationError { throw CancellationError() }
-            catch { /* The cached caption and durable pending refresh survive offline/relaunch. */ }
+            guard access.state == .available else { break }
+            try Task.checkCancellation()
+            do {
+                try await modelWriter.loadEntries(of: item)
+                publishModel()
+            } catch {
+                if Task.isCancelled || error is CancellationError { throw CancellationError() }
+                guard access.state == .available else { break }
+                // A failed optional refresh keeps the cached conversation usable.
+                errors.report(ErrorLogReport(concern: .snapshot, connectionRole: .request,
+                    operation: "handoff_projection", phase: "read", reason: .api(error), retryable: true,
+                    correlation: ErrorLogCorrelation(resourceID: item.rawValue)))
+            }
         }
         return me
     }
@@ -809,8 +827,7 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
 
     public func loadEntriesIfNeeded(itemID: ExactText) async throws {
         guard model.snapshot.items[itemID] != nil,
-              (!model.snapshot.loadedEntryItems.contains(itemID) ||
-               model.snapshot.handoffCaptionRefreshItems.contains(itemID)) else { return }
+              !model.snapshot.loadedEntryItems.contains(itemID) else { return }
         do {
             try await modelWriter.loadEntries(of: itemID)
             errors.resolve(concern: .snapshot, operation: "load_entries")

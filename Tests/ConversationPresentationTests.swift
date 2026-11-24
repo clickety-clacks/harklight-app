@@ -41,7 +41,7 @@ final class ConversationPresentationTests: XCTestCase {
                        "A cached served turn must not turn Sending before its contract projection is refreshed.")
         let offline = ServerModelV2Store(fileURL: url)
         XCTAssertEqual(try caption(thread(offline)), .delivered)
-        try offline.apply(page(#"{"delivered":true,"legacy_caption":true}"#), of: ExactText("item"))
+        try offline.apply([page(#"{"delivered":true,"legacy_caption":true}"#)], of: ExactText("item"), complete: false)
         XCTAssertEqual(offline.snapshot.entries[ExactText("item")]?[ExactText("sent")]?.delivery?.legacyCaption, true,
                        "The entries route must upgrade a cached projection even at the same revision.")
         XCTAssertEqual(try thread(offline).accountReadThroughConversationSequence, 1)
@@ -111,13 +111,21 @@ final class ConversationPresentationTests: XCTestCase {
             fact: .request(sessionHandle: turn.sessionHandle, payload: .null)))
         var thread = try XCTUnwrap(state.threads[binding.request])
         thread.chatNeverCloses = true
+        thread.handoffCaptions = true
         func reply(_ author: ConversationAuthor, to target: String) -> ConversationTurn {
             ConversationTurn(id: ExactText("reply"), binding: binding, author: author,
                 sessionHandle: turn.sessionHandle, text: ExactText("Reply"),
                 inReplyTo: ExactText(target), kind: .reply)
         }
         thread.turns = [turn, reply(.origin, to: "other"), reply(.server, to: "sent")]
+        thread.turns.append(ConversationTurn(id: ExactText("withdrawn"), binding: binding,
+            author: .origin, sessionHandle: turn.sessionHandle, text: ExactText(""),
+            inReplyTo: turn.id, contentRedacted: true, kind: .reply))
         XCTAssertFalse(ConversationSentChatStatusPresentation.replyTargets(in: thread).contains(turn.id))
+        thread.handoffCaptions = false
+        XCTAssertTrue(ConversationSentChatStatusPresentation.replyTargets(in: thread).contains(turn.id),
+                      "Feature off preserves the existing reply matching behavior.")
+        thread.handoffCaptions = true
         thread.turns.append(reply(.origin, to: "sent"))
         XCTAssertTrue(ConversationSentChatStatusPresentation.replyTargets(in: thread).contains(turn.id))
         var served = ConversationTurnFacts()

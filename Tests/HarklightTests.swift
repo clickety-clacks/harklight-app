@@ -11,6 +11,17 @@ private final class V2ScenePushTransport: ClientAPITransport, @unchecked Sendabl
     private var entryReads = 0
     private var handoffFeature = false
     private var handoffPage: String?
+    private var entryFailure: URLError.Code?
+    private var cancelEntryRead = false
+    private var pausedAccount = false
+    private var pauseOnEntryRead = false
+    func pauseDuringEntryRead() { lock.withLock { pauseOnEntryRead = true } }
+
+    func failEntryReads(_ code: URLError.Code, cancelling: Bool = false) {
+        lock.withLock { entryFailure = code; cancelEntryRead = cancelling }
+    }
+
+    func setPaused() { lock.withLock { pausedAccount = true } }
 
     func advertiseHandoff(page: String) {
         lock.withLock { handoffFeature = true; handoffPage = page }
@@ -34,6 +45,15 @@ private final class V2ScenePushTransport: ClientAPITransport, @unchecked Sendabl
     }
 
     func send(_ request: APIRequest) async throws -> APIResponse {
+        if request.path.hasSuffix("/entries"), lock.withLock({ pauseOnEntryRead }) {
+            lock.withLock { entryReads += 1 }
+            throw APIError(status: 403, token: .accountPaused, retryable: false, requestID: nil)
+        }
+        if request.path.hasSuffix("/entries"), let failure = lock.withLock({ entryFailure }) {
+            let cancel = lock.withLock { entryReads += 1; return cancelEntryRead }
+            if cancel { withUnsafeCurrentTask { $0?.cancel() } }
+            throw URLError(failure)
+        }
         let body: String
         switch request.path {
         case "/v2/devices/me/focus":
@@ -62,7 +82,9 @@ private final class V2ScenePushTransport: ClientAPITransport, @unchecked Sendabl
         let responseBody = request.path == "/v2/me" && lock.withLock({ handoffFeature })
             ? body.replacingOccurrences(of: "\"features\":{}", with: "\"features\":{\"handoff_captions\":true}")
             : request.path == "/v2/items/item/entries" ? lock.withLock { handoffPage ?? body } : body
-        return APIResponse(status: 200, requestID: "test", body: Data(responseBody.utf8))
+        let accountBody = request.path == "/v2/me" && lock.withLock({ pausedAccount })
+            ? responseBody.replacingOccurrences(of: "\"state\":\"active\"", with: "\"state\":\"paused\"") : responseBody
+        return APIResponse(status: 200, requestID: "test", body: Data(accountBody.utf8))
     }
 
     func download(_ request: APIRequest, to destination: URL) async throws -> APIResponse {
@@ -92,6 +114,58 @@ private final class V2ScenePushTransport: ClientAPITransport, @unchecked Sendabl
 }
 
 final class HarklightTests: XCTestCase {
+    @MainActor
+    func testOptionalHandoffRefreshDoesNotFailCachedOpenOrRunWhilePausedOrCancelled() async throws {
+        func connection(_ transport: V2ScenePushTransport) throws -> ClientAPIv2Connection {
+            let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                personID: ExactText("person"), deviceID: ExactText("device"))
+            let context = ProfileContext(identity: identity, transportMode: .relay)
+            let repository = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+            let connection = try ClientAPIv2Connection(transport: transport, repository: repository,
+                context: context, directory: nil, errors: NoopErrorLog())
+            for (index, id) in ["item", "second"].enumerated() {
+                let item = "{\"item_id\":\"" + id + "\",\"rev\":1,\"sender\":\"sender\",\"request_revision\":1,\"message\":{\"title\":\"Hello\"},\"files\":[],\"seen\":false,\"chat\":{\"available\":true,\"started\":true},\"rank\":{\"key\":\"" + String(index) + "\",\"section\":\"current\"}}"
+                try connection.model.apply([.init(rev: 1, kind: "item", data: Data(item.utf8))], cursor: 1)
+                let entry = "{\"entry_id\":\"" + id + "-sent\",\"item_id\":\"" + id + "\",\"rev\":2,\"position\":1,\"kind\":\"reply\",\"author\":\"person\",\"request_revision\":1,\"text\":\"Hello\",\"files\":[],\"delivery\":{\"delivered\":true}}"
+                let page = "{\"rev\":2,\"entries\":[" + entry + "],\"older\":false}"
+                try connection.model.apply(APIEntriesPage(json: JSONValue.parse(Data(page.utf8))), of: ExactText(id))
+            }
+            try connection.model.setHandoffCaptionsEnabled(true)
+            transport.advertiseHandoff(page: #"{"rev":2,"entries":[],"older":false}"#)
+            return connection
+        }
+        let offlineTransport = V2ScenePushTransport()
+        let offline = try connection(offlineTransport)
+        offlineTransport.failEntryReads(.notConnectedToInternet)
+        try await offline.loadEntriesIfNeeded(itemID: ExactText("item"))
+        XCTAssertEqual(offlineTransport.counts.entryReads, 0, "Opening complete cached content needs no optional network read.")
+        XCTAssertEqual(offline.model.snapshot.handoffCaptionRefreshItems.count, 2)
+
+        let pausedTransport = V2ScenePushTransport()
+        let paused = try connection(pausedTransport)
+        pausedTransport.setPaused()
+        pausedTransport.failEntryReads(.notConnectedToInternet)
+        _ = try await paused.refreshMe()
+        XCTAssertEqual(pausedTransport.counts.entryReads, 0)
+        try await paused.loadEntriesIfNeeded(itemID: ExactText("item"))
+        XCTAssertEqual(pausedTransport.counts.entryReads, 0, "A paused account can still open its complete cached Chat.")
+
+        let pausingTransport = V2ScenePushTransport()
+        let pausing = try connection(pausingTransport)
+        pausingTransport.pauseDuringEntryRead()
+        _ = try await pausing.refreshMe()
+        XCTAssertEqual(pausingTransport.counts.entryReads, 1, "Stop when the first entry read pauses the account.")
+
+        let cancelledTransport = V2ScenePushTransport()
+        let cancelled = try connection(cancelledTransport)
+        cancelledTransport.failEntryReads(.cancelled, cancelling: true)
+        let task = Task { try await cancelled.refreshMe() }
+        do { _ = try await task.value; XCTFail("Cancellation should end the optional refresh.") }
+        catch is CancellationError {}
+        XCTAssertEqual(cancelledTransport.counts.entryReads, 1, "Do not attempt the second item after URL cancellation.")
+        XCTAssertEqual(cancelled.model.snapshot.handoffCaptionRefreshItems.count, 2)
+    }
+
     @MainActor
     func testHandoffUpgradeRereadsCachedEntriesOnceAndOlderAppCacheAlsoRefreshes() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
