@@ -1146,13 +1146,13 @@ enum ConversationSentChatStatusPresentation {
                 if delivery?.ack2Expected == false && delivery?.listenerReceived == true {
                     return .deliveredAck
                 }
+                if delivery?.legacyCaption == true && facts.delivered { return .delivered }
                 if let availability {
                     switch availability.state {
                     case .gone, .unsupported: return .noOneWillGetThis
                     default: break
                     }
                 }
-                if delivery?.legacyCaption == true && facts.delivered { return .delivered }
                 if facts.delivered { return .sending }
             }
             var legacyFacts = facts

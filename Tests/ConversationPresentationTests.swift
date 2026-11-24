@@ -113,7 +113,13 @@ final class ConversationPresentationTests: XCTestCase {
         XCTAssertEqual(try caption(projected(saved)), .sending)
         let oldEntry = try receiptJSON(#"{"delivered":true,"legacy_caption":true}"#, rev: 3)
         try model.apply([.init(rev: 3, kind: "entry", data: Data(oldEntry.jsonString.utf8))], cursor: 3)
-        XCTAssertEqual(try caption(projected(saved)), .delivered)
+        let history = try projected(saved)
+        XCTAssertEqual(try caption(history), .delivered)
+        let historyTurn = try XCTUnwrap(history.turns.first)
+        XCTAssertEqual(ConversationSentChatStatusPresentation.delivery(for: historyTurn,
+            facts: try XCTUnwrap(history.facts[historyTurn.id]),
+            availability: .init(state: .gone), hasReply: false, conversationAgentName: "Studio",
+            nowMilliseconds: 10, personFeed: true, handoffCaptions: true), .delivered)
         // A second account/Server connection gets only its own /me, not a global switch.
         let other = ServerModelV2Presentation(savedMe: older)
         XCTAssertFalse(try XCTUnwrap(projected(other).handoffCaptions))
