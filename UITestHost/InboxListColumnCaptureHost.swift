@@ -7,7 +7,6 @@ import AttentionDomain
 @MainActor
 struct InboxListColumnCaptureHost: View {
     @Environment(\.colorScheme) private var colorScheme
-    @State private var isWarningPresented = false
     @State private var selected: InboxSelection?
     @State private var workspaceTab: InboxWorkspaceTab = .inbox
     @State private var search = ""
