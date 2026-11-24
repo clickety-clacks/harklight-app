@@ -813,6 +813,7 @@ struct MessageHeading: View {
     let title: String
     var createdAt: Date? = nil
     var messageType: HarklightMessageType = .request
+    var inFYIList = false
     @Environment(\.colorScheme) private var colorScheme
 
     private var palette: HarklightDesignSource.Appearance {
@@ -820,36 +821,43 @@ struct MessageHeading: View {
     }
 
     private var senderLine: String? {
+        if inFYIList { return sender }
         let parts = [sender, createdAt.map { InboxFriendlyDate.detailLabel(for: $0) }].compactMap { $0 }
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack(spacing: 10) {
+        VStack(alignment: .leading, spacing: inFYIList ? 6 : 16) {
+            HStack(spacing: inFYIList ? 8 : 10) {
                 if !initials.isEmpty {
+                    let badgeSize = HarklightDesignSystem.shape(inFYIList ? .rowInitials : .messageInitials)
                     Text(initials)
-                        .font(.caption)
+                        .font(inFYIList ? .system(size: 10.5, weight: .medium) : .caption)
                         .foregroundStyle(palette.label)
-                        .frame(width: HarklightDesignSystem.shape(.messageInitials),
-                               height: HarklightDesignSystem.shape(.messageInitials))
+                        .frame(width: badgeSize, height: badgeSize)
                         .background(palette.field, in: Circle())
                         .overlay(Circle().strokeBorder(palette.line, lineWidth: 1))
+                        .accessibilityHidden(inFYIList)
                 }
                 if let senderLine {
                     Text(verbatim: senderLine)
-                        .harklightType(.messageSender)
+                        .harklightType(inFYIList ? .rowByline : .messageSender)
                         .foregroundStyle(palette.secondary)
                 }
                 Spacer(minLength: 0)
+                if inFYIList, let createdAt {
+                    Text(InboxFriendlyDate.detailLabel(for: createdAt))
+                        .harklightType(.rowTime)
+                        .foregroundStyle(palette.label)
+                }
             }
-            HStack(alignment: .firstTextBaseline, spacing: 14) {
+            HStack(alignment: .firstTextBaseline, spacing: inFYIList ? 8 : 14) {
                 Image(systemName: messageType.symbol)
-                    .font(.system(size: 22, weight: .medium))
+                    .font(.system(size: inFYIList ? 17 : 22, weight: .medium))
                     .foregroundStyle(palette.typeColor(messageType))
                     .accessibilityHidden(true)
                 Text(MessageMarkdown.attributed(title))
-                    .harklightType(.messageTitle)
+                    .harklightType(inFYIList ? .inboxMessageTitle : .messageTitle)
                     .foregroundStyle(palette.text)
                     .fixedSize(horizontal: false, vertical: true)
             }
