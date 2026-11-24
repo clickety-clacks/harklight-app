@@ -122,6 +122,15 @@ private final class V2ScenePushTransport: ClientAPITransport, @unchecked Sendabl
 }
 
 final class HarklightTests: XCTestCase {
+    private var savedRules = AnswerScreenRules.today
+
+    override func setUp() {
+        savedRules = AnswerScreenRules.current
+        AnswerScreenRules.current = .today
+    }
+
+    override func tearDown() { AnswerScreenRules.current = savedRules }
+
     @MainActor
     private func handoffFailureFixture(directory: URL?, errors: any ErrorLogging)
         throws -> (ClientAPIv2Connection, V2ScenePushTransport) {
