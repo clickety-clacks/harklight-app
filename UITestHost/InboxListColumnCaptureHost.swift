@@ -180,7 +180,6 @@ struct InboxListColumnCaptureHost: View {
             newMessageAreaStore: newMessageAreaStore,
             replyItemAreaStore: replyItemAreaStore,
             openReplyItem: { _, _, _ in },
-            isWarningPresented: $isWarningPresented,
             selected: $selected,
             workspaceTab: $workspaceTab,
             search: $search,
