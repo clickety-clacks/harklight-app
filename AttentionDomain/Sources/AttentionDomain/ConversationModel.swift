@@ -262,6 +262,10 @@ public struct ConversationTurnFacts: Equatable, Codable, Sendable {
     public var localLiveArrivalAtMilliseconds: UInt64?
     public var deliveryAck1: ConversationDeliveryAcknowledgement?
     public var deliveryAck2: ConversationDeliveryAcknowledgement?
+    /// Per-entry person-feed evidence; legacy delivered/acted stay separate.
+    public var personDelivery: APIEntryDelivery?
+    /// Keeps the cached caption until its pre-contract entry has been reread.
+    public var handoffCaptionRefreshPending: Bool?
     public var fileTransfers: [ExactText: ConversationFileTransfer] = [:]
     public var fileUses: [ExactText: ConversationFileUse] = [:]
 
@@ -465,6 +469,8 @@ public struct ConversationThread: Equatable, Codable, Sendable {
     /// only on threads from the v2 projection, so the current protocol keeps
     /// today's rules. Optional so existing saved state stays readable.
     public var chatNeverCloses: Bool?
+    /// Current Server/account feature from the existing /v2/me lifecycle.
+    public var handoffCaptions: Bool?
     /// Client API v2 (product ruling APP-07): each sent chat message is its
     /// own operation, queued in send order with its own id, while the composer
     /// stays free for the next one. Optional so saved state stays readable.

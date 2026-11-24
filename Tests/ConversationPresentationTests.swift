@@ -1,4 +1,4 @@
-import AttentionDomain
+@testable import AttentionDomain
 import CryptoKit
 import Foundation
 import SwiftUI
@@ -10,6 +10,305 @@ import HarklightNativeRelay
 
 @MainActor
 final class ConversationPresentationTests: XCTestCase {
+    func testCachedServedTurnKeepsCaptionUntilSameRevisionContractRefresh() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let store = ServerModelV2Store(fileURL: url)
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+            personID: ExactText("person"), deviceID: ExactText("device"))
+        let item = try JSONValue.parse(Data(#"{"item_id":"item","rev":1,"sender":"Studio","request_revision":1,"message":{"title":"Hello","body":"Message"},"files":[],"seen":false,"chat":{"available":true,"started":true,"read_position":"sent"},"rank":{"key":"a","section":"current"}}"#.utf8))
+        try store.apply([.init(rev: 1, kind: "item", data: Data(item.jsonString.utf8))], cursor: 1)
+        func page(_ delivery: String) throws -> APIEntriesPage {
+            let entry = try receiptJSON(delivery)
+            return try APIEntriesPage(json: JSONValue.parse(Data(("{\"rev\":2,\"entries\":[" + entry.jsonString + "],\"older\":false}").utf8)))
+        }
+        try store.apply(page(#"{"delivered":true,"acted":true}"#), of: ExactText("item"))
+        let supporting = try APIMe(json: JSONValue.parse(Data(#"{"features":{"handoff_captions":true}}"#.utf8)))
+        try store.setHandoffCaptionsEnabled(true)
+        let presentation = ServerModelV2Presentation(savedMe: supporting)
+        XCTAssertEqual(store.snapshot.handoffCaptionRefreshItems, [ExactText("item")])
+        func thread(_ store: ServerModelV2Store) throws -> ConversationThread {
+            try XCTUnwrap(presentation.cachedState(store.snapshot, identity: identity).conversations.values.first)
+        }
+        func caption(_ thread: ConversationThread) throws -> ConversationSentChatStatusPresentation.Delivery {
+            let turn = try XCTUnwrap(thread.turns.first)
+            return ConversationSentChatStatusPresentation.delivery(for: turn,
+                facts: try XCTUnwrap(thread.facts[turn.id]), hasReply: false,
+                conversationAgentName: "Studio", nowMilliseconds: 10,
+                personFeed: true, handoffCaptions: thread.handoffCaptions == true)
+        }
+        XCTAssertEqual(try caption(thread(store)), .delivered,
+                       "A cached served turn must not turn Sending before its contract projection is refreshed.")
+        let offline = ServerModelV2Store(fileURL: url)
+        XCTAssertEqual(try caption(thread(offline)), .delivered)
+        try offline.apply([page(#"{"delivered":true,"legacy_caption":true}"#)], of: ExactText("item"), complete: false)
+        XCTAssertEqual(offline.snapshot.entries[ExactText("item")]?[ExactText("sent")]?.delivery?.legacyCaption, true,
+                       "The entries route must upgrade a cached projection even at the same revision.")
+        XCTAssertEqual(try thread(offline).accountReadThroughConversationSequence, 1)
+        XCTAssertEqual(offline.heldCursor, 1)
+        XCTAssertEqual(offline.snapshot.entries[ExactText("item")]?.count, 1)
+        XCTAssertTrue(offline.snapshot.handoffCaptionRefreshItems.isEmpty)
+        let relaunched = ServerModelV2Store(fileURL: url)
+        XCTAssertTrue(relaunched.snapshot.handoffCaptionRefreshItems.isEmpty)
+        // A second equal-revision page is a duplicate, not an ongoing bypass.
+        try relaunched.apply(page(#"{"delivered":true,"outcome":"not_handed","reason":"stale"}"#), of: ExactText("item"))
+        XCTAssertEqual(relaunched.snapshot.entries[ExactText("item")]?[ExactText("sent")]?.delivery?.legacyCaption, true)
+        let otherAccount = ServerModelV2Store(fileURL: nil)
+        try otherAccount.setHandoffCaptionsEnabled(true)
+        XCTAssertTrue(otherAccount.snapshot.handoffCaptionRefreshItems.isEmpty)
+    }
+
+
+    func testHandoffCaptionContractRequiresSameTurnEvidenceAndConfirmedIncapableReceipt() throws {
+        let binding = ConversationBinding(request: RequestKey(accountScope: ExactText("person"),
+            senderID: ExactText("Studio"), messageID: ExactText("item")), revision: 1)
+        let turn = ConversationTurn(id: ExactText("sent"), binding: binding, author: .person,
+            sessionHandle: ExactText("item"), text: ExactText("Hello"), kind: .discussion)
+        let cases: [(String, ConversationSentChatStatusPresentation.Delivery)] = [
+            (#"{"delivered":true,"acted":true}"#, .sending),
+            (#"{"delivered":true,"ack2_expected":null}"#, .sending),
+            (#"{"delivered":true,"ack2_expected":true}"#, .sending),
+            (#"{"delivered":true,"ack2_expected":false}"#, .sending),
+            (#"{"delivered":true,"ack2_expected":false,"listener_received":false}"#, .sending),
+            (#"{"delivered":true,"ack2_expected":false,"listener_received":true}"#, .deliveredAck),
+            (#"{"delivered":true,"listener_received":true}"#, .sending),
+            (#"{"delivered":true,"legacy_caption":true}"#, .delivered),
+            (#"{"delivered":true,"legacy_caption":false}"#, .sending),
+            (#"{"delivered":true,"legacy_caption":null}"#, .sending),
+            (#"{"delivered":false,"acted":true}"#, .sent),
+            (#"{"delivered":true,"outcome":"not_handed","acted":true,"agent_seen":true}"#, .deliveredAck),
+            (#"{"delivered":true,"outcome":"not_handed","acted":true,"agent_acted":true}"#, .deliveredAck),
+            (#"{"delivered":true,"outcome":"not_handed","acted":true,"legacy_caption":true}"#, .notDelivered("")),
+            (#"{"delivered":true,"outcome":"not_handed","reason":"Try later"}"#, .notDelivered("Try later")),
+            (#"{"delivered":true,"outcome":"handed","rerouted":true,"agent":"Release"}"#, .deliveredTo("Release"))
+        ]
+        for (wire, expected) in cases {
+            let delivery = try XCTUnwrap(APIEntry(json: receiptJSON(wire)).delivery)
+            var facts = ConversationTurnFacts(acceptedAtMilliseconds: 10)
+            facts.personDelivery = delivery
+            facts.delivered = delivery.delivered ?? false
+            // The ordinary projection supplies the existing ack2 fact.
+            switch delivery.outcome {
+            case "handed": facts.deliveryAck2 = .handed(atMilliseconds: 10,
+                rerouted: delivery.rerouted ?? false, acknowledgerSystem: nil, acknowledgerAgent: delivery.agent)
+            case "not_handed": facts.deliveryAck2 = .notHanded(atMilliseconds: 10,
+                reason: delivery.reason ?? ExactText(""), acknowledgerSystem: nil, acknowledgerAgent: delivery.agent)
+            default: break
+            }
+            let status = ConversationSentChatStatusPresentation.delivery(for: turn, facts: facts,
+                hasReply: false, conversationAgentName: "Studio", nowMilliseconds: 9_000_000,
+                personFeed: true, handoffCaptions: true)
+            XCTAssertEqual(status, expected, wire)
+            if delivery.outcome == "not_handed" {
+                XCTAssertEqual(ConversationSentChatStatusPresentation.delivery(for: turn, facts: facts,
+                    hasReply: true, conversationAgentName: "Studio", nowMilliseconds: 9_000_000,
+                    personFeed: true, handoffCaptions: true), .deliveredAck)
+                XCTAssertEqual(facts.personDelivery?.outcome, "not_handed", "A reply never rewrites the receipt.")
+            }
+        }
+        var state = ConversationState()
+        try state.apply(ConversationEvent(sequence: 1, binding: binding,
+            fact: .request(sessionHandle: turn.sessionHandle, payload: .null)))
+        var thread = try XCTUnwrap(state.threads[binding.request])
+        thread.chatNeverCloses = true
+        thread.handoffCaptions = true
+        func reply(_ author: ConversationAuthor, to target: String) -> ConversationTurn {
+            ConversationTurn(id: ExactText("reply"), binding: binding, author: author,
+                sessionHandle: turn.sessionHandle, text: ExactText("Reply"),
+                inReplyTo: ExactText(target), kind: .reply)
+        }
+        thread.turns = [turn, reply(.origin, to: "other"), reply(.server, to: "sent")]
+        thread.turns.append(ConversationTurn(id: ExactText("withdrawn"), binding: binding,
+            author: .origin, sessionHandle: turn.sessionHandle, text: ExactText(""),
+            inReplyTo: turn.id, contentRedacted: true, kind: .reply))
+        XCTAssertFalse(ConversationSentChatStatusPresentation.replyTargets(in: thread).contains(turn.id))
+        thread.handoffCaptions = false
+        XCTAssertTrue(ConversationSentChatStatusPresentation.replyTargets(in: thread).contains(turn.id),
+                      "Feature off preserves the existing reply matching behavior.")
+        thread.handoffCaptions = true
+        thread.turns.append(reply(.origin, to: "sent"))
+        XCTAssertTrue(ConversationSentChatStatusPresentation.replyTargets(in: thread).contains(turn.id))
+        var served = ConversationTurnFacts()
+        served.delivered = true
+        for state: ConversationAvailability in [.listening, .notListening(lastDetachedAt: nil), .gone,
+                                               .unsupported(reason: ExactText("old"))] {
+            let availability = ConversationAvailabilityObservation(state: state)
+            XCTAssertEqual(ConversationSentChatStatusPresentation.delivery(for: turn, facts: served,
+                availability: availability, hasReply: false, conversationAgentName: "Studio",
+                nowMilliseconds: 9_000_000, personFeed: true, handoffCaptions: true),
+                state == .gone || state == .unsupported(reason: ExactText("old")) ? .noOneWillGetThis : .sending)
+        }
+    }
+
+    func testHandoffFeatureRefreshIsConnectionScopedAndPreservesOlderServerHistory() throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+            personID: ExactText("person"), deviceID: ExactText("device"))
+        let model = ServerModelV2Store(fileURL: nil)
+        try model.setHandoffCaptionsEnabled(true)
+        let item = try JSONValue.parse(Data(#"{"item_id":"item","rev":1,"sender":"Studio","request_revision":1,"message":{"title":"Hello","body":"Message"},"files":[],"seen":false,"chat":{"available":true,"started":true},"rank":{"key":"a","section":"current"}}"#.utf8))
+        try model.apply([.init(rev: 1, kind: "item", data: Data(item.jsonString.utf8))], cursor: 1)
+        try model.apply(APIEntriesPage(json: JSONValue.parse(Data(#"{"rev":1,"entries":[],"older":false}"#.utf8))), of: ExactText("item"))
+        let entry = try receiptJSON(#"{"delivered":true,"acted":true}"#)
+        try model.apply([.init(rev: 2, kind: "entry", data: Data(entry.jsonString.utf8))], cursor: 2)
+        func me(_ features: String) throws -> APIMe {
+            try APIMe(json: JSONValue.parse(Data(features.utf8)))
+        }
+        let older = try me(#"{}"#) // Server 0.2.5 has no feature signal.
+        let supporting = try me(#"{"features":{"handoff_captions":true}}"#)
+        let presentation = ServerModelV2Presentation(savedMe: older)
+        func projected(_ presentation: ServerModelV2Presentation) throws -> ConversationThread {
+            try XCTUnwrap(presentation.cachedState(model.snapshot, identity: identity).conversations.values.first)
+        }
+        func caption(_ thread: ConversationThread) throws -> ConversationSentChatStatusPresentation.Delivery {
+            let turn = try XCTUnwrap(thread.turns.first)
+            return ConversationSentChatStatusPresentation.delivery(for: turn,
+                facts: try XCTUnwrap(thread.facts[turn.id]), hasReply: false,
+                conversationAgentName: "Studio", nowMilliseconds: 10,
+                personFeed: thread.chatNeverCloses == true, handoffCaptions: thread.handoffCaptions == true)
+        }
+        XCTAssertEqual(try caption(projected(presentation)), .delivered)
+        presentation.apply(supporting)
+        XCTAssertEqual(try caption(projected(presentation)), .sending)
+        let saved = ServerModelV2Presentation(savedMe: supporting)
+        XCTAssertEqual(try caption(projected(saved)), .sending)
+        let oldEntry = try receiptJSON(#"{"delivered":true,"legacy_caption":true}"#, rev: 3)
+        try model.apply([.init(rev: 3, kind: "entry", data: Data(oldEntry.jsonString.utf8))], cursor: 3)
+        let history = try projected(saved)
+        XCTAssertEqual(try caption(history), .delivered)
+        let historyTurn = try XCTUnwrap(history.turns.first)
+        XCTAssertEqual(ConversationSentChatStatusPresentation.delivery(for: historyTurn,
+            facts: try XCTUnwrap(history.facts[historyTurn.id]),
+            availability: .init(state: .gone), hasReply: false, conversationAgentName: "Studio",
+            nowMilliseconds: 10, personFeed: true, handoffCaptions: true), .delivered)
+        // A second account/Server connection gets only its own /me, not a global switch.
+        let other = ServerModelV2Presentation(savedMe: older)
+        XCTAssertFalse(try XCTUnwrap(projected(other).handoffCaptions))
+        presentation.apply(try me(#"{"features":{"handoff_captions":false}}"#))
+        XCTAssertFalse(try XCTUnwrap(projected(presentation).handoffCaptions))
+    }
+
+
+    private func receiptJSON(_ delivery: String, rev: UInt64 = 2) throws -> JSONValue {
+        try JSONValue.parse(Data("""
+        {"entry_id":"sent","item_id":"item","rev":\(rev),"position":1,
+         "kind":"reply","author":"person","at_ms":10,"request_revision":1,
+         "text":"Hello","files":[],"delivery":\(delivery)}
+        """.utf8))
+    }
+
+    private func receiptStatus(_ thread: ConversationThread, hasReply: Bool = false,
+                               availability: ConversationAvailabilityObservation? = nil)
+        throws -> ConversationSentChatStatusPresentation.Delivery {
+        let turn = try XCTUnwrap(thread.turns.first)
+        return ConversationSentChatStatusPresentation.delivery(for: turn,
+            facts: try XCTUnwrap(thread.facts[turn.id]), availability: availability,
+            hasReply: hasReply, conversationAgentName: "Studio", nowMilliseconds: 9_000_000,
+            personFeed: thread.chatNeverCloses == true, handoffCaptions: thread.handoffCaptions == true)
+    }
+
+    func testPersonFeedDeliveryDecodesOptionalAndFutureOutcomes() throws {
+        for fields in ["", #", "outcome":null"#, #", "outcome":"future""#] {
+            let entry = try APIEntry(json: receiptJSON(#"{"delivered":true,"acted":true\#(fields)}"#))
+            XCTAssertEqual(entry.entryID, ExactText("sent"))
+            XCTAssertEqual(entry.delivery?.delivered, true)
+            let restored = try JSONDecoder().decode(APIEntry.self, from: JSONEncoder().encode(entry))
+            XCTAssertEqual(restored, entry)
+        }
+        let entry = try APIEntry(json: receiptJSON(
+            #"{"outcome":"not_handed","reason":"Try later","agent":"Release","rerouted":true}"#))
+        XCTAssertEqual(entry.delivery?.outcome, "not_handed")
+        XCTAssertEqual(entry.delivery?.reason, ExactText("Try later"))
+        XCTAssertEqual(entry.delivery?.agent, ExactText("Release"))
+        XCTAssertEqual(entry.delivery?.rerouted, true)
+    }
+
+    func testPersonFeedHandoffUpdatesLiveAndAfterReopeningOldCache() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+            personID: ExactText("person"), deviceID: ExactText("device"))
+        let store = ServerModelV2Store(fileURL: url)
+        let item = try JSONValue.parse(Data(#"{"item_id":"item","rev":1,"sender":"Studio","request_revision":1,"message":{"title":"Hello","body":"Message"},"files":[],"seen":false,"chat":{"available":true,"started":true},"rank":{"key":"a","score":1,"section":"current"}}"#.utf8))
+        try store.apply([.init(rev: 1, kind: "item", data: Data(item.jsonString.utf8))], cursor: 1)
+        let page = try APIEntriesPage(json: JSONValue.parse(Data(#"{"rev":1,"entries":[],"older":false}"#.utf8)))
+        try store.apply(page, of: ExactText("item"))
+        func apply(_ delivery: String, rev: UInt64, to target: ServerModelV2Store) throws {
+            let json = try receiptJSON(delivery, rev: rev)
+            try target.apply([.init(rev: rev, kind: "entry", data: Data(json.jsonString.utf8))], cursor: rev)
+        }
+        func thread(_ target: ServerModelV2Store) throws -> ConversationThread {
+            try XCTUnwrap(ServerModelV2Projection.cachedState(target.snapshot, identity: identity, handoffCaptions: true).conversations.values.first)
+        }
+        // This saves exactly the delivery fields written before handoff outcomes existed.
+        try apply(#"{"delivered":true,"acted":true}"#, rev: 2, to: store)
+        let old = ServerModelV2Store(fileURL: url)
+        XCTAssertEqual(old.snapshot.orderedEntries(of: ExactText("item")).count, 1)
+        XCTAssertEqual(try receiptStatus(thread(old)), .delivered)
+        try old.setHandoffCaptionsEnabled(true)
+        try apply(#"{"delivered":true,"acted":true,"outcome":"not_handed","reason":"Agent unavailable","agent":"Studio"}"#, rev: 3, to: old)
+        let negative = try thread(old)
+        XCTAssertEqual(negative.facts[ExactText("sent")]?.deliveryAck2,
+            .notHanded(atMilliseconds: 10, reason: ExactText("Agent unavailable"),
+                       acknowledgerSystem: nil, acknowledgerAgent: ExactText("Studio")))
+        XCTAssertNil(negative.facts[ExactText("sent")]?.actedBy)
+        XCTAssertEqual(try receiptStatus(negative), .notDelivered("Agent unavailable"))
+        let reopened = ServerModelV2Store(fileURL: url)
+        XCTAssertEqual(try receiptStatus(thread(reopened)), .notDelivered("Agent unavailable"))
+        try apply(#"{"delivered":true,"outcome":"handed","agent":"Release","rerouted":true}"#, rev: 4, to: reopened)
+        XCTAssertEqual(try receiptStatus(thread(reopened)), .deliveredTo("Release"))
+        XCTAssertEqual(try receiptStatus(thread(ServerModelV2Store(fileURL: url))), .deliveredTo("Release"))
+        XCTAssertEqual(reopened.snapshot.orderedEntries(of: ExactText("item")).count, 1)
+        let rows = ServerModelV2Projection.cachedState(reopened.snapshot, identity: identity).inboxView?.listItems
+        XCTAssertEqual(rows?.map(\.kind), [.message], "Handoff changes do not manufacture an inbox reply row.")
+    }
+
+    func testPersonFeedCaptionPrecedenceKeepsLegacyReceiptRules() throws {
+        let binding = ConversationBinding(request: RequestKey(accountScope: ExactText("person"),
+            senderID: ExactText("Studio"), messageID: ExactText("item")), revision: 1)
+        let turn = ConversationTurn(id: ExactText("sent"), binding: binding, author: .person,
+            sessionHandle: ExactText("item"), text: ExactText("Hello"), kind: .discussion)
+        var facts = ConversationTurnFacts()
+        facts.delivered = true
+        facts.deliveryAck2 = .notHanded(atMilliseconds: 10, reason: ExactText("Try later"),
+            acknowledgerSystem: nil, acknowledgerAgent: nil)
+        func status(_ availability: ConversationAvailabilityObservation? = nil, reply: Bool = false,
+                    personFeed: Bool = true) -> ConversationSentChatStatusPresentation.Delivery {
+            ConversationSentChatStatusPresentation.delivery(for: turn, facts: facts,
+                availability: availability, hasReply: reply, conversationAgentName: "Studio",
+                nowMilliseconds: 10, personFeed: personFeed, handoffCaptions: personFeed)
+        }
+        XCTAssertEqual(status(), .notDelivered("Try later"))
+        XCTAssertEqual(ConversationSentChatStatusPresentation.delivery(for: turn, facts: facts,
+            hasReply: false, conversationAgentName: "Studio", nowMilliseconds: 10,
+            personFeed: true, handoffCaptions: false), .delivered,
+            "Feature off ignores outcome captions as well as the new evidence fields.")
+        for state: ConversationAvailability in [.gone, .unsupported(reason: ExactText("old"))] {
+            let availability = ConversationAvailabilityObservation(state: state)
+            XCTAssertEqual(status(availability), .noOneWillGetThis)
+            XCTAssertEqual(status(availability, reply: true), .deliveredAck)
+        }
+        XCTAssertEqual(status(personFeed: false), .deliveredAck)
+        facts.deliveryAck2 = .notHanded(atMilliseconds: 10, reason: ExactText(""),
+            acknowledgerSystem: nil, acknowledgerAgent: nil)
+        XCTAssertEqual(status(), .notDelivered(""))
+        XCTAssertEqual(ConversationSentChatStatusPresentation.failureCaption(""), "Not delivered")
+        let reason = "**bold** [link](https://example.test) _text_ <tag>"
+        XCTAssertEqual(ConversationSentChatStatusPresentation.failureCaption(reason), "Not delivered: " + reason)
+        for rerouted in [false, true] {
+            facts.deliveryAck2 = .handed(atMilliseconds: 10, rerouted: rerouted,
+                acknowledgerSystem: nil, acknowledgerAgent: ExactText("Release"))
+            XCTAssertEqual(status(), rerouted ? .deliveredTo("Release") : .deliveredAck)
+        }
+        XCTAssertEqual(ConversationSentChatStatusPresentation.delivery(for: turn, facts: facts,
+            hasReply: false, conversationAgentName: "Studio", nowMilliseconds: 10,
+            personFeed: true, handoffCaptions: false), .delivered)
+        facts.deliveryAck2 = nil
+        facts.delivered = false
+        facts.actedBy = ExactText("action")
+        XCTAssertEqual(status(), .sent, "Acted is never evidence of handoff on the person feed.")
+    }
+
+
     func testPastedNewlineRemainsInTheComposerWithoutSending() {
         var text = "Before "
         var sendCount = 0

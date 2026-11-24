@@ -153,6 +153,16 @@ public struct APIItem: Equatable, Codable, Sendable {
 public struct APIEntryDelivery: Equatable, Codable, Sendable {
     public let delivered: Bool?
     public let acted: Bool?
+    /// Unknown outcomes are retained for forward-compatible cached decoding.
+    public let outcome: String?
+    public let reason: ExactText?
+    public let agent: ExactText?
+    public let rerouted: Bool?
+    public let ack2Expected: Bool?
+    public let listenerReceived: Bool?
+    public let agentSeen: Bool?
+    public let agentActed: Bool?
+    public let legacyCaption: Bool?
 }
 
 public struct APIEntry: Equatable, Codable, Sendable {
@@ -419,7 +429,16 @@ extension APIEntry {
         terminal = try reader.optionalObject("terminal").map(APITerminal.init)
         availability = try reader.optionalObject("availability").map(APIAvailability.init)
         delivery = try reader.optionalObject("delivery").map { delivery in
-            APIEntryDelivery(delivered: try delivery.optionalBool("delivered"), acted: try delivery.optionalBool("acted"))
+            APIEntryDelivery(delivered: try delivery.optionalBool("delivered"), acted: try delivery.optionalBool("acted"),
+                             outcome: try delivery.optionalString("outcome")?.rawValue,
+                             reason: try delivery.optionalString("reason"),
+                             agent: try delivery.optionalString("agent"),
+                             rerouted: try delivery.optionalBool("rerouted"),
+                             ack2Expected: try delivery.optionalBool("ack2_expected"),
+                             listenerReceived: try delivery.optionalBool("listener_received"),
+                             agentSeen: try delivery.optionalBool("agent_seen"),
+                             agentActed: try delivery.optionalBool("agent_acted"),
+                             legacyCaption: try delivery.optionalBool("legacy_caption"))
         }
         result = try reader.optionalObject("result").map { result in
             APIOriginResult(status: try result.string("status"), resultRef: try result.optionalString("result_ref"),
@@ -601,6 +620,8 @@ public struct APIMe: Equatable, Sendable {
     /// Nil while the server has not supplied a usable file limit.
     public let uploadCap: APIUploadCap?
     public let body: JSONValue
+
+    public var handoffCaptionsEnabled: Bool { features["handoff_captions"] == true }
 
     public var pushPrincipal: APIPushPrincipal? {
         guard let server = body.uniqueValue(named: "server")?.uniqueValue(named: "id")?.stringValue,

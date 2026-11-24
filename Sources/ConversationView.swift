@@ -399,6 +399,7 @@ private struct ConversationHistoryContent: View, Equatable {
         lhs.thread.turns == rhs.thread.turns &&
         lhs.pendingSubmissions == rhs.pendingSubmissions &&
         lhs.thread.facts == rhs.thread.facts &&
+        lhs.thread.handoffCaptions == rhs.thread.handoffCaptions &&
         lhs.thread.answerDrafts == rhs.thread.answerDrafts &&
         lhs.thread.latestReportedAvailabilityObservation == rhs.thread.latestReportedAvailabilityObservation &&
         lhs.thread.terminalTurn == rhs.thread.terminalTurn &&
@@ -417,11 +418,7 @@ private struct ConversationHistoryContent: View, Equatable {
         let textByTurnID = Dictionary(
             thread.turns.map { ($0.id, $0.text.rawValue) },
             uniquingKeysWith: { first, _ in first })
-        let replyTargetIDs = Set(thread.turns.compactMap { turn -> ExactText? in
-            guard turn.author != .person,
-                  turn.kind == nil || turn.kind == .reply else { return nil }
-            return turn.inReplyTo
-        })
+        let replyTargetIDs = ConversationSentChatStatusPresentation.replyTargets(in: thread)
         let turnIDs = Set(thread.turns.map(\.id))
 
         ScrollViewReader { proxy in
@@ -436,6 +433,8 @@ private struct ConversationHistoryContent: View, Equatable {
                     ForEach(thread.turns) { turn in
                         ConversationTurnView(turn: turn, facts: thread.facts[turn.id] ?? ConversationTurnFacts(),
                             sender: sender, local: local,
+                            personFeed: thread.chatNeverCloses == true,
+                            handoffCaptions: thread.handoffCaptions == true,
                             availability: thread.latestReportedAvailabilityObservation,
                             hasReply: replyTargetIDs.contains(turn.id),
                             replyContext: turn.inReplyTo.flatMap { textByTurnID[$0] },
@@ -1122,7 +1121,50 @@ enum ConversationSentChatStatusPresentation {
 
     static func delivery(for turn: ConversationTurn, facts: ConversationTurnFacts,
                          availability: ConversationAvailabilityObservation? = nil, hasReply: Bool,
-                         conversationAgentName: String, nowMilliseconds: UInt64) -> Delivery {
+                         conversationAgentName: String, nowMilliseconds: UInt64,
+                         personFeed: Bool = false, handoffCaptions: Bool = false) -> Delivery {
+        // On 0.2 Delivered records Server delivery, independently of handoff.
+        // Keep 0.1 receipt/acted precedence below unchanged.
+        if personFeed, turn.author == .person, turn.kind == .discussion {
+            if !handoffCaptions || facts.handoffCaptionRefreshPending == true {
+                return delivery(for: facts, availability: availability, hasReply: hasReply,
+                                nowMilliseconds: nowMilliseconds)
+            }
+            if hasReply || (handoffCaptions && (facts.personDelivery?.agentSeen == true ||
+                                                facts.personDelivery?.agentActed == true)) {
+                return .deliveredAck
+            }
+            if case let .handed(_, rerouted, _, agent)? = facts.deliveryAck2 {
+                return rerouted ? (agent.flatMap { $0.rawValue.isEmpty ? nil : .deliveredTo($0.rawValue) } ?? .deliveredAck) : .deliveredAck
+            }
+            if case let .notHanded(_, reason, _, _)? = facts.deliveryAck2 {
+                if let availability {
+                    switch availability.state {
+                    case .unsupported, .gone: return .noOneWillGetThis
+                    default: break
+                    }
+                }
+                return .notDelivered(reason.rawValue)
+            }
+            if handoffCaptions {
+                let delivery = facts.personDelivery
+                if delivery?.ack2Expected == false && delivery?.listenerReceived == true {
+                    return .deliveredAck
+                }
+                if delivery?.legacyCaption == true && facts.delivered { return .delivered }
+                if let availability {
+                    switch availability.state {
+                    case .gone, .unsupported: return .noOneWillGetThis
+                    default: break
+                    }
+                }
+                if facts.delivered { return .sending }
+            }
+            var legacyFacts = facts
+            legacyFacts.actedBy = nil
+            return delivery(for: legacyFacts, availability: availability, hasReply: hasReply,
+                            nowMilliseconds: nowMilliseconds)
+        }
         guard usesDeliveryAckPresentation(turn: turn, facts: facts) else {
             return delivery(for: facts, availability: availability, hasReply: hasReply,
                             nowMilliseconds: nowMilliseconds)
@@ -1151,6 +1193,22 @@ enum ConversationSentChatStatusPresentation {
         if case .listenerReceived(_, true, _, _)? = facts.deliveryAck1 { return .sending }
         if case .notListening? = availability?.state { return .noListenerPickedThisUp }
         return .sending
+    }
+
+    static func replyTargets(in thread: ConversationThread) -> Set<ExactText> {
+        Set(thread.turns.compactMap { turn -> ExactText? in
+            guard turn.author != .person,
+                  turn.kind == nil || turn.kind == .reply else { return nil }
+            if thread.chatNeverCloses == true && thread.handoffCaptions == true {
+                guard turn.author == .origin || turn.author == .agent,
+                      turn.contentRedacted != true else { return nil }
+            }
+            return turn.inReplyTo
+        })
+    }
+
+    static func failureCaption(_ reason: String) -> String {
+        reason.isEmpty ? "Not delivered" : "Not delivered: " + reason
     }
 
     static func usesDeliveryAckPresentation(turn: ConversationTurn,
@@ -1210,6 +1268,8 @@ private struct ConversationSentChatStatus: View {
     let hasReply: Bool
     let conversationAgentName: String
     let local: Bool
+    let personFeed: Bool
+    let handoffCaptions: Bool
 
     // Unreceived turns use the latest reported conversation availability.
     // Receipt, action, and reply facts take precedence and remain independent.
@@ -1230,7 +1290,7 @@ private struct ConversationSentChatStatus: View {
         deliveryLabel(ConversationSentChatStatusPresentation.delivery(
             for: turn, facts: facts, availability: availability, hasReply: hasReply,
             conversationAgentName: conversationAgentName,
-            nowMilliseconds: Self.milliseconds(.now)))
+            nowMilliseconds: Self.milliseconds(.now), personFeed: personFeed, handoffCaptions: handoffCaptions))
     }
 
     @ViewBuilder
@@ -1260,7 +1320,8 @@ private struct ConversationSentChatStatus: View {
             Text("Waiting for \(agent)")
                 .foregroundStyle(.hkSecondary)
         case let .notDelivered(reason):
-            Text("Not delivered: \(reason)")
+            Text(verbatim: ConversationSentChatStatusPresentation.failureCaption(reason))
+                .accessibilityLabel(Text(verbatim: ConversationSentChatStatusPresentation.failureCaption(reason)))
                 .fontWeight(.semibold)
                 .foregroundStyle(.hkCoral)
         case .deliveredAck:
@@ -1292,6 +1353,8 @@ private struct ConversationTurnView: View {
     let facts: ConversationTurnFacts
     let sender: String
     let local: Bool
+    let personFeed: Bool
+    let handoffCaptions: Bool
     let availability: ConversationAvailabilityObservation?
     let hasReply: Bool
     let replyContext: String?
@@ -1337,7 +1400,7 @@ private struct ConversationTurnView: View {
             }
             if turn.author == .person {
                 ConversationSentChatStatus(turn: turn, facts: facts, availability: availability,
-                    hasReply: hasReply, conversationAgentName: sender, local: local)
+                    hasReply: hasReply, conversationAgentName: sender, local: local, personFeed: personFeed, handoffCaptions: handoffCaptions)
             }
         }
         .accessibilityIdentifier("conversation-turn-" + turn.id.rawValue)

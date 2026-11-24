@@ -21,7 +21,7 @@ public enum ServerModelV2Projection {
         RequestKey(accountScope: identity.personID, senderID: sender, messageID: itemID)
     }
 
-    public static func cachedState(_ model: ServerModelV2, identity: ProfileIdentity) -> CachedAttentionServerState {
+    public static func cachedState(_ model: ServerModelV2, identity: ProfileIdentity, handoffCaptions: Bool = false) -> CachedAttentionServerState {
         let ordered = model.orderedItems
         let keys = Dictionary(uniqueKeysWithValues: ordered.map {
             ($0.itemID, key(for: $0.itemID, sender: $0.sender, identity: identity))
@@ -50,7 +50,14 @@ public enum ServerModelV2Projection {
             remoteStates[key] = RemoteRequestState(state: terminalState(item.terminal),
                                                    accountAnswerOutcome: answerOutcome(item.terminal?.answer))
             let entries = model.orderedEntries(of: item.itemID)
-            conversations[key] = thread(for: item, key: key, entries: entries)
+            var conversation = thread(for: item, key: key, entries: entries)
+            conversation.handoffCaptions = handoffCaptions
+            if handoffCaptions {
+                for entry in entries where model.needsHandoffCaptionRefresh(entry) {
+                    conversation.facts[entry.entryID]?.handoffCaptionRefreshPending = true
+                }
+            }
+            conversations[key] = conversation
             if let read = item.chat.readPosition,
                let position = entries.first(where: { $0.entryID == read })?.position {
                 readPositions[key] = position
@@ -138,6 +145,18 @@ public enum ServerModelV2Projection {
             if let delivery = entry.delivery {
                 var facts = ConversationTurnFacts(acceptedAtMilliseconds: entry.atMs)
                 facts.delivered = delivery.delivered ?? false
+                facts.personDelivery = delivery
+                // The wire has no handoff timestamp; this is display-only metadata.
+                let at = entry.atMs ?? 0
+                switch delivery.outcome {
+                case "handed":
+                    facts.deliveryAck2 = .handed(atMilliseconds: at, rerouted: delivery.rerouted ?? false,
+                        acknowledgerSystem: nil, acknowledgerAgent: delivery.agent)
+                case "not_handed":
+                    facts.deliveryAck2 = .notHanded(atMilliseconds: at, reason: delivery.reason ?? ExactText(""),
+                        acknowledgerSystem: nil, acknowledgerAgent: delivery.agent)
+                default: break
+                }
                 thread.facts[entry.entryID] = facts
             }
         }
@@ -273,6 +292,7 @@ public final class ServerModelV2Presentation: @unchecked Sendable {
 
     public func cachedState(_ model: ServerModelV2, identity: ProfileIdentity) throws -> CachedAttentionServerState {
         guard hasRules else { throw PresentationError.rulesNotRead }
-        return ServerModelV2Projection.cachedState(model, identity: identity)
+        let captions = lock.withLock { me?.handoffCaptionsEnabled == true }
+        return ServerModelV2Projection.cachedState(model, identity: identity, handoffCaptions: captions)
     }
 }

@@ -67,6 +67,11 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
         meURL = directory?.appendingPathComponent("me-v2.json")
         let savedMe = meURL.flatMap { try? Data(contentsOf: $0) }
             .flatMap { try? JSONValue.parse($0) }.flatMap { try? APIMe(json: $0) }
+        do { try model.setHandoffCaptionsEnabled(savedMe?.handoffCaptionsEnabled == true) }
+        catch {
+            errors.report(ErrorLogReport(concern: .snapshot, connectionRole: .request,
+                operation: "handoff_projection", phase: "save", reason: .from(error: error), retryable: true))
+        }
         let access = (transport as? ClientAPIAccess) ?? ClientAPIAccess(transport: transport)
         self.access = access
         let transport = access
@@ -172,6 +177,11 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
         let update: (editingEnabled: Bool, resumed: Bool)? = lock.withLock {
             let wasPaused = access.state == .paused
             guard access.applyMeAccountState(me.accountState, check: check) else { return nil }
+            do { try model.setHandoffCaptionsEnabled(me.handoffCaptionsEnabled) }
+            catch {
+                errors.report(ErrorLogReport(concern: .snapshot, connectionRole: .request,
+                    operation: "handoff_projection", phase: "save", reason: .from(error: error), retryable: true))
+            }
             if meReadID == id {
                 pausedMeRead = nil
                 errors.resolve(concern: .snapshot, operation: "me")
@@ -215,6 +225,23 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
             await outbox.wake(operation: "priority_levels")
         }
         publishModel()
+        for item in model.snapshot.handoffCaptionRefreshItems {
+            guard access.state == .available else { break }
+            try Task.checkCancellation()
+            do {
+                try await modelWriter.loadEntries(of: item)
+                publishModel()
+            } catch {
+                if Task.isCancelled || error is CancellationError || (error as? URLError)?.code == .cancelled {
+                    throw CancellationError()
+                }
+                guard access.state == .available else { break }
+                // A failed optional refresh keeps the cached conversation usable.
+                errors.report(ErrorLogReport(concern: .snapshot, connectionRole: .request,
+                    operation: "handoff_projection", phase: "read", reason: .api(error), retryable: true,
+                    correlation: ErrorLogCorrelation(resourceID: item.rawValue)))
+            }
+        }
         return me
     }
 

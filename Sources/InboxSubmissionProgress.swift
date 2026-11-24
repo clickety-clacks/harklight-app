@@ -37,6 +37,7 @@ struct InboxSubmissionProgress: Equatable, Sendable {
             replies[key] = Set(thread.turns.compactMap { turn in
                 guard turn.author == .origin || turn.author == .agent,
                       turn.kind == .reply || turn.kind == nil else { return nil }
+                if thread.handoffCaptions == true && turn.contentRedacted == true { return nil }
                 return turn.inReplyTo
             })
             let replyTargets = replies[key] ?? []
@@ -51,7 +52,9 @@ struct InboxSubmissionProgress: Equatable, Sendable {
                 guard facts.submittedAt != nil || facts.acceptedAtMilliseconds != nil else { continue }
                 let delivery = ConversationSentChatStatusPresentation.delivery(for: turn, facts: facts,
                     availability: thread.latestReportedAvailabilityObservation, hasReply: false,
-                    conversationAgentName: "", nowMilliseconds: 0)
+                    conversationAgentName: "", nowMilliseconds: 0,
+                    personFeed: thread.chatNeverCloses == true,
+                    handoffCaptions: thread.handoffCaptions == true)
                 let state: State
                 switch delivery {
                 case .noOneWillGetThis, .notDelivered: state = .notSent
