@@ -3693,20 +3693,12 @@ private struct FYIList: View {
         NavigationStack {
             List(order.sorted(items)) { item in
                 VStack(alignment: .leading, spacing: 8) {
-                    Text(MessageMarkdown.attributed(item.title)).font(.headline)
-                    HStack {
-                        Text(item.senderLabel)
-                        if let date = item.fyiPostedAt ?? item.createdAt {
-                            Text(date.formatted(date: .abbreviated, time: .shortened))
-                        }
-                    }
-                    .font(.caption)
-                    .foregroundStyle(.hkSecondary)
+                    MessageHeading(sender: item.senderLabel, initials: item.initials,
+                                   title: item.title, createdAt: item.fyiPostedAt ?? item.createdAt,
+                                   messageType: item.resolvedMessageType)
                     if let body = item.bodyText {
-                        Text(MessageMarkdown.attributed(body))
-                            .font(.body)
-                            .textSelection(.enabled)
-                            .fixedSize(horizontal: false, vertical: true)
+                        SystemDetectedMessageBody(text: body, foregroundColor: .hkText)
+                            .frame(maxWidth: .infinity, alignment: .leading)
                     }
                     if item.informationalSeenStatus == .pending {
                         Text("Seen pending confirmation").font(.caption)
