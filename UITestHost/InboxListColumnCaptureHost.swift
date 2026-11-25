@@ -1,6 +1,35 @@
 import SwiftUI
 import AttentionDomain
 
+/// Two production rows next to each other for comparing the octagon symbols.
+struct MessageIconComparisonCaptureHost: View {
+    var body: some View {
+        HStack(alignment: .top, spacing: 16) {
+            InboxRowContent(row: example("error", title: "Error opening preview", blocker: false),
+                            messageTab: .inbox)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .accessibilityIdentifier("icon-comparison-error")
+            InboxRowContent(row: example("blocker", title: "Approve the release", blocker: true),
+                            messageTab: .inbox)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .accessibilityIdentifier("icon-comparison-blocker")
+        }
+        .padding()
+        .frame(maxHeight: .infinity, alignment: .top)
+        .background(.hkBackground)
+    }
+
+    private func example(_ id: String, title: String, blocker: Bool) -> InboxRequestRow {
+        InboxRequestRow(key: RequestKey(accountScope: ExactText("fixture"), senderID: ExactText("release"),
+                                        messageID: ExactText(id)),
+                        title: title, sender: "Release assistant", status: "",
+                        bodyText: blocker ? "The release is waiting for approval." : "The preview could not be loaded.",
+                        declaredMessageType: blocker ? .request : nil,
+                        declaredMessageKind: blocker ? .blocker : nil,
+                        messageType: blocker ? nil : .error)
+    }
+}
+
 /// Temporary isolated composition for measuring the production InboxList in a
 /// real NavigationSplitView primary column. This view exists only in the UI-test
 /// host; the shipped app keeps its normal adaptive column sizing.

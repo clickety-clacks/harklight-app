@@ -2610,7 +2610,8 @@ struct InboxList: View {
                 Section {
                     ForEach(shownProgressRows) { row in
                         NavigationLink(value: InboxSelection.request(row.key)) {
-                            ProgressMessageRow(title: row.title, progress: row.progress!)
+                            ProgressMessageRow(title: row.title, progress: row.progress!,
+                                               messageType: row.resolvedMessageType, metadata: row.messageMetadata)
                                 .padding(.horizontal, HarklightDesignSystem.shape(.rowHorizontalPadding))
                                 .overlay(alignment: .bottom) {
                                     Rectangle().fill(designPalette.line).frame(height: 1)
@@ -3838,7 +3839,8 @@ private struct FYIList: View {
         VStack(alignment: .leading, spacing: HarklightDesignSystem.shape(.fyiListRowSpacing)) {
             MessageHeading(sender: item.senderLabel, initials: item.displayInitials,
                            title: item.title, createdAt: item.postedAt,
-                           messageType: item.resolvedMessageType, inFYIList: true)
+                           messageType: item.resolvedMessageType,
+                           metadata: item.messageMetadata, inFYIList: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(Rectangle())
                 .onTapGesture { open(item.key) }

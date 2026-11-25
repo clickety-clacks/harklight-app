@@ -61,15 +61,40 @@ struct ProgressSegmentedBar: View {
     }
 }
 
+private struct ProgressMessageTitle: View {
+    let title: String
+    let style: HarklightTextStyle
+    let messageType: HarklightMessageType
+    let metadata: MessageMetadataPresentation
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        let text = Text(title)
+        HStack(alignment: .firstTextBaseline, spacing: HarklightDesignSystem.shape(.rowTypeColumnGap)) {
+            if !metadata.accessibilityLabels.isEmpty {
+                Image(systemName: metadata.iconRole(for: messageType).token.sfSymbol)
+                    .font(style == .messageTitle ? .title3 : .body)
+                    .foregroundStyle(HarklightDesignSystem.palette(for: colorScheme).typeColor(messageType))
+                    .accessibilityHidden(true)
+            }
+            text
+                .harklightType(style)
+                .foregroundStyle(.hkText)
+                .accessibilityLabel(metadata.accessibilityTitle(text))
+                .accessibilityAddTraits(style == .messageTitle ? .isHeader : [])
+        }
+    }
+}
+
 struct ProgressMessageRow: View {
     let title: String
     let progress: MessageProgress
+    let messageType: HarklightMessageType
+    let metadata: MessageMetadataPresentation
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(title)
-                .harklightType(.rowTitle)
-                .foregroundStyle(.hkText)
+            ProgressMessageTitle(title: title, style: .rowTitle, messageType: messageType, metadata: metadata)
             if let snapshot = progress.snapshot {
                 ProgressSegmentedBar(snapshot: snapshot)
                 HStack(alignment: .firstTextBaseline) {
@@ -92,7 +117,7 @@ struct ProgressMessageRow: View {
     }
 }
 
-/// Dedicated Progress content: it has no answer, Seen, chat or dismissal action.
+/// Dedicated Progress content with the existing Seen action when available.
 /// The caller supplies the current accepted revision, including authoritative
 /// lifecycle removal, through the same navigation used for the ordinary identity.
 struct ProgressMessageDetail: View {
@@ -100,6 +125,8 @@ struct ProgressMessageDetail: View {
     let sender: String
     let bodyText: String?
     let progress: MessageProgress
+    let messageType: HarklightMessageType
+    let metadata: MessageMetadataPresentation
     var createdAt: Date?
     var itemID: ExactText?
     var seenPending = false
@@ -109,10 +136,8 @@ struct ProgressMessageDetail: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(title)
-                        .harklightType(.messageTitle)
-                        .foregroundStyle(.hkText)
-                        .accessibilityAddTraits(.isHeader)
+                    ProgressMessageTitle(title: title, style: .messageTitle,
+                                         messageType: messageType, metadata: metadata)
                     if let itemID {
                         MessageIDByline(identity: byline, itemID: itemID)
                             .id(itemID)

@@ -677,6 +677,9 @@ struct LiveContentView: View {
                                 ProgressMessageDetail(title: request.title?.rawValue ?? "Message",
                                     sender: request.senderDisplayName?.rawValue ?? key.senderID.rawValue,
                                     bodyText: request.body?.rawValue, progress: progress,
+                                    messageType: context.messageType,
+                                    metadata: .init(declaredType: request.messageType, kind: request.messageKind,
+                                                    hasSeenDescriptor: request.informationalSeenStatus != nil),
                                     createdAt: request.createdAt,
                                     itemID: store.isLocalExample ? nil : key.messageID,
                                     seenPending: row?.isFYISeenPending == true,
@@ -896,6 +899,7 @@ struct MessageHeading: View {
                 .harklightType(inFYIList ? .inboxMessageTitle : .messageTitle)
                 .foregroundStyle(palette.text)
                 .fixedSize(horizontal: false, vertical: true)
+                .accessibilityLabel(metadata.accessibilityTitle(titleText))
         }
     }
 
