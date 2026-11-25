@@ -81,6 +81,8 @@ private final class V2ScenePushTransport: ClientAPITransport, @unchecked Sendabl
         case "/v2/items/other-account":
             lock.withLock { showReads += 1 }
             throw APIError(status: 404, token: .notFound, retryable: false, requestID: nil)
+        case "/v2/items/gone":
+            body = #"{"rev":2,"item":{"item_id":"gone","rev":2,"sender":"sender","request_revision":1,"message":{"title":"Gone"},"files":[],"seen":false,"rank":{"key":"a","section":"current"},"chat":{"available":false,"started":false},"terminal":{"state":"retracted","at_ms":1,"by_this_person":false}}}"#
         case "/v2/items/newest":
             lock.withLock { showReads += 1 }
             if let holdShowLookup { for await _ in holdShowLookup {} }
@@ -554,6 +556,8 @@ final class HarklightTests: XCTestCase {
 
         lifecycle.receiveV2Show(ClientAPIShow(showID: "misaddressed", deviceID: "other-device",
             itemID: "other-account", target: .message, heldMilliseconds: 0), receivedAt: Date(), attempt: attempt)
+        let cached = Data(#"{"item_id":"other-account","rev":1,"sender":"sender","request_revision":1,"message":{"title":"Evicted"},"files":[],"seen":false,"rank":{"key":"b","section":"current"},"chat":{"available":false,"started":false}}"#.utf8)
+        try connection.model.apply([.init(rev: 1, kind: "item", data: cached)], cursor: 1)
         lifecycle.receiveV2Show(ClientAPIShow(showID: "unknown", deviceID: "device",
             itemID: "other-account", target: .message, heldMilliseconds: 0), receivedAt: Date(), attempt: attempt)
         let deadline = ContinuousClock.now + .seconds(2)
@@ -562,8 +566,6 @@ final class HarklightTests: XCTestCase {
         XCTAssertEqual(shows.map(\.unavailable), [.notSent])
         XCTAssertNil(coordinator.passivePair)
 
-        let retracted = Data(#"{"item_id":"gone","rev":1,"sender":"sender","request_revision":1,"message":{"title":"Gone"},"files":[],"seen":false,"rank":{"key":"a","section":"current"},"chat":{"available":false,"started":false},"terminal":{"state":"retracted","at_ms":1,"by_this_person":false}}"#.utf8)
-        try connection.model.apply([.init(rev: 1, kind: "item", data: retracted)], cursor: 1)
         lifecycle.receiveV2Show(ClientAPIShow(showID: "retracted", deviceID: "device",
             itemID: "gone", target: .chat, heldMilliseconds: 0), receivedAt: Date(), attempt: attempt)
         let retractionDeadline = ContinuousClock.now + .seconds(2)

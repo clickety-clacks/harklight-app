@@ -898,8 +898,9 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
     }
 
     public func resolveShowItem(itemID: ExactText) async throws -> APIItem? {
-        if let held = model.snapshot.items[itemID] { return held }
-        return try await fetchCurrentItem(itemID)
+        // A held Show can outlive its item. Check the active account even
+        // when a cached copy exists.
+        try await fetchCurrentItem(itemID)
     }
 
     private func fetchCurrentItem(_ itemID: ExactText) async throws -> APIItem? {

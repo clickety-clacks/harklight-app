@@ -1101,10 +1101,6 @@ final class NativeRelayLifecycle {
         v2ShowLookup?.cancel()
         v2ShowCoordinator.supersedePendingShow()
         pendingV2Show = (show, receivedAt)
-        if connection.model.snapshot.items[ExactText(show.itemID)] != nil {
-            deliverV2ShowIfHydrated(attempt: attempt)
-            return
-        }
         // The item lookup is an independent request; a slow read must not
         // block a focus PUT or consumption of the change feed.
         v2ShowLookup = Task { [weak self] in
@@ -1119,18 +1115,20 @@ final class NativeRelayLifecycle {
             }
             guard let self, !Task.isCancelled, self.activeTransportAttemptID == attempt,
                   self.pendingV2Show?.show.showID == show.showID else { return }
-            if connection.model.snapshot.items[ExactText(show.itemID)] != nil {
+            self.v2ShowLookup = nil
+            if unavailable == .notSent {
+                self.pendingV2Show = nil
+            } else if connection.model.snapshot.items[ExactText(show.itemID)] != nil {
                 self.deliverV2ShowIfHydrated(attempt: attempt)
-            } else {
-                if unavailable == .notSent { self.pendingV2Show = nil }
-                self.v2ShowCoordinator.receiveV2(.clientAPIUnavailable(show, reason: unavailable),
-                    elapsedSinceReceipt: max(0, Date().timeIntervalSince(receivedAt)))
+                return
             }
+            self.v2ShowCoordinator.receiveV2(.clientAPIUnavailable(show, reason: unavailable),
+                elapsedSinceReceipt: max(0, Date().timeIntervalSince(receivedAt)))
         }
     }
 
     func deliverV2ShowIfHydrated(attempt: UUID) {
-        guard activeTransportAttemptID == attempt, let pending = pendingV2Show,
+        guard activeTransportAttemptID == attempt, v2ShowLookup == nil, let pending = pendingV2Show,
               let item = v2Connection?.model.snapshot.items[ExactText(pending.show.itemID)] else { return }
         pendingV2Show = nil
         let frame: ViewShowFrame = if item.terminal?.state == "retracted" {
