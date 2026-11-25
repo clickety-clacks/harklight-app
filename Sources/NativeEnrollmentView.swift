@@ -129,7 +129,7 @@ struct NativeEnrollmentView: View {
         case .confirmation:
             heading("Join \(flow.invitation?.serverName ?? "this server")?", symbol: "person.badge.plus")
             Text("\(flow.invitation?.approvingOwnerLabel ?? "The owner") invited this device.")
-            destination
+            destination(serverLabel: "Server")
             card {
                 labeled("You join as", flow.invitation?.claimedAccountLabel ?? "The invited account")
                 Text("This is what the invitation says. The server confirms the account when you join.")
@@ -267,7 +267,7 @@ struct NativeEnrollmentView: View {
                 labeled("Server", flow.currentAccount?.serverDisplayName ?? flow.currentAccount?.host ?? "Harklight")
                 labeled("Joined as", flow.currentAccount?.savedAccountName ?? "Your account")
             }
-            destination
+            destination(serverLabel: "Invited server")
             primary("Keep current account") { Task { await flow.keepCurrentAccount() } }
             Button("Replace with this invitation…") { flow.considerReplacement() }.buttonStyle(.bordered)
         case .replacementConfirmation:
@@ -289,9 +289,9 @@ struct NativeEnrollmentView: View {
         }
     }
 
-    private var destination: some View {
+    private func destination(serverLabel: String) -> some View {
         card {
-            labeled("Server", flow.invitation?.serverName ?? "Invited server")
+            labeled(serverLabel, flow.invitation?.serverName ?? "Invited server")
             labeled("Verified address", flow.invitation?.enrollmentURL.host ?? "")
             Text("This address is the server the invitation expects. The account name is a claim until the server confirms it.")
                 .font(.caption).foregroundStyle(.hkSecondary)

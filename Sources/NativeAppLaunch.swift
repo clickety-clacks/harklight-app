@@ -198,6 +198,16 @@ final class NativeAppLaunch {
         guidedJoin.departureRecordsDidChange = { [weak self] in
             self?.refreshArchivedAccounts()
         }
+        guidedJoin.canKeepCurrentConnection = { [weak self] record in
+            guard let self, case let .live(presentation) = self.state,
+                  !presentation.isReadOnly, !presentation.isLocalExample,
+                  let active = self.activeEnrollmentRecord,
+                  active.sameNotificationProfile(as: record), active.deviceURL == record.deviceURL,
+                  (try? self.guidedJoinStore.hasConfirmedRemoval(for: record)) == false else { return false }
+            let lifecycle = NativeRelayLifecycle.shared
+            let context = presentation.notificationContext
+            return lifecycle.isActive(for: context) && !lifecycle.isPreparingV2SignOut(for: context)
+        }
         guidedJoin.connectApproved = { [weak self] record in
             guard let self else { return false }
             let material = try self.enrollment.material(from: record)
