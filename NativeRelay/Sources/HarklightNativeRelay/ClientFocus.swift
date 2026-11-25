@@ -3,6 +3,7 @@ import Foundation
 
 public enum FocusReportScreen: String, Equatable, Sendable {
     case inbox
+    case fyi
     case message
     case chat
     case settings
@@ -33,6 +34,7 @@ public struct FocusReport: Equatable, Sendable {
     }
 
     public static let inbox = Self(screen: .inbox)
+    public static let fyi = Self(screen: .fyi)
     public static let settings = Self(screen: .settings)
     public static let signedOut = Self(screen: .signedOut)
     public static let notInFront = Self(screen: .notInFront)
@@ -75,6 +77,7 @@ public struct ViewShowFrame: Equatable, Sendable {
     public enum Unavailable: Equatable, Sendable {
         case notSent
         case notHere
+        case retracted
     }
 
     fileprivate init(senderID: String, messageID: String,
@@ -88,9 +91,9 @@ public struct ViewShowFrame: Equatable, Sendable {
 }
 
 extension ViewShowFrame {
-    public static func clientAPIUnavailable(_ show: ClientAPIShow, notFound: Bool) -> Self {
+    public static func clientAPIUnavailable(_ show: ClientAPIShow, reason: Unavailable) -> Self {
         Self(senderID: "", messageID: show.itemID, target: show.target,
-             heldMilliseconds: show.heldMilliseconds, unavailable: notFound ? .notSent : .notHere)
+             heldMilliseconds: show.heldMilliseconds, unavailable: reason)
     }
 
     /// A client API v2 show in the shape the pushed-view coordinator already

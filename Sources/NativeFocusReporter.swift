@@ -15,8 +15,10 @@ final class NativeFocusReporter {
 
     private(set) var currentFocus: FocusReport? = .inbox
 
-    typealias ReportHandler = @Sendable (FocusReport) async -> Void
+    // A nil report pauses writes and renewal while a read-only archive is visible.
+    typealias ReportHandler = @Sendable (FocusReport?) async -> Void
 
+    private var reportsVisiblePresentation = true
     private var isSceneActive = false
     private var isSceneBackgrounded = false
     private var reportedBackground = false
@@ -55,8 +57,20 @@ final class NativeFocusReporter {
         updateFocus(focusForSelection(report, preservingChat: currentFocus))
     }
 
-    func selectionChanged(to selection: InboxSelection?) {
-        selectionChanged(to: NativeFocusSelection.report(for: selection))
+    func setReportsVisiblePresentation(_ enabled: Bool) {
+        guard reportsVisiblePresentation != enabled else { return }
+        reportsVisiblePresentation = enabled
+        cancelPendingReport()
+        pendingReportRestoreFocus = nil
+        lastReportedFocus = nil
+        if enabled {
+            if isSceneActive, let currentFocus { send(currentFocus, immediately: true) }
+        } else {
+            currentFocus = .inbox
+            selectionFocus = .inbox
+            focusBeforeSettings = nil
+            if let transportID = reportTransportID { enqueue(nil, transportID: transportID) }
+        }
     }
 
     func conversationAppeared(senderID: String,
@@ -76,7 +90,8 @@ final class NativeFocusReporter {
         let focus = visibility.report(senderID: senderID, messageID: messageID)
         if currentFocus?.screen == .settings {
             focusBeforeSettings = focus
-        } else if currentFocus?.screen == .chat {
+        } else if currentFocus?.screen == .chat,
+                  currentFocus?.senderID == senderID, currentFocus?.messageID == messageID {
             updateFocus(focus)
         }
     }
@@ -151,6 +166,7 @@ final class NativeFocusReporter {
         guard reportTransportID == transportID else { return }
         guard readyTransportID != transportID else { return }
         readyTransportID = transportID
+        guard reportsVisiblePresentation else { return }
         if !isSceneBackgrounded, let currentFocus {
             send(currentFocus, immediately: true)
         } else if isSceneBackgrounded {
@@ -187,7 +203,7 @@ final class NativeFocusReporter {
         currentFocus = report
         let restoreFocus = pendingReportRestoreFocus ?? previous
         cancelPendingReport()
-        guard isSceneActive else { return }
+        guard isSceneActive, reportsVisiblePresentation else { return }
 
         if previous?.screen != report.screen {
             pendingReportRestoreFocus = nil
@@ -217,6 +233,7 @@ final class NativeFocusReporter {
                                    preservingChat previous: FocusReport?) -> FocusReport {
         guard previous?.screen == .chat,
               report.screen == .message,
+              report.senderID == previous?.senderID, report.messageID == previous?.messageID,
               let previous else { return report }
         return previous
     }
@@ -227,14 +244,14 @@ final class NativeFocusReporter {
     }
 
     private func send(_ report: FocusReport, immediately: Bool = false) {
-        guard immediately || lastReportedFocus != report,
+        guard reportsVisiblePresentation, immediately || lastReportedFocus != report,
               let transportID = reportTransportID,
               enqueue(report, transportID: transportID) != nil else { return }
         lastReportedFocus = report
     }
 
     @discardableResult
-    private func enqueue(_ report: FocusReport, transportID: UUID) -> Task<Void, Never>? {
+    private func enqueue(_ report: FocusReport?, transportID: UUID) -> Task<Void, Never>? {
         guard let reportHandler,
               readyTransportID == transportID,
               unsupportedTransportID != transportID else { return nil }
@@ -244,14 +261,16 @@ final class NativeFocusReporter {
             await previousDelivery?.value
             guard let self,
                   !Task.isCancelled,
-                  await self.canDeliverReport(handlerGeneration, transportID: transportID) else { return }
+                  await self.canDeliverReport(handlerGeneration, transportID: transportID,
+                                              report: report) else { return }
             await reportHandler(report)
         }
         reportDeliveryTask = delivery
         return delivery
     }
 
-    private func canDeliverReport(_ generation: UUID, transportID: UUID) -> Bool {
+    private func canDeliverReport(_ generation: UUID, transportID: UUID, report: FocusReport?) -> Bool {
+        (report == nil || report == .signedOut || reportsVisiblePresentation) &&
         reportHandlerGeneration == generation &&
         reportTransportID == transportID &&
         readyTransportID == transportID &&

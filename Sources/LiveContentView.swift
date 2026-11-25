@@ -711,7 +711,8 @@ struct LiveContentView: View {
                 diagnostics: launch?.diagnostics,
                 refreshInbox: inboxRefreshAction,
                 showsLocalExamples: showsSampleMessages && !store.isReadOnly,
-                notificationNavigation: testNotificationNavigation ?? launch?.notificationNavigation,
+                notificationNavigation: testNotificationNavigation ??
+                    (store.isReadOnly ? nil : launch?.notificationNavigation),
                 notificationChatRouteDidOpen: { serial in
                     if let testNotificationChatRouteDidOpen {
                         testNotificationChatRouteDidOpen(serial)
@@ -743,8 +744,26 @@ struct LiveContentView: View {
             } message: { diagnostic in
                 Text(diagnostic.progress.userFacingMessage)
             }
+            .alert("Couldn't show message", isPresented: Binding(
+                get: { !store.isReadOnly && launch?.pushedViewUnavailableMessage != nil },
+                set: { if !$0 { launch?.dismissPushedViewUnavailableMessage() } }
+            )) {
+                Button("OK", role: .cancel) { launch?.dismissPushedViewUnavailableMessage() }
+            } message: {
+                Text(launch?.pushedViewUnavailableMessage ?? "")
+            }
             .onChange(of: store.presentation.revision) { _, _ in
                 fixtureStore?.refreshFromDurableStore()
+            }
+            .onChange(of: store.isReadOnly, initial: true) { _, readOnly in
+                NativeFocusReporter.shared.setReportsVisiblePresentation(!readOnly)
+                if !readOnly, let launch {
+                    NativePushedViewCoordinator.shared.setApplyHandler { show in
+                        await launch.applyPushedView(show)
+                    }
+                } else {
+                    NativePushedViewCoordinator.shared.setApplyHandler(nil)
+                }
             }
             .onChange(of: scenePhase) { _, phase in
                 NativeFocusReporter.shared.scenePhaseChanged(phase)
@@ -759,11 +778,6 @@ struct LiveContentView: View {
             .onAppear {
                 NativeFocusReporter.shared.scenePhaseChanged(scenePhase)
                 NativePushedViewCoordinator.shared.scenePhaseChanged(scenePhase)
-                if let launch {
-                    NativePushedViewCoordinator.shared.setApplyHandler { show in
-                        await launch.applyPushedView(show)
-                    }
-                }
                 applyPresentationTestFixtureIfNeeded()
             }
             .onDisappear {

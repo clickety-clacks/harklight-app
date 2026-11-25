@@ -118,7 +118,7 @@ struct ConversationPanel: View {
     @Environment(\.isFYIDetail) private var isFYIDetail
 
     private var canReportItemFocus: Bool {
-        !isFYIDetail || NativeFocusSelection.canReportFYIItem(in: store)
+        !store.isReadOnly && (!isFYIDetail || NativeFocusSelection.canReportFYIItem(in: store))
     }
 
     private var thread: ConversationThread? { store.conversation(for: key) }
@@ -401,7 +401,7 @@ private struct ConversationHistoryContent: View, Equatable {
     @Environment(\.isFYIDetail) private var isFYIDetail
 
     private var canReportItemFocus: Bool {
-        !isFYIDetail || NativeFocusSelection.canReportFYIItem(in: store)
+        !store.isReadOnly && (!isFYIDetail || NativeFocusSelection.canReportFYIItem(in: store))
     }
 
     nonisolated static func == (lhs: Self, rhs: Self) -> Bool {

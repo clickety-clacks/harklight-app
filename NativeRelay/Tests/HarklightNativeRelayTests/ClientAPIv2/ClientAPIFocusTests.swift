@@ -148,6 +148,40 @@ final class ClientAPIFocusTests: XCTestCase {
                               onShow: { log.add($0, $1) })
     }
 
+    func testPausingForReadOnlyStopsRenewingWithoutSendingAnotherReport() async {
+        let transport = FocusTransport()
+        let ticks = ManualTicks()
+        let focus = channel(transport, ticks: ticks)
+        await focus.report(.fyi)
+        await waitFor("in-front focus starts renewing") { ticks.sleepers == 1 }
+        await focus.pauseReporting()
+        await waitFor("archive cancels renewal") { ticks.sleepers == 0 }
+        XCTAssertEqual(transport.sentBodies.count, 1)
+        await focus.report(.inbox)
+        XCTAssertEqual(transport.sentBodies.count, 2)
+        await focus.stop()
+    }
+
+    func testOlderServerKeepsFocusAndShowWorkingFromTheFYIList() async {
+        let transport = FocusTransport()
+        transport.failNext = APIError(status: 400, token: .invalidField, retryable: false, requestID: nil)
+        transport.respond("{}")
+        transport.respond("{\"show\":\(showJSON)}")
+        let shows = ShowLog()
+        let focus = channel(transport, log: shows)
+        let first = await focus.report(.fyi)
+        let second = await focus.report(.fyi)
+        XCTAssertEqual(first, .accepted)
+        XCTAssertEqual(second, .accepted)
+        XCTAssertEqual(transport.sentBodies, [
+            #"{"screen":"fyi","ttl_s":120}"#,
+            #"{"screen":"inbox","ttl_s":120}"#,
+            #"{"screen":"inbox","ttl_s":120}"#,
+        ])
+        XCTAssertEqual(shows.ids, ["s1"])
+        await focus.stop()
+    }
+
     func testTheFocusBodyCarriesTodaysFieldsUnderV2Names() {
         func body(_ report: FocusReport) -> String {
             String(decoding: ClientAPIFocusWire.request(for: report, ttlSeconds: 120).body ?? Data(), as: UTF8.self)
@@ -156,6 +190,7 @@ final class ClientAPIFocusTests: XCTestCase {
         XCTAssertEqual(request.method, .put)
         XCTAssertEqual(request.path, "/v2/devices/me/focus")
         XCTAssertEqual(body(.inbox), #"{"screen":"inbox","ttl_s":120}"#)
+        XCTAssertEqual(body(.fyi), #"{"screen":"fyi","ttl_s":120}"#)
         XCTAssertEqual(body(.notInFront), #"{"screen":"not_in_front","ttl_s":120}"#)
         XCTAssertEqual(body(.signedOut), #"{"screen":"signed_out","ttl_s":120}"#)
         XCTAssertEqual(body(.message(senderID: "agent", messageID: "i1")),

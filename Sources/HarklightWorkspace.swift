@@ -1,6 +1,7 @@
 import SwiftUI
 import UIKit
 import AttentionDomain
+import HarklightNativeRelay
 
 /// Read the framework's current presentation rather than inferring it from
 /// orientation or size class. Hiding an overlaid primary column leaves the
@@ -1365,15 +1366,13 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         }
     }
 
+    private var visibleDetailFocus: FocusReport? {
+        NativeFocusSelection.report(for: selection, path: relatedMessageNavigationPath,
+                                    isReadOnly: conversationStore?.isReadOnly == true)
+    }
+
     private func reportVisibleDetailFocus() {
-        guard let key = detailRequest(selection: selection, path: relatedMessageNavigationPath) else {
-            NativeFocusReporter.shared.selectionChanged(to: NativeFocusSelection.report(for: selection))
-            return
-        }
-        let report = selection == .fyis
-            ? NativeFocusSelection.fyiDetailReport(for: key, in: conversationStore)
-            : NativeFocusSelection.messageReport(for: key)
-        NativeFocusReporter.shared.selectionChanged(to: report)
+        if let visibleDetailFocus { NativeFocusReporter.shared.selectionChanged(to: visibleDetailFocus) }
     }
 
     private func rememberFYIRestoration(from previous: InboxSelection?) {
@@ -1392,6 +1391,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     private func navigationSelection(for tab: InboxWorkspaceTab) -> Binding<InboxSelection?> {
         Binding(get: { workspaceTab == tab ? selection : nil }, set: { next in
             guard workspaceTab == tab else { return }
+            guard next != selection else { return }
             if next != nil { splitPresentation.dismissOverlay() }
             navigate(to: next)
         })
@@ -1547,20 +1547,12 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             case let .fyi(targetKey), let .supersedes(targetKey), let .replacement(targetKey):
                 key = targetKey
             }
-            let focus = if newFYI != nil {
-                NativeFocusSelection.fyiDetailReport(for: key, in: conversationStore)
-            } else {
-                NativeFocusSelection.messageReport(for: key)
-            }
-            NativeFocusReporter.shared.selectionChanged(to: focus)
             if newPath.count > oldPath.count {
                 NativePushedViewCoordinator.shared.recordOwnOpen()
                 reportMessageContentOpen(for: key)
             }
-        } else {
-            NativeFocusReporter.shared.selectionChanged(
-                to: NativeFocusSelection.report(for: selection))
         }
+        reportVisibleDetailFocus()
     }
 
     private struct FYIRoutePresentation: Equatable {
@@ -1683,7 +1675,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         let hasNext = index.map { $0 + 1 < ids.count } ?? false
         let chatTargetFallsBack = if case let .request(key) = id,
             let route = visibleNotificationNavigation, route.request == key {
-            route.chatTargetFallsBackToMessage
+            route.chatTargetFallsBackToMessage || route.showsMessageOnly
         } else {
             false
         }
@@ -1862,7 +1854,8 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                 selection = destination.selection
                 rememberFYIRestoration(from: previous)
                 if let key = route.request {
-                    if !NativePushedViewCoordinator.shared.isPassive(key) {
+                    if route.showsMessageOnly { dismissedInlineChatRequests.insert(key) }
+                    if !route.isPushed, !NativePushedViewCoordinator.shared.isPassive(key) {
                         conversationStore?.newMessageAreaStore?.open(key)
                         reportMessageContentOpen(for: key)
                     }
@@ -1876,12 +1869,13 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             }
             .onChange(of: settings) { _, isPresented in
                 if isPresented {
-                    let underlying = NativeFocusReporter.shared.currentFocus ??
-                        NativeFocusSelection.report(for: selection)
+                    guard let visibleDetailFocus else { return }
+                    let underlying = NativeFocusReporter.shared.currentFocus ?? visibleDetailFocus
                     NativeFocusReporter.shared.settingsPresented(underlyingFocus: underlying)
                 } else {
-                    NativeFocusReporter.shared.settingsDismissed(
-                        fallback: NativeFocusSelection.report(for: selection))
+                    if let visibleDetailFocus {
+                        NativeFocusReporter.shared.settingsDismissed(fallback: visibleDetailFocus)
+                    }
                 }
             }
             .modifier(InboxAreaExpiry(newMessageAreaStore: conversationStore?.newMessageAreaStore,
