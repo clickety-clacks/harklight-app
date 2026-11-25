@@ -948,7 +948,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     @AppStorage("harklight.fyi-list-replied") private var restoredFYIWasReplied = false
     @State private var checkedFYIRestoration = false
     @State private var inboxOrder = InboxOrder.priority
-    @State private var selectedTab: InboxMessageTab = .inbox
+    private var selectedTab: InboxMessageTab { workspaceTab.messageTab }
     @State private var workspaceTab: InboxWorkspaceTab = .inbox
     @State private var search = ""
     @State private var searchPresented = false
@@ -1320,7 +1320,6 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         conversationStore?.navigateMessage(from: oldKey, to: newKey)
         if let newKey { selectRequest(newKey) }
         workspaceTab = tab
-        selectedTab = tab.messageTab
         selection = next
         restoringTabPath = oldPath != nextPath
         relatedMessageNavigationPath = nextPath
@@ -1597,7 +1596,8 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                       notificationNavigation: visibleNotificationNavigation,
                       notificationPendingPresentation: notificationPendingListPresentation,
                       triggerNotification: exposesNotificationTestAction
-                          ? { triggerNotificationTestAction() } : nil)
+                          ? { triggerNotificationTestAction() } : nil,
+                      isRegularSidebar: horizontalSizeClass == .regular)
             .searchable(text: searchTextBinding, isPresented: $searchPresented,
                         prompt: "Search messages")
             .searchFocused($searchFieldFocused)
@@ -1744,7 +1744,6 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             }
             .tint(HarklightDesignSystem.palette(for: colorScheme).amber)
             .onChange(of: workspaceTab) { _, newTab in
-                selectedTab = newTab.messageTab
                 guard newTab != .inbox,
                       let route = activeNotificationNavigation, route.isPending,
                       case let .notificationPending(serial)? = selection,
@@ -1757,9 +1756,6 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                       case let .notificationPending(serial)? = selection,
                       serial == route.serial else { return }
                 dismissPendingNotification()
-            }
-            .onChange(of: selectedTab) { _, tab in
-                workspaceTab = tab == .replied ? .replied : .inbox
             }
             split
             .onChange(of: activeNotificationNavigation, initial: true) { _, route in
@@ -1783,7 +1779,6 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                 let previous = selection
                 relatedMessageNavigationPath.removeAll()
                 workspaceTab = destination.workspaceTab
-                selectedTab = destination.selectedTab
                 search = destination.search
                 // A routed message closes list search, as leaving the old
                 // Search tab did, so the list returns unfiltered.
@@ -1920,6 +1915,10 @@ struct InboxList: View {
     let notificationNavigation: NativeInboxNavigation?
     var notificationPendingPresentation: InboxNotificationPendingPresentation? = nil
     let triggerNotification: (() -> Void)?
+    /// Whether the window is regular width, so the list is the split view's
+    /// floating sidebar. Read from the scene by the owner: inside a split
+    /// view the sidebar column itself always reports a compact width.
+    var isRegularSidebar = false
     @Environment(\.accessibilityReduceMotion) private var systemReduceMotion
     @Environment(\.harklightReduceMotionOverride) private var reduceMotionOverride
     private var reduceMotion: Bool {
@@ -1950,15 +1949,13 @@ struct InboxList: View {
         HarklightDesignSystem.palette(for: colorScheme)
     }
 
-    /// Rows sit on the page background on iPhone. On iPad the list is in the
-    /// system's floating glass sidebar, so rows leave the glass showing.
+    /// Rows sit on the page background in a compact width. In a regular width
+    /// the list is in the system's floating glass sidebar, so rows leave the
+    /// glass showing.
     private var rowSurface: Color {
-        isPadSidebar ? .clear : designPalette.background
+        isRegularSidebar ? .clear : designPalette.background
     }
 
-    private var isPadSidebar: Bool {
-        horizontalSizeClass == .regular
-    }
 
     private var listTint: Color {
         guard let selected,
@@ -2662,14 +2659,13 @@ struct InboxList: View {
                 brandAndStatusHeader
             }
             .sharedBackgroundVisibility(.hidden)
-            let isPad = UIDevice.current.userInterfaceIdiom == .pad
             let sortMenu = inboxOrder.map {
                 InboxSortMenu(order: $0, title: "Sort Inbox", identifier: "inbox-sort",
-                              usesStackedLabel: isPad)
+                              usesStackedLabel: isRegularSidebar)
             }
-            if showsInboxSort, let sortMenu, isPad {
-                // The iPad sidebar can overflow separate trailing items as a
-                // group. Place the two controls in one item's shared space.
+            if showsInboxSort, let sortMenu, isRegularSidebar {
+                // A regular-width sidebar can overflow separate trailing items
+                // as a group. Place the two controls in one item's shared space.
                 ToolbarItem(placement: .topBarTrailing) {
                     HStack(spacing: 4) {
                         sortMenu

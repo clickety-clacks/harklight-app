@@ -36,6 +36,7 @@ struct MessageIconComparisonCaptureHost: View {
 @MainActor
 struct InboxListColumnCaptureHost: View {
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @State private var selected: InboxSelection?
     @State private var workspaceTab: InboxWorkspaceTab = .inbox
     @State private var search = ""
@@ -164,7 +165,8 @@ struct InboxListColumnCaptureHost: View {
             clearRetracted: { _ in },
             fetchOlderInboxPage: nil,
             notificationNavigation: nil,
-            triggerNotification: nil
+            triggerNotification: nil,
+            isRegularSidebar: horizontalSizeClass == .regular
         )
         .background {
             GeometryReader { geometry in
