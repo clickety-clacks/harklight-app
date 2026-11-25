@@ -224,25 +224,20 @@ public struct Submission: Equatable, Codable, Sendable {
     }
 }
 
-/// A deliberate message-content open that is durable locally until the relay
-/// confirms the account-wide fact or explicitly rejects the operation.
-/// This is an outbox record only; settled opens are not retained as local
-/// per-device history.
+/// A deliberate message-content open identified by its request revision and
+/// operation ID. A permanent refusal leaves the outbox and stays visible
+/// until the request revision or Server state supersedes it.
 public struct PendingMessageOpen: Equatable, Codable, Identifiable, Sendable {
     public let requestKey: RequestKey
     public let requestRevision: UInt64
     public let operationID: UUID
-    /// Absent in queues written before permanent refusals were retained.
-    public let failed: Bool?
 
     public var id: UUID { operationID }
 
-    public init(requestKey: RequestKey, requestRevision: UInt64, operationID: UUID = UUID(),
-                failed: Bool? = nil) {
+    public init(requestKey: RequestKey, requestRevision: UInt64, operationID: UUID = UUID()) {
         self.requestKey = requestKey
         self.requestRevision = requestRevision
         self.operationID = operationID
-        self.failed = failed
     }
 }
 

@@ -771,6 +771,7 @@ struct InboxRequestRow: Identifiable {
 
     var belongsToReplied: Bool {
         if isRepliedFYI { return true }
+        if fyiGroupingEnabled && isActiveFYI { return false }
         // A failed delivery returns a response-marked row to Inbox, even if its
         // previous Seen state was still reported as pending.
         guard !hasFailedResponse else { return false }

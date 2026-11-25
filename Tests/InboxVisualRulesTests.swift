@@ -516,7 +516,7 @@ final class InboxVisualRulesTests: XCTestCase {
         XCTAssertTrue(seenAction.isActiveFYI)
         XCTAssertTrue(pending.isActiveFYI)
         XCTAssertFalse(pending.isRepliedFYI)
-        XCTAssertTrue(pending.belongsToReplied)
+        XCTAssertFalse(pending.belongsToReplied)
         opened.fyiHasEnded = false
         opened.fyiServerSeen = false
         XCTAssertTrue(opened.isActiveFYI)
@@ -578,6 +578,75 @@ final class InboxVisualRulesTests: XCTestCase {
             }
         }
         XCTAssertTrue(try store.fyiTestSnapshot().pendingMessageOpens.isEmpty)
+    }
+
+    @MainActor
+    func testPendingTypedAndUntypedFYIsStayInInboxUntilServerConfirmsSeen() throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("fixture.invalid"),
+            personID: ExactText("fixture-person"), deviceID: ExactText("fixture-device"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let persistence = MemoryPendingActionPersistence()
+        let repository = try ClientRepository(context: context, persistence: persistence)
+        let model = ServerModelV2Store(fileURL: nil)
+        let initialItems = NativeAppLaunch.fyiBulkTestChanges(indices: 0..<2, firstRevision: 1, openCount: 2)
+        try model.apply(initialItems, cursor: 2)
+        let cached = ServerModelV2Projection.cachedState(model.snapshot, identity: identity)
+        try repository.restoreCachedServerState(cached, context: context)
+        let store = try LivePresentationStore(store: repository, context: context)
+        XCTAssertEqual(store.inboxRows.count, 2)
+        XCTAssertEqual(store.inboxRows.compactMap(\.declaredMessageType), [.fyi])
+        for row in store.inboxRows {
+            XCTAssertTrue(store.markFYISeen(row.key, requestRevision: row.requestRevision))
+        }
+
+        let reopened = try ClientRepository(context: context, persistence: persistence)
+        try reopened.restoreCachedServerState(cached, context: context)
+        let relaunched = try LivePresentationStore(store: reopened, context: context)
+
+        func checkRouting(confirmed: Bool, stage: String) {
+            let rows = relaunched.inboxRows
+            XCTAssertEqual(rows.count, 2)
+            let items = rows.map(InboxItem.request)
+            let references = rows.map { row in
+                InboxViewListItem(kind: .message, key: row.key,
+                    freeSection: InboxFreeSection(state: confirmed ? .history : .active, group: .common))
+            }
+            for row in rows {
+                XCTAssertEqual(row.isActiveFYI, !confirmed, stage)
+                XCTAssertEqual(row.isFYISeenPending, !confirmed, stage)
+                XCTAssertEqual(row.isRepliedFYI, confirmed, stage)
+                XCTAssertEqual(row.isBundledFYI(in: .replied), confirmed, stage)
+            }
+            for (serverItems, version) in [(nil, nil), (references, nil), (references, 1)] {
+                for query in ["", "Bulletin"] {
+                    let entries = InboxNormalListProjection.entries(rows: items,
+                        serverItems: serverItems, freeOrderVersion: version, in: .replied, search: query)
+                    XCTAssertEqual(entries.count, confirmed ? 2 : 0,
+                                   "\(stage), order \(String(describing: version)), query \(query)")
+                }
+                let inbox = InboxNormalListProjection.entries(rows: items,
+                    serverItems: serverItems, freeOrderVersion: version, in: .inbox, search: "Bulletin")
+                XCTAssertEqual(inbox.count, confirmed ? 0 : 2, stage)
+            }
+        }
+
+        checkRouting(confirmed: false, stage: "Offline relaunch")
+        let saved = try relaunched.fyiTestSnapshot().intents
+        XCTAssertEqual(saved.count, 2)
+        for intent in saved.values {
+            try reopened.recordAcceptedOperation(intent.intentID, operationID: intent.operationID,
+                terminalSequence: 3, context: context)
+        }
+        try relaunched.refreshFromDurableStore()
+        checkRouting(confirmed: false, stage: "Accepted, terminal still pending")
+
+        let terminalItems = NativeAppLaunch.fyiBulkTestChanges(indices: 0..<2, firstRevision: 3,
+                                                               openCount: 0, allSeen: true)
+        try model.apply(terminalItems, cursor: 4)
+        try reopened.restoreCachedServerState(
+            ServerModelV2Projection.cachedState(model.snapshot, identity: identity), context: context)
+        try relaunched.refreshFromDurableStore()
+        checkRouting(confirmed: true, stage: "Confirmed by the server")
     }
 
     @MainActor

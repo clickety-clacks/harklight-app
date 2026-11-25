@@ -89,10 +89,7 @@ enum InboxItem: Identifiable {
 
     @MainActor
     func belongsToMessageTab(_ tab: InboxMessageTab) -> Bool {
-        if tab == .inbox, case let .request(row) = self, row.fyiGroupingEnabled, row.isActiveFYI {
-            return true
-        }
-        return belongsToReplied == (tab == .replied)
+        belongsToReplied == (tab == .replied)
     }
 
     var isSettledFYI: Bool {

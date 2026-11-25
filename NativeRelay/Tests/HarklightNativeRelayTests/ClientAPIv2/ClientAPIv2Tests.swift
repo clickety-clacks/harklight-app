@@ -345,6 +345,23 @@ final class SavedV2ItemActionTests: XCTestCase {
             (try? repository.snapshot(context: context).pendingMessageOpens.isEmpty) == true
         }
 
+        // Both builds 349 and 350 read this same key and record shape.
+        struct ShippedMessageOpen: Decodable {
+            let requestKey: RequestKey
+            let requestRevision: UInt64
+            let operationID: UUID
+        }
+        struct ShippedQueue: Decodable {
+            let messageOpens: [ShippedMessageOpen]?
+        }
+
+        let otherKey = ServerModelV2Projection.key(for: ExactText("other"), sender: item.sender, identity: identity)
+        let otherOpen = try repository.enqueueMessageOpen(otherKey, requestRevision: 1, context: context)
+        let bytes = try XCTUnwrap(persistence.load(identity: identity))
+        let shippedQueue = try PropertyListDecoder().decode(ShippedQueue.self, from: bytes)
+        XCTAssertEqual(shippedQueue.messageOpens?.map(\.operationID), [otherOpen.operationID],
+                       "Builds 349 and 350 should only be able to send the unrelated pending open.")
+
         let reopened = try ClientRepository(context: context, persistence: persistence)
         try reopened.restoreCachedServerState(cached, context: context)
         let port = AttentionDomainPort(store: reopened)
