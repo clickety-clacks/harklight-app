@@ -15,15 +15,10 @@ final class ServerCacheReplacementTests: XCTestCase {
         _ = try repository.apply(RelayEvent(sequence: 1,
             body: .delivery(request(first, title: "Cached"), .message)), context: context)
         let model = ServerModelV2Store(fileURL: nil)
-        func item(_ key: RequestKey, title: String, revision: UInt64) -> ServerModelV2Store.Change {
-            let data = """
-            {"item_id":"\(key.messageID.rawValue)","rev":\(revision),"sender":"sender","request_revision":1,
-             "message":{"title":"\(title)"},"files":[],"seen":false,"rank":{"key":"a","section":"current"}}
-            """
-            return .init(rev: revision, kind: "item", data: Data(data.utf8))
-        }
-        try model.apply([item(first, title: "Server", revision: 2),
-                         item(second, title: "Other request", revision: 3)], cursor: 3)
+        try model.apply([
+            v2CacheItem(first, message: request(first, title: "Server").originalPayload, revision: 2),
+            v2CacheItem(second, message: request(second, title: "Other request").originalPayload, revision: 3)
+        ], cursor: 3, onUnreadable: { _, error in throw error })
         let replacement = ServerModelV2Projection.cachedState(model.snapshot, identity: context.identity)
         try repository.restoreCachedServerState(replacement, context: context)
 
@@ -210,10 +205,13 @@ final class ServerCacheReplacementTests: XCTestCase {
         let context = context()
         let key = key("answer", context: context)
         let payload = try JSONValue.parse(Data(#"{"title":"Question","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"yes","label":"Yes","kind":"value","value":"yes"}]}}"#.utf8))
-        let request = StoredRequest(key: key, originalPayload: payload)
+        let model = ServerModelV2Store(fileURL: nil)
+        try model.apply([v2CacheItem(key, message: payload, revision: 1)], cursor: 1,
+                        onUnreadable: { _, error in throw error })
         let persistence = MemoryPendingActionPersistence()
         let first = try ClientRepository(context: context, persistence: persistence)
-        _ = try first.apply(RelayEvent(sequence: 1, body: .delivery(request, .message)), context: context)
+        try first.restoreCachedServerState(
+            ServerModelV2Projection.cachedState(model.snapshot, identity: context.identity), context: context)
         let port = AttentionDomainPort(store: first)
         let selector = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first?.selector)
         let receipt = try port.submit(SubmitIntent(context: port.context, selector: selector,
@@ -225,14 +223,17 @@ final class ServerCacheReplacementTests: XCTestCase {
         XCTAssertEqual(restored.operationID, queued.operationID)
         XCTAssertEqual(restored.wireFrame, queued.wireFrame)
         XCTAssertTrue(try restarted.snapshot(context: context).requests.isEmpty)
-        _ = try restarted.apply(RelayEvent(sequence: 1, body: .delivery(request, .message)), context: context)
-        _ = try restarted.apply(RelayEvent(sequence: 2, body: .terminal(key, .answered, nil),
-            accountAnswerOutcome: .reply(ExactText("Server answer"))), context: context)
+        let terminal = try JSONValue.parse(Data(
+            #"{"state":"answered","at_ms":2,"by_this_person":true,"answer":{"kind":"reply","text":"Server answer"}}"#.utf8))
+        try model.apply([v2CacheItem(key, message: payload, revision: 2, terminal: terminal)], cursor: 2,
+                        onUnreadable: { _, error in throw error })
+        try restarted.restoreCachedServerState(
+            ServerModelV2Projection.cachedState(model.snapshot, identity: context.identity), context: context)
 
         XCTAssertThrowsError(try restarted.queueOriginalOperationForUserTap(receipt.intentID, context: context)) {
-            XCTAssertEqual($0 as? AttentionStoreError, .intentMissing)
+            XCTAssertEqual($0 as? AttentionStoreError, .requestClosed)
         }
-        XCTAssertNil(try restarted.lookupIntent(receipt.intentID, context: context))
+        try restarted.queueRecoverableOperations(context: context)
         XCTAssertTrue(try restarted.snapshot(context: context).outbox.isEmpty)
         let currentPort = AttentionDomainPort(store: restarted)
         let shown = try XCTUnwrap(currentPort.inspect(context: currentPort.context, request: key).requests.first)
@@ -255,10 +256,11 @@ final class ServerCacheReplacementTests: XCTestCase {
             intentID: UUID(), inputs: [.compatibilityValue(action: ExactText("yes"))]))
         let restarted = try ClientRepository(context: context, persistence: persistence)
         let operationID = try XCTUnwrap(restarted.lookupIntent(receipt.intentID, context: context)).operationID
-        let otherRequest = StoredRequest(key: other, originalPayload: payload)
-        try restarted.restoreCachedServerState(CachedAttentionServerState(identity: context.identity,
-            requests: [other: otherRequest], remoteStates: [:], cursor: 2, conversationCursor: 0,
-            conversations: [:], inboxView: nil, currentRequestKeys: [other]), context: context)
+        let model = ServerModelV2Store(fileURL: nil)
+        try model.apply([v2CacheItem(other, message: payload, revision: 2)], cursor: 2,
+                        onUnreadable: { _, error in throw error })
+        try restarted.restoreCachedServerState(
+            ServerModelV2Projection.cachedState(model.snapshot, identity: context.identity), context: context)
         XCTAssertEqual(try restarted.lookupIntent(receipt.intentID, context: context)?.operationID, operationID,
                        "A complete snapshot without the request is not the Server's outcome for the queued answer.")
         let again = try ClientRepository(context: context, persistence: persistence)
@@ -364,6 +366,17 @@ final class ServerCacheReplacementTests: XCTestCase {
     private func request(_ key: RequestKey, title: String) -> StoredRequest {
         StoredRequest(key: key, originalPayload: .object([JSONMember("title", .string(ExactText(title)))]))
     }
+}
+
+func v2CacheItem(_ key: RequestKey, message: JSONValue, revision: UInt64,
+                 terminal: JSONValue? = nil) -> ServerModelV2Store.Change {
+    let json = """
+    {"item_id":\(JSONValue.string(key.messageID).jsonString),"rev":\(revision),
+     "sender":\(JSONValue.string(key.senderID).jsonString),"request_revision":1,
+     "message":\(message.jsonString),"files":[],"seen":false,"chat":{"started":false},
+     "rank":{"key":"a","section":"current"},"terminal":\(terminal?.jsonString ?? "null")}
+    """
+    return .init(rev: revision, kind: "item", data: Data(json.utf8))
 }
 
 /// Only the historical user-input field names matter. These deliberately

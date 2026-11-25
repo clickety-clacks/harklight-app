@@ -168,10 +168,11 @@ final class OperationRecoveryTests: XCTestCase {
 
     private func confirm(_ repository: ClientRepository, context: ProfileContext,
                          key: RequestKey, payload: JSONValue) throws {
-        let request = StoredRequest(key: key, originalPayload: payload)
-        try repository.restoreCachedServerState(CachedAttentionServerState(identity: context.identity,
-            requests: [key: request], remoteStates: [:], cursor: 1, conversationCursor: 0,
-            conversations: [:], inboxView: nil, currentRequestKeys: [key]), context: context)
+        let model = ServerModelV2Store(fileURL: nil)
+        try model.apply([v2CacheItem(key, message: payload, revision: 1)], cursor: 1,
+                        onUnreadable: { _, error in throw error })
+        try repository.restoreCachedServerState(
+            ServerModelV2Projection.cachedState(model.snapshot, identity: context.identity), context: context)
     }
 
     private func submit(_ repository: ClientRepository, context: ProfileContext,

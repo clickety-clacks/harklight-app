@@ -1581,8 +1581,6 @@ public final class ClientRepository: @unchecked Sendable {
         if case let .terminal(key, _, _) = event.body {
             dropUnsentAnswer(for: key, in: &next)
         }
-        if let requestKey = Self.requestKey(in: event) {
-        }
         next.appliedEvents[event.sequence] = event
         next.cursor = max(next.cursor, event.sequence)
         next.repairIssues.removeAll { issue in
