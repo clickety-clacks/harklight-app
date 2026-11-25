@@ -523,6 +523,64 @@ final class InboxVisualRulesTests: XCTestCase {
     }
 
     @MainActor
+    func testTerminalFYIsKeepOnlyEligibleSeenFlagsAndOpeningARetractionDoesNotMarkSeen() throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("fixture.invalid"),
+            personID: ExactText("terminal-fyi-fixture"), deviceID: ExactText("device"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let repo = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        let model = ServerModelV2Store(fileURL: nil)
+        let states = ["cleared", "expired", "retracted", "superseded"]
+        let cases = states.flatMap { state in
+            [false, true].flatMap { progress in
+                [false, true].map { seen in (state: state, progress: progress, seen: seen) }
+            }
+        }
+        let now = UInt64(Date().timeIntervalSince1970 * 1000)
+        let sender = ExactText("fixture:community")
+
+        func changes(terminal: Bool) -> [ServerModelV2Store.Change] {
+            cases.enumerated().map { index, item in
+                let rev = index + 1 + (terminal ? cases.count : 0)
+                let progress = item.progress ? #","progress":{"percent":0,"updated_at":"2026-11-25T00:00:00Z","stage":"","segments":[]}"# : ""
+                let outcome = terminal ? #","terminal":{"state":"\#(item.state)","at_ms":\#(now)}"# : ""
+                let body = #"""
+                    {"item_id":"terminal-\#(index)","sender":"\#(sender.rawValue)","rev":\#(rev),
+                     "request_revision":1,"seen":\#(item.seen),"message":{"message_type":"fyi",
+                     "title":"Synthetic terminal bulletin"\#(progress)},
+                     "files":[],"chat":{"started":false},"rank":{"key":"\#(index)","section":"current"}\#(outcome)}
+                    """#
+                return .init(rev: UInt64(rev), kind: "item", data: Data(body.utf8))
+            }
+        }
+
+        try model.apply(changes(terminal: false), cursor: UInt64(cases.count))
+        try repo.restoreCachedServerState(ServerModelV2Projection.cachedState(model.snapshot, identity: identity), context: context)
+        let store = try LivePresentationStore(store: repo, context: context)
+        XCTAssertEqual(store.inboxRows.filter(\.isRepliedFYI).count, 8)
+
+        try model.apply(changes(terminal: true), cursor: UInt64(cases.count * 2))
+        try repo.restoreCachedServerState(ServerModelV2Projection.cachedState(model.snapshot, identity: identity), context: context)
+        try store.refreshFromDurableStore()
+        XCTAssertEqual(store.inboxRows.filter(\.isRepliedFYI).count, 4)
+        XCTAssertTrue(store.inboxRows.filter(\.isActiveFYI).isEmpty)
+        for (index, item) in cases.enumerated() {
+            let key = RequestKey(accountScope: identity.personID, senderID: sender,
+                                 messageID: ExactText("terminal-\(index)"))
+            let row = try XCTUnwrap(store.inboxRow(for: key))
+            let keepsSeenGroup = item.seen && (item.state == "cleared" || item.state == "expired")
+            XCTAssertEqual(row.isRepliedFYI, keepsSeenGroup, "\(item)")
+            if item.state == "retracted" {
+                XCTAssertTrue(row.isRetracted)
+                store.reportMessageContentOpened(try XCTUnwrap(store.request(for: key)))
+            }
+            if item.progress && !keepsSeenGroup {
+                XCTAssertTrue(row.fyiUsesInboxSearchForProgress)
+            }
+        }
+        XCTAssertTrue(try store.fyiTestSnapshot().pendingMessageOpens.isEmpty)
+    }
+
+    @MainActor
     func testSeenFYISearchStaysOnRepliedWithFreeOrder() {
         var row = fyiRow("Stored Seen bulletin")
         row.informationalSeenStatus = .confirmed

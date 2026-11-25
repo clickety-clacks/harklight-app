@@ -668,6 +668,7 @@ struct InboxRequestRow: Identifiable {
     var fyiOpenedFlagFailed = false
     var fyiGroupingEnabled = true
     var fyiAnsweredOtherwise = false
+    var fyiIsSuperseded = false
     var fyiUsesInboxSearchForProgress = false
     var canRetryFYISeen = false
     var fyiUsesRepliedForProgress = false
@@ -699,7 +700,7 @@ struct InboxRequestRow: Identifiable {
     }
 
     var isRepliedFYI: Bool {
-        guard fyiGroupingEnabled, isFYI, !isRetracted, !fyiAnsweredOtherwise else { return false }
+        guard fyiGroupingEnabled, isFYI, !isRetracted, !fyiIsSuperseded, !fyiAnsweredOtherwise else { return false }
         if informationalSeenStatus == .confirmed { return true }
         return !isFYISeenPending && fyiServerSeen == true &&
             (hasProgressMarker || informationalSeenStatus == nil)

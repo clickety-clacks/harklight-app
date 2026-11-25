@@ -2664,6 +2664,7 @@ final class LivePresentationStore {
 
         if row.isFYI {
             row.fyiGroupingEnabled = !isReadOnly
+            row.fyiIsSuperseded = request.lifecycleStatus == .superseded
             row.fyiAnsweredOtherwise = (request.lifecycleStatus == .answered || request.lifecycleStatus == .noComment) &&
                 request.informationalSeenStatus != .confirmed
             row.fyiHasEnded = retracted || request.isResolved ||
@@ -2838,7 +2839,7 @@ final class LivePresentationStore {
     /// operation is stored before any best-effort relay send; a reconnect will
     /// retry it with the same message identity and revision.
     func reportMessageContentOpened(_ request: PresentedRequest) {
-        if request.isFYIRequest, request.isSettledFYIRequest { return }
+        if request.isFYIRequest, request.isSettledFYIRequest || isRetracted(request.key) { return }
         // Opening Progress with an explicit Seen response leaves acknowledgement
         // to the Seen controls. Plain FYIs retain their ordinary open behavior.
         if request.messageProgress != nil, !request.isResolved,
