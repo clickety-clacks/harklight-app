@@ -1341,7 +1341,9 @@ final class SampleWorkspaceUITests: XCTestCase {
         XCTAssertTrue(replied.isSelected)
         selectMessageTab("Inbox", in: app)
         XCTAssertTrue(inbox.isSelected)
-        XCTAssertTrue(message.isHittable)
+        let warningRestored = expectation(for: NSPredicate(format: "isHittable == true"),
+                                          evaluatedWith: message)
+        wait(for: [warningRestored], timeout: 5)
     }
 
     func testUnsupportedNoCommentControlStaysVisibleAndCanBeRetried() {
