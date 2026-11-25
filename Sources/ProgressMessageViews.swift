@@ -100,19 +100,26 @@ struct ProgressMessageDetail: View {
     let sender: String
     let bodyText: String?
     let progress: MessageProgress
+    var createdAt: Date?
+    var itemID: ExactText?
     var seenPending = false
     var onSeen: (() -> Void)? = nil
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
-                Text(sender)
-                    .harklightType(.messageSender)
-                    .foregroundStyle(.hkSecondary)
-                Text(title)
-                    .harklightType(.messageTitle)
-                    .foregroundStyle(.hkText)
-                    .accessibilityAddTraits(.isHeader)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(title)
+                        .harklightType(.messageTitle)
+                        .foregroundStyle(.hkText)
+                        .accessibilityAddTraits(.isHeader)
+                    if let itemID {
+                        MessageIDByline(identity: byline, itemID: itemID)
+                            .id(itemID)
+                    } else {
+                        byline
+                    }
+                }
                 if let snapshot = progress.snapshot {
                     snapshotContent(snapshot)
                 } else {
@@ -145,6 +152,13 @@ struct ProgressMessageDetail: View {
             }
         }
         .accessibilityIdentifier("progress.detail")
+    }
+
+    private var byline: some View {
+        let date = createdAt.map { InboxFriendlyDate.detailLabel(for: $0) }
+        return Text(verbatim: [sender, date].compactMap { $0 }.joined(separator: " · "))
+            .harklightType(.messageSender)
+            .foregroundStyle(.hkSecondary)
     }
 
     @ViewBuilder

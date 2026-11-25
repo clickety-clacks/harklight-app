@@ -390,6 +390,13 @@ final class SampleWorkspaceUITests: XCTestCase {
         row.tap()
         let seen = app.buttons["request-seen-action"]
         XCTAssertTrue(seen.waitForExistence(timeout: 5))
+        let pill = app.buttons["copy-message-id"]
+        XCTAssertTrue(pill.waitForExistence(timeout: 5))
+        XCTAssertEqual(pill.label, "Copy message ID")
+        XCTAssertEqual(pill.value as? String, "progress-fyi")
+        pill.tap()
+        XCTAssertEqual(pill.value as? String, "Copied")
+        XCTAssertTrue(seen.exists, "Copying the ID leaves Seen available.")
         seen.tap()
         XCTAssertTrue(app.staticTexts["Seen pending confirmation"].waitForExistence(timeout: 5))
         XCTAssertFalse(seen.exists)
@@ -402,6 +409,34 @@ final class SampleWorkspaceUITests: XCTestCase {
         capture("Progress FYI Seen pending in list", app)
         row.swipeLeft()
         XCTAssertFalse(app.buttons["Seen"].exists)
+    }
+
+    func testProgressItemIDFromInboxAndNotificationNavigation() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--harklight-test-fyi-list", "--harklight-test-fyi-finished-progress",
+                               "--harklight-test-notification-navigation",
+                               "--harklight-test-notification-item=progress-fyi"]
+        app.launch()
+        defer { app.terminate() }
+
+        let row = app.descendants(matching: .any)["progress-row-progress-fyi"]
+        XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertFalse(app.buttons["copy-message-id"].exists)
+        row.tap()
+        let detail = app.scrollViews["progress.detail"]
+        XCTAssertTrue(detail.waitForExistence(timeout: 5))
+        let pill = detail.buttons["copy-message-id"]
+        XCTAssertTrue(pill.waitForExistence(timeout: 5))
+        XCTAssertEqual(pill.value as? String, "progress-fyi")
+
+        app.terminate()
+        app.launch()
+        let notification = app.buttons["harklight-test-notification"]
+        XCTAssertTrue(notification.waitForExistence(timeout: 5), app.debugDescription)
+        notification.tap()
+        XCTAssertTrue(pill.waitForExistence(timeout: 5))
+        XCTAssertEqual(pill.label, "Copy message ID")
+        XCTAssertEqual(pill.value as? String, "progress-fyi")
     }
 
     func testConfirmedFYILeavesTheRestoredListAndLastSeenLeavesAnEmptyState() {

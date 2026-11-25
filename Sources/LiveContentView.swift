@@ -677,6 +677,8 @@ struct LiveContentView: View {
                                 ProgressMessageDetail(title: request.title?.rawValue ?? "Message",
                                     sender: request.senderDisplayName?.rawValue ?? key.senderID.rawValue,
                                     bodyText: request.body?.rawValue, progress: progress,
+                                    createdAt: request.createdAt,
+                                    itemID: store.isLocalExample ? nil : key.messageID,
                                     seenPending: row?.isFYISeenPending == true,
                                     onSeen: row?.canMarkFYISeen == true
                                         ? { store.markProgressFYISeen(key, requestRevision: request.requestRevision) }
@@ -1365,7 +1367,7 @@ private struct ReplacedByMessagesSection: View {
     }
 }
 
-private struct MessageIDByline<Identity: View>: View {
+struct MessageIDByline<Identity: View>: View {
     let identity: Identity
     let itemID: ExactText
     @State private var confirmation: UUID?

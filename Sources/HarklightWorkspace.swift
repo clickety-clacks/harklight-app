@@ -1067,7 +1067,12 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     }
 
     private func triggerNotificationTestAction() {
-        guard exposesNotificationTestAction, let key = requests.first?.key else { return }
+        guard exposesNotificationTestAction else { return }
+        let prefix = "--harklight-test-notification-item="
+        let itemID = ProcessInfo.processInfo.arguments.first { $0.hasPrefix(prefix) }
+            .map { ExactText(String($0.dropFirst(prefix.count))) }
+        let target = itemID.flatMap { id in requests.first { $0.key.messageID == id } } ?? requests.first
+        guard let key = target?.key else { return }
         let serial = max(notificationNavigation?.serial ?? 0,
                          testNotificationNavigation?.serial ?? 0) &+ 1
         testNotificationNavigation = NativeInboxNavigation(serial: serial, request: key)
