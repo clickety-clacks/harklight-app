@@ -180,6 +180,8 @@ extension ErrorLogForegroundConnectTests {
         XCTAssertFalse(inbox.presentsConnectionFailure)
         XCTAssertEqual(launch.foregroundConnectFailureKey, dismissed)
         XCTAssertTrue(showsLiveUpdatesPaused(log))
+        launch.reopenForegroundConnectFailure(dismissed)
+        XCTAssertTrue(inbox.presentsConnectionFailure, "The alert is visible before the active feed recovers.")
 
         let (releaseBatch, release) = AsyncStream<Void>.makeStream()
         defer { release.finish() }

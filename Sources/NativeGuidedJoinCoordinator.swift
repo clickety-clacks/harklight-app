@@ -28,6 +28,7 @@ final class NativeGuidedJoinCoordinator {
     @ObservationIgnored private var verificationPending = false
     @ObservationIgnored private var receivedInvitation = false
     @ObservationIgnored var connectApproved: ((NativeEnrollmentRecord) async throws -> Bool)?
+    @ObservationIgnored var canKeepCurrentConnection: ((NativeEnrollmentRecord) -> Bool)?
     @ObservationIgnored var notificationChoice: ((Bool) async -> Void)?
     @ObservationIgnored var didRemoveCurrentAccount: (() async -> Void)?
     @ObservationIgnored var didKeepCurrentAccount: ((NativeEnrollmentRecord) async throws -> Void)?
@@ -450,20 +451,23 @@ final class NativeGuidedJoinCoordinator {
         verificationPending = false
         invitation = nil
         message = nil
-        guard currentAccount?.isApproved == true else {
+        guard let currentAccount, currentAccount.isApproved else {
             screen = .welcome
             return
         }
         generation = UUID()
-        invitation = nil
-        message = nil
+        if currentAccount.foregroundRelayConfirmed != false,
+           currentAccount.notificationExplanationSeen != false,
+           canKeepCurrentConnection?(currentAccount) == true {
+            screen = .connected
+            isShowing = false
+            return
+        }
         let epoch = generation
         busy = true
         defer { if generation == epoch { busy = false } }
         do {
-            if let currentAccount {
-                try await finishApproval(currentAccount, epoch: epoch, restoring: true)
-            }
+            try await finishApproval(currentAccount, epoch: epoch, restoring: true)
         } catch {
             diagnostics?.record(area: .connection, phase: .approvedConnection,
                                 transition: NativeDiagnosticCauseCode.failureTransition(for: error),

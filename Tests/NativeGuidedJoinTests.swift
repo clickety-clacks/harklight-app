@@ -1764,6 +1764,33 @@ final class NativeGuidedJoinTests: XCTestCase {
         XCTAssertEqual(try store.approvedRecord()?.personID, fixture.invitation.personID)
     }
 
+    func testKeepingTheCurrentAccountPreservesItsActiveConnection() async throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanup() }
+        let transport = FakeTransport()
+        let store = NativeGuidedJoinStore(namespace: fixture.namespace, transport: transport)
+        let (attempt, _) = try await approvedInstallation(fixture, store: store, transport: transport)
+        let records = NativeEnrollmentStore(service: fixture.namespace)
+        try records.markForegroundRelayConfirmed(for: attempt.deviceID)
+        try records.markNotificationExplanationSeen(for: attempt.deviceID)
+        let savedAccount = try XCTUnwrap(store.approvedRecord())
+        let flow = NativeGuidedJoinCoordinator(store: store, deviceName: "My phone")
+        flow.canKeepCurrentConnection = { $0 == savedAccount }
+        flow.connectApproved = { _ in
+            XCTFail("Keeping an active account should not reopen its connection")
+            return false
+        }
+
+        await flow.receive(fixture.url(try fixture.invitationWith(person: "another-person")))
+        XCTAssertEqual(flow.screen, .existingAccount)
+        await flow.keepCurrentAccount()
+
+        XCTAssertEqual(flow.screen, .connected)
+        XCTAssertFalse(flow.isShowing)
+        XCTAssertNil(flow.invitation)
+        XCTAssertEqual(try store.approvedRecord(), savedAccount)
+    }
+
     func testDelayedStartupRestoreCannotReplaceTheInvitationThePersonJustOpened() async throws {
         let fixture = try Fixture()
         defer { fixture.cleanup() }
