@@ -543,14 +543,67 @@ private struct InboxNotificationPendingStatusContent: View {
     }
 }
 
-private struct InboxListRowScrollTarget: Hashable {
+struct InboxListRowScrollTarget: Hashable {
     let tab: InboxWorkspaceTab
     let selection: InboxSelection
     var placement: InboxListRowPlacement = .normal
 }
 
-private enum InboxListRowPlacement: Hashable {
+enum InboxSortScrollTarget: Equatable {
+    case row(InboxListRowScrollTarget)
+    case thread(group: InboxListRowScrollTarget, member: InboxListRowScrollTarget)
+}
+
+struct InboxSortScrollState {
+    struct Context: Equatable {
+        let selection: InboxSelection?
+        let search: String
+        let tab: InboxWorkspaceTab
+        let order: InboxOrder?
+    }
+
+    struct Request: Equatable {
+        let target: InboxSortScrollTarget
+        let context: Context
+        private let identity = UUID()
+
+        init(target: InboxSortScrollTarget, context: Context) {
+            self.target = target
+            self.context = context
+        }
+    }
+
+    private(set) var pending: Request?
+
+    mutating func start(_ target: InboxSortScrollTarget, in context: Context) {
+        pending = Request(target: target, context: context)
+    }
+
+    mutating func cancel() {
+        pending = nil
+    }
+
+    mutating func contextDidChange(to context: Context) {
+        if pending?.context != context {
+            cancel()
+        }
+    }
+
+    func accepts(_ request: Request, in context: Context) -> Bool {
+        pending == request && request.context == context
+    }
+}
+
+private struct InboxThreadListMember: Identifiable {
+    let item: InboxItem
+    let tab: InboxWorkspaceTab
+
+    var id: InboxListRowScrollTarget { .init(tab: tab, selection: item.id) }
+}
+
+enum InboxListRowPlacement: Hashable {
     case normal
+    case threadGroup
     case normalReplyItem
     case newMessageArea
     case replyItemArea
@@ -661,7 +714,8 @@ struct InboxRequestRow: Identifiable {
     var duePhrase: InboxDuePhrase.Presentation? = nil
     var orderingReason: String? = nil
     var defaultAnswerStatus: String? = nil
-    var fyiPostedAt: Date? = nil
+    var serverPostedAt: Date? = nil
+    var postedAt: Date? { serverPostedAt ?? createdAt }
     var fyiServerSeen: Bool? = nil
     var fyiHasEnded = false
     var fyiOpenedFlagPending = false
@@ -902,6 +956,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     @AppStorage("harklight.fyi-list-account") private var restoredFYIAccount: Data?
     @AppStorage("harklight.fyi-list-replied") private var restoredFYIWasReplied = false
     @State private var checkedFYIRestoration = false
+    @State private var inboxOrder = InboxOrder.priority
     @State private var selectedTab: InboxMessageTab = .inbox
     @State private var workspaceTab: InboxWorkspaceTab = .inbox
     @State private var rootTab: InboxRootTab = .inbox
@@ -958,10 +1013,14 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     }
 
     private var cardNavigationIDs: [InboxSelection] {
-        cardNavigationIDs(for: workspaceTab, query: activeSearch.trimmingCharacters(in: .whitespacesAndNewlines))
+        let query = activeSearch.trimmingCharacters(in: .whitespacesAndNewlines)
+        let order: InboxOrder = rootTab == .inbox && workspaceTab == .inbox && query.isEmpty
+            ? inboxOrder : .priority
+        return cardNavigationIDs(for: workspaceTab, query: query, order: order)
     }
 
-    private func cardNavigationIDs(for tab: InboxWorkspaceTab, query: String) -> [InboxSelection] {
+    private func cardNavigationIDs(for tab: InboxWorkspaceTab, query: String,
+                                   order: InboxOrder = .priority) -> [InboxSelection] {
         let visibleRows = rows.filter { item in
             guard query.isEmpty, case let .request(row) = item else { return true }
             return activeFYIsOnly ? !row.isBundledFYI(in: tab.messageTab) :
@@ -970,7 +1029,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         return InboxNormalListProjection.entries(rows: visibleRows,
             serverItems: conversationStore?.presentation.inboxViewListItems,
             freeOrderVersion: conversationStore?.presentation.inboxFreeOrderVersion,
-            in: tab, search: query).flatMap { entry -> [InboxSelection] in
+            in: tab, search: query, order: order).flatMap { entry -> [InboxSelection] in
                 guard case let .message(message) = entry else { return [] }
                 return message.members.map(\.id)
             }
@@ -1539,6 +1598,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             InboxList(tab: tab, rows: rows, warnings: visibleWarnings,
                   fyiInboxRow: !searching ? fyiInboxRow(for: tab) : nil,
                   activeFYIsOnly: activeFYIsOnly,
+                  inboxOrder: tab == .inbox && !searching ? $inboxOrder : nil,
                   showsBasicOrderMarker: showsBasicOrderMarker, isRefreshing: isRefreshing,
                   refreshInbox: refreshInbox,
                   conversationStore: conversationStore,
@@ -1952,6 +2012,7 @@ struct InboxList: View {
     let warnings: [String]
     var fyiInboxRow: FYIInboxRow? = nil
     var activeFYIsOnly = false
+    var inboxOrder: Binding<InboxOrder>? = nil
     var showsBasicOrderMarker = false
     var isRefreshing = false
     var refreshInbox: (@MainActor () async -> Void)? = nil
@@ -1986,6 +2047,7 @@ struct InboxList: View {
     @State private var requestedInGesture = false
     @State private var isFetchingOlderPage = false
     @State private var expandedThreadGroups: Set<InboxListEntryID> = []
+    @State private var sortScroll = InboxSortScrollState()
     @State private var isNewMessageAreaExpanded = false
     @State private var isProgressExpanded = false
     @State private var visibleMessagePlacements: Set<NewMessageAreaVisibility> = []
@@ -2071,7 +2133,7 @@ struct InboxList: View {
     }
 
     private func filteredRows(in tab: InboxWorkspaceTab) -> [InboxItem] {
-        if showsFreeOrder {
+        if showsFreeOrder || normalOrder == .posted {
             return normalListEntries.flatMap { entry -> [InboxItem] in
                 guard case let .message(message) = entry else { return [] }
                 return message.members
@@ -2094,13 +2156,28 @@ struct InboxList: View {
         })
     }
 
+    private var showsInboxSort: Bool {
+        tab == .inbox && inboxOrder != nil && search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var sortScrollContext: InboxSortScrollState.Context {
+        .init(selection: selected, search: search, tab: workspaceTab, order: inboxOrder?.wrappedValue)
+    }
+
+    private var normalOrder: InboxOrder {
+        guard showsInboxSort, let inboxOrder else { return .priority }
+        return inboxOrder.wrappedValue
+    }
+
     private var normalListEntries: [InboxNormalListDisplayEntry] {
         InboxNormalListProjection.entries(
             rows: rows.filter { !isBundledFYI($0) },
             serverItems: conversationStore?.presentation.inboxViewListItems,
             freeOrderVersion: conversationStore?.presentation.inboxFreeOrderVersion,
             in: tab,
-            search: search)
+            search: search,
+            order: normalOrder,
+            replyReceiptDate: { normalReplyProjection(for: $0)?.receivedAt })
     }
 
     private func isBundledFYI(_ item: InboxItem) -> Bool {
@@ -2386,6 +2463,7 @@ struct InboxList: View {
                 projection: item.projection,
                 parentTitle: item.parentTitle,
                 senderLabel: item.senderLabel,
+                date: reference.postedAt(fallingBackTo: item.projection?.receivedAt),
                 selected: isSelected)
         }
         .buttonStyle(.plain)
@@ -2488,7 +2566,7 @@ struct InboxList: View {
     /// can keep its old visible range and draw none of the matching rows, so a
     /// filter change starts the list again at its first row.
     private func showFirstRow(using proxy: ScrollViewProxy, in tab: InboxWorkspaceTab) {
-        if showsFreeOrder {
+        if showsFreeOrder || normalOrder == .posted {
             for entry in normalListEntries {
                 switch entry {
                 case .heading: continue
@@ -2510,16 +2588,42 @@ struct InboxList: View {
     }
 
     private func expandThreadContaining(_ selection: InboxSelection, in tab: InboxWorkspaceTab) {
-        let entries: [InboxListEntry] = showsFreeOrder ? normalListEntries.compactMap {
-            guard case let .message(message) = $0 else { return nil }
-            return message
-        } : InboxListProjection.visibleEntries(rows, in: tab, search: search)
+        let entries: [InboxListEntry] = if showsFreeOrder || normalOrder == .posted {
+            normalListEntries.compactMap {
+                guard case let .message(message) = $0 else { return nil }
+                return message
+            }
+        } else {
+            InboxListProjection.visibleEntries(rows, in: tab, search: search)
+        }
         guard let group = entries
             .first(where: { entry in
                 guard case .thread = entry else { return false }
                 return entry.members.contains { $0.id == selection }
             }) else { return }
         expandedThreadGroups.insert(group.id)
+    }
+
+    private func scrollAfterSort(_ request: InboxSortScrollState.Request,
+                                 using proxy: ScrollViewProxy, in tab: InboxWorkspaceTab) async {
+        // Each order has its own list positions. Scroll after the new list is installed.
+        await Task.yield()
+        guard !Task.isCancelled, sortScroll.accepts(request, in: sortScrollContext),
+              workspaceTab == tab, showsInboxSort else { return }
+        switch request.target {
+        case let .row(row):
+            // Use the data ID so the list can find a row that has not been laid out yet.
+            let displayID: InboxNormalListDisplayEntry.ID
+            if row.placement == .normalReplyItem, case let .request(key) = row.selection {
+                displayID = .reply(key)
+            } else {
+                displayID = .message(.row(row.selection))
+            }
+            proxy.scrollTo(displayID, anchor: .center)
+            sortScroll.cancel()
+        case let .thread(group, _):
+            proxy.scrollTo(group, anchor: .center)
+        }
     }
 
     private func openSettings() {
@@ -2591,27 +2695,21 @@ struct InboxList: View {
 
     @ViewBuilder
     private func rowContent(for row: InboxItem) -> some View {
-        let isSelected = selected == row.id
-        switch row {
-        case let .request(request):
+        let renderedRow: InboxRequestRow? = {
+            var request: InboxRequestRow? = switch row {
+            case let .request(request): request
+            case let .example(_, response): response.inboxRow
+            }
+            request?.createdAt = row.postedAt
+            return request
+        }()
+        if let request = renderedRow {
             NavigationLink(value: row.id) {
-                inboxRowLabel(request, selected: isSelected)
+                InboxRowContent(row: request, selected: selected == row.id, messageTab: tab.messageTab)
             }
             .buttonStyle(.plain)
             .navigationLinkIndicatorVisibility(.hidden)
-        case let .example(_, response):
-            if let request = response.inboxRow {
-                NavigationLink(value: row.id) {
-                    inboxRowLabel(request, selected: isSelected)
-                }
-                .buttonStyle(.plain)
-                .navigationLinkIndicatorVisibility(.hidden)
-            }
         }
-    }
-
-    private func inboxRowLabel(_ request: InboxRequestRow, selected: Bool) -> some View {
-        InboxRowContent(row: request, selected: selected, messageTab: tab.messageTab)
     }
 
     @ViewBuilder
@@ -2664,6 +2762,7 @@ struct InboxList: View {
     @ViewBuilder
     private func listRow(for row: InboxItem, in tab: InboxWorkspaceTab) -> some View {
         rowContent(for: row)
+            .accessibilityAddTraits(selected == row.id ? .isSelected : [])
             .tag(row.id)
             .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                 messageSwipeActions(for: row, in: tab)
@@ -2801,13 +2900,26 @@ struct InboxList: View {
             case let .row(row):
                 listRow(for: row, in: tab)
             case let .thread(_, members):
+                let request = sortScroll.pending
+                let group = InboxListRowScrollTarget(tab: tab, selection: members[0].id, placement: .threadGroup)
                 DisclosureGroup(isExpanded: threadExpansionBinding(for: messageEntry.id)) {
-                    ForEach(members) { row in
-                        listRow(for: row, in: tab)
+                    ForEach(members.map { InboxThreadListMember(item: $0, tab: tab) }) { member in
+                        listRow(for: member.item, in: tab)
+                            .onScrollVisibilityChange(threshold: 0.001) { isVisible in
+                                // The children are ready to scroll once the first one is visible.
+                                guard isVisible, member.item.id == members[0].id,
+                                      let request, case let .thread(expectedGroup, target) = request.target,
+                                      expectedGroup == group, sortScroll.accepts(request, in: sortScrollContext),
+                                      members.contains(where: { $0.id == target.selection }),
+                                      workspaceTab == tab, showsInboxSort else { return }
+                                proxy.scrollTo(target, anchor: .center)
+                                sortScroll.cancel()
+                            }
                     }
                 } label: {
                     threadGroupLabel(members: members)
                 }
+                .id(group)
                 .accessibilityIdentifier("inbox-thread-group-\(members[0].accessibilityID)")
                 .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
                 .listRowSeparator(.hidden)
@@ -2830,6 +2942,7 @@ struct InboxList: View {
             : []
         let shownProgressRows = ProgressInboxProjection.shown(progressRows, expanded: isProgressExpanded)
         let normalEntries = normalListEntries
+        let pendingSortScroll = sortScroll.pending
         let historyIDs = freeHistoryIDs
         let historyRows = matchingExpiredRetractionRows
         let areaRows = combinedNewMessageAreaRows
@@ -2947,7 +3060,7 @@ struct InboxList: View {
                 }
                 .listSectionMargins(.vertical, 0)
             }
-            if tab == .inbox && showsBasicOrderMarker && !showsFreeOrder {
+            if tab == .inbox && showsBasicOrderMarker && !showsFreeOrder && normalOrder == .priority {
                 Text("Basic order")
                     .harklightType(.sectionHeading)
                     .foregroundStyle(designPalette.label)
@@ -2990,6 +3103,7 @@ struct InboxList: View {
                     .listRowSeparator(.hidden)
             }
         }
+        .id(inboxOrder?.wrappedValue)
         .listStyle(.plain)
         .listSectionSeparator(.hidden)
         .contentMargins(.horizontal, 0, for: .scrollContent)
@@ -3008,8 +3122,25 @@ struct InboxList: View {
                 brandAndStatusHeader
             }
             .sharedBackgroundVisibility(.hidden)
-            ToolbarItemGroup(placement: .topBarTrailing) {
-                settingsButton
+            let isPad = UIDevice.current.userInterfaceIdiom == .pad
+            let sortMenu = inboxOrder.map {
+                InboxSortMenu(order: $0, title: "Sort Inbox", identifier: "inbox-sort",
+                              usesStackedLabel: isPad)
+            }
+            if showsInboxSort, let sortMenu, isPad {
+                // The iPad sidebar can overflow separate trailing items as a
+                // group. Place the two controls in one item's shared space.
+                ToolbarItem(placement: .topBarTrailing) {
+                    HStack(spacing: 4) {
+                        sortMenu
+                        settingsButton
+                    }
+                }
+            } else {
+                ToolbarItemGroup(placement: .topBarTrailing) {
+                    if showsInboxSort { sortMenu }
+                    settingsButton
+                }
             }
         }
         .toolbarMinimizationBehavior(.onScrollDown, for: .navigationBar)
@@ -3054,6 +3185,37 @@ struct InboxList: View {
                 showFirstRow(using: proxy, in: tab)
             }
         }
+        .onChange(of: inboxOrder?.wrappedValue) { _, _ in
+            sortScroll.cancel()
+            guard workspaceTab == tab, showsInboxSort, let selected else { return }
+            let placement: InboxListRowPlacement
+            if case let .request(key) = selected, lastViewedReplyTarget == key,
+               normalEntries.contains(where: { $0.id == .reply(key) }) {
+                placement = .normalReplyItem
+            } else if let message = normalEntries.compactMap({
+                if case let .message(entry) = $0 { return entry }
+                return nil
+            }).first(where: { $0.members.contains { $0.id == selected } }) {
+                if case let .thread(_, members) = message {
+                    expandedThreadGroups.insert(message.id)
+                    let target = InboxSortScrollTarget.thread(
+                        group: .init(tab: tab, selection: members[0].id, placement: .threadGroup),
+                        member: .init(tab: tab, selection: selected))
+                    sortScroll.start(target, in: sortScrollContext)
+                    return
+                }
+                placement = .normal
+            } else {
+                return
+            }
+            sortScroll.start(.row(.init(tab: tab, selection: selected, placement: placement)),
+                             in: sortScrollContext)
+        }
+        .task(id: pendingSortScroll) {
+            if let pendingSortScroll {
+                await scrollAfterSort(pendingSortScroll, using: proxy, in: tab)
+            }
+        }
         .onChange(of: normalEntries.map(\.id)) { _, _ in
             guard workspaceTab == tab, restoreLastViewed else { return }
             restoreLastViewed(using: proxy, in: tab)
@@ -3095,6 +3257,10 @@ struct InboxList: View {
                 renderedList(using: proxy)
             }
         }
+        .onChange(of: sortScrollContext) { _, context in
+            sortScroll.contextDidChange(to: context)
+        }
+        .onDisappear { sortScroll.cancel() }
     }
 }
 
@@ -3823,6 +3989,7 @@ private struct ReplyItemNormalRowContent: View {
     let projection: ReplyItemNormalRow?
     let parentTitle: String
     let senderLabel: String
+    let date: Date?
     let selected: Bool
 
     @Environment(\.colorScheme) private var colorScheme
@@ -3882,8 +4049,8 @@ private struct ReplyItemNormalRowContent: View {
             }
 
             HStack(alignment: .firstTextBaseline, spacing: 8) {
-                if let receivedAt = projection?.receivedAt {
-                    Text(InboxFriendlyDate.label(for: receivedAt))
+                if let date {
+                    Text(InboxFriendlyDate.label(for: date))
                         .harklightType(.rowTime)
                         .foregroundStyle(palette.label)
                         .lineLimit(1)
@@ -3934,19 +4101,19 @@ private struct InboxListSearchFieldModifier: ViewModifier {
     }
 }
 
-enum FYIOrder: String, CaseIterable, Identifiable {
+enum InboxOrder: String, CaseIterable, Identifiable {
     case priority = "Priority"
     case posted = "Posted"
 
     var id: Self { self }
 
-    func sorted(_ items: [InboxRequestRow]) -> [InboxRequestRow] {
+    func sortedFYIs(_ items: [InboxRequestRow]) -> [InboxRequestRow] {
         items.sorted { left, right in
             if self == .priority, left.fyiRankScore != right.fyiRankScore {
                 return left.fyiRankScore > right.fyiRankScore
             }
-            let leftDate = left.fyiPostedAt ?? left.createdAt ?? .distantPast
-            let rightDate = right.fyiPostedAt ?? right.createdAt ?? .distantPast
+            let leftDate = left.postedAt ?? .distantPast
+            let rightDate = right.postedAt ?? .distantPast
             if leftDate != rightDate { return leftDate > rightDate }
             return (left.key.senderID.rawValue, left.key.messageID.rawValue) <
                 (right.key.senderID.rawValue, right.key.messageID.rawValue)
@@ -4004,7 +4171,7 @@ final class FYIDigest {
     @ObservationIgnored private var generation = 0
 
     static func highlights(_ items: [InboxRequestRow]) -> [Highlight] {
-        let ranked = FYIOrder.priority.sorted(items.filter(\.isActiveFYI))
+        let ranked = InboxOrder.priority.sortedFYIs(items.filter(\.isActiveFYI))
         let highPriority = ranked.filter { $0.fyiRankScore >= 0.7 }
         return (highPriority.isEmpty ? ranked : highPriority).prefix(4).map {
             Highlight(key: $0.key,
@@ -4135,7 +4302,7 @@ struct FYIInboxRow: View {
     let open: () -> Void
 
     var body: some View {
-        let latest = FYIOrder.posted.sorted(items).first
+        let latest = InboxOrder.posted.sortedFYIs(items).first
         let unseen = showsUnseenBadge ? items.filter(\.isUnseenFYI).count : 0
         let colors = HarklightDesignSystem.source.fyiDigest
         Button(action: open) {
@@ -4199,6 +4366,38 @@ struct FYIInboxRow: View {
     }
 }
 
+private struct InboxSortMenu: View {
+    @Binding var order: InboxOrder
+    let title: LocalizedStringKey
+    let identifier: String
+    var usesStackedLabel = false
+
+    var body: some View {
+        Menu {
+            Picker(title, selection: $order) {
+                ForEach(InboxOrder.allCases) { choice in
+                    Text(choice.rawValue).tag(choice)
+                }
+            }
+        } label: {
+            if usesStackedLabel {
+                VStack(spacing: 1) {
+                    Image(systemName: "arrow.up.arrow.down")
+                    Text(order.rawValue)
+                }
+                .font(.caption2)
+            } else {
+                HStack(spacing: 4) {
+                    Image(systemName: "arrow.up.arrow.down")
+                    Text(order.rawValue)
+                }
+            }
+        }
+        .accessibilityLabel(Text("Sort: \(order.rawValue)"))
+        .accessibilityIdentifier(identifier)
+    }
+}
+
 private struct FYIList: View {
     let items: [InboxRequestRow]
     let activeFYIsOnly: Bool
@@ -4208,7 +4407,7 @@ private struct FYIList: View {
     let markSeen: (InboxRequestRow) -> Void
     let retrySeen: (InboxRequestRow) -> Void
     let open: (RequestKey) -> Void
-    @State private var order = FYIOrder.priority
+    @State private var order = InboxOrder.priority
     @Environment(\.colorScheme) private var colorScheme
 
     private var markAllDisabledReason: LocalizedStringKey? {
@@ -4223,7 +4422,7 @@ private struct FYIList: View {
     var body: some View {
         let palette = HarklightDesignSystem.palette(for: colorScheme)
         let disabledReason = markAllDisabledReason
-        List(order.sorted(items)) { item in
+        List(order.sortedFYIs(items)) { item in
             fyiRow(item, foregroundColor: palette.text)
         }
         .harklightListSurface()
@@ -4248,20 +4447,7 @@ private struct FYIList: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
-                Menu {
-                    Picker("Sort FYIs", selection: $order) {
-                        ForEach(FYIOrder.allCases) { choice in
-                            Text(choice.rawValue).tag(choice)
-                        }
-                    }
-                } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: "arrow.up.arrow.down")
-                        Text(order.rawValue)
-                    }
-                }
-                .accessibilityLabel(Text("Sort: \(order.rawValue)"))
-                .accessibilityIdentifier("fyi-sort")
+                InboxSortMenu(order: $order, title: "Sort FYIs", identifier: "fyi-sort")
                 if !isReplied {
                     Button("Mark All Seen") {
                         clearActionError()
@@ -4277,7 +4463,7 @@ private struct FYIList: View {
     private func fyiRow(_ item: InboxRequestRow, foregroundColor: Color) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             MessageHeading(sender: item.senderLabel, initials: item.displayInitials,
-                           title: item.title, createdAt: item.fyiPostedAt ?? item.createdAt,
+                           title: item.title, createdAt: item.postedAt,
                            messageType: item.resolvedMessageType, inFYIList: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(Rectangle())

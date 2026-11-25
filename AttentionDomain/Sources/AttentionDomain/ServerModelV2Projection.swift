@@ -219,7 +219,8 @@ public enum ServerModelV2Projection {
                                   openAtConversationSequence: open.position, unseenCount: unread,
                                   score: item.chat.replyPriority?.score.flatMap { Double($0.lexeme) },
                                   scoreKind: unread > 0 ? .current : .historical,
-                                  freeSection: InboxFreeSection(state: state, group: replyGroup)))
+                                  freeSection: InboxFreeSection(state: state, group: replyGroup),
+                                  postedAtMilliseconds: quote.atMs))
     }
 
     static func inboxView(_ ordered: [APIItem], keys: [ExactText: RequestKey], model: ServerModelV2) -> InboxView {

@@ -164,6 +164,10 @@ final class NativeAppLaunch {
             if let failureSeed, let seeded = try? SubmissionFailureTestSeed.makeStore(failureSeed) {
                 state = .live(seeded)
                 isIsolatedRelayTestSeed = true
+            } else if fyiSeed, let scenario = arguments.lazy.compactMap(InboxSortTestScenario.init(rawValue:)).first,
+                      let seeded = try? Self.makeInboxSortReviewTestStore(scenario) {
+                state = .live(seeded)
+                isIsolatedRelayTestSeed = true
             } else if fyiSeed, let seeded = try? Self.makeFYITestStore(
                 includeProgress: arguments.contains("--harklight-test-fyi-finished-progress") ||
                     arguments.contains("--harklight-test-fyi-ended-progress"),
@@ -175,7 +179,8 @@ final class NativeAppLaunch {
                 museumSeen: arguments.contains("--harklight-test-fyi-plain-seen"),
                 includeBulk: arguments.contains("--harklight-test-fyi-bulk"),
                 repliedFixture: arguments.contains("--harklight-test-fyi-tab-switch"),
-                includeBulkReplied: arguments.contains("--harklight-test-fyi-bulk-replied")) {
+                includeBulkReplied: arguments.contains("--harklight-test-fyi-bulk-replied"),
+                includeInboxSortRows: arguments.contains("--harklight-test-inbox-sort")) {
                 state = .live(seeded)
                 isIsolatedRelayTestSeed = true
             } else {
@@ -2674,10 +2679,11 @@ final class LivePresentationStore {
             row.fyiUsesInboxSearchForProgress = !isReadOnly && row.hasProgressMarker &&
                 row.fyiHasEnded && !row.belongsToReplied
         }
-        if row.isFYI, let item = request.fyiInboxEntry {
-            row.fyiPostedAt = item.itemCreatedAtMilliseconds.map {
-                Date(timeIntervalSince1970: Double($0) / 1_000)
-            }
+        let inboxEntry = request.fyiInboxEntry
+        row.serverPostedAt = inboxEntry?.itemCreatedAtMilliseconds.map {
+            Date(timeIntervalSince1970: Double($0) / 1_000)
+        }
+        if row.isFYI, let item = inboxEntry {
             row.fyiServerSeen = item.itemSeen
             row.fyiPriority = item.priority
             row.fyiPriorityScore = item.score
@@ -4439,10 +4445,12 @@ extension NativeAppLaunch {
                                  progressSeen: Bool = false, progressTerminal: String = "",
                                  gardenSeen: Bool = false, museumSeen: Bool = false,
                                  includeBulk: Bool = false, repliedFixture: Bool = false,
-                                 includeBulkReplied: Bool = false) throws -> LivePresentationStore {
+                                 includeBulkReplied: Bool = false,
+                                 includeInboxSortRows: Bool = false) throws -> LivePresentationStore {
         // Measure the large list opening from Inbox, free of the other fixture's restored selection.
+        let fixtureID = includeInboxSortRows ? "inbox-order-fixture" : (repliedFixture ? "fyi-tab-fixture" : "fyi-fixture")
         let personID = includeBulk || includeBulkReplied || !progressTerminal.isEmpty
-            ? ExactText(UUID().uuidString) : ExactText(repliedFixture ? "fyi-tab-fixture" : "fyi-fixture")
+            ? ExactText(UUID().uuidString) : ExactText(fixtureID)
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("fixture.invalid"),
             personID: personID, deviceID: ExactText("fixture-device"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
@@ -4472,6 +4480,25 @@ extension NativeAppLaunch {
         if includeProgress {
             pages.append(fyiProgressTestPage(progressPercent: progressPercent, progressSeen: progressSeen,
                                              progressTerminal: progressTerminal, revision: 3))
+        }
+        if includeInboxSortRows {
+            pages.append(#"""
+            {"rev":3,"counts":{"unresolved":4},"items":[
+                {"item_id":"sort-higher","rev":3,"sender":"fixture:sort","request_revision":1,
+                 "created_at_ms":1700000000000,"seen":false,
+                 "message":{"title":"Older priority message","created_at":1700345600000},
+                 "files":[],"chat":{"started":false},"rank":{"key":"c","score":0.9,"section":"current"}},
+                {"item_id":"sort-newer","rev":3,"sender":"fixture:sort","request_revision":1,
+                 "created_at_ms":1700172800000,"seen":false,
+                 "message":{"title":"Newest posted message","created_at":1700086400000},
+                 "files":[],"chat":{"started":false},"rank":{"key":"d","score":0.2,"section":"current"}},
+                {"item_id":"sort-answered","rev":3,"sender":"fixture:sort","request_revision":1,
+                 "created_at_ms":1700000008000,"seen":true,
+                 "message":{"title":"Replied sort example"},
+                 "terminal":{"state":"answered","at_ms":1700000008001,"answer":{"kind":"reply","text":"Confirmed"}},
+                 "files":[],"chat":{"started":false},"rank":{"key":"e","score":0.1,"section":"resolved"}}
+            ]}
+            """#)
         }
         for page in pages {
             try model.apply(APIInboxPage(json: JSONValue.parse(Data(page.utf8))))
@@ -4519,6 +4546,88 @@ extension NativeAppLaunch {
             return ServerModelV2Store.Change(rev: UInt64(revision), kind: "item",
                 data: Data(item(index, revision: revision, ended: index >= openCount).utf8))
         }
+    }
+
+    private enum InboxSortTestScenario: String {
+        case thread = "--harklight-test-inbox-sort-thread"
+        case reply = "--harklight-test-inbox-sort-reply"
+        case dates = "--harklight-test-inbox-sort-dates"
+    }
+
+    private static func makeInboxSortReviewTestStore(_ scenario: InboxSortTestScenario) throws -> LivePresentationStore {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("fixture.invalid"),
+            personID: ExactText("inbox-sort-review"), deviceID: ExactText("fixture-device"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let syntheticThread = ExactText("sort-review-thread")
+        typealias Fixture = (id: String, title: String, time: UInt64, thread: ExactText?)
+        var fixtures: [Fixture]
+        switch scenario {
+        case .thread:
+            fixtures = (1...18).map { index in
+                let batchTime: UInt64 = index <= 10 ? 1_700_000_003_000 : 1_700_000_000_000
+                return ("filler-\(index)", "Inbox message \(index)", batchTime + UInt64(index), nil)
+            }
+            fixtures.append(("thread-first", "First in thread", 1_700_000_001_000, syntheticThread))
+            fixtures += (1...12).map { index in
+                ("thread-\(index)", "Thread message \(index)", 1_700_000_001_000 + UInt64(index), syntheticThread)
+            }
+            fixtures.append(("thread-selected", "Selected thread message", 1_700_000_002_000, syntheticThread))
+        case .reply:
+            fixtures = [
+                ("reply-parent", "Cached reply parent", 1_700_000_000_000, nil),
+                ("dated-message", "Dated Inbox message", 1_700_172_800_000, nil)
+            ]
+        case .dates:
+            fixtures = [("reply-parent", "Shared date fixture", 1_700_000_000_000, nil)]
+        }
+
+        let model = ServerModelV2Store(fileURL: nil)
+        let authored = scenario == .dates ? #","created_at":1700345600000"# : ""
+        let terminal = scenario == .dates
+            ? #","terminal":{"state":"answered","at_ms":1700345600001,"answer":{"kind":"reply","text":"Confirmed"}}"#
+            : ""
+        let items = try fixtures.enumerated().map { index, fixture in
+            try APIItem(json: JSONValue.parse(Data(#"""
+            {"item_id":"\#(fixture.id)","rev":1,"sender":"fixture:sort","request_revision":1,
+             "created_at_ms":\#(fixture.time),"seen":false,"message":{"title":"\#(fixture.title)"\#(authored)},
+             "files":[],"chat":{"started":false},"rank":{"key":"\#(100 + index)","section":"current"}\#(terminal)}
+            """#.utf8)))
+        }
+        try model.rebaseline(items: items, counts: APICounts(unresolved: fixtures.count), position: 1)
+
+        let replyID = ExactText("cached-reply")
+        if scenario != .thread {
+            let page = try APIEntriesPage(json: JSONValue.parse(Data(#"""
+            {"rev":1,"older":false,"entries":[
+                {"entry_id":"cached-reply","item_id":"reply-parent","rev":1,"position":1,"kind":"reply",
+                 "author":"origin","request_revision":1,"text":"A cached reply","files":[]}
+            ]}
+            """#.utf8)))
+            try model.apply(page, of: ExactText("reply-parent"))
+        }
+        let cached = ServerModelV2Projection.cachedState(model.snapshot, identity: identity)
+        let entries = fixtures.map { fixture in
+            let key = ServerModelV2Projection.key(for: ExactText(fixture.id),
+                sender: ExactText("fixture:sort"), identity: identity)
+            return InboxViewEntry(key: key, thread: fixture.thread, itemCreatedAtMilliseconds: fixture.time)
+        }
+        let section: InboxFreeSection? = scenario == .dates ? .init(state: .history, group: .common) : nil
+        var references = entries.map { InboxViewListItem(kind: .message, key: $0.key, freeSection: section) }
+        var conversations = cached.conversations
+        if scenario != .thread, let parent = entries.first?.key {
+            conversations[parent]?.facts[replyID] =
+                ConversationTurnFacts(localLiveArrivalAtMilliseconds: 1_700_432_000_000)
+            references.append(.init(kind: .reply, key: parent, conversationSequence: 1,
+                                    openAtConversationSequence: 1, unseenCount: scenario == .dates ? 0 : 1,
+                                    freeSection: section, postedAtMilliseconds: scenario == .dates ? 1_700_172_800_000 : nil))
+        }
+        let view = InboxView(revision: ExactText("sort-review"), entries: entries, listItems: references,
+                             freeOrderVersion: scenario == .dates ? 1 : nil)
+        let repository = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        try repository.restoreCachedServerState(CachedAttentionServerState(identity: identity,
+            requests: cached.requests, remoteStates: cached.remoteStates, cursor: 1, conversationCursor: 1,
+            conversations: conversations, inboxView: view, currentRequestKeys: cached.currentRequestKeys), context: context)
+        return try LivePresentationStore(store: repository, context: context)
     }
 
     fileprivate static func fyiProgressTestPage(progressPercent: Int?, progressSeen: Bool,

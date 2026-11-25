@@ -11,6 +11,226 @@ final class SampleWorkspaceUITests: XCTestCase {
         XCUIDevice.shared.orientation = .portrait
     }
 
+    func testInboxSortSwitchesBetweenServerPriorityAndOriginalPostingTime() {
+        let isPad = UIDevice.current.userInterfaceIdiom == .pad
+        if isPad { XCUIDevice.shared.orientation = .landscapeLeft }
+        let app = XCUIApplication()
+        app.launchArguments = ["--harklight-test-fyi-list", "--harklight-test-inbox-sort"]
+        app.launch()
+        defer { app.terminate() }
+
+        XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
+        let sort = app.buttons["inbox-sort"]
+        guard sort.waitForExistence(timeout: 5) else {
+            XCTFail("The main Inbox toolbar needs a Priority / Posted control.")
+            return
+        }
+        XCTAssertEqual(sort.label, "Sort: Priority")
+        let higher = app.buttons["request-row-sort-higher"]
+        let newer = app.buttons["request-row-sort-newer"]
+        XCTAssertTrue(higher.waitForExistence(timeout: 5))
+        XCTAssertTrue(newer.exists)
+        XCTAssertLessThan(higher.frame.minY, newer.frame.minY)
+        assertInboxDate(1_700_000_000_000, in: higher)
+        assertInboxDate(1_700_172_800_000, in: newer)
+        capture("Inbox Priority order", app)
+
+        if isPad {
+            higher.tap()
+            XCTAssertTrue(app.buttons["request-heading"].waitForExistence(timeout: 5))
+        }
+        sort.tap()
+        app.buttons["Posted"].tap()
+        XCTAssertEqual(sort.label, "Sort: Posted")
+        XCTAssertLessThan(newer.frame.minY, higher.frame.minY)
+        assertInboxDate(1_700_172_800_000, in: newer)
+        assertInboxDate(1_700_000_000_000, in: higher)
+        if isPad {
+            XCTAssertTrue(app.buttons["request-heading"].label.contains("Older priority message"))
+            XCTAssertTrue(higher.isSelected)
+        }
+        capture("Inbox Posted order", app)
+        if !isPad {
+            newer.tap()
+            let heading = app.buttons["request-heading"]
+            XCTAssertTrue(heading.waitForExistence(timeout: 5))
+            XCTAssertTrue(heading.label.contains("Newest posted message"))
+            showList(app)
+            XCTAssertTrue(sort.waitForExistence(timeout: 5))
+            XCTAssertEqual(sort.label, "Sort: Posted")
+        }
+
+        sort.tap()
+        app.buttons["Priority"].tap()
+        XCTAssertEqual(sort.label, "Sort: Priority")
+        XCTAssertLessThan(higher.frame.minY, newer.frame.minY)
+        sort.tap()
+        app.buttons["Posted"].tap()
+        app.terminate()
+        app.launch()
+        XCTAssertTrue(sort.waitForExistence(timeout: 5))
+        XCTAssertEqual(sort.label, "Sort: Priority")
+    }
+
+    func testInboxSortUsesTheExistingReplyDateWhenTheQuoteHasNoTimestamp() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--harklight-test-fyi-list", "--harklight-test-inbox-sort-reply"]
+        app.launch()
+        defer { app.terminate() }
+
+        let reply = app.buttons["normal-reply-item-reply-parent"]
+        let message = app.buttons["request-row-dated-message"]
+        guard reply.waitForExistence(timeout: 5), message.exists else {
+            XCTFail("The cached reply and comparison message must be visible.")
+            return
+        }
+        XCTAssertLessThan(message.frame.minY, reply.frame.minY)
+        assertInboxDate(1_700_432_000_000, in: reply)
+        let sort = app.buttons["inbox-sort"]
+        sort.tap()
+        app.buttons["Posted"].tap()
+        XCTAssertLessThan(reply.frame.minY, message.frame.minY)
+        assertInboxDate(1_700_432_000_000, in: reply)
+    }
+
+    func testInboxDatesAgreeInPriorityPostedSearchAndReplied() {
+        if UIDevice.current.userInterfaceIdiom == .pad { XCUIDevice.shared.orientation = .landscapeLeft }
+        let app = XCUIApplication()
+        app.launchArguments = ["--harklight-test-fyi-list", "--harklight-test-inbox-sort-dates"]
+        app.launch()
+        defer { app.terminate() }
+
+        let sort = app.buttons["inbox-sort"]
+        XCTAssertTrue(sort.waitForExistence(timeout: 5))
+        let message = app.buttons["request-row-reply-parent"]
+        let reply = app.buttons["normal-reply-item-reply-parent"]
+        func assertDates() {
+            XCTAssertTrue(message.waitForExistence(timeout: 5))
+            XCTAssertTrue(reply.waitForExistence(timeout: 5))
+            assertInboxDate(1_700_000_000_000, in: message)
+            assertInboxDate(1_700_172_800_000, in: reply)
+        }
+
+        assertDates()
+        sort.tap()
+        app.buttons["Posted"].tap()
+        assertDates()
+        enterSearch("Shared date fixture", in: app)
+        XCTAssertFalse(sort.exists)
+        assertDates()
+        clearSearch(in: app)
+        workspaceTab("Replied", in: app).tap()
+        XCTAssertFalse(sort.exists)
+        assertDates()
+    }
+
+    func testInboxSortScrollsToASelectedThreadMemberWhenItRegroups() throws {
+        guard UIDevice.current.userInterfaceIdiom == .pad else {
+            throw XCTSkip("A split Inbox is needed to sort while the detail stays visible.")
+        }
+        XCUIDevice.shared.orientation = .landscapeLeft
+        let app = XCUIApplication()
+        app.launchArguments = ["--harklight-test-fyi-list", "--harklight-test-inbox-sort-thread"]
+        app.launch()
+        defer { app.terminate() }
+
+        // The disclosure can give its identifier to nested rows. Find the row by its own label.
+        let listButtons = app.buttons.matching(NSPredicate(format: "identifier != %@", "request-heading"))
+        let selected = listButtons.matching(NSPredicate(format: "label CONTAINS %@", "Selected thread message"))
+            .firstMatch
+        let previousMember = listButtons.matching(NSPredicate(format: "label CONTAINS %@", "Thread message 12"))
+            .firstMatch
+        let sort = app.buttons["inbox-sort"]
+        XCTAssertTrue(sort.waitForExistence(timeout: 5))
+        XCTAssertFalse(selected.isHittable, "The Priority group starts collapsed below the visible rows.")
+        sort.tap()
+        app.buttons["Posted"].tap()
+        XCTAssertEqual(sort.label, "Sort: Posted")
+        let list = app.collectionViews.firstMatch
+        for _ in 0..<4 where !selected.isHittable {
+            list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.84))
+                .press(forDuration: 0.05, thenDragTo:
+                    list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.36)))
+        }
+        XCTAssertTrue(selected.isHittable, "The thread member can be selected in Posted.")
+        selected.tap()
+        let heading = app.buttons["request-heading"]
+        XCTAssertTrue(heading.waitForExistence(timeout: 5))
+        XCTAssertTrue(heading.label.contains("Selected thread message"))
+
+        if !sort.isHittable { list.swipeDown() } // Reveal the sidebar toolbar after scrolling.
+        XCTAssertTrue(sort.waitForExistence(timeout: 5))
+        sort.tap()
+        app.buttons["Priority"].tap()
+        XCTAssertEqual(sort.label, "Sort: Priority")
+        assertInboxRowInView(selected, "Priority should reopen and scroll to the member's group.")
+        XCTAssertTrue(previousMember.isHittable)
+        XCTAssertLessThan(previousMember.frame.minY, selected.frame.minY)
+        XCTAssertTrue(heading.label.contains("Selected thread message"))
+        capture("Inbox Priority regrouped selected thread member", app)
+
+        if !sort.isHittable { list.swipeDown() }
+        XCTAssertTrue(sort.waitForExistence(timeout: 5))
+        sort.tap()
+        app.buttons["Posted"].tap()
+        XCTAssertEqual(sort.label, "Sort: Posted")
+        assertInboxRowInView(selected, "Posted should scroll back to the selected row.")
+        XCTAssertTrue(previousMember.isHittable)
+        XCTAssertLessThan(selected.frame.minY, previousMember.frame.minY)
+        XCTAssertTrue(heading.label.contains("Selected thread message"))
+        capture("Inbox Posted selected thread member", app)
+    }
+
+    private func assertInboxRowInView(_ row: XCUIElement, _ reason: String,
+                                      file: StaticString = #filePath, line: UInt = #line) {
+        let visible = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            row.exists && row.isHittable && row.isSelected
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [visible], timeout: 5), .completed, reason, file: file, line: line)
+    }
+
+    private func assertInboxDate(_ milliseconds: Double, in row: XCUIElement,
+                                 file: StaticString = #filePath, line: UInt = #line) {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .short
+        let date = formatter.string(from: Date(timeIntervalSince1970: milliseconds / 1_000))
+        XCTAssertTrue(row.label.contains(date) || row.staticTexts[date].exists,
+                      "Expected row date \(date), got \(row.label).", file: file, line: line)
+    }
+
+    func testInboxSortKeepsSearchAndRepliedBehavior() {
+        if UIDevice.current.userInterfaceIdiom == .pad { XCUIDevice.shared.orientation = .landscapeLeft }
+        let app = XCUIApplication()
+        app.launchArguments = ["--harklight-test-fyi-list", "--harklight-test-inbox-sort"]
+        app.launch()
+        defer { app.terminate() }
+
+        let sort = app.buttons["inbox-sort"]
+        guard sort.waitForExistence(timeout: 5) else {
+            XCTFail("The Inbox sort control is missing.")
+            return
+        }
+        sort.tap()
+        app.buttons["Posted"].tap()
+
+        enterSearch("Older priority message", in: app)
+        XCTAssertTrue(app.buttons["request-row-sort-higher"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["request-row-sort-newer"].exists)
+        XCTAssertFalse(sort.exists)
+        clearSearch(in: app)
+        let inbox = workspaceTab("Inbox", in: app)
+        if inbox.exists && !inbox.isSelected { inbox.tap() }
+
+        let replied = workspaceTab("Replied", in: app)
+        XCTAssertTrue(replied.waitForExistence(timeout: 5))
+        replied.tap()
+        XCTAssertFalse(sort.exists)
+        XCTAssertTrue(app.buttons["request-row-sort-answered"].waitForExistence(timeout: 5))
+        inbox.tap()
+        XCTAssertTrue(sort.waitForExistence(timeout: 5))
+        XCTAssertEqual(sort.label, "Sort: Posted")
+    }
+
     func testFYIDigestOpensListInNavigationAndSortChangesOrder() {
         if UIDevice.current.userInterfaceIdiom == .pad { XCUIDevice.shared.orientation = .landscapeLeft }
         let app = XCUIApplication()

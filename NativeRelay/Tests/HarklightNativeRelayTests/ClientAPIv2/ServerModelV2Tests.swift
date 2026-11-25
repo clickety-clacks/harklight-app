@@ -163,7 +163,7 @@ final class ServerModelV2Tests: XCTestCase {
 /// Serves `GET /v2/inbox` pages and records writes; enough for rebaseline.
 private final class InboxPagesTransport: ClientAPITransport, @unchecked Sendable {
     var pages: [String?: String] = [:]
-    var beforeReturningPage: @Sendable () async -> Void = {}
+    var beforeReturningPage: @Sendable (String?) async -> Void = { _ in }
     var maximumBatchPosition: Rev?
     var onBatch: (@Sendable (Rev) async throws -> FeedBatch)?
     var onFeed: (@Sendable (Rev) -> AsyncThrowingStream<FeedEvent, any Error>)?
@@ -171,7 +171,7 @@ private final class InboxPagesTransport: ClientAPITransport, @unchecked Sendable
         guard request.path == "/v2/inbox", let body = pages[request.query["page"]] else {
             throw APIError(status: 404, token: .notFound, retryable: false, requestID: "r")
         }
-        await beforeReturningPage()
+        await beforeReturningPage(request.query["page"])
         return APIResponse(status: 200, requestID: "r", body: Data(body.utf8))
     }
     func changeFeed(after: Rev) -> AsyncThrowingStream<FeedEvent, any Error> {
@@ -259,7 +259,7 @@ final class ServerModelAdapterTests: XCTestCase {
         let requested = AsyncGate()
         let blocked = AsyncGate()
         transport.pages[nil] = #"{"rev":1,"items":[],"counts":{"unresolved":0}}"#
-        transport.beforeReturningPage = {
+        transport.beforeReturningPage = { _ in
             requested.release()
             await blocked.wait()
         }
@@ -297,7 +297,7 @@ final class ServerModelAdapterTests: XCTestCase {
         transport.maximumBatchPosition = 1
         let reset = V2Fixture.item("reset", rev: 1, rankKey: "a")
         transport.pages[nil] = #"{"rev":1,"items":[\#(reset)],"counts":{"unresolved":1}}"#
-        transport.beforeReturningPage = {
+        transport.beforeReturningPage = { _ in
             requested.release()
             await blocked.wait()
         }
@@ -385,7 +385,7 @@ final class ServerModelAdapterTests: XCTestCase {
         let nextBatch = ResetBatchScript()
         let late = FeedChange(rev: 11, kind: .item, data: Data(V2Fixture.item("old", rev: 11, rankKey: "a").utf8))
         transport.pages[nil] = #"{"rev":1,"items":[],"counts":{"unresolved":0}}"#
-        transport.beforeReturningPage = {
+        transport.beforeReturningPage = { _ in
             if await nextBatch.isSecondSnapshot() { overlappingSnapshotStarted.release() }
             snapshotStarted.release()
             await releaseSnapshot.wait()
@@ -442,6 +442,48 @@ final class ServerModelAdapterTests: XCTestCase {
         XCTAssertEqual(Set(store.snapshot.items.keys.map(\.rawValue)), ["a", "b"], "Items no page lists are dropped.")
         XCTAssertTrue(store.snapshot.entries.isEmpty, "Cached entries are dropped and fetched on open.")
         XCTAssertEqual(store.snapshot.counts?.unresolved, 2)
+    }
+
+    func testInboxBaselineIncludesLaterPagesAndReplaysItemsThatMovedAheadOfTheCursor() async throws {
+        let store = ServerModelV2Store(fileURL: nil)
+        let transport = InboxPagesTransport()
+        let older = V2Fixture.item("high-priority", rev: 31, rankKey: "a", extra: #""created_at_ms":100"#)
+        let newer = V2Fixture.item("later-page", rev: 32, rankKey: "z", extra: #""created_at_ms":300"#)
+        let moved = V2Fixture.item("moved-before-page", rev: 41, rankKey: "0", extra: #""created_at_ms":200"#)
+        let live = V2Fixture.item("live-insert", rev: 42, rankKey: "b", extra: #""created_at_ms":400"#)
+        transport.pages[nil] = #"{"rev":40,"items":[\#(older)],"counts":{"unresolved":3},"next_page":"p2"}"#
+        transport.pages["p2"] = #"{"rev":41,"items":[\#(newer)],"counts":{"unresolved":3}}"#
+        transport.onBatch = { after in
+            XCTAssertEqual(after, 40)
+            XCTAssertEqual(Set(store.snapshot.items.keys.map(\.rawValue)), ["high-priority", "later-page"])
+            return FeedBatch(changes: [
+                FeedChange(rev: 41, kind: .item, data: Data(moved.utf8)),
+                FeedChange(rev: 42, kind: .item, data: Data(live.utf8))
+            ], rev: 42, more: false)
+        }
+        let secondPageRequested = expectation(description: "Requests the later rank page")
+        let returnSecondPage = AsyncGate()
+        transport.beforeReturningPage = { cursor in
+            guard cursor == "p2" else { return }
+            secondPageRequested.fulfill()
+            await returnSecondPage.wait()
+        }
+        let errors = RecordingErrorLogV2()
+        let sync = ChangeFeedSync(transport: transport,
+            model: ServerModelSyncWriter(store: store, transport: transport, errors: errors), errors: errors)
+        let catchUp = Task { try await sync.catchUp() }
+        defer { returnSecondPage.release() }
+        await fulfillment(of: [secondPageRequested], timeout: 5)
+        XCTAssertNil(store.heldCursor, "A partly loaded baseline cannot become the authoritative model.")
+        XCTAssertTrue(store.snapshot.items.isEmpty)
+        returnSecondPage.release()
+        try await catchUp.value
+
+        XCTAssertEqual(store.heldCursor, 42)
+        XCTAssertEqual(store.snapshot.items.compactMapValues(\.createdAtMs), [
+            ExactText("high-priority"): 100, ExactText("later-page"): 300,
+            ExactText("moved-before-page"): 200, ExactText("live-insert"): 400
+        ])
     }
 
     func testSyncAppliesRealResourcesFromTheFeedIntoTheModel() async throws {

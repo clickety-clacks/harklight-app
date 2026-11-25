@@ -7,16 +7,16 @@ import SwiftUI
 final class InboxVisualRulesTests: XCTestCase {
     func testFYIPostedSortUsesOriginalServerTimeInsteadOfUpdatedContent() {
         var later = fyiRow("later")
-        later.fyiPostedAt = Date(timeIntervalSince1970: 200)
+        later.serverPostedAt = Date(timeIntervalSince1970: 200)
         later.createdAt = Date(timeIntervalSince1970: 10)
         later.fyiPriority = .low
         var earlier = fyiRow("earlier")
-        earlier.fyiPostedAt = Date(timeIntervalSince1970: 100)
+        earlier.serverPostedAt = Date(timeIntervalSince1970: 100)
         earlier.createdAt = Date(timeIntervalSince1970: 400)
         earlier.fyiPriority = .high
 
-        XCTAssertEqual(FYIOrder.posted.sorted([earlier, later]).map(\.key), [later.key, earlier.key])
-        XCTAssertEqual(FYIOrder.priority.sorted([later, earlier]).map(\.key), [earlier.key, later.key])
+        XCTAssertEqual(InboxOrder.posted.sortedFYIs([earlier, later]).map(\.key), [later.key, earlier.key])
+        XCTAssertEqual(InboxOrder.priority.sortedFYIs([later, earlier]).map(\.key), [earlier.key, later.key])
     }
 
     func testFYISeenUsesExistingResponseStateAndKeepsConfirmedRows() {
@@ -31,7 +31,7 @@ final class InboxVisualRulesTests: XCTestCase {
         item.informationalSeenStatus = .confirmed
         item.fyiServerSeen = false
         XCTAssertFalse(item.isUnseenFYI)
-        XCTAssertEqual(FYIOrder.priority.sorted([item]).map(\.key), [item.key])
+        XCTAssertEqual(InboxOrder.priority.sortedFYIs([item]).map(\.key), [item.key])
     }
 
     func testExplicitFYIWithoutResponseUsesOrdinaryNativeSeen() {
@@ -49,7 +49,7 @@ final class InboxVisualRulesTests: XCTestCase {
     func testNormalFYIsReachTheDigestModel() async {
         let rows = ["Garden", "Museum", "Station", "Library", "Market"].enumerated().map { index, title in
             var row = fyiRow(title)
-            row.fyiPostedAt = Date(timeIntervalSince1970: TimeInterval(100 - index))
+            row.serverPostedAt = Date(timeIntervalSince1970: TimeInterval(100 - index))
             return row
         }
         let highlights = FYIDigest.highlights(Array(rows.reversed()))
@@ -289,8 +289,8 @@ final class InboxVisualRulesTests: XCTestCase {
         XCTAssertEqual(garden.fyiPriorityScore, 0.9)
         XCTAssertEqual(museum.fyiPriorityScore, 0.5)
         XCTAssertEqual(garden.fyiServerSeen, false)
-        XCTAssertEqual(FYIOrder.priority.sorted(rows).map(\.key), [garden.key, museum.key])
-        XCTAssertEqual(FYIOrder.posted.sorted(rows).map(\.key), [museum.key, garden.key])
+        XCTAssertEqual(InboxOrder.priority.sortedFYIs(rows).map(\.key), [garden.key, museum.key])
+        XCTAssertEqual(InboxOrder.posted.sortedFYIs(rows).map(\.key), [museum.key, garden.key])
     }
 
     @MainActor
@@ -414,7 +414,7 @@ final class InboxVisualRulesTests: XCTestCase {
         XCTAssertEqual(badgeBefore, openCount)
         XCTAssertEqual(original.filter(\.isActiveFYI).count, openCount)
         XCTAssertEqual(FYIDigest.highlights(original).count, 4)
-        XCTAssertTrue(FYIOrder.priority.sorted(original.filter(\.isActiveFYI)).contains { $0.title == "Bulletin 1" })
+        XCTAssertTrue(InboxOrder.priority.sortedFYIs(original.filter(\.isActiveFYI)).contains { $0.title == "Bulletin 1" })
 
         let batch = NativeAppLaunch.fyiBulkTestChanges(
             indices: 0..<openCount, firstRevision: itemCount + 1, openCount: 0)
@@ -673,7 +673,7 @@ final class InboxVisualRulesTests: XCTestCase {
         let inbox = (0..<100).map { fyiRow("New bulletin \($0)") }
         let start = DispatchTime.now().uptimeNanoseconds
         let rows = seen + inbox
-        XCTAssertEqual(FYIOrder.priority.sorted(rows.filter(\.isRepliedFYI)).count, 900)
+        XCTAssertEqual(InboxOrder.priority.sortedFYIs(rows.filter(\.isRepliedFYI)).count, 900)
         XCTAssertEqual(rows.filter(\.isActiveFYI).count, 100)
         XCTAssertEqual(FYIDigest.highlights(rows).count, 4)
         XCTAssertEqual(InboxBadge.count(requests: rows, samples: SampleLibrary(), showsLocalExamples: false), 100)
@@ -733,10 +733,10 @@ final class InboxVisualRulesTests: XCTestCase {
     func testEqualFYIPriorityUsesPostedOrder() {
         var earlier = fyiRow("Earlier")
         var later = fyiRow("Later")
-        earlier.fyiPostedAt = Date(timeIntervalSince1970: 1)
-        later.fyiPostedAt = Date(timeIntervalSince1970: 2)
+        earlier.serverPostedAt = Date(timeIntervalSince1970: 1)
+        later.serverPostedAt = Date(timeIntervalSince1970: 2)
         let rows = [earlier, later]
-        XCTAssertEqual(FYIOrder.priority.sorted(rows).map(\.key), FYIOrder.posted.sorted(rows).map(\.key))
+        XCTAssertEqual(InboxOrder.priority.sortedFYIs(rows).map(\.key), InboxOrder.posted.sortedFYIs(rows).map(\.key))
     }
 
     private func fyiRow(_ id: String) -> InboxRequestRow {
