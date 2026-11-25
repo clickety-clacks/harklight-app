@@ -510,6 +510,19 @@ final class InboxVisualRulesTests: XCTestCase {
     }
 
     @MainActor
+    func testSeenFYISearchStaysOnRepliedWithFreeOrder() {
+        var row = fyiRow("Stored Seen bulletin")
+        row.informationalSeenStatus = .confirmed
+        let items = [InboxItem.request(row)]
+        let references = [InboxViewListItem(kind: .message, key: row.key,
+            freeSection: InboxFreeSection(state: .history, group: .common))]
+        XCTAssertTrue(InboxNormalListProjection.entries(rows: items, serverItems: references,
+            freeOrderVersion: 1, in: .inbox, search: "Stored Seen").isEmpty)
+        XCTAssertEqual(InboxNormalListProjection.entries(rows: items, serverItems: references,
+            freeOrderVersion: 1, in: .replied, search: "Stored Seen").count, 1)
+    }
+
+    @MainActor
     func testLargeSeenFYIGroupRemainsSearchableAndDoesNotCountAsUnseen() {
         var seen = (0..<900).map { index in
             var row = fyiRow("Seen bulletin \(index)")

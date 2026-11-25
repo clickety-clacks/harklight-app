@@ -242,7 +242,7 @@ enum InboxListProjection {
         let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
         let inTab = rows.filter {
             $0.usesNormalMessageList(inInboxSearch: messageTab == .inbox && !query.isEmpty) &&
-                $0.belongsToReplied == (messageTab == .replied)
+                $0.belongsToMessageTab(messageTab)
         }
         guard !query.isEmpty else { return inTab }
         return inTab.filter { $0.matchesSearch(query) }
@@ -255,7 +255,7 @@ enum InboxListProjection {
         return InboxThreadListProjection.grouped(rows).compactMap { entry in
             let matches = entry.members.filter { item in
                 item.usesNormalMessageList(inInboxSearch: !isRepliedTab && !query.isEmpty) &&
-                    item.belongsToReplied == isRepliedTab &&
+                    item.belongsToMessageTab(tab.messageTab) &&
                     (query.isEmpty || item.matchesSearch(query))
             }
             guard !matches.isEmpty else { return nil }

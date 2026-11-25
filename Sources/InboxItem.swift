@@ -86,6 +86,14 @@ enum InboxItem: Identifiable {
         return row.progress == nil || row.fyiUsesRepliedForProgress
     }
 
+    @MainActor
+    func belongsToMessageTab(_ tab: InboxMessageTab) -> Bool {
+        if tab == .inbox, case let .request(row) = self, row.fyiGroupingEnabled, row.isActiveFYI {
+            return true
+        }
+        return belongsToReplied == (tab == .replied)
+    }
+
     var isSettledFYI: Bool {
         if case let .request(row) = self { return row.isSettledFYI }
         return false
@@ -344,7 +352,8 @@ enum InboxNormalListProjection {
             switch item.kind {
             case .message:
                 guard let row = rowsByKey[item.key], InboxItem.request(row).usesNormalMessageList(inInboxSearch: tab == .inbox && !query.isEmpty),
-                      (isFree && !row.fyiUsesRepliedForProgress) || row.belongsToReplied == (tab.messageTab == .replied),
+                      (isFree && !row.fyiUsesRepliedForProgress && !(row.isFYI && row.fyiGroupingEnabled)) ||
+                        InboxItem.request(row).belongsToMessageTab(tab.messageTab),
                       query.isEmpty || InboxItem.request(row).matchesSearch(query) else {
                     flushMessages()
                     continue
