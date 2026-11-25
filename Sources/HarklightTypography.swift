@@ -11,6 +11,7 @@ enum HarklightTextStyle: String, CaseIterable, Sendable {
     case inboxMessageTitle
     case rowByline
     case fyiDigestTitle
+    case fyiDigestPreview
     case messageTitle
     case sheetTitle
     case messageBody
@@ -75,7 +76,7 @@ struct HarklightTypeToken: Decodable, Sendable {
     let face: Face
     let size: Double
     let weight: Int
-    /// Line height as a multiple of the size, as the design's CSS states it.
+    /// Line height as a multiple of the point size. Nil uses the font's intrinsic line height.
     let lineHeight: Double?
     /// Letter spacing in ems.
     let tracking: Double?
@@ -144,6 +145,16 @@ enum HarklightTypography {
         }
     }
 
+    fileprivate static func usesNativeDigestPreview(_ style: HarklightTextStyle) -> Bool {
+        guard style == .fyiDigestPreview else { return false }
+        let token = HarklightDesignSystem.source.type.token(for: style)
+        let traits = UITraitCollection(preferredContentSizeCategory: .large)
+        let subheadline = UIFont.preferredFont(forTextStyle: .subheadline, compatibleWith: traits)
+        return token.face == .system && token.relativeTo == .subheadline &&
+            token.size == Double(subheadline.pointSize) && token.weight == 400 &&
+            token.tracking == nil && token.lineHeight == nil
+    }
+
     static func resolve(_ style: HarklightTextStyle,
                         dynamicTypeSize: DynamicTypeSize = .large) -> HarklightResolvedType {
         let token = HarklightDesignSystem.source.type.token(for: style)
@@ -179,11 +190,16 @@ private struct HarklightTypeModifier: ViewModifier {
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     func body(content: Content) -> some View {
-        let resolved = HarklightTypography.resolve(style, dynamicTypeSize: dynamicTypeSize)
-        content
-            .font(resolved.swiftUIFont)
-            .tracking(resolved.tracking)
-            .lineSpacing(resolved.lineSpacing)
+        if HarklightTypography.usesNativeDigestPreview(style) {
+            // SwiftUI's semantic font supplies the digest's existing multiline leading.
+            content.font(.subheadline)
+        } else {
+            let resolved = HarklightTypography.resolve(style, dynamicTypeSize: dynamicTypeSize)
+            content
+                .font(resolved.swiftUIFont)
+                .tracking(resolved.tracking)
+                .lineSpacing(resolved.lineSpacing)
+        }
     }
 }
 

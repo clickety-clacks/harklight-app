@@ -102,6 +102,118 @@ final class HarklightDesignTokenTests: XCTestCase {
         }
     }
 
+    func testSharedLayoutTokensPreserveTheAppMetrics() {
+        let expected: [HarklightShape: CGFloat] = [
+            .answeredCardPadding: 16,
+            .answeredCardStackSpacing: 8,
+            .answeredCardSymbolGap: 12,
+            .answeredCardSymbolSize: 18,
+            .answeredCardSymbolWidth: 22,
+            .brandEmptyDetailWidth: 190,
+            .brandHeaderStatusGap: 8,
+            .brandHeaderWidth: 128,
+            .brandPromptGap: 16,
+            .choiceCheckboxRadius: 4,
+            .choiceListSpacing: 10,
+            .choiceMarkBaselineOffset: 6,
+            .choiceMarkGap: 16,
+            .choiceMarkSize: 20,
+            .choiceMarkStroke: 1.5,
+            .choicePadding: 16,
+            .choicePickedRadioStroke: 6,
+            .choiceSuggestedGap: 8,
+            .choiceTextStackSpacing: 4,
+            .fyiDigestBadgeGap: 8,
+            .fyiDigestBadgeHorizontalPadding: 7,
+            .fyiDigestBadgeVerticalPadding: 2,
+            .fyiDigestBottomInset: 10,
+            .fyiDigestDisclosureSize: 18,
+            .fyiDigestDisclosureSymbolSize: 9,
+            .fyiDigestHeaderGap: 8,
+            .fyiDigestHorizontalInset: 12,
+            .fyiDigestPadding: 16,
+            .fyiDigestRadius: 12,
+            .fyiDigestStackSpacing: 6,
+            .fyiDigestStackedBadgeGap: 4,
+            .fyiDigestTopInset: 6,
+            .fyiListBylineGap: 8,
+            .fyiListHeadingStackSpacing: 6,
+            .fyiListInitialsTextSize: 10.5,
+            .fyiListRowSpacing: 8,
+            .fyiListSortLabelGap: 4,
+            .fyiListStatusVerticalPadding: 6,
+            .fyiListTitleSymbolGap: 8,
+            .fyiListTitleSymbolSize: 17,
+            .replyBorderDashLength: 4,
+            .replyBorderDashGap: 3,
+            .replyEditorHorizontalPadding: 12,
+            .replyEditorVerticalPadding: 10,
+            .replyFailureGap: 16,
+            .replyFailureHorizontalPadding: 16,
+            .replyFailureSymbolSize: 18,
+            .replyFailureVerticalPadding: 12,
+            .replyHeaderPaneGap: 0,
+            .replySavedHorizontalPadding: 16,
+            .replySavedVerticalPadding: 14,
+            .rowActionGlyphSize: 15,
+            .rowActionGlyphStroke: 1.1,
+            .rowActionTileRadius: 7,
+            .rowActionTileSize: 23,
+            .rowBylineGap: 8,
+            .rowContentSpacing: 6,
+            .rowDueTimeGap: 4,
+            .rowInitialsTextSize: 10.5,
+            .rowLeadingAccessoryGap: 6,
+            .rowLegacyTypeColumnGap: 12,
+            .rowLegacyTypeColumnWidth: 26,
+            .rowPriorityDueGap: 4,
+            .rowPriorityFlagGap: 6,
+            .rowPriorityFlagSize: 12,
+            .rowStackSpacing: 6,
+            .rowStatusFrameSize: 16,
+            .rowStatusSymbolSize: 14,
+            .rowSubmissionFailureSymbolSize: 14,
+            .rowTimeMinimumGap: 4,
+            .rowTitleStatusGap: 8,
+            .rowTypeBaselineOffset: 6,
+            .rowTypeColumnGap: 8,
+            .rowTypeColumnWidth: 23,
+            .rowTypeSymbolSize: 17,
+        ]
+        for (role, value) in expected {
+            XCTAssertEqual(HarklightDesignSystem.shape(role), value, role.rawValue)
+        }
+    }
+
+    func testSharedFillAndTypeTokensPreserveTheAppMetrics() throws {
+        let source = HarklightDesignSystem.source
+        for appearance in [source.light, source.dark] {
+            XCTAssertEqual(appearance.derived.openRowFillShare, 0.15)
+            XCTAssertEqual(appearance.derived.openRowBarShare, 0.55)
+            XCTAssertEqual(appearance.derived.pickedFillShare, 0.09)
+        }
+        let preview = source.type.token(for: .fyiDigestPreview)
+        XCTAssertEqual(preview.face, .system)
+        XCTAssertEqual(preview.size, 15)
+        XCTAssertEqual(preview.weight, 400)
+        XCTAssertNil(preview.tracking)
+        XCTAssertEqual(preview.relativeTo, .subheadline)
+        XCTAssertNil(preview.lineHeight)
+        XCTAssertNil(source.type.token(for: .choiceTitle).lineHeight)
+        XCTAssertNil(source.type.token(for: .choiceDetail).lineHeight)
+
+        let url = try XCTUnwrap(Bundle.main.url(forResource: "tokens", withExtension: "json")
+            ?? Bundle.main.url(forResource: "tokens", withExtension: "json", subdirectory: "Design"))
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        let type = try XCTUnwrap(json["type"] as? [String: Any])
+        let styles = try XCTUnwrap(type["styles"] as? [String: [String: Any]])
+        let roles: [HarklightTextStyle] = [.fyiDigestPreview, .choiceTitle, .choiceDetail]
+        for role in roles {
+            let style = try XCTUnwrap(styles[role.rawValue], role.rawValue)
+            XCTAssertTrue(style["lineHeight"] is NSNull, "\(role.rawValue).lineHeight must be explicitly null")
+        }
+    }
+
     func testHeadingFontIsBundled() {
         XCTAssertNotNil(Bundle.main.url(forResource: "Fraunces", withExtension: "ttf"))
         let title = HarklightTypography.resolve(.messageTitle)

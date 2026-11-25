@@ -118,6 +118,9 @@ struct HarklightDesignSource: Decodable, Sendable {
 
     struct Derived: Decodable, Sendable {
         let typeTint: [String: String]
+        let openRowFillShare: Double
+        let openRowBarShare: Double
+        let pickedFillShare: Double
         let urgentWash: String
         let highWash: String
         let replyPane: String
@@ -200,18 +203,18 @@ struct HarklightDesignSource: Decodable, Sendable {
         /// Fill of a picked choice, picked reply card and answered card:
         /// the type color at 9 percent over whatever is behind.
         func pickedFill(_ type: HarklightMessageType) -> Color {
-            typeColor(type).opacity(0.09)
+            typeColor(type).opacity(derived.pickedFillShare)
         }
 
         /// iPad open row fill: the type color at 15 percent.
         func openRowFill(_ type: HarklightMessageType) -> Color {
-            typeColor(type).opacity(0.15)
+            typeColor(type).opacity(derived.openRowFillShare)
         }
 
         /// iPad open row bar: the type color at 55 percent over the background.
         func openRowBar(_ type: HarklightMessageType) -> Color {
             HarklightRGBA(token: typeColorToken(type))
-                .mixed(0.55, over: HarklightRGBA(token: color.background)).color
+                .mixed(derived.openRowBarShare, over: HarklightRGBA(token: color.background)).color
         }
     }
 }
@@ -239,6 +242,81 @@ enum HarklightShape: String, CaseIterable, Sendable {
     case selectionBar
     case selectionIndent
     case replyPaneMinHeight
+    case answeredCardPadding
+    case answeredCardStackSpacing
+    case answeredCardSymbolGap
+    case answeredCardSymbolSize
+    case answeredCardSymbolWidth
+    case brandEmptyDetailWidth
+    case brandHeaderStatusGap
+    case brandHeaderWidth
+    case brandPromptGap
+    case choiceCheckboxRadius
+    case choiceListSpacing
+    case choiceMarkBaselineOffset
+    case choiceMarkGap
+    case choiceMarkSize
+    case choiceMarkStroke
+    case choicePadding
+    case choicePickedRadioStroke
+    case choiceSuggestedGap
+    case choiceTextStackSpacing
+    case fyiDigestBadgeGap
+    case fyiDigestBadgeHorizontalPadding
+    case fyiDigestBadgeVerticalPadding
+    case fyiDigestBottomInset
+    case fyiDigestDisclosureSize
+    case fyiDigestDisclosureSymbolSize
+    case fyiDigestHeaderGap
+    case fyiDigestHorizontalInset
+    case fyiDigestPadding
+    case fyiDigestRadius
+    case fyiDigestStackSpacing
+    case fyiDigestStackedBadgeGap
+    case fyiDigestTopInset
+    case fyiListBylineGap
+    case fyiListHeadingStackSpacing
+    case fyiListInitialsTextSize
+    case fyiListRowSpacing
+    case fyiListSortLabelGap
+    case fyiListStatusVerticalPadding
+    case fyiListTitleSymbolGap
+    case fyiListTitleSymbolSize
+    case replyBorderDashLength
+    case replyBorderDashGap
+    case replyEditorHorizontalPadding
+    case replyEditorVerticalPadding
+    case replyFailureGap
+    case replyFailureHorizontalPadding
+    case replyFailureSymbolSize
+    case replyFailureVerticalPadding
+    case replyHeaderPaneGap
+    case replySavedHorizontalPadding
+    case replySavedVerticalPadding
+    case rowActionGlyphSize
+    case rowActionGlyphStroke
+    case rowActionTileRadius
+    case rowActionTileSize
+    case rowBylineGap
+    case rowContentSpacing
+    case rowDueTimeGap
+    case rowInitialsTextSize
+    case rowLeadingAccessoryGap
+    case rowLegacyTypeColumnGap
+    case rowLegacyTypeColumnWidth
+    case rowPriorityDueGap
+    case rowPriorityFlagGap
+    case rowPriorityFlagSize
+    case rowStackSpacing
+    case rowStatusFrameSize
+    case rowStatusSymbolSize
+    case rowSubmissionFailureSymbolSize
+    case rowTimeMinimumGap
+    case rowTitleStatusGap
+    case rowTypeBaselineOffset
+    case rowTypeColumnGap
+    case rowTypeColumnWidth
+    case rowTypeSymbolSize
 }
 
 enum HarklightDesignSystem {
@@ -257,6 +335,8 @@ enum HarklightDesignSystem {
     static func palette(for colorScheme: ColorScheme) -> HarklightDesignSource.Appearance {
         colorScheme == .dark ? source.dark : source.light
     }
+
+    static var replyBorderDash: [CGFloat] { [shape(.replyBorderDashLength), shape(.replyBorderDashGap)] }
 
     static func shape(_ token: HarklightShape) -> CGFloat {
         guard let value = source.shape[token.rawValue] else {

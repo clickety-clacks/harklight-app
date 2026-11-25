@@ -174,11 +174,11 @@ struct HarklightBrand: View {
     var large = false
 
     var body: some View {
-        VStack(spacing: 16) {
+        VStack(spacing: HarklightDesignSystem.shape(.brandPromptGap)) {
             Image("HarklightLockup")
                 .resizable()
                 .scaledToFit()
-                .frame(width: large ? 190 : 128)
+                .frame(width: HarklightDesignSystem.shape(large ? .brandEmptyDetailWidth : .brandHeaderWidth))
                 .accessibilityLabel("Harklight")
 
             if large {
@@ -2488,7 +2488,7 @@ struct InboxList: View {
     }
 
     private var brandAndStatusHeader: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: HarklightDesignSystem.shape(.brandHeaderStatusGap)) {
             HarklightBrand().accessibilityIdentifier("inbox-brand")
             if isRefreshing {
                 // Refreshing is status, not a control: a plain spinner with no
@@ -2955,7 +2955,10 @@ struct InboxList: View {
         List(selection: listSelection) {
             if search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, let fyiInboxRow {
                 fyiInboxRow
-                    .listRowInsets(EdgeInsets(top: 6, leading: 12, bottom: 10, trailing: 12))
+                    .listRowInsets(EdgeInsets(top: HarklightDesignSystem.shape(.fyiDigestTopInset),
+                                              leading: HarklightDesignSystem.shape(.fyiDigestHorizontalInset),
+                                              bottom: HarklightDesignSystem.shape(.fyiDigestBottomInset),
+                                              trailing: HarklightDesignSystem.shape(.fyiDigestHorizontalInset)))
                     .listRowSeparator(.hidden)
                     .listRowBackground(rowSurface)
             }
@@ -3593,7 +3596,7 @@ struct InboxSubmissionProgressMark: View {
                     .accessibilityIdentifier("inbox-not-sent")
             } else {
                 Image(systemName: "exclamationmark.circle")
-                    .font(.system(size: 14, weight: .semibold))
+                    .font(.system(size: HarklightDesignSystem.shape(.rowSubmissionFailureSymbolSize), weight: .semibold))
                     .foregroundStyle(palette.coral)
                     .accessibilityLabel("Did not send")
                     .accessibilityIdentifier("inbox-not-sent")
@@ -3607,6 +3610,9 @@ private struct InboxRowMark: View {
     let palette: HarklightDesignSource.Appearance
 
     var body: some View {
+        let glyphSize = HarklightDesignSystem.shape(.rowActionGlyphSize)
+        let tileSize = HarklightDesignSystem.shape(.rowActionTileSize)
+        let glyphScale = glyphSize / 24
         Path { path in
             if answered {
                 path.move(to: CGPoint(x: 4, y: 12))
@@ -3621,13 +3627,13 @@ private struct InboxRowMark: View {
                 path.addLine(to: CGPoint(x: 9, y: 17))
             }
         }
-        .applying(CGAffineTransform(scaleX: 0.625, y: 0.625))
+        .applying(CGAffineTransform(scaleX: glyphScale, y: glyphScale))
         .stroke(Color(harklightToken: answered ? palette.inboxRow.answeredInk : palette.inboxRow.requestInk),
-                style: StrokeStyle(lineWidth: 1.1, lineCap: .round, lineJoin: .round))
-        .frame(width: 15, height: 15)
-        .frame(width: 23, height: 23)
+                style: StrokeStyle(lineWidth: HarklightDesignSystem.shape(.rowActionGlyphStroke), lineCap: .round, lineJoin: .round))
+        .frame(width: glyphSize, height: glyphSize)
+        .frame(width: tileSize, height: tileSize)
         .background(Color(harklightToken: answered ? palette.inboxRow.answeredFill : palette.inboxRow.requestFill),
-                    in: RoundedRectangle(cornerRadius: 7))
+                    in: RoundedRectangle(cornerRadius: HarklightDesignSystem.shape(.rowActionTileRadius)))
         .accessibilityHidden(true)
     }
 }
@@ -3652,8 +3658,8 @@ struct InboxRowContent: View {
 
     /// The title's own column starts after the type symbol, so lines under
     /// the title line up with the title text.
-    private var symbolColumn: CGFloat { messageTab == nil ? 26 : 23 }
-    private var symbolSpacing: CGFloat { messageTab == nil ? 12 : 8 }
+    private var symbolColumn: CGFloat { HarklightDesignSystem.shape(messageTab == nil ? .rowLegacyTypeColumnWidth : .rowTypeColumnWidth) }
+    private var symbolSpacing: CGFloat { HarklightDesignSystem.shape(messageTab == nil ? .rowLegacyTypeColumnGap : .rowTypeColumnGap) }
 
     @ViewBuilder
     private var leadingAccessories: some View {
@@ -3684,21 +3690,22 @@ struct InboxRowContent: View {
 
     @ViewBuilder
     private var titleTrailingStatus: some View {
+        let statusSize = HarklightDesignSystem.shape(.rowStatusFrameSize)
         if let progress = row.submissionProgress {
             InboxSubmissionProgressMark(progress: progress)
         }
         // Only a chat with an unread turn is marked; a read chat shows nothing.
         if row.chatUnread == true {
             Image(systemName: "flag.fill")
-                .font(.system(size: 14, weight: .semibold))
-                .frame(width: 16, height: 16)
+                .font(.system(size: HarklightDesignSystem.shape(.rowStatusSymbolSize), weight: .semibold))
+                .frame(width: statusSize, height: statusSize)
                 .foregroundStyle(palette.amber)
                 .accessibilityLabel("Unread conversation")
         }
         if row.localSeenSelected || row.informationalSeenStatus == .confirmed {
             Image(systemName: "checkmark")
-                .font(.system(size: 14, weight: .semibold))
-                .frame(width: 16, height: 16)
+                .font(.system(size: HarklightDesignSystem.shape(.rowStatusSymbolSize), weight: .semibold))
+                .frame(width: statusSize, height: statusSize)
                 .foregroundStyle(palette.teal)
                 .accessibilityLabel("Seen")
         }
@@ -3707,11 +3714,11 @@ struct InboxRowContent: View {
     @ViewBuilder
     private var priorityAndDueLine: some View {
         if priorityMarkerLevel != nil || row.duePhrase != nil {
-            HStack(alignment: .top, spacing: 4) {
+            HStack(alignment: .top, spacing: HarklightDesignSystem.shape(.rowPriorityDueGap)) {
                 if let level = priorityMarkerLevel {
-                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    HStack(alignment: .firstTextBaseline, spacing: HarklightDesignSystem.shape(.rowPriorityFlagGap)) {
                         Image(systemName: "flag.fill")
-                            .font(.system(size: 12, weight: .semibold))
+                            .font(.system(size: HarklightDesignSystem.shape(.rowPriorityFlagSize), weight: .semibold))
                             .accessibilityHidden(true)
                         Text(level.title)
                             .lineLimit(1)
@@ -3727,7 +3734,7 @@ struct InboxRowContent: View {
                 Spacer(minLength: 0)
                 if let duePhrase = row.duePhrase {
                     ViewThatFits(in: .horizontal) {
-                        HStack(alignment: .firstTextBaseline, spacing: 4) {
+                        HStack(alignment: .firstTextBaseline, spacing: HarklightDesignSystem.shape(.rowDueTimeGap)) {
                             Text(duePhrase.dayLine)
                                 .lineLimit(1)
                             Text(duePhrase.timeLine)
@@ -3755,10 +3762,10 @@ struct InboxRowContent: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 8) {
+        VStack(alignment: .leading, spacing: HarklightDesignSystem.shape(.rowStackSpacing)) {
+            HStack(spacing: HarklightDesignSystem.shape(.rowBylineGap)) {
                 Text(row.displayInitials)
-                    .font(.system(size: 10.5, weight: .regular))
+                    .font(.system(size: HarklightDesignSystem.shape(.rowInitialsTextSize), weight: .regular))
                     .foregroundStyle(palette.label)
                     .frame(width: HarklightDesignSystem.shape(.rowInitials),
                            height: HarklightDesignSystem.shape(.rowInitials))
@@ -3769,7 +3776,7 @@ struct InboxRowContent: View {
                     .harklightType(messageTab == nil ? .rowSender : .rowByline)
                     .foregroundStyle(palette.secondary)
                     .lineLimit(1)
-                Spacer(minLength: 4)
+                Spacer(minLength: HarklightDesignSystem.shape(.rowTimeMinimumGap))
                 if let createdAt = row.createdAt {
                     Text(InboxFriendlyDate.label(for: createdAt))
                         .harklightType(.rowTime)
@@ -3779,23 +3786,23 @@ struct InboxRowContent: View {
             }
 
             HStack(alignment: .firstTextBaseline, spacing: symbolSpacing) {
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                HStack(alignment: .firstTextBaseline, spacing: HarklightDesignSystem.shape(.rowLeadingAccessoryGap)) {
                     leadingAccessories
                     if let messageTab, messageTab == .replied || messageType == .request {
                         InboxRowMark(answered: messageTab == .replied, palette: palette)
-                            .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + 6 }
+                            .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + HarklightDesignSystem.shape(.rowTypeBaselineOffset) }
                     } else {
                         Image(systemName: messageType.symbol)
-                            .font(.system(size: 17, weight: .regular))
+                            .font(.system(size: HarklightDesignSystem.shape(.rowTypeSymbolSize), weight: .regular))
                             .foregroundStyle(palette.typeColor(messageType))
                             .frame(width: messageTab == nil ? nil : symbolColumn)
-                            .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + 6 }
+                            .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + HarklightDesignSystem.shape(.rowTypeBaselineOffset) }
                             .accessibilityHidden(true)
                     }
                 }
                 .frame(minWidth: messageTab == nil ? symbolColumn - symbolSpacing : symbolColumn, alignment: .leading)
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                VStack(alignment: .leading, spacing: HarklightDesignSystem.shape(.rowContentSpacing)) {
+                    HStack(alignment: .firstTextBaseline, spacing: HarklightDesignSystem.shape(.rowTitleStatusGap)) {
                         Text(MessageMarkdown.attributed(row.title))
                             .harklightType(messageTab == nil ? .rowTitle : .inboxMessageTitle)
                             .foregroundStyle(palette.text)
@@ -4310,31 +4317,32 @@ struct FYIInboxRow: View {
         let latest = InboxOrder.posted.sortedFYIs(items).first
         let unseen = showsUnseenBadge ? items.filter(\.isUnseenFYI).count : 0
         let colors = HarklightDesignSystem.source.fyiDigest
+        let disclosureSize = HarklightDesignSystem.shape(.fyiDigestDisclosureSize)
         Button(action: open) {
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(alignment: .top, spacing: 8) {
+            VStack(alignment: .leading, spacing: HarklightDesignSystem.shape(.fyiDigestStackSpacing)) {
+                HStack(alignment: .top, spacing: HarklightDesignSystem.shape(.fyiDigestHeaderGap)) {
                     ViewThatFits(in: .horizontal) {
-                        HStack(spacing: 8) {
+                        HStack(spacing: HarklightDesignSystem.shape(.fyiDigestBadgeGap)) {
                             Text(showsUnseenBadge ? "FYI digest" : "Seen FYIs").font(.caption.weight(.semibold))
                             if showsUnseenBadge { unseenBadge(unseen, border: colors.badgeBorder) }
                         }
-                        VStack(alignment: .leading, spacing: 4) {
+                        VStack(alignment: .leading, spacing: HarklightDesignSystem.shape(.fyiDigestStackedBadgeGap)) {
                             Text(showsUnseenBadge ? "FYI digest" : "Seen FYIs").font(.caption.weight(.semibold))
                             if showsUnseenBadge { unseenBadge(unseen, border: colors.badgeBorder) }
                         }
                     }
                     Spacer(minLength: 0)
                     Image(systemName: "chevron.right")
-                        .font(.system(size: 9, weight: .medium))
-                        .frame(width: 18, height: 18)
+                        .font(.system(size: HarklightDesignSystem.shape(.fyiDigestDisclosureSymbolSize), weight: .medium))
+                        .frame(width: disclosureSize, height: disclosureSize)
                         .background(Color(harklightToken: colors.disclosureBackground), in: Circle())
-                        .overlay(Circle().strokeBorder(Color(harklightToken: colors.disclosureBorder), lineWidth: 1))
+                        .overlay(Circle().strokeBorder(Color(harklightToken: colors.disclosureBorder), lineWidth: HarklightDesignSystem.shape(.lineWidth)))
                         .accessibilityHidden(true)
                 }
                 if let summary {
                     Text("Highlights").harklightType(.fyiDigestTitle)
                     Text(summary)
-                        .font(.subheadline)
+                        .harklightType(.fyiDigestPreview)
                         .foregroundStyle(Color(harklightToken: colors.preview))
                         .lineLimit(4)
                 } else if let latest {
@@ -4344,19 +4352,19 @@ struct FYIInboxRow: View {
                         .allowsHitTesting(false)
                     if let preview = latest.bodyText, !preview.isEmpty {
                         Text(MessageMarkdown.attributed(preview))
-                            .font(.subheadline)
+                            .harklightType(.fyiDigestPreview)
                             .foregroundStyle(Color(harklightToken: colors.preview))
                             .lineLimit(4)
                             .allowsHitTesting(false)
                     }
                 }
             }
-            .padding(16)
+            .padding(HarklightDesignSystem.shape(.fyiDigestPadding))
             .foregroundStyle(Color(harklightToken: colors.foreground))
             .tint(Color(harklightToken: colors.foreground))
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color(harklightToken: colors.background), in: RoundedRectangle(cornerRadius: 12))
-            .contentShape(RoundedRectangle(cornerRadius: 12))
+            .background(Color(harklightToken: colors.background), in: RoundedRectangle(cornerRadius: HarklightDesignSystem.shape(.fyiDigestRadius)))
+            .contentShape(RoundedRectangle(cornerRadius: HarklightDesignSystem.shape(.fyiDigestRadius)))
         }
         .buttonStyle(.plain)
         .accessibilityIdentifier(showsUnseenBadge ? "inbox-fyi" : "replied-fyi")
@@ -4365,9 +4373,9 @@ struct FYIInboxRow: View {
     private func unseenBadge(_ unseen: Int, border: String) -> some View {
         Text("\(unseen) unseen")
             .font(.caption2.monospacedDigit())
-            .padding(.horizontal, 7)
-            .padding(.vertical, 2)
-            .overlay(Capsule().strokeBorder(Color(harklightToken: border), lineWidth: 1))
+            .padding(.horizontal, HarklightDesignSystem.shape(.fyiDigestBadgeHorizontalPadding))
+            .padding(.vertical, HarklightDesignSystem.shape(.fyiDigestBadgeVerticalPadding))
+            .overlay(Capsule().strokeBorder(Color(harklightToken: border), lineWidth: HarklightDesignSystem.shape(.lineWidth)))
     }
 }
 
@@ -4376,6 +4384,7 @@ private struct InboxSortMenu: View {
     let title: LocalizedStringKey
     let identifier: String
     var usesStackedLabel = false
+    var labelSpacing: CGFloat = 4
 
     var body: some View {
         Menu {
@@ -4392,7 +4401,7 @@ private struct InboxSortMenu: View {
                 }
                 .font(.caption2)
             } else {
-                HStack(spacing: 4) {
+                HStack(spacing: labelSpacing) {
                     Image(systemName: "arrow.up.arrow.down")
                     Text(order.rawValue)
                 }
@@ -4443,7 +4452,7 @@ private struct FYIList: View {
                     .font(.caption)
                     .foregroundStyle(.hkSecondary)
                     .frame(maxWidth: .infinity)
-                    .padding(.vertical, 6)
+                    .padding(.vertical, HarklightDesignSystem.shape(.fyiListStatusVerticalPadding))
                     .accessibilityIdentifier("fyi-mark-all-reason")
             }
         }
@@ -4452,7 +4461,8 @@ private struct FYIList: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
-                InboxSortMenu(order: $order, title: "Sort FYIs", identifier: "fyi-sort")
+                InboxSortMenu(order: $order, title: "Sort FYIs", identifier: "fyi-sort",
+                              labelSpacing: HarklightDesignSystem.shape(.fyiListSortLabelGap))
                 if !isReplied {
                     Button("Mark All Seen") {
                         clearActionError()
@@ -4466,7 +4476,7 @@ private struct FYIList: View {
     }
 
     private func fyiRow(_ item: InboxRequestRow, foregroundColor: Color) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: HarklightDesignSystem.shape(.fyiListRowSpacing)) {
             MessageHeading(sender: item.senderLabel, initials: item.displayInitials,
                            title: item.title, createdAt: item.postedAt,
                            messageType: item.resolvedMessageType, inFYIList: true)

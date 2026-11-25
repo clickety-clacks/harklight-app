@@ -229,6 +229,9 @@ struct MessageChoiceLabel: View {
     private var isSendingHere: Bool { selected && submission.isSending(submissionKind) }
     private var isFailedHere: Bool { showsFailure && selected && submission.isFailed(submissionKind) }
 
+    private var markSize: CGFloat { HarklightDesignSystem.shape(.choiceMarkSize) }
+    private var markStroke: CGFloat { HarklightDesignSystem.shape(.choiceMarkStroke) }
+
     @ViewBuilder
     private var mark: some View {
         if isSendingHere {
@@ -238,14 +241,14 @@ struct MessageChoiceLabel: View {
                 .accessibilityLabel("Sending")
         } else if isFailedHere {
             Image(systemName: "exclamationmark.circle")
-                .font(.system(size: 20, weight: .regular))
+                .font(.system(size: markSize, weight: .regular))
                 .foregroundStyle(HarklightDesignSystem.palette(for: colorScheme).coral)
                 .accessibilityLabel("Did not send")
         } else if multiple {
             ZStack {
-                RoundedRectangle(cornerRadius: 4)
-                    .stroke(selected ? beamStyle : secondaryStyle, lineWidth: 1.5)
-                    .frame(width: 20, height: 20)
+                RoundedRectangle(cornerRadius: HarklightDesignSystem.shape(.choiceCheckboxRadius))
+                    .stroke(selected ? beamStyle : secondaryStyle, lineWidth: markStroke)
+                    .frame(width: markSize, height: markSize)
                 if selected {
                     Image(systemName: "checkmark")
                         .font(.caption.bold())
@@ -256,18 +259,18 @@ struct MessageChoiceLabel: View {
             // A picked choice's mark is a 6 point ring in the type color.
             Circle()
                 .stroke(selected ? beamStyle : secondaryStyle,
-                        lineWidth: selected ? 6 : 1.5)
-                .frame(width: 20, height: 20)
+                        lineWidth: selected ? HarklightDesignSystem.shape(.choicePickedRadioStroke) : markStroke)
+                .frame(width: markSize, height: markSize)
         }
     }
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 16) {
+        HStack(alignment: .firstTextBaseline, spacing: HarklightDesignSystem.shape(.choiceMarkGap)) {
             mark
-                .frame(width: 20, height: 20)
-                .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + 6 }
-            VStack(alignment: .leading, spacing: 4) {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                .frame(width: markSize, height: markSize)
+                .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + HarklightDesignSystem.shape(.choiceMarkBaselineOffset) }
+            VStack(alignment: .leading, spacing: HarklightDesignSystem.shape(.choiceTextStackSpacing)) {
+                HStack(alignment: .firstTextBaseline, spacing: HarklightDesignSystem.shape(.choiceSuggestedGap)) {
                     Text(title)
                         .harklightType(.choiceTitle)
                         .foregroundStyle(textStyle)
@@ -293,7 +296,7 @@ struct MessageChoiceLabel: View {
             }
         }
         .foregroundStyle(textStyle)
-        .padding(16).frame(maxWidth: .infinity, alignment: .leading)
+        .padding(HarklightDesignSystem.shape(.choicePadding)).frame(maxWidth: .infinity, alignment: .leading)
         .background {
             if drawsSurface && !appearance.usesSystemSurface {
                 RoundedRectangle(cornerRadius: cornerRadius)
@@ -305,7 +308,7 @@ struct MessageChoiceLabel: View {
                 RoundedRectangle(cornerRadius: cornerRadius)
                     .strokeBorder(selected ? beamStyle : AnyShapeStyle(messageColors.line),
                                   style: StrokeStyle(lineWidth: HarklightDesignSystem.shape(.lineWidth),
-                                                     dash: ownAnswer && !selected ? [4, 3] : []))
+                                                     dash: ownAnswer && !selected ? HarklightDesignSystem.replyBorderDash : []))
             }
         }
         .contentShape(RoundedRectangle(cornerRadius: cornerRadius))

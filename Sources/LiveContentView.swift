@@ -182,8 +182,8 @@ private struct AnswerConfirmationCard: View {
         HarklightDesignSystem.palette(for: colorScheme).message(messageType)
     }
 
-    private let symbolWidth: CGFloat = 22
-    private let symbolSpacing: CGFloat = 12
+    private let symbolWidth: CGFloat = HarklightDesignSystem.shape(.answeredCardSymbolWidth)
+    private let symbolSpacing: CGFloat = HarklightDesignSystem.shape(.answeredCardSymbolGap)
 
     private func answerText(_ answer: String) -> some View {
         Text(answer)
@@ -198,11 +198,11 @@ private struct AnswerConfirmationCard: View {
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: HarklightDesignSystem.shape(.card))
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: HarklightDesignSystem.shape(.answeredCardStackSpacing)) {
             HStack(alignment: .firstTextBaseline, spacing: symbolSpacing) {
                 if let symbolName {
                     Image(systemName: symbolName)
-                        .font(.system(size: 18, weight: .semibold))
+                        .font(.system(size: HarklightDesignSystem.shape(.answeredCardSymbolSize), weight: .semibold))
                         .foregroundStyle(messageColors.beam)
                         .frame(width: symbolWidth)
                 }
@@ -220,7 +220,7 @@ private struct AnswerConfirmationCard: View {
                     .padding(.leading, symbolName == nil ? 0 : symbolWidth + symbolSpacing)
             }
         }
-        .padding(16)
+        .padding(HarklightDesignSystem.shape(.answeredCardPadding))
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(messageColors.pickedFill, in: shape)
         .overlay(shape.strokeBorder(messageColors.beam, lineWidth: HarklightDesignSystem.shape(.lineWidth)))
@@ -461,7 +461,7 @@ private struct ReplyChoiceCard: View {
         let showsPane = showsEditor || !text.isEmpty
         let appearance = MessageChoiceAppearance.writtenReply(
             style: style, showsEditor: showsEditor, isReadOnly: isReadOnly, failed: failedHere)
-        let card = VStack(alignment: .leading, spacing: 0) {
+        let card = VStack(alignment: .leading, spacing: HarklightDesignSystem.shape(.replyHeaderPaneGap)) {
             // The card's own row below shows a failure once, with Edit and Retry.
             MessageChoiceLabel(title: title, detail: detail, selected: selected,
                                multiple: multiple, suggested: suggested,
@@ -475,8 +475,8 @@ private struct ReplyChoiceCard: View {
                     .frame(maxWidth: .infinity,
                            minHeight: HarklightDesignSystem.shape(.replyPaneMinHeight),
                            alignment: .topLeading)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 10)
+                    .padding(.horizontal, HarklightDesignSystem.shape(.replyEditorHorizontalPadding))
+                    .padding(.vertical, HarklightDesignSystem.shape(.replyEditorVerticalPadding))
                     .background(messageColors.replyPane)
                     .focused($focusedActionID, equals: target.actionIdentifier)
                     .accessibilityLabel(title)
@@ -489,14 +489,14 @@ private struct ReplyChoiceCard: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, minHeight: HarklightDesignSystem.shape(.replyPaneMinHeight),
                            alignment: .topLeading)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 14)
+                    .padding(.horizontal, HarklightDesignSystem.shape(.replySavedHorizontalPadding))
+                    .padding(.vertical, HarklightDesignSystem.shape(.replySavedVerticalPadding))
                     .background(messageColors.replyPane)
             }
             if failedHere {
-                HStack(spacing: 16) {
+                HStack(spacing: HarklightDesignSystem.shape(.replyFailureGap)) {
                     Image(systemName: "exclamationmark.circle")
-                        .font(.system(size: 18, weight: .regular))
+                        .font(.system(size: HarklightDesignSystem.shape(.replyFailureSymbolSize), weight: .regular))
                         .foregroundStyle(HarklightDesignSystem.palette(for: colorScheme).coral)
                         .accessibilityLabel("Did not send")
                     Spacer(minLength: 0)
@@ -511,8 +511,8 @@ private struct ReplyChoiceCard: View {
                     }
                 }
                 .tint(messageColors.beam)
-                .padding(.horizontal, 16)
-                .padding(.vertical, 12)
+                .padding(.horizontal, HarklightDesignSystem.shape(.replyFailureHorizontalPadding))
+                .padding(.vertical, HarklightDesignSystem.shape(.replyFailureVerticalPadding))
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -526,7 +526,7 @@ private struct ReplyChoiceCard: View {
             if !appearance.usesSystemSurface {
                 shape.strokeBorder(selected ? messageColors.beam : messageColors.line,
                                   style: StrokeStyle(lineWidth: HarklightDesignSystem.shape(.lineWidth),
-                                                     dash: selected ? [] : [4, 3]))
+                                                     dash: selected ? [] : HarklightDesignSystem.replyBorderDash))
             }
         }
         .animation(.smooth(duration: 0.25), value: selected)
@@ -851,11 +851,11 @@ struct MessageHeading: View {
     }
 
     private var bylineIdentity: some View {
-        HStack(spacing: inFYIList ? 8 : 10) {
+        HStack(spacing: inFYIList ? HarklightDesignSystem.shape(.fyiListBylineGap) : 10) {
             if !initials.isEmpty {
                 let badgeSize = HarklightDesignSystem.shape(inFYIList ? .rowInitials : .messageInitials)
                 Text(initials)
-                    .font(inFYIList ? .system(size: 10.5, weight: .medium) : .caption)
+                    .font(inFYIList ? .system(size: HarklightDesignSystem.shape(.fyiListInitialsTextSize), weight: .medium) : .caption)
                     .foregroundStyle(palette.label)
                     .frame(width: badgeSize, height: badgeSize)
                     .background(palette.field, in: Circle())
@@ -871,9 +871,9 @@ struct MessageHeading: View {
     }
 
     private var titleLine: some View {
-        HStack(alignment: .firstTextBaseline, spacing: inFYIList ? 8 : 14) {
+        HStack(alignment: .firstTextBaseline, spacing: inFYIList ? HarklightDesignSystem.shape(.fyiListTitleSymbolGap) : 14) {
             Image(systemName: messageType.symbol)
-                .font(.system(size: inFYIList ? 17 : 22, weight: .medium))
+                .font(.system(size: inFYIList ? HarklightDesignSystem.shape(.fyiListTitleSymbolSize) : 22, weight: .medium))
                 .foregroundStyle(palette.typeColor(messageType))
                 .accessibilityHidden(true)
             Text(MessageMarkdown.attributed(title))
@@ -901,8 +901,8 @@ struct MessageHeading: View {
                 }
             }
         } else {
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(spacing: 8) {
+            VStack(alignment: .leading, spacing: inFYIList ? HarklightDesignSystem.shape(.fyiListHeadingStackSpacing) : 6) {
+                HStack(spacing: inFYIList ? HarklightDesignSystem.shape(.fyiListBylineGap) : 8) {
                     bylineIdentity
                     Spacer(minLength: 0)
                     if let createdAt {
@@ -4021,7 +4021,7 @@ private struct LiveCompatibilityActions: View {
                 identifier: "request-seen-confirmation",
                 accessibilityValue: "Completed", symbolName: "checkmark")
         } else {
-            VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: HarklightDesignSystem.shape(.choiceListSpacing)) {
                 ForEach(actions, id: \.id) { action in
                     let option = localExample?.message.options.first { $0.id == action.id.rawValue }
                     let isSelected = selected == action.id
