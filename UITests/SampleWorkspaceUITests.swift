@@ -420,6 +420,10 @@ final class SampleWorkspaceUITests: XCTestCase {
         defer { app.terminate() }
 
         let row = app.descendants(matching: .any)["progress-row-progress-fyi"]
+        let backFromRestoredFYIs = app.navigationBars["FYIs"].buttons["BackButton"]
+        if !row.exists && backFromRestoredFYIs.isHittable {
+            backFromRestoredFYIs.tap()
+        }
         XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertFalse(app.buttons["copy-message-id"].exists)
         row.tap()
@@ -432,6 +436,9 @@ final class SampleWorkspaceUITests: XCTestCase {
         app.terminate()
         app.launch()
         let notification = app.buttons["harklight-test-notification"]
+        if !notification.exists && backFromRestoredFYIs.isHittable {
+            backFromRestoredFYIs.tap()
+        }
         XCTAssertTrue(notification.waitForExistence(timeout: 5), app.debugDescription)
         notification.tap()
         XCTAssertTrue(pill.waitForExistence(timeout: 5))
