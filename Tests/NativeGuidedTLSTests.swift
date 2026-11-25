@@ -278,42 +278,6 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertFalse(restored.shareText.contains("secret-marker"))
     }
 
-    func testPostAckFailureJournalRetainsBoundedStepAndErrorCode() throws {
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("HarklightPostAckFailure-\(UUID().uuidString).json")
-        defer { try? FileManager.default.removeItem(at: url) }
-        let journal = NativeClientDiagnosticJournal(fileURL: url)
-        let code = "url_session_error_code_-1005"
-        let event = NativeClientDiagnosticEvent(
-            area: .relay,
-            phase: .postAckDrain,
-            transition: .failed,
-            causeCode: code,
-            postAckFailureStep: .drainPendingOperations,
-            postAckFailureErrorCode: code,
-            id: UUID(),
-            occurredAtMilliseconds: 1)
-
-        journal.record(event)
-        let restored = NativeClientDiagnosticJournal(fileURL: url)
-        XCTAssertEqual(restored.events.first?.postAckFailureStep, .drainPendingOperations)
-        XCTAssertEqual(restored.events.first?.postAckFailureErrorCode, code)
-        XCTAssertTrue(restored.shareText.contains("post_ack_failure_step=drain_pending_operations"))
-        XCTAssertTrue(restored.shareText.contains("post_ack_failure_error_code=\(code)"))
-
-        let unsafeEvent = NativeClientDiagnosticEvent(
-            area: .relay,
-            phase: .postAckDrain,
-            transition: .failed,
-            postAckFailureStep: .drainPendingOperations,
-            postAckFailureErrorCode: "token=secret-marker",
-            id: UUID(),
-            occurredAtMilliseconds: 2)
-        journal.record(unsafeEvent)
-        XCTAssertFalse(journal.shareText.contains("secret-marker"))
-        XCTAssertTrue(journal.shareText.contains("post_ack_failure_error_code=unknown_error"))
-    }
-
     func testNoReplyJournalPersistsPayloadFreeOperationAndRoutingChain() throws {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("HarklightNoReplyChain-\(UUID().uuidString).json")

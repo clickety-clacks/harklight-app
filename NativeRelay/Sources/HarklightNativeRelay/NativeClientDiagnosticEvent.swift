@@ -142,18 +142,6 @@ public enum NativeDiagnosticPostAckStep: String, Codable, Sendable {
     case validateRelayState = "validate_relay_state"
 }
 
-/// Safe detail retained when a post-ACK operation fails. The error is reduced
-/// to a named client code or bounded numeric code before it crosses layers.
-public struct NativePostAckFailureDetails: Equatable, Sendable {
-    public let step: NativeDiagnosticPostAckStep
-    public let errorCode: String
-
-    public init(step: NativeDiagnosticPostAckStep, errorCode: String?) {
-        self.step = step
-        self.errorCode = NativeDiagnosticCauseCode.safeCode(errorCode) ?? "unknown_error"
-    }
-}
-
 public enum NativeDiagnosticReceiptState: String, Codable, Sendable {
     case pendingUnconfirmed
     case acceptedAwaitingReplay

@@ -7,7 +7,6 @@ enum NativeEnrollmentError: Error {
     case invalidIdentity
     case identityStorage
     case emptyAPNsToken
-    case invalidServerResponse
     case noPendingEnrollment
     case wrongApprovedDevice
     case keyPending

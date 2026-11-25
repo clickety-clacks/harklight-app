@@ -79,19 +79,13 @@ final class NativeClientDiagnosticJournal {
         record([event])
     }
 
-    /// Persist a group of related facts with one journal rewrite while keeping
-    /// the existing unchanged-operation replay suppression in force.
+    /// Persist a group of related facts with one journal rewrite.
     func record(_ newEvents: [NativeClientDiagnosticEvent]) {
         guard !newEvents.isEmpty else { return }
         // URLSession and actor callbacks may reach the main-actor journal in a
         // different order than they occurred. Keep the exported history in
         // event-time order while preserving arrival order for equal timestamps.
-        var appended = false
-        for event in newEvents where !isUnchangedOperationReplayState(event) {
-            events.append(event)
-            appended = true
-        }
-        guard appended else { return }
+        events.append(contentsOf: newEvents)
         events = events.enumerated().sorted { lhs, rhs in
             if lhs.element.occurredAtMilliseconds == rhs.element.occurredAtMilliseconds {
                 return lhs.offset < rhs.offset
@@ -138,34 +132,12 @@ final class NativeClientDiagnosticJournal {
         record(event)
     }
 
-    private func isUnchangedOperationReplayState(_ event: NativeClientDiagnosticEvent) -> Bool {
-        guard event.area == .answer,
-              event.phase == .ordinaryReplay,
-              let operationID = event.operationID,
-              let previous = events.last(where: {
-                  $0.area == .answer && $0.phase == .ordinaryReplay && $0.operationID == operationID
-              }) else { return false }
-        // A new transport attempt with the same receipt, phase and cause is not
-        // a new operation state. The connection-level journal still records
-        // that transport attempt; avoid rewriting this same operation summary.
-        return previous.transition == event.transition &&
-            previous.causeCode == event.causeCode &&
-            previous.terminalReason == event.terminalReason &&
-            previous.postAckBoundary == event.postAckBoundary &&
-            previous.postAckDrainTransition == event.postAckDrainTransition &&
-            previous.requestTag == event.requestTag &&
-            previous.requestRevision == event.requestRevision &&
-            previous.receiptState == event.receiptState
-    }
-
     func record(area: NativeDiagnosticArea,
                 phase: NativeDiagnosticPhase,
                 transition: NativeDiagnosticTransition,
                 error: Error? = nil,
                 causeCode: String? = nil,
                 terminalReason: NativeDiagnosticTerminalReason? = nil,
-                postAckBoundary: NativeDiagnosticPostAckBoundary? = nil,
-                postAckDrainTransition: NativeDiagnosticTransition? = nil,
                 attemptID: UUID? = nil,
                 transportAttemptID: UUID? = nil,
                 operationID: UUID? = nil,
@@ -174,7 +146,6 @@ final class NativeClientDiagnosticJournal {
                 receiptState: NativeDiagnosticReceiptState? = nil) {
         record(NativeClientDiagnosticEvent(area: area, phase: phase, transition: transition,
             causeCode: causeCode ?? error.map(Self.causeCode(for:)), terminalReason: terminalReason,
-            postAckBoundary: postAckBoundary, postAckDrainTransition: postAckDrainTransition,
             attemptID: attemptID,
             transportAttemptID: transportAttemptID,
             operationID: operationID, request: request, requestRevision: requestRevision,
@@ -350,7 +321,6 @@ final class NativeClientDiagnosticJournal {
             case .emptyAPNsToken: return "notification_empty_token"
             case .invalidIdentity: return "enrollment_invalid_identity"
             case .identityStorage: return "enrollment_identity_storage"
-            case .invalidServerResponse: return "enrollment_invalid_response"
             case .noPendingEnrollment: return "enrollment_no_pending_request"
             case .wrongApprovedDevice: return "enrollment_wrong_approved_device"
             case .keyPending: return "enrollment_key_pending"
