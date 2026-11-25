@@ -236,8 +236,9 @@ public actor ClientAPIFocusChannel {
         await deliver(show)
     }
 
-    /// Stops queued writes and renewal without interrupting a write already in flight.
-    public func pauseReporting() {
+    /// Stops renewal without interrupting a write already in flight. Leaving the
+    /// live workspace also sends one final focus report without a retry or renewal.
+    public func pauseReporting(sendNotInFront: Bool = false) {
         pausedForInternalError = nil
         latest = nil
         waiting = nil
@@ -245,6 +246,7 @@ public actor ClientAPIFocusChannel {
         renewal = nil
         retryTimer?.cancel()
         retryTimer = nil
+        if sendNotInFront && !isClosing { queue(.notInFront) }
     }
 
     /// Stops reporting when the connection is torn down.

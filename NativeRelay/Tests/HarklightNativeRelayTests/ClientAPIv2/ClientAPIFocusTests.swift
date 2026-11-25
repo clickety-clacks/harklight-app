@@ -148,17 +148,22 @@ final class ClientAPIFocusTests: XCTestCase {
                               onShow: { log.add($0, $1) })
     }
 
-    func testPausingForReadOnlyStopsRenewingWithoutSendingAnotherReport() async {
+    func testEnteringReadOnlyArchiveSendsNotInFrontOnceAndStopsRenewing() async {
         let transport = FocusTransport()
         let ticks = ManualTicks()
         let focus = channel(transport, ticks: ticks)
         await focus.report(.fyi)
         await waitFor("in-front focus starts renewing") { ticks.sleepers == 1 }
-        await focus.pauseReporting()
-        await waitFor("archive cancels renewal") { ticks.sleepers == 0 }
-        XCTAssertEqual(transport.sentBodies.count, 1)
+        await focus.pauseReporting(sendNotInFront: true)
+        await waitFor("archive sends final focus and cancels renewal") {
+            transport.acceptedBodies.count == 2 && ticks.sleepers == 0
+        }
         await focus.report(.inbox)
-        XCTAssertEqual(transport.sentBodies.count, 2)
+        XCTAssertEqual(transport.sentBodies, [
+            #"{"screen":"fyi","ttl_s":120}"#,
+            #"{"screen":"not_in_front","ttl_s":120}"#,
+            #"{"screen":"inbox","ttl_s":120}"#,
+        ])
         await focus.stop()
     }
 
