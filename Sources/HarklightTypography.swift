@@ -16,9 +16,7 @@ enum HarklightTextStyle: String, CaseIterable, Sendable {
     case sheetTitle
     case messageBody
     case rowBody
-    case newSummary
     case newStatus
-    case urgencyPill
     case priorityLine
     case rowSender
     case messageSender

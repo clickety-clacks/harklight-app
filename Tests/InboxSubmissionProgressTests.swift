@@ -143,7 +143,7 @@ final class InboxSubmissionProgressTests: XCTestCase {
         XCTAssertTrue(observed.value)
         XCTAssertEqual(model.submissionProgress[key], .init(state: .awaiting, since: date))
         XCTAssertEqual(model.inboxRows.first(where: { $0.key == key })?.submissionProgress,
-                       .init(state: .awaiting, since: date))
+                       .init(state: .awaiting))
         XCTAssertEqual(try repository.prepareDiscussion(binding, context: context), operation)
         XCTAssertEqual(try repository.conversationSnapshot(context: context).threads[key]?.drafts[1]?.submittedAt, date)
         let cache = try repository.serverCacheSnapshot(context: context)

@@ -364,7 +364,6 @@ struct ConversationPanel: View {
     private func activatePassivePushContent() {
         guard !store.isLocalExample else { return }
         NativePushedViewCoordinator.shared.contentWasTouched(key) {
-            store.newMessageAreaStore?.open(key)
             if let request = store.request(for: key) {
                 store.reportMessageContentOpened(request)
             }
@@ -598,7 +597,6 @@ private struct ConversationHistoryContent: View, Equatable {
 
     private func activatePassivePushContent() {
         NativePushedViewCoordinator.shared.contentWasTouched(key) {
-            store.newMessageAreaStore?.open(key)
             if let request = store.request(for: key) {
                 store.reportMessageContentOpened(request)
             }

@@ -4,11 +4,10 @@ import XCTest
 /// generated non-live content. No customer account or network is involved.
 @MainActor
 final class FreeRenderedUITests: XCTestCase {
-    func testNewMessageRowOffersSameSwipeActionAsItsNormalRow() {
-        // Prove eligibility on the same message's ordinary placement first.
+    func testNormalMessageRowOffersSwipeActionFromEitherEdge() {
         // Merely revealing an action must neither answer nor open the message.
         for swipeLeft in [true, false] {
-            let app = launchActionableNewMessage()
+            let app = launchActionableMessage()
             let list = app.collectionViews.firstMatch
             XCTAssertTrue(list.waitForExistence(timeout: 10), app.debugDescription)
             let normal = element("request-row-sample-approval-0", in: app)
@@ -19,71 +18,49 @@ final class FreeRenderedUITests: XCTestCase {
             XCTAssertTrue(eligible, app.debugDescription)
             capture("normal-message-swipe-\(swipeLeft)", app)
             app.terminate()
-            guard eligible else { return }
-
-            let fresh = launchActionableNewMessage()
-            let newRow = element("new-message-area-request-row-sample-approval-0", in: fresh)
-            XCTAssertTrue(newRow.waitForExistence(timeout: 10), fresh.debugDescription)
-            reveal(newRow, in: fresh.collectionViews.firstMatch, downward: true)
-            if swipeLeft { newRow.swipeLeft() } else { newRow.swipeRight() }
-            XCTAssertTrue(fresh.buttons["inbox-no-comment"].waitForExistence(timeout: 5),
-                          "The same actionable message must offer No comment in New. \(fresh.debugDescription)")
-            XCTAssertTrue(newRow.exists, "Revealing a swipe action must not answer the message.")
-            XCTAssertFalse(fresh.scrollViews["message-card-scroll"].exists,
-                           "A horizontal row swipe must not select the message.")
-            capture("new-message-swipe-\(swipeLeft)", fresh)
-            fresh.terminate()
         }
     }
 
-    private func launchActionableNewMessage() -> XCUIApplication {
+    private func launchActionableMessage() -> XCUIApplication {
         XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()
         app.launchArguments = ["--harklight-test-inbox-list-column",
-                               "--harklight-test-inbox-list-state=actionableNewMessage",
+                               "--harklight-test-inbox-list-state=actionableMessage",
                                "--harklight-ui-diagnostics"]
         app.launch()
         return app
     }
 
-    func testCapturedFreeNewSelectionAndReadTransition() {
+    func testCapturedFreeSelectionAndReadTransition() {
         for appearance in ["light", "dark"] {
             let app = launch(appearance)
             let list = app.collectionViews.firstMatch
             XCTAssertTrue(list.waitForExistence(timeout: 10), app.debugDescription)
             let provenance = element("free-rendered-provenance", in: app)
             XCTAssertTrue(status(provenance).contains("unread"), app.debugDescription)
-            let newMessage = element("new-message-area-request-row-newer", in: app)
-            let newReply = element("reply-item-request-row-older", in: app)
             let normalMessage = element("request-row-newer", in: app)
             let normalReply = element("normal-reply-item-older", in: app)
-            reveal(newMessage, in: list)
-            XCTAssertTrue(newReply.exists, app.debugDescription)
-            capture("free-\(appearance)-captured-new", app)
             reveal(normalMessage, in: list)
             reveal(normalReply, in: list)
-            XCTAssertTrue(newMessage.exists, "New remains alongside its own normal row.")
-            XCTAssertTrue(newReply.exists, "New reply remains alongside its independent normal row.")
             XCTAssertTrue(status(provenance).contains("unread"), "List visibility must not mark chat Seen.")
             capture("free-\(appearance)-captured-normal", app)
 
-            // Select compact New, then return to the same ordinary request row.
-            reveal(newMessage, in: list, downward: true)
-            newMessage.tap()
+            // Select the request and return to its normal row.
+            reveal(normalMessage, in: list, downward: true)
+            normalMessage.tap()
             let heading = app.buttons["request-heading"]
             XCTAssertTrue(heading.waitForExistence(timeout: 5), app.debugDescription)
             XCTAssertTrue(heading.label.contains("Generated newer parent"), app.debugDescription)
             capture("free-\(appearance)-selected-own-parent", app)
             returnToInbox(app)
-            XCTAssertFalse(newMessage.exists, app.debugDescription)
             XCTAssertTrue(normalMessage.isHittable,
-                          "Return must reveal the existing own row after New selection.\n\(app.debugDescription)")
+                          "Return must reveal the existing own row after selection.\n\(app.debugDescription)")
             XCTAssertTrue(status(provenance).contains("unread"), "Selecting a different parent does not read this chat.")
-            capture("free-\(appearance)-own-row-after-new", app)
+            capture("free-\(appearance)-own-row-after-selection", app)
 
             // The reply opens its own parent's chat at the retained target.
-            reveal(newReply, in: list, downward: true)
-            newReply.tap()
+            reveal(normalReply, in: list)
+            normalReply.tap()
             let replyText = app.staticTexts["Generated reply for the captured older chat"]
             XCTAssertTrue(replyText.waitForExistence(timeout: 5), app.debugDescription)
             XCTAssertTrue(replyText.isHittable, app.debugDescription)
@@ -94,7 +71,6 @@ final class FreeRenderedUITests: XCTestCase {
             capture("free-\(appearance)-chat-read-target", app)
             dismissChat(app)
             returnToInbox(app)
-            XCTAssertFalse(newReply.exists, "Actual read and New departure leave only the normal history row.")
             let history = app.staticTexts["History"]
             reveal(history, in: list)
             reveal(normalReply, in: list)

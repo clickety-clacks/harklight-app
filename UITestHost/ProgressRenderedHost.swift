@@ -15,7 +15,7 @@ struct ProgressRenderedHost: View {
             let domain = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
             let defaults = UserDefaults(suiteName: "progress-ui-\(UUID().uuidString)")!
             let model = try LivePresentationStore(localFixtureStore: domain, context: context,
-                                                   newMessageAreaDefaults: defaults)
+                                                   replyItemAreaDefaults: defaults)
             var messages: [StoredRequest] = []
             for index in 0..<7 {
                 let date = "2026-11-09T10:0\(6-index):00Z"

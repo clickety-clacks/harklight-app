@@ -167,31 +167,29 @@ final class InboxStockTabsUITests: XCTestCase {
         attachScreenshot("Native header restored at top", from: app)
     }
 
-    /// Something the person just sent shows in the New area at the top of
-    /// Inbox with a spinner, and its row in the normal list shows the spinner
-    /// too. A definitive failure shows as not sent instead.
-    func testSentItemsShowASpinnerInTheNewAreaAndTheNormalList() {
+    func testSentItemsStayInTheNormalListWithoutANewSection() {
         let app = XCUIApplication()
         app.launchArguments = ["--reset-attention-fixture", "--harklight-samples",
                                "--harklight-test-submission-progress"]
         app.launch()
+        defer { app.terminate() }
 
-        let awaitingArea = app.descendants(matching: .any)["awaiting-reply-area-sample-approval-0"]
-        XCTAssertTrue(awaitingArea.waitForExistence(timeout: 15), app.debugDescription)
-        XCTAssertTrue(awaitingArea.label.contains("Waiting for a reply"), awaitingArea.label)
-
-        let notSentArea = app.descendants(matching: .any)["awaiting-reply-area-sample-textChoice-0"]
-        XCTAssertTrue(notSentArea.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(notSentArea.label.contains("Did not send"), notSentArea.label)
-        XCTAssertLessThan(awaitingArea.frame.minY, notSentArea.frame.minY,
-                          "The more recently sent item is first in the New area.")
-
-        let normalRow = app.descendants(matching: .any)["sample-approval-0"]
         let list = app.collectionViews.firstMatch
-        for _ in 0..<10 where !(normalRow.exists && normalRow.isHittable) { list.swipeUp() }
-        XCTAssertTrue(normalRow.exists && normalRow.isHittable, app.debugDescription)
-        XCTAssertTrue(normalRow.label.contains("Waiting for a reply"),
-                      "The same message keeps its normal-list row, with the spinner. \(normalRow.label)")
+        XCTAssertTrue(list.waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertFalse(app.descendants(matching: .any)["new-message-area-header"].exists)
+        XCTAssertFalse(app.descendants(matching: .any)["new-message-area-more"].exists)
+        let capture = XCTAttachment(screenshot: app.screenshot())
+        capture.name = "normal-inbox-without-new-section"
+        capture.lifetime = .keepAlways
+        add(capture)
+        for (id, status) in [("sample-approval-0", "Waiting for a reply"),
+                             ("sample-textChoice-0", "Did not send")] {
+            let row = app.descendants(matching: .any)[id].firstMatch
+            for _ in 0..<12 where !(row.exists && row.isHittable) { list.swipeUp() }
+            XCTAssertTrue(row.exists && row.isHittable, app.debugDescription)
+            XCTAssertTrue(row.label.contains(status), row.label)
+            XCTAssertFalse(app.descendants(matching: .any)["awaiting-reply-area-\(id)"].exists)
+        }
     }
 
     func testSearchTabSearchesTheListItWasOpenedFrom() throws {

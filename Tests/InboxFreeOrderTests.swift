@@ -501,18 +501,10 @@ final class InboxFreeOrderTests: XCTestCase {
     }
 
     @MainActor
-    func testNewDepartureAndSectionTransitionKeepReplyIdentityAndNavigationTarget() throws {
+    func testHistoryTransitionKeepsReplyIdentityAndNavigationTarget() throws {
         let active = try decode([reference("parent", kind: "reply")])
         let reference = try XCTUnwrap(active.listItems?.first)
-        var ledger = ReplyItemLedger()
-        ledger.reconcile([], accountScopes: [reference.key.accountScope], now: .now)
-        ledger.reconcile([ReplyItemObservation(parent: reference.key, turnID: ExactText("reply"),
-            conversationSequence: 900, isSeen: false, text: "Reply")], now: .now)
-        XCTAssertEqual(ledger.entries.map(\.parent), [reference.key])
         XCTAssertEqual(rowIDs(projection(active)), [.reply(reference.key)])
-        XCTAssertTrue(ledger.removeForSelection(reference.key))
-        XCTAssertEqual(rowIDs(projection(active)), [.reply(reference.key)])
-        XCTAssertEqual(active.listItems?.first?.unseenCount, 1, "Local New selection is not a Seen receipt.")
         let history = try decode([self.reference("parent", kind: "reply", state: "history")], revision: "seen")
         XCTAssertEqual(rowIDs(projection(history)), [.reply(reference.key)])
         XCTAssertEqual(history.listItems?.first?.openAtConversationSequence, reference.openAtConversationSequence)

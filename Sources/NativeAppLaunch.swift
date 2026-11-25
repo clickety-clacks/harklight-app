@@ -717,7 +717,7 @@ final class NativeAppLaunch {
     private func makeDisconnectedPresentation(for departure: NativeAccountDeparture) throws -> LivePresentationStore {
         let (store, context) = try reopenArchivedStore(for: departure.record)
         return try LivePresentationStore(disconnectedStore: store, context: context,
-                                        newMessageAreaDefaults: .standard)
+                                        replyItemAreaDefaults: .standard)
     }
 
     private func reopenArchivedStore(for record: NativeEnrollmentRecord) throws -> (ClientRepository, ProfileContext) {
@@ -933,7 +933,7 @@ final class NativeAppLaunch {
         diagnostics.recordPendingActionsRecoveries(store.pendingActionsRecoveries)
         let activation = try await LivePresentationStore.makeForActivation(
             store: store, context: context, diagnostics: diagnostics,
-            newMessageAreaDefaults: .standard, conversationFiles: fileStorage)
+            replyItemAreaDefaults: .standard, conversationFiles: fileStorage)
         guard activationGeneration == generation else { return }
         let presentation = activation.presentation
         let directory = try NativeRelayLifecycle.v2Directory(for: context.identity)
@@ -1348,17 +1348,10 @@ private struct PreparedLivePresentationInitialState: Sendable {
     let submissionProgress: [RequestKey: InboxSubmissionProgress]
     let submissionPhases: [RequestKey: SubmissionControlPhase]
     let conversationFiles: ConversationFileStorage?
-    let messageLedger: NewMessageAreaLedger
     let replyLedger: ReplyItemLedger
-    let preparedMessageArea: PreparedNewMessageAreaReconciliation
     let preparedReplyArea: PreparedReplyItemAreaReconciliation
     let failedResponseWarnings: [RequestKey: LivePresentationStore.FailedResponseWarning]
     let staleAnswerDialog: StaleAnswerDialog?
-}
-
-private struct VersionedPreparedNewMessageAreaReconciliation: Sendable {
-    let value: PreparedNewMessageAreaReconciliation
-    let generation: UInt64
 }
 
 private struct VersionedPreparedReplyItemAreaReconciliation: Sendable {
@@ -1371,7 +1364,6 @@ private struct PreparedLivePresentationUpdate: Sendable {
     let conversationThreads: [RequestKey: ConversationThread]
     let submissionProgress: [RequestKey: InboxSubmissionProgress]
     let submissionPhases: [RequestKey: SubmissionControlPhase]
-    let messageArea: VersionedPreparedNewMessageAreaReconciliation?
     let replyItemArea: VersionedPreparedReplyItemAreaReconciliation?
     let failedResponseWarnings: [RequestKey: LivePresentationStore.FailedResponseWarning]
     let warningGeneration: UInt64
@@ -1665,7 +1657,6 @@ final class LivePresentationStore {
     @ObservationIgnored private var failedResponseWarningGeneration: UInt64 = 0
     private var pendingConversationReadUpdates = Set<ConversationReadKey>()
     @ObservationIgnored private var conversationProjectionRevision: UInt64?
-    @ObservationIgnored private let messageAreaStore: NewMessageAreaStore?
     @ObservationIgnored private let replyAreaStore: ReplyItemAreaStore?
     @ObservationIgnored private var pendingDrafts: [DraftBufferKey: RequestDraft] = [:]
     @ObservationIgnored private var pendingDraftSaveTasks: [DraftBufferKey: Task<Void, Never>] = [:]
@@ -1685,21 +1676,21 @@ final class LivePresentationStore {
                      conversationAvailability: NativeConversationAvailability = NativeRelayLifecycle.shared.conversationAvailability,
                      diagnostics: NativeClientDiagnosticJournal? = nil,
                      clearedRetractionDefaults: UserDefaults = .standard,
-                     newMessageAreaDefaults: UserDefaults? = nil) throws {
+                     replyItemAreaDefaults: UserDefaults? = nil) throws {
         guard context.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
         try self.init(store: store, context: context, permitsDelivery: true, diagnostics: diagnostics,
                       featureFlags: featureFlags,
                       conversationAvailability: conversationAvailability,
                       clearedRetractionDefaults: clearedRetractionDefaults,
-                      newMessageAreaDefaults: newMessageAreaDefaults)
+                      replyItemAreaDefaults: replyItemAreaDefaults)
     }
 
     /// Uses the ordinary projection/edit path, but cannot mint an intent or retry transport.
     convenience init(localFixtureStore store: ClientRepository, context: ProfileContext,
-                     newMessageAreaDefaults: UserDefaults? = nil) throws {
+                     replyItemAreaDefaults: UserDefaults? = nil) throws {
         guard context.transportMode == .fixture else { throw AttentionStoreError.fixtureOnlyOperation }
         try self.init(store: store, context: context, permitsDelivery: false, isReadOnly: false,
-                      diagnostics: nil, newMessageAreaDefaults: newMessageAreaDefaults)
+                      diagnostics: nil, replyItemAreaDefaults: replyItemAreaDefaults)
     }
 
 #if DEBUG
@@ -1707,19 +1698,19 @@ final class LivePresentationStore {
     /// relay confirmation or enabling delivery.
     convenience init(localFixtureStore store: ClientRepository, context: ProfileContext,
                      syntheticAvailability: SyntheticFixtureAvailabilityInput,
-                     newMessageAreaDefaults: UserDefaults? = nil) throws {
+                     replyItemAreaDefaults: UserDefaults? = nil) throws {
         guard context.transportMode == .fixture else { throw AttentionStoreError.fixtureOnlyOperation }
         try self.init(localFixtureStore: store, context: context,
-                      newMessageAreaDefaults: newMessageAreaDefaults)
+                      replyItemAreaDefaults: replyItemAreaDefaults)
         self.syntheticFixtureAvailability = syntheticAvailability
     }
 #endif
 
     convenience init(disconnectedStore store: ClientRepository, context: ProfileContext,
-                     newMessageAreaDefaults: UserDefaults? = nil) throws {
+                     replyItemAreaDefaults: UserDefaults? = nil) throws {
         guard context.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
         try self.init(store: store, context: context, permitsDelivery: false, isReadOnly: true,
-                      diagnostics: nil, newMessageAreaDefaults: newMessageAreaDefaults)
+                      diagnostics: nil, replyItemAreaDefaults: replyItemAreaDefaults)
     }
 
     static func makeForActivation(
@@ -1729,7 +1720,7 @@ final class LivePresentationStore {
         conversationAvailability: NativeConversationAvailability = NativeRelayLifecycle.shared.conversationAvailability,
         diagnostics: NativeClientDiagnosticJournal? = nil,
         clearedRetractionDefaults: UserDefaults = .standard,
-        newMessageAreaDefaults: UserDefaults? = nil,
+        replyItemAreaDefaults: UserDefaults? = nil,
         conversationFiles suppliedConversationFiles: ConversationFileStorage? = nil
     ) async throws -> (presentation: LivePresentationStore,
                         mainActorWorkMilliseconds: Double,
@@ -1738,34 +1729,22 @@ final class LivePresentationStore {
         let activationStartedAt = DispatchTime.now().uptimeNanoseconds
         var mainActorWorkNanoseconds: UInt64 = 0
         var mainActorSegmentStartedAt = DispatchTime.now().uptimeNanoseconds
-        let messageLedgerData = newMessageAreaDefaults?.data(forKey: NewMessageAreaStore.defaultsKey)
-        let replyLedgerData = newMessageAreaDefaults?.data(forKey: ReplyItemAreaStore.defaultsKey)
+        let replyLedgerData = replyItemAreaDefaults?.data(forKey: ReplyItemAreaStore.defaultsKey)
         let diagnosticEvents = diagnostics?.events ?? []
         mainActorWorkNanoseconds += DispatchTime.now().uptimeNanoseconds - mainActorSegmentStartedAt
-        let progressInboxEnabled = featureFlags.isEnabled(.progressInbox)
         let initial = try await Task.detached(priority: .userInitiated) {
             let port = AttentionDomainPort(store: store)
             let snapshot = try port.observe(context: port.context)
             let conversationThreads = try port.conversations(context: port.context).threads
             let attentionSnapshot = try store.snapshot(context: context)
-            let messageLedger = messageLedgerData.flatMap {
-                try? JSONDecoder().decode(NewMessageAreaLedger.self, from: $0)
-            } ?? NewMessageAreaLedger()
             let replyLedger = replyLedgerData.flatMap {
                 try? JSONDecoder().decode(ReplyItemLedger.self, from: $0)
             } ?? ReplyItemLedger()
-            let messages = Self.newMessageObservations(for: snapshot.requests, progressInboxEnabled: progressInboxEnabled)
-            let revisions = Dictionary(uniqueKeysWithValues: snapshot.requests.map {
-                ($0.key, $0.requestRevision)
-            })
             let replyObservations = Self.replyObservations(
                 in: conversationThreads,
                 account: context.identity.personID,
                 ledger: replyLedger)
             let now = Date()
-            let preparedMessageArea = NewMessageAreaStore.prepareReconciliation(
-                ledger: messageLedger, messages: messages, revisions: revisions,
-                accountScopes: [context.identity.personID], now: now)
             let preparedReplyArea = ReplyItemAreaStore.prepareReconciliation(
                 ledger: replyLedger, observations: replyObservations.observations,
                 accountScopes: [context.identity.personID],
@@ -1784,8 +1763,8 @@ final class LivePresentationStore {
                     snapshot: attentionSnapshot, threads: conversationThreads),
                 submissionPhases: SubmissionControlPhase.project(snapshot: attentionSnapshot),
                 conversationFiles: conversationFiles,
-                messageLedger: messageLedger, replyLedger: replyLedger,
-                preparedMessageArea: preparedMessageArea, preparedReplyArea: preparedReplyArea,
+                replyLedger: replyLedger,
+                preparedReplyArea: preparedReplyArea,
                 failedResponseWarnings: failedResponseWarnings,
                 staleAnswerDialog: staleAnswerDialog)
         }.value
@@ -1796,7 +1775,7 @@ final class LivePresentationStore {
             diagnostics: diagnostics, featureFlags: featureFlags,
             conversationAvailability: conversationAvailability,
             clearedRetractionDefaults: clearedRetractionDefaults,
-            newMessageAreaDefaults: newMessageAreaDefaults, preparedInitialState: initial)
+            replyItemAreaDefaults: replyItemAreaDefaults, preparedInitialState: initial)
         presentation.reportUnprojectable(initial.snapshot)
         mainActorWorkNanoseconds += DispatchTime.now().uptimeNanoseconds - mainActorSegmentStartedAt
         let activationPreparationNanoseconds = DispatchTime.now().uptimeNanoseconds - activationStartedAt
@@ -1810,15 +1789,11 @@ final class LivePresentationStore {
                  featureFlags: RemoteFeatureFlags = NativeRelayLifecycle.shared.featureFlags,
                  conversationAvailability: NativeConversationAvailability = NativeRelayLifecycle.shared.conversationAvailability,
                  clearedRetractionDefaults: UserDefaults = .standard,
-                 newMessageAreaDefaults: UserDefaults? = nil,
+                 replyItemAreaDefaults: UserDefaults? = nil,
                  preparedInitialState: PreparedLivePresentationInitialState? = nil) throws {
         self.featureFlags = featureFlags
         self.clearedRetractionDefaults = clearedRetractionDefaults
-        let areaStore = newMessageAreaDefaults.map {
-            NewMessageAreaStore(defaults: $0, initialLedger: preparedInitialState?.messageLedger)
-        }
-        self.messageAreaStore = areaStore
-        let replyStore = newMessageAreaDefaults.map {
+        let replyStore = replyItemAreaDefaults.map {
             ReplyItemAreaStore(defaults: $0, initialLedger: preparedInitialState?.replyLedger)
         }
         self.replyAreaStore = replyStore
@@ -1866,12 +1841,9 @@ final class LivePresentationStore {
         self.conversationFiles = conversationFiles
         self.selectedRequestKey = nil
         if let preparedInitialState {
-            _ = areaStore?.applyPreparedReconciliation(preparedInitialState.preparedMessageArea,
-                                                        basedOn: 0)
             _ = replyStore?.applyPreparedReconciliation(preparedInitialState.preparedReplyArea,
                                                         basedOn: 0)
         } else {
-            reconcileNewMessageArea(snapshot.requests, using: areaStore)
             reconcileReplyItemArea(using: replyStore)
         }
         if let data = clearedRetractionDefaults.data(forKey: Self.clearedRetractionsDefaultsKey),
@@ -2514,28 +2486,8 @@ final class LivePresentationStore {
         }.min()
     }
 
-    var newMessageAreaStore: NewMessageAreaStore? { messageAreaStore }
 
     var replyItemAreaStore: ReplyItemAreaStore? { replyAreaStore }
-
-    private func reconcileNewMessageArea(_ requests: [PresentedRequest],
-                                         using store: NewMessageAreaStore? = nil) {
-        guard let store = store ?? messageAreaStore else { return }
-        let messages = Self.newMessageObservations(for: requests, progressInboxEnabled: progressInboxEnabled)
-        let revisions = Dictionary(uniqueKeysWithValues: requests.map { ($0.key, $0.requestRevision) })
-        store.reconcile(messages, revisions: revisions,
-                        accountScopes: [profileContext.identity.personID])
-    }
-
-    private nonisolated static func newMessageObservations(
-        for requests: [PresentedRequest], progressInboxEnabled: Bool
-    ) -> [NewMessageAreaMessage] {
-        requests.filter { !progressInboxEnabled || $0.messageProgress == nil }.map {
-            NewMessageAreaMessage(key: $0.key, acceptanceOrder: $0.acceptanceOrder,
-                                  isResolved: $0.isResolved || $0.isSettledFYIRequest,
-                                  hasSubmittedAnswer: $0.intentReceipt != nil)
-        }
-    }
 
     private nonisolated static func replyObservations(
         in conversationThreads: [RequestKey: ConversationThread],
@@ -2673,8 +2625,7 @@ final class LivePresentationStore {
             chatUnread: listChatUnread(request.key),
             submissionProgress: submissionProgress[request.key].map { progress in
                 InboxRowSubmissionProgress(
-                    state: progress.state == .awaiting ? .awaiting : .notSent(detail: progress.detail),
-                    since: progress.since)
+                    state: progress.state == .awaiting ? .awaiting : .notSent(detail: progress.detail))
             },
             tier: .middle,
             inboxPriority: request.inboxPriority,
@@ -3868,7 +3819,6 @@ final class LivePresentationStore {
         }
         presentation = snapshot
         requestsByKey = Dictionary(uniqueKeysWithValues: snapshot.requests.map { ($0.key, $0) })
-        reconcileNewMessageArea(snapshot.requests)
         if !locallyReconciledRead { reconcileReplyItemArea() }
         refreshFailedResponseWarnings(for: snapshot.requests)
         recordNoReplyRoutingChanges(from: previousRoutingStates, in: snapshot.requests)
@@ -3899,7 +3849,6 @@ final class LivePresentationStore {
                 return Double(mainActorWorkNanoseconds) / 1_000_000
             }
             reportUnprojectable(snapshot)
-            let messageSeed = messageAreaStore?.reconciliationSeed()
             let replySeed = replyAreaStore?.reconciliationSeed()
             let previousRequests = presentation.requests
             let previousWarnings = failedResponseWarnings
@@ -3909,22 +3858,10 @@ final class LivePresentationStore {
             let presentedStaleIDs = presentedStaleAnswerOperationIDs
             let capturedActionErrorRequest = actionErrorRequest
             let updateSnapshot = snapshot
-            let progressInboxEnabled = self.progressInboxEnabled
             var mainActorSegmentStartedAt = DispatchTime.now().uptimeNanoseconds
             let preparation = Task.detached(priority: .userInitiated) {
                 let conversationThreads = try port.conversations(context: port.context).threads
                 let attentionSnapshot = try store.snapshot(context: context)
-                let messages = Self.newMessageObservations(for: updateSnapshot.requests, progressInboxEnabled: progressInboxEnabled)
-                let revisions = Dictionary(uniqueKeysWithValues: updateSnapshot.requests.map {
-                    ($0.key, $0.requestRevision)
-                })
-                let messageArea = messageSeed.map { seed in
-                    VersionedPreparedNewMessageAreaReconciliation(
-                        value: NewMessageAreaStore.prepareReconciliation(
-                            ledger: seed.ledger, messages: messages, revisions: revisions,
-                            accountScopes: [account]),
-                        generation: seed.generation)
-                }
                 let replyItemArea = replySeed.map { seed in
                     let observations = Self.replyObservations(
                         in: conversationThreads, account: account, ledger: seed.ledger)
@@ -3961,7 +3898,7 @@ final class LivePresentationStore {
                     submissionProgress: InboxSubmissionProgress.project(
                         snapshot: attentionSnapshot, threads: conversationThreads),
                     submissionPhases: SubmissionControlPhase.project(snapshot: attentionSnapshot),
-                    messageArea: messageArea, replyItemArea: replyItemArea,
+                    replyItemArea: replyItemArea,
                     failedResponseWarnings: failedResponseWarnings,
                     warningGeneration: warningGeneration,
                     noReplyRoutingChanges: noReplyRoutingChanges,
@@ -3980,13 +3917,10 @@ final class LivePresentationStore {
             }
             let locallyReconciledRead = locallyReconciledConversationReadRevisions
                 .contains(snapshot.revision)
-            let messageSeedIsCurrent = prepared.messageArea.map {
-                messageAreaStore?.reconciliationSeed().generation == $0.generation
-            } ?? true
             let replySeedIsCurrent = locallyReconciledRead || (prepared.replyItemArea.map {
                 replyAreaStore?.reconciliationSeed().generation == $0.generation
             } ?? true)
-            guard messageSeedIsCurrent && replySeedIsCurrent &&
+            guard replySeedIsCurrent &&
                     failedResponseWarningGeneration == prepared.warningGeneration else {
                 mainActorWorkNanoseconds += DispatchTime.now().uptimeNanoseconds - mainActorSegmentStartedAt
                 let refresh = Task.detached(priority: .userInitiated) {
@@ -3997,10 +3931,6 @@ final class LivePresentationStore {
                 continue
             }
 
-            if let messageArea = prepared.messageArea {
-                _ = messageAreaStore?.applyPreparedReconciliation(
-                    messageArea.value, basedOn: messageArea.generation)
-            }
             if !locallyReconciledRead, let replyItemArea = prepared.replyItemArea {
                 _ = replyAreaStore?.applyPreparedReconciliation(
                     replyItemArea.value, basedOn: replyItemArea.generation)

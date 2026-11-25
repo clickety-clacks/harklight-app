@@ -305,21 +305,22 @@ extension InboxViewListItem {
 @MainActor
 enum InboxNormalListProjection {
     /// Uses the server's mixed sequence when present. The old-server path keeps
-    /// the existing message projection. Normal-list membership is independent
-    /// of local New membership, so an item can retain its server-ranked row
-    /// while it also appears in the compact New area.
+    /// the existing message projection. An unread local reply without a server
+    /// reference can still be opened from the normal Inbox.
     static func entries(rows: [InboxItem],
                         serverItems: [InboxViewListItem]?,
                         freeOrderVersion: Int? = nil,
                         in tab: InboxWorkspaceTab,
                         search: String,
                         order: InboxOrder = .priority,
+                        localReplies: [InboxViewListItem] = [],
                         replyReceiptDate: (InboxViewListItem) -> Date? = { _ in nil }) -> [InboxNormalListDisplayEntry] {
         let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
         let sortsByPosted = order == .posted && tab == .inbox && query.isEmpty
         guard let serverItems else {
             let visibleMessages = InboxListProjection.filteredRows(rows, in: tab, search: search)
             let entries = InboxThreadListProjection.grouped(visibleMessages).map(InboxNormalListDisplayEntry.message)
+                + localReplies.map(InboxNormalListDisplayEntry.reply)
             return sortsByPosted ? postedEntries(entries, replyReceiptDate: replyReceiptDate) : entries
         }
 
@@ -401,6 +402,8 @@ enum InboxNormalListProjection {
             let examples = InboxListProjection.visibleEntries(localExamples, in: tab, search: search)
             result.append(contentsOf: examples.map { .message($0) })
         }
+        let serverReplyKeys = Set(serverItems.filter { $0.kind == .reply }.map(\.key))
+        result.append(contentsOf: localReplies.compactMap { serverReplyKeys.contains($0.key) ? nil : .reply($0) })
         return sortsByPosted ? postedEntries(result, replyReceiptDate: replyReceiptDate) : result
     }
 

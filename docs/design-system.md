@@ -139,14 +139,6 @@ THE prioritized list row SHALL show, top to bottom: the initials circle, sender 
 
 *Check*: "Production deploy failed" shows a coral wash, a 2 pt coral left edge and "Urgent" under the title. The Lisbon row shows a filled amber flag. "Your week ahead" after Seen shows a teal check. Each row's body stops at two lines, and in dark each time reads #9aa4b8.
 
-### C3. New item [A1], [INV]
-
-Today: `NewMessageArea`.
-
-WHEN the New section has items, THE section SHALL show the heading "New · *n* of *m*" in ordinary capitals, then each item on the plain background as at most three lines: two lines of summary and one status line with the time leading and, when it applies, a right-aligned urgency pill ("Urgent" on `coral`, "High priority" on `amber`, text `on-beam`) on the text baseline. The section's existing rules stay: the newest five, then a "More…" row, each item leaving the section when tapped or an hour after first seen, and the message's first two lines when no summary exists. The prioritized list SHALL start under the New section on the first screen. Serves: [WI] "three-line New items"; [A1].
-
-*Check*: with seven new messages the section shows "New · 5 of 7", five items of at most three lines, "More…", and the top of the prioritized list on the same first screen of a 6.1-inch iPhone simulator, 852 pt tall, the size the page draws. The 7:30 AM item's "High priority" pill is right-aligned on the status line. No item has a colored background.
-
 ### C4. Open message [A2], [A3]
 
 Today: `MessageCardSurface`, `LiveRequestDetail`, `MessageHeading`, `MessageChoiceLabel`.
@@ -199,7 +191,7 @@ WHEN Settings opens, THE app SHALL show it as a stock sheet titled "Settings" wi
 
 Today: the iPad split in the root navigation.
 
-WHILE the app runs on iPad, THE list SHALL sit in the system's floating glass sidebar on the left with the open message beside it, and the open message's type tint SHALL run behind the panel to the screen edge. The New section SHALL top the list as on iPhone. In landscape the chat SHALL take the right column (C8). Serves: [A6] "The list is a floating glass panel, and the message's tint runs behind it to the edge of the screen."
+WHILE the app runs on iPad, THE list SHALL sit in the system's floating glass sidebar on the left with the open message beside it, and the open message's type tint SHALL run behind the panel to the screen edge. In landscape the chat SHALL take the right column (C8). Serves: [A6] "The list is a floating glass panel, and the message's tint runs behind it to the edge of the screen."
 
 *Check*: on an iPad simulator in landscape with the Lisbon request open, the list floats as a glass panel with violet tint visible behind and around it, the message is in the middle and the chat is on the right, with the tab bar and search at the top.
 
@@ -216,7 +208,7 @@ WHEN a message is open on iPad, THE row for it in the prioritized list SHALL tak
 - The web client, the hosted account pages, the marketing site and any Part B or C drawing [WI].
 - What search shows before the first letter is typed: the page leaves it undecided, so it stays as today [A1].
 - New surfaces, controls or wording: new layouts for the undrawn surfaces in R8, avatars, new settings, sign-in screens [WI] "No features beyond the drawings".
-- Behavior changes to Seen, reply, swipe or the New section rules [WI].
+- Behavior changes to Seen, reply or swipe rules [WI].
 - Custom glass, hand-drawn tab bars, or matching Apple's keyboard row and close button to the drawing. The system draws those [A1].
 
 ## 7. Assumptions

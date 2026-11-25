@@ -27,11 +27,17 @@ struct ReplyItemEntry: Codable, Equatable, Identifiable, Sendable {
     /// only ever leave from the front.
     var unseenReplies: [ReplyItemUnseenReply]
     /// When the newest unseen reply arrived on this device; the item's
-    /// ordering key among new-message entries.
+    /// fallback date when no server reply reference is present.
     var receivedAt: Date
-    var firstSeenAt: Date?
 
     var id: RequestKey { parent }
+
+    var reference: InboxViewListItem {
+        InboxViewListItem(kind: .reply, key: parent,
+                          conversationSequence: newestUnseenReply?.conversationSequence,
+                          openAtConversationSequence: earliestUnseenReply?.conversationSequence,
+                          unseenCount: unseenCount)
+    }
 
     var newestUnseenReply: ReplyItemUnseenReply? { unseenReplies.last }
     var earliestUnseenReply: ReplyItemUnseenReply? { unseenReplies.first }
@@ -83,7 +89,7 @@ enum ReplyItemNormalRowProjection {
 }
 
 enum ReplyItemPriorityProjection {
-    /// Normal list groups use the same highest-priority unseen replies as New.
+    /// Normal list groups use the highest priority among the unseen replies.
     /// Seen history has no per-reply priority in the current view; its retained
     /// group score remains the only authoritative historical priority.
     static func display(for reference: InboxViewListItem,
@@ -136,8 +142,6 @@ struct ReplyItemIdentity: Codable, Hashable, Sendable {
 }
 
 struct ReplyItemLedger: Codable, Equatable, Sendable {
-    static let expiryInterval: TimeInterval = 60 * 60
-
     private(set) var baselineEstablishedAccounts: Set<ExactText> = []
     private(set) var knownReplyIDs: Set<ReplyItemIdentity> = []
     private(set) var entriesByParent: [RequestKey: ReplyItemEntry] = [:]
@@ -160,12 +164,6 @@ struct ReplyItemLedger: Codable, Equatable, Sendable {
         var protocols = baselineProtocolByAccount ?? [:]
         protocols[account] = protocolID
         baselineProtocolByAccount = protocols
-    }
-
-    var nextExpiry: Date? {
-        entriesByParent.values.compactMap { entry in
-            entry.firstSeenAt.map { $0.addingTimeInterval(Self.expiryInterval) }
-        }.min()
     }
 
     mutating func reconcile(_ observations: [ReplyItemObservation],
@@ -232,43 +230,16 @@ struct ReplyItemLedger: Codable, Equatable, Sendable {
                                              conversationSequence: observation.conversationSequence,
                                              text: observation.text)
             if var entry = entriesByParent[observation.parent] {
-                // A joining reply re-dates the item and restarts its
-                // visible-time clock.
                 entry.unseenReplies.append(reply)
                 entry.receivedAt = now
-                entry.firstSeenAt = nil
                 entriesByParent[observation.parent] = entry
             } else {
                 entriesByParent[observation.parent] = ReplyItemEntry(
                     parent: observation.parent,
                     unseenReplies: [reply],
-                    receivedAt: now,
-                    firstSeenAt: nil)
+                    receivedAt: now)
             }
         }
-        pruneExpired(now: now)
-    }
-
-    mutating func markFirstSeen(_ parent: RequestKey, at date: Date) {
-        guard var entry = entriesByParent[parent], entry.firstSeenAt == nil else { return }
-        entry.firstSeenAt = date
-        entriesByParent[parent] = entry
-    }
-
-    @discardableResult
-    mutating func removeForSelection(_ parent: RequestKey) -> Bool {
-        entriesByParent.removeValue(forKey: parent) != nil
-    }
-
-    @discardableResult
-    mutating func pruneExpired(now: Date) -> Bool {
-        let expiredParents = entriesByParent.values.compactMap { entry -> RequestKey? in
-            guard let firstSeenAt = entry.firstSeenAt,
-                  now.timeIntervalSince(firstSeenAt) >= Self.expiryInterval else { return nil }
-            return entry.parent
-        }
-        for parent in expiredParents { entriesByParent.removeValue(forKey: parent) }
-        return !expiredParents.isEmpty
     }
 
     private static func isNewer(_ lhs: ReplyItemEntry, than rhs: ReplyItemEntry) -> Bool {
@@ -288,34 +259,6 @@ struct ReplyItemLedger: Codable, Equatable, Sendable {
 struct PreparedReplyItemAreaReconciliation: Sendable {
     let ledger: ReplyItemLedger
     let didChange: Bool
-}
-
-enum NewMessageAreaRowOrder {
-    /// Merges message entries and reply items, each already newest-first,
-    /// into one newest-received-on-device-first list. A tie goes to the
-    /// message, which keeps same-batch messages contiguous in their
-    /// accepted order.
-    static func merged<Message, Reply, Combined>(
-        messages: [Message], replies: [Reply],
-        messageDate: (Message) -> Date, replyDate: (Reply) -> Date,
-        message: (Message) -> Combined, reply: (Reply) -> Combined) -> [Combined] {
-        var combined: [Combined] = []
-        combined.reserveCapacity(messages.count + replies.count)
-        var messageIndex = messages.startIndex
-        var replyIndex = replies.startIndex
-        while messageIndex < messages.endIndex, replyIndex < replies.endIndex {
-            if replyDate(replies[replyIndex]) > messageDate(messages[messageIndex]) {
-                combined.append(reply(replies[replyIndex]))
-                replyIndex += 1
-            } else {
-                combined.append(message(messages[messageIndex]))
-                messageIndex += 1
-            }
-        }
-        combined.append(contentsOf: messages[messageIndex...].map(message))
-        combined.append(contentsOf: replies[replyIndex...].map(reply))
-        return combined
-    }
 }
 
 @MainActor
@@ -345,7 +288,6 @@ final class ReplyItemAreaStore {
     }
 
     var entries: [ReplyItemEntry] { ledger.entries }
-    var nextExpiry: Date? { ledger.nextExpiry }
 
     func reconcile(_ observations: [ReplyItemObservation],
                    accountScopes: Set<ExactText> = [],
@@ -392,26 +334,6 @@ final class ReplyItemAreaStore {
         if prepared.didChange { persist() }
         reconciliationGeneration &+= 1
         return true
-    }
-
-    func markFirstSeen(_ parent: RequestKey, at date: Date = .now) {
-        let oldEntries = ledger.entriesByParent
-        ledger.markFirstSeen(parent, at: date)
-        guard oldEntries != ledger.entriesByParent else { return }
-        reconciliationGeneration &+= 1
-        persist()
-    }
-
-    func removeForSelection(_ parent: RequestKey) {
-        guard ledger.removeForSelection(parent) else { return }
-        reconciliationGeneration &+= 1
-        persist()
-    }
-
-    func removeExpired(now: Date = .now) {
-        guard ledger.pruneExpired(now: now) else { return }
-        reconciliationGeneration &+= 1
-        persist()
     }
 
     private func persist() {

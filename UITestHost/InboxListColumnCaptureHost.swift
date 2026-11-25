@@ -10,7 +10,6 @@ struct InboxListColumnCaptureHost: View {
     @State private var selected: InboxSelection?
     @State private var workspaceTab: InboxWorkspaceTab = .inbox
     @State private var search = ""
-    @State private var newMessageAreaStore: NewMessageAreaStore
     @State private var replyItemAreaStore: ReplyItemAreaStore?
     private let captureState: InboxListColumnCaptureFixture.State
     private let sampleFixture: SampleFixtureDomain
@@ -38,7 +37,6 @@ struct InboxListColumnCaptureHost: View {
         let fixture = InboxListColumnCaptureFixture.make(for: state, sampleFixture: sampleFixture)
         rows = fixture.rows.map(InboxItem.request)
         _selected = State(initialValue: fixture.selected)
-        _newMessageAreaStore = State(initialValue: fixture.newMessageAreaStore)
         _replyItemAreaStore = State(initialValue: fixture.replyItemAreaStore)
     }
 
@@ -52,7 +50,7 @@ struct InboxListColumnCaptureHost: View {
                     }
             }
             .tint(HarklightDesignSystem.palette(for: colorScheme).amber)
-            .overlay(alignment: .topLeading) { accessibilityProbe }
+            .overlay(alignment: .topLeading) { selectionProbe }
         } else {
             NavigationSplitView {
                 productionInboxList
@@ -64,7 +62,7 @@ struct InboxListColumnCaptureHost: View {
             }
             .navigationSplitViewStyle(.balanced)
             .tint(HarklightDesignSystem.palette(for: colorScheme).amber)
-            .overlay(alignment: .topLeading) { accessibilityProbe }
+            .overlay(alignment: .topLeading) { selectionProbe }
         }
     }
 
@@ -107,60 +105,6 @@ struct InboxListColumnCaptureHost: View {
             .allowsHitTesting(false)
     }
 
-    private var markdownFirstSeenProbe: some View {
-        Color.clear
-            .frame(width: 1, height: 1)
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel(Text(verbatim: "Markdown row first seen"))
-            .accessibilityValue(Text(verbatim: markdownFirstSeenValue))
-            .accessibilityIdentifier("markdown-row-first-seen")
-            .allowsHitTesting(false)
-    }
-
-    private var markdownReplyFirstSeenProbe: some View {
-        Color.clear
-            .frame(width: 1, height: 1)
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel(Text(verbatim: "Markdown reply first seen"))
-            .accessibilityValue(Text(verbatim: markdownReplyFirstSeenValue))
-            .accessibilityIdentifier("markdown-reply-first-seen")
-            .allowsHitTesting(false)
-    }
-
-    private var accessibilityProbe: some View {
-        VStack(spacing: 0) {
-            selectionProbe
-            if captureState == .markdown {
-                markdownFirstSeenProbe
-                markdownReplyFirstSeenProbe
-            }
-        }
-    }
-
-    private var markdownFirstSeenValue: String {
-        guard let row = rows.compactMap({ item -> InboxRequestRow? in
-            guard case let .request(row) = item,
-                  row.key.messageID.rawValue == "sample-markdown-acceptance" else { return nil }
-            return row
-        }).first,
-              let entry = newMessageAreaStore.entries.first(where: { $0.key == row.key }) else {
-            return "missing"
-        }
-        return entry.firstSeenAt.map { String($0.timeIntervalSince1970) } ?? "unseen"
-    }
-
-    private var markdownReplyFirstSeenValue: String {
-        guard let row = rows.compactMap({ item -> InboxRequestRow? in
-            guard case let .request(row) = item,
-                  row.key.messageID.rawValue == "sample-markdown-acceptance" else { return nil }
-            return row
-        }).first,
-              let entry = replyItemAreaStore?.entries.first(where: { $0.parent == row.key }) else {
-            return "missing"
-        }
-        return entry.firstSeenAt.map { String($0.timeIntervalSince1970) } ?? "unseen"
-    }
-
     private var selectionProbeValue: String {
         guard let selected else { return "none" }
         switch selected {
@@ -177,7 +121,6 @@ struct InboxListColumnCaptureHost: View {
             rows: rows,
             warnings: [],
             conversationStore: sampleFixture.viewModel,
-            newMessageAreaStore: newMessageAreaStore,
             replyItemAreaStore: replyItemAreaStore,
             openReplyItem: { _, _, _ in },
             selected: $selected,
@@ -212,8 +155,8 @@ private enum InboxListColumnCaptureFixture {
     enum State: String {
         case selectedHigh
         case selectedPlainAndUnselectedComparison
-        case acceptedNewMessage
-        case actionableNewMessage
+        case acceptedMessage
+        case actionableMessage
         case markdown
         case fullWidthHigh
         case replyItem
@@ -223,7 +166,6 @@ private enum InboxListColumnCaptureFixture {
     struct Contents {
         let rows: [InboxRequestRow]
         let selected: InboxSelection?
-        let newMessageAreaStore: NewMessageAreaStore
         let replyItemAreaStore: ReplyItemAreaStore?
     }
 
@@ -244,36 +186,11 @@ private enum InboxListColumnCaptureFixture {
             preconditionFailure("The isolated inbox capture fixture could not create its local defaults suite.")
         }
         defaults.removePersistentDomain(forName: suiteName)
-        let store = NewMessageAreaStore(defaults: defaults,
-                                        defaultsKey: "selected-row-capture-new-message-area")
         let now = Date()
         let isReplyState = state == .replyItem || state == .replyItemFullWidth || state == .markdown
         var scopedRows = [plainRow, highRow, unselectedRow, newMessageRow]
         if let markdownRow { scopedRows.append(markdownRow) }
         let accountScopes = Set(scopedRows.map(\.key.accountScope))
-        store.reconcile([], revisions: [:], accountScopes: accountScopes, now: now.addingTimeInterval(-120))
-        if state == .markdown, let markdownRow {
-            store.reconcile([
-                NewMessageAreaMessage(key: markdownRow.key, acceptanceOrder: 1,
-                                      isResolved: false, hasSubmittedAnswer: false)
-            ], revisions: [markdownRow.key: markdownRow.requestRevision],
-               accountScopes: accountScopes, now: now.addingTimeInterval(-60))
-        } else if state == .actionableNewMessage {
-            // Use the sample's actual local No comment eligibility so swipe
-            // tests compare the same actionable request in both placements.
-            store.reconcile([
-                NewMessageAreaMessage(key: plainRow.key, acceptanceOrder: 1,
-                                      isResolved: false, hasSubmittedAnswer: false)
-            ], revisions: [plainRow.key: plainRow.requestRevision],
-               accountScopes: accountScopes, now: now.addingTimeInterval(-60))
-        } else if state == .acceptedNewMessage || isReplyState {
-            store.reconcile([
-                NewMessageAreaMessage(key: newMessageRow.key, acceptanceOrder: 1,
-                                      isResolved: false, hasSubmittedAnswer: false)
-            ], revisions: [newMessageRow.key: newMessageRow.requestRevision],
-               accountScopes: accountScopes, now: now.addingTimeInterval(-60))
-        }
-
         var replyItemAreaStore: ReplyItemAreaStore?
         var replyParentRow = state == .markdown ? (markdownRow ?? newMessageRow) : newMessageRow
         if isReplyState {
@@ -319,10 +236,10 @@ private enum InboxListColumnCaptureFixture {
         case .selectedPlainAndUnselectedComparison:
             rows = [plainRow, unselectedRow]
             selected = nil
-        case .acceptedNewMessage:
+        case .acceptedMessage:
             rows = [newMessageRow]
             selected = nil
-        case .actionableNewMessage:
+        case .actionableMessage:
             rows = [plainRow]
             selected = nil
         case .markdown:
@@ -340,7 +257,6 @@ private enum InboxListColumnCaptureFixture {
         }
 
         return Contents(rows: rows, selected: selected,
-                        newMessageAreaStore: store,
                         replyItemAreaStore: replyItemAreaStore)
     }
 

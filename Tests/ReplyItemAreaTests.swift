@@ -4,6 +4,27 @@ import XCTest
 @testable import Harklight
 
 final class ReplyItemAreaTests: XCTestCase {
+    @MainActor
+    func testUnreadLocalQuoteStaysInNormalListWithoutDuplicatingAServerReply() {
+        let parent = RequestKey(accountScope: ExactText("person"), senderID: ExactText("sender"),
+                                messageID: ExactText("parent"))
+        let local = ReplyItemEntry(parent: parent, unseenReplies: [
+            ReplyItemUnseenReply(turnID: ExactText("first"), conversationSequence: 4, text: "First"),
+            ReplyItemUnseenReply(turnID: ExactText("latest"), conversationSequence: 5, text: "Latest")
+        ], receivedAt: Date(timeIntervalSince1970: 100))
+        XCTAssertEqual(local.reference.conversationSequence, 5)
+        XCTAssertEqual(local.reference.openAtConversationSequence, 4)
+        XCTAssertEqual(local.reference.unseenCount, 2)
+        for order: InboxOrder in [.priority, .posted] {
+            let old = InboxNormalListProjection.entries(rows: [], serverItems: nil, in: .inbox,
+                search: "", order: order, localReplies: [local.reference])
+            XCTAssertEqual(old.map(\.id), [.reply(parent)])
+            let current = InboxNormalListProjection.entries(rows: [], serverItems: [local.reference],
+                in: .inbox, search: "", order: order, localReplies: [local.reference])
+            XCTAssertEqual(current.map(\.id), [.reply(parent)])
+        }
+    }
+
     private func reopenWithServerCache(_ source: ClientRepository, context: ProfileContext,
                                        persistence: MemoryPendingActionPersistence) async throws -> ClientRepository {
         let inbox = try source.snapshot(context: context)
@@ -91,13 +112,11 @@ final class ReplyItemAreaTests: XCTestCase {
                        "An account first observed later starts with its current replies as baseline.")
     }
 
-    func testJoiningReplyRedatesTheItemAndRestartsItsVisibleClock() {
+    func testJoiningReplyRedatesTheItem() {
         var ledger = ReplyItemLedger()
         ledger.reconcile([], accountScopes: [ExactText("account")], now: baselineDate)
         let first = reply("message", turn: "reply-1", sequence: 1, text: "First")
         ledger.reconcile([first], now: baselineDate.addingTimeInterval(1))
-        ledger.markFirstSeen(parent("message"), at: baselineDate.addingTimeInterval(2))
-        XCTAssertNotNil(ledger.entries.first?.firstSeenAt)
 
         let second = reply("message", turn: "reply-2", sequence: 2, text: "Second")
         let joinedAt = baselineDate.addingTimeInterval(3)
@@ -110,8 +129,6 @@ final class ReplyItemAreaTests: XCTestCase {
         XCTAssertEqual(entry?.newestUnseenReply?.text, "Second")
         XCTAssertEqual(entry?.receivedAt, joinedAt,
                        "A joining reply moves the item to the newest-received position.")
-        XCTAssertNil(entry?.firstSeenAt,
-                     "A joining reply restarts the item's visible-time clock.")
     }
 
     func testAdvancedReadPositionDropsSeenRepliesAndALeftItemNeverReenters() {
@@ -162,51 +179,46 @@ final class ReplyItemAreaTests: XCTestCase {
 
         XCTAssertNil(ledger.entries.first { $0.parent == viewed.parent })
         XCTAssertEqual(ledger.entries.first { $0.parent == other.parent }, otherBeforeRead,
-                       "Reading one conversation must leave another conversation's New replies unchanged.")
+                       "Reading one conversation must leave another conversation's unread replies unchanged.")
     }
 
-    func testSelectionRemovesNewMembershipWithoutTreatingRepliesAsSeen() {
+    @MainActor
+    func testOfflineUnreadReplyStaysInBothNormalOrdersAfterAnHour() throws {
+        let suite = "ReplyItemAreaUpgrade.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let arrival = reply("message", turn: "reply-1", sequence: 1, text: "Still unread")
+        let receivedAt = baselineDate.addingTimeInterval(10)
+        let firstVisible = receivedAt.addingTimeInterval(10)
         var ledger = ReplyItemLedger()
-        ledger.reconcile([], accountScopes: [ExactText("account")], now: baselineDate)
-        let first = reply("message", turn: "reply-1", sequence: 1)
-        let second = reply("message", turn: "reply-2", sequence: 2)
-        ledger.reconcile([first, second], now: baselineDate.addingTimeInterval(1))
+        ledger.reconcile([], accountScopes: [arrival.accountScope], now: baselineDate)
+        ledger.reconcile([arrival], now: receivedAt)
 
-        XCTAssertTrue(ledger.removeForSelection(parent("message")))
-        XCTAssertTrue(ledger.entries.isEmpty, "Selection alone transfers the group out of New.")
+        // Older builds stored visibility independently of the chat read receipt.
+        let encoded = try JSONEncoder().encode(ledger)
+        var oldLedger = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        var rows = try XCTUnwrap(oldLedger["entriesByParent"] as? [[String: Any]])
+        XCTAssertEqual(rows.count, 2)
+        rows[1]["firstSeenAt"] = firstVisible.timeIntervalSinceReferenceDate
+        oldLedger["entriesByParent"] = rows
+        defaults.set(try JSONSerialization.data(withJSONObject: oldLedger), forKey: ReplyItemAreaStore.defaultsKey)
 
-        ledger.reconcile([first, second], now: baselineDate.addingTimeInterval(2))
-        XCTAssertTrue(ledger.entries.isEmpty, "Replay does not restore a selected group.")
+        let offline = ReplyItemAreaStore(defaults: defaults)
+        XCTAssertEqual(offline.entries.first?.newestUnseenReply?.turnID, arrival.turnID)
+        offline.reconcile([arrival], now: firstVisible.addingTimeInterval(3_601))
 
-        let third = reply("message", turn: "reply-3", sequence: 3)
-        ledger.reconcile([first, second, third], now: baselineDate.addingTimeInterval(3))
-        XCTAssertEqual(ledger.entries.first?.unseenReplies.map(\.turnID), [ExactText("reply-3")],
-                       "A later genuine reply can create a fresh New group.")
-    }
+        for order: InboxOrder in [.priority, .posted] {
+            let entries = InboxNormalListProjection.entries(rows: [], serverItems: [],
+                in: .inbox, search: "", order: order, localReplies: offline.entries.map(\.reference))
+            XCTAssertEqual(entries.map(\.id), [.reply(arrival.parent)], order.rawValue)
+        }
+        XCTAssertEqual(offline.entries.first?.receivedAt, receivedAt)
+        XCTAssertEqual(offline.entries.first?.newestUnseenReply?.text, arrival.text)
 
-    func testFirstSeenPersistsAndExpiresAtOneHourWithoutReentry() throws {
-        var ledger = ReplyItemLedger()
-        ledger.reconcile([], accountScopes: [ExactText("account")], now: baselineDate)
-        let arrival = reply("message", turn: "reply-1", sequence: 1)
-        ledger.reconcile([arrival], now: baselineDate.addingTimeInterval(10))
-        XCTAssertNil(ledger.entries.first?.firstSeenAt,
-                     "Receiving an item does not start its visible-time clock.")
-
-        let firstSeen = baselineDate.addingTimeInterval(20)
-        ledger.markFirstSeen(parent("message"), at: firstSeen)
-        XCTAssertEqual(ledger.nextExpiry, firstSeen.addingTimeInterval(3_600))
-
-        var restored = try JSONDecoder().decode(ReplyItemLedger.self,
-                                                from: JSONEncoder().encode(ledger))
-        XCTAssertEqual(restored.entries.first?.firstSeenAt, firstSeen)
-
-        XCTAssertFalse(restored.pruneExpired(now: firstSeen.addingTimeInterval(3_599)))
-        XCTAssertTrue(restored.pruneExpired(now: firstSeen.addingTimeInterval(3_600)))
-        XCTAssertTrue(restored.entries.isEmpty)
-
-        restored.reconcile([arrival], now: firstSeen.addingTimeInterval(3_601))
-        XCTAssertTrue(restored.entries.isEmpty,
-                      "An expired item remains known and cannot re-enter on replay.")
+        offline.reconcile([reply("message", turn: "reply-1", sequence: 1, seen: true)],
+                          now: firstVisible.addingTimeInterval(3_602))
+        XCTAssertTrue(offline.entries.isEmpty, "A chat read receipt removes the local fallback.")
     }
 
     func testEntriesOrderNewestReceivedFirst() {
@@ -226,53 +238,23 @@ final class ReplyItemAreaTests: XCTestCase {
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
         let receivedAt = baselineDate.addingTimeInterval(1)
-        let firstSeenAt = baselineDate.addingTimeInterval(2)
 
         let store = ReplyItemAreaStore(defaults: defaults)
         store.reconcile([], accountScopes: [ExactText("account")], now: baselineDate)
         store.reconcile([reply("message", turn: "reply-1", sequence: 1, text: "Saved")],
                         now: receivedAt)
-        store.markFirstSeen(parent("message"), at: firstSeenAt)
 
         await waitUntil {
             guard let data = defaults.data(forKey: ReplyItemAreaStore.defaultsKey),
                   let ledger = try? JSONDecoder().decode(ReplyItemLedger.self, from: data) else {
                 return false
             }
-            return ledger.entriesByParent[parent("message")]?.firstSeenAt == firstSeenAt
+            return ledger.entriesByParent[parent("message")]?.receivedAt == receivedAt
         }
         let restored = ReplyItemAreaStore(defaults: defaults)
         XCTAssertEqual(restored.entries.first?.parent, parent("message"))
         XCTAssertEqual(restored.entries.first?.receivedAt, receivedAt)
-        XCTAssertEqual(restored.entries.first?.firstSeenAt, firstSeenAt)
         XCTAssertEqual(restored.entries.first?.newestUnseenReply?.text, "Saved")
-        XCTAssertEqual(restored.nextExpiry, firstSeenAt.addingTimeInterval(3_600))
-    }
-
-    @MainActor
-    func testSelectionDeparturePersistsLocally() async throws {
-        let suite = "ReplyItemAreaSelectionTests.\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-        defer { defaults.removePersistentDomain(forName: suite) }
-
-        let store = ReplyItemAreaStore(defaults: defaults)
-        store.reconcile([], accountScopes: [ExactText("account")], now: baselineDate)
-        store.reconcile([reply("message", turn: "reply-1", sequence: 1)],
-                        now: baselineDate.addingTimeInterval(1))
-        store.removeForSelection(parent("message"))
-
-        await waitUntil {
-            guard let data = defaults.data(forKey: ReplyItemAreaStore.defaultsKey),
-                  let ledger = try? JSONDecoder().decode(ReplyItemLedger.self, from: data) else {
-                return false
-            }
-            return ledger.entriesByParent.isEmpty
-        }
-        let restored = ReplyItemAreaStore(defaults: defaults)
-        restored.reconcile([reply("message", turn: "reply-1", sequence: 1)],
-                           now: baselineDate.addingTimeInterval(2))
-        XCTAssertTrue(restored.entries.isEmpty,
-                      "A selected item stays out of New after process restart and replay.")
     }
 
     @MainActor
@@ -329,8 +311,6 @@ final class ReplyItemAreaTests: XCTestCase {
         let activeRow = ReplyItemNormalRowProjection.resolve(active, in: thread)
         XCTAssertEqual(activeRow?.quotedReply.text, ExactText("Newest quote"))
         XCTAssertEqual(activeRow?.openTargetTurnID, ExactText("reply-7"))
-        XCTAssertNil(ReplyItemLocalReceiptTime.resolve(quote.id, in: thread),
-                     "The compact New row omits time when no live-arrival receipt was retained.")
         XCTAssertNil(activeRow?.receivedAt,
                      "A discussion acceptance time is not a receipt time for an agent reply.")
         var liveThread = thread
@@ -339,9 +319,6 @@ final class ReplyItemAreaTests: XCTestCase {
         XCTAssertEqual(ReplyItemNormalRowProjection.resolve(active, in: liveThread)?.receivedAt,
                        Date(timeIntervalSince1970: 1_800_000_456),
                        "The retained local live-arrival fact supplies the reply time.")
-        XCTAssertEqual(ReplyItemLocalReceiptTime.resolve(quote.id, in: liveThread),
-                       Date(timeIntervalSince1970: 1_800_000_456),
-                       "The compact New row uses the same retained local receipt source.")
 
         let historical = InboxViewListItem(kind: .reply, key: key,
             conversationSequence: 4, openAtConversationSequence: 4,
@@ -497,29 +474,6 @@ final class ReplyItemAreaTests: XCTestCase {
         XCTAssertNil(ReplyItemPriorityProjection.score(for: entry,
             perReplyScores: [1: 0.93, 2: 0.4], serverListItems: []),
             "A supported projection with no reply row does not borrow per-reply scores.")
-    }
-
-    func testMergedRowsAreNewestFirstWithTiesGoingToTheMessage() {
-        func at(_ offset: TimeInterval) -> Date { baselineDate.addingTimeInterval(offset) }
-        let messages: [(String, Date)] = [("message-30", at(30)), ("message-10", at(10))]
-        let replies: [(String, Date)] = [("reply-20", at(20)), ("reply-10", at(10)),
-                                         ("reply-5", at(5))]
-
-        let merged = NewMessageAreaRowOrder.merged(
-            messages: messages, replies: replies,
-            messageDate: { $0.1 }, replyDate: { $0.1 },
-            message: { $0.0 }, reply: { $0.0 })
-        XCTAssertEqual(merged, ["message-30", "reply-20", "message-10", "reply-10", "reply-5"],
-                       "One newest-first order; a same-moment pair keeps the message first.")
-
-        XCTAssertEqual(NewMessageAreaRowOrder.merged(
-            messages: [(String, Date)](), replies: replies,
-            messageDate: { $0.1 }, replyDate: { $0.1 },
-            message: { $0.0 }, reply: { $0.0 }), ["reply-20", "reply-10", "reply-5"])
-        XCTAssertEqual(NewMessageAreaRowOrder.merged(
-            messages: messages, replies: [(String, Date)](),
-            messageDate: { $0.1 }, replyDate: { $0.1 },
-            message: { $0.0 }, reply: { $0.0 }), ["message-30", "message-10"])
     }
 
     func testInboxReplyScoresComeFromTheViewAndSurviveTheParentResolving() throws {

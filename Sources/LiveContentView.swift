@@ -3027,7 +3027,6 @@ struct LiveRequestDetail: View {
     private func activatePassivePushContent() {
         guard localExample == nil else { return }
         NativePushedViewCoordinator.shared.contentWasTouched(request.key) {
-            store.newMessageAreaStore?.open(request.key)
             store.reportMessageContentOpened(request)
         }
     }
@@ -3684,7 +3683,6 @@ private struct LiveProjectedInputView: View {
     private func activatePassivePushContent() {
         guard localExample == nil else { return }
         NativePushedViewCoordinator.shared.contentWasTouched(request.key) {
-            store.newMessageAreaStore?.open(request.key)
             store.reportMessageContentOpened(request)
         }
     }

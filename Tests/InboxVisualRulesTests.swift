@@ -6,6 +6,89 @@ import HarklightNativeRelay
 import SwiftUI
 
 final class InboxVisualRulesTests: XCTestCase {
+    @MainActor
+    func testOpeningStoreWithBuild351NewAreaDefaultsKeepsNormalRows() throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("fixture.invalid"),
+            personID: ExactText("person"), deviceID: ExactText("device"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let repo = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        let key = RequestKey(accountScope: identity.personID, senderID: ExactText("sender"),
+                             messageID: ExactText("cached-request"))
+        let payload = try JSONValue.parse(Data(#"{"title":"Retained request"}"#.utf8))
+        try repo.apply(RelayEvent(sequence: 1, body: .delivery(
+            StoredRequest(key: key, originalPayload: payload), .message)), context: context)
+        let suite = UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        // Encoded by the old New-area ledger with an accepted request.
+        let oldLedger = Data(#"""
+        {
+          "baselineEstablishedAccounts": [
+            {
+              "rawValue": "person"
+            }
+          ],
+          "entriesByKey": [
+            {
+              "accountScope": {
+                "rawValue": "person"
+              },
+              "messageID": {
+                "rawValue": "cached-request"
+              },
+              "senderID": {
+                "rawValue": "sender"
+              }
+            },
+            {
+              "acceptanceOrder": 1,
+              "key": {
+                "accountScope": {
+                  "rawValue": "person"
+                },
+                "messageID": {
+                  "rawValue": "cached-request"
+                },
+                "senderID": {
+                  "rawValue": "sender"
+                }
+              },
+              "receivedAt": 721692800
+            }
+          ],
+          "highestAcceptanceOrderByAccount": [
+            {
+              "rawValue": "person"
+            },
+            1
+          ],
+          "knownMessageKeys": [
+            {
+              "accountScope": {
+                "rawValue": "person"
+              },
+              "messageID": {
+                "rawValue": "cached-request"
+              },
+              "senderID": {
+                "rawValue": "sender"
+              }
+            }
+          ]
+        }
+        """#.utf8)
+        defaults.set(oldLedger, forKey: "harklight.new-message-area.v1")
+
+        let store = try LivePresentationStore(store: repo, context: context, replyItemAreaDefaults: defaults)
+        for order: InboxOrder in [.priority, .posted] {
+            let entries = InboxNormalListProjection.entries(rows: store.inboxRows.map(InboxItem.request),
+                serverItems: store.presentation.inboxViewListItems, in: .inbox, search: "", order: order)
+            XCTAssertEqual(entries.map(\.id), [.message(.row(.request(key)))])
+        }
+        XCTAssertNotNil(store.replyItemAreaStore)
+        XCTAssertEqual(defaults.data(forKey: "harklight.new-message-area.v1"), oldLedger)
+    }
+
     func testFYIPostedSortUsesOriginalServerTimeInsteadOfUpdatedContent() {
         var later = fyiRow("later")
         later.serverPostedAt = Date(timeIntervalSince1970: 200)
@@ -432,7 +515,7 @@ final class InboxVisualRulesTests: XCTestCase {
         let suite = UUID().uuidString
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
-        let store = try LivePresentationStore(store: repo, context: context, newMessageAreaDefaults: defaults)
+        let store = try LivePresentationStore(store: repo, context: context, replyItemAreaDefaults: defaults)
 
         let openCount = 135
         let itemCount = 840
@@ -443,9 +526,7 @@ final class InboxVisualRulesTests: XCTestCase {
                                           context: context)
         try store.refreshFromDurableStore()
         let original = store.inboxRows
-        let newBefore = try XCTUnwrap(store.newMessageAreaStore).entries.count
         let badgeBefore = InboxBadge.count(requests: original, samples: SampleLibrary(), showsLocalExamples: false)
-        XCTAssertEqual(newBefore, openCount)
         XCTAssertEqual(badgeBefore, openCount)
         XCTAssertEqual(original.filter(\.isActiveFYI).count, openCount)
         XCTAssertEqual(FYIDigest.highlights(original).count, 4)
@@ -465,9 +546,6 @@ final class InboxVisualRulesTests: XCTestCase {
         let badgeCount = InboxBadge.count(requests: liveRows, samples: SampleLibrary(), showsLocalExamples: false)
         XCTAssertGreaterThan(oldBadgeCount, 0)
         XCTAssertEqual(badgeCount, 0)
-        let newAfter = try XCTUnwrap(store.newMessageAreaStore).entries.count
-        XCTAssertEqual(newAfter, 0)
-        print("840 FYIs: badge \(badgeBefore) to \(badgeCount), New \(newBefore) to \(newAfter); previous settled badge \(oldBadgeCount)")
         let projected = DispatchTime.now().uptimeNanoseconds
 
         for serverItems in [nil, store.presentation.inboxViewListItems] {
@@ -862,19 +940,6 @@ final class InboxVisualRulesTests: XCTestCase {
         let expected = HarklightRGBA(token: "#9D8CFF").mixed(0.55, over: HarklightRGBA(token: "#070B14"))
         XCTAssertEqual(palette.typeColorToken(.request), "#9D8CFF")
         XCTAssertEqual(expected.red, 0.55 * 0x9D / 255 + 0.45 * 0x07 / 255, accuracy: 0.0001)
-    }
-
-    func testNewSectionPriorityLabelsAreReversedOnCoralAndAmber() {
-        XCTAssertEqual(NewMessageAreaPriorityTreatment.forLevel(.urgent, colorScheme: .dark),
-                       NewMessageAreaPriorityTreatment(capsuleFillHex: "#FF8A5C", capsuleTextHex: "#070B14"))
-        XCTAssertEqual(NewMessageAreaPriorityTreatment.forLevel(.high, colorScheme: .dark),
-                       NewMessageAreaPriorityTreatment(capsuleFillHex: "#FFC857", capsuleTextHex: "#070B14"))
-        XCTAssertEqual(NewMessageAreaPriorityTreatment.forLevel(.urgent, colorScheme: .light),
-                       NewMessageAreaPriorityTreatment(capsuleFillHex: "#A13811", capsuleTextHex: "#FFFFFF"))
-        XCTAssertEqual(NewMessageAreaPriorityTreatment.forLevel(.high, colorScheme: .light),
-                       NewMessageAreaPriorityTreatment(capsuleFillHex: "#7D5100", capsuleTextHex: "#FFFFFF"))
-        XCTAssertNil(NewMessageAreaPriorityTreatment.forLevel(.low, colorScheme: .light))
-        XCTAssertNil(NewMessageAreaPriorityTreatment.forLevel(nil, colorScheme: .dark))
     }
 
     func testRowLabelsMeetContrastOnPageAndPriorityWashes() {
