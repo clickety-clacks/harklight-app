@@ -108,4 +108,14 @@ final class HarklightDesignTokenTests: XCTestCase {
         XCTAssertTrue(title.font.familyName.contains("Fraunces"), title.font.familyName)
         XCTAssertEqual(title.font.pointSize, 28, accuracy: 0.5)
     }
+
+    func testMessageIDPillUsesSharedCapsuleGeometryAndScalableMonospacedType() {
+        XCTAssertEqual(HarklightDesignSystem.shape(.messageIDPillHorizontalPadding), 8)
+        XCTAssertEqual(HarklightDesignSystem.shape(.messageIDPillVerticalPadding), 4)
+        XCTAssertEqual(HarklightDesignSystem.shape(.messageIDPillRadius), 999)
+        let regular = HarklightTypography.resolve(.messageIDPill)
+        let larger = HarklightTypography.resolve(.messageIDPill, dynamicTypeSize: .accessibility1)
+        XCTAssertTrue(regular.font.fontDescriptor.symbolicTraits.contains(.traitMonoSpace))
+        XCTAssertGreaterThan(larger.font.pointSize, regular.font.pointSize)
+    }
 }

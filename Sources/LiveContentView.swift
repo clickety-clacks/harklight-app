@@ -1399,9 +1399,10 @@ private struct MessageIDByline<Identity: View>: View {
             AccessibilityNotification.Announcement(String(localized: "Copied")).post()
         } label: {
             pillLabel
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .background(.quaternary, in: Capsule())
+                .padding(.horizontal, HarklightDesignSystem.shape(.messageIDPillHorizontalPadding))
+                .padding(.vertical, HarklightDesignSystem.shape(.messageIDPillVerticalPadding))
+                .background(.quaternary, in: RoundedRectangle(
+                    cornerRadius: HarklightDesignSystem.shape(.messageIDPillRadius), style: .circular))
             .frame(minHeight: 44)
             .contentShape(Rectangle())
         }
@@ -1416,7 +1417,7 @@ private struct MessageIDByline<Identity: View>: View {
             Text(verbatim: itemID.rawValue).opacity(confirmation == nil ? 1 : 0)
             if confirmation != nil { Text("Copied") }
         }
-        .font(.caption.monospaced())
+        .harklightType(.messageIDPill)
         .foregroundStyle(.secondary)
     }
 }

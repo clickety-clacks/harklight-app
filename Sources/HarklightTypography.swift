@@ -21,6 +21,7 @@ enum HarklightTextStyle: String, CaseIterable, Sendable {
     case priorityLine
     case rowSender
     case messageSender
+    case messageIDPill
     case rowTime
     case sectionHeading
     case more
@@ -68,6 +69,7 @@ struct HarklightTypeToken: Decodable, Sendable {
     enum Face: String, Decodable, Sendable {
         case heading
         case system
+        case monospace
     }
 
     let face: Face
@@ -151,6 +153,7 @@ enum HarklightTypography {
         let font = switch token.face {
         case .heading: heading(size: size, weight: token.weight)
         case .system: UIFont.systemFont(ofSize: size, weight: systemWeight(token.weight))
+        case .monospace: UIFont.monospacedSystemFont(ofSize: size, weight: systemWeight(token.weight))
         }
         let lineSpacing = token.lineHeight.map { max(0, CGFloat($0) * size - font.lineHeight) } ?? 0
         return HarklightResolvedType(font: font,
