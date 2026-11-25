@@ -8,15 +8,27 @@ enum HarklightMessageType: String, CaseIterable, Sendable {
     case warning
     case error
 
-    /// The type symbol drawn beside a message title.
-    var symbol: String {
+    var iconRole: MessageIconRole {
         switch self {
-        case .request: "questionmark.circle"
-        case .info: "info.circle"
-        case .done: "checkmark.circle"
-        case .warning: "exclamationmark.triangle"
-        case .error: "xmark.octagon"
+        case .request: .request
+        case .info: .fyi
+        case .done: .fyiSuccess
+        case .warning: .fyiBlocker
+        case .error: .error
         }
+    }
+}
+
+enum MessageIconRole: String, CaseIterable, Sendable {
+    case request, requestBlocker, requestSuccess
+    case fyi, fyiBlocker, fyiSuccess
+    case answered, error
+
+    var token: HarklightDesignSource.MessageIcons.Pair {
+        guard let icon = HarklightDesignSystem.source.messageIcons.roles[rawValue] else {
+            preconditionFailure("Design/tokens.json is missing the \(rawValue) message icon.")
+        }
+        return icon
     }
 }
 
@@ -91,8 +103,18 @@ struct HarklightDesignSource: Decodable, Sendable {
     let light: Appearance
     let dark: Appearance
     let fyiDigest: FYIDigest
+    let messageIcons: MessageIcons
     let type: HarklightTypeTokens
     let shape: [String: Double]
+
+    struct MessageIcons: Decodable, Sendable {
+        let roles: [String: Pair]
+
+        struct Pair: Decodable, Sendable {
+            let sfSymbol: String
+            let web: String
+        }
+    }
 
     struct Colors: Decodable, Sendable {
         let background: String

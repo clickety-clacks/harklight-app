@@ -80,6 +80,17 @@ struct HarklightApp: App {
         return nil
     }
 
+    #if DEBUG
+    private var messageKindAcceptanceColorScheme: ColorScheme? {
+        guard ProcessInfo.processInfo.arguments.contains("--harklight-message-kind-acceptance") else { return nil }
+        switch ProcessInfo.processInfo.environment["HARKLIGHT_MESSAGE_KIND_TEST_APPEARANCE"] {
+        case "light": return .light
+        case "dark": return .dark
+        default: return nil
+        }
+    }
+    #endif
+
     private var showsTierReference: Bool {
         #if DEBUG
         return ProcessInfo.processInfo.arguments.contains("--harklight-tier-reference")
@@ -144,6 +155,9 @@ struct HarklightApp: App {
             .background { Rectangle().fill(.hkBackground).ignoresSafeArea() }
             .modifier(HarklightAccentTint())
             .modifier(AcceptanceReduceMotionOverride(isEnabled: acceptanceReduceMotionOverride))
+            #if DEBUG
+            .preferredColorScheme(messageKindAcceptanceColorScheme)
+            #endif
             .foregroundChatNotificationLayer()
             .task {
                 if loadsSampleMessages { samples.populate() }

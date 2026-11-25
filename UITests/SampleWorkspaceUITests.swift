@@ -713,63 +713,61 @@ final class SampleWorkspaceUITests: XCTestCase {
         XCTAssertTrue(sort.waitForExistence(timeout: 5), app.debugDescription)
     }
 
-    func testSuccessMessageKindAppearsInInboxAndDetail() {
-        for (motionLabel, motionArgument) in [
-            ("off", "--harklight-test-reduce-motion-off"),
-            ("on", "--harklight-test-reduce-motion-on")
-        ] {
+    func testMessageKindsUseLeadingIconsAndStayInAccessibilityLabels() {
+        for appearance in ["light", "dark"] {
             let app = XCUIApplication()
             app.launchArguments = ["--reset-attention-fixture", "--harklight-samples",
-                                  "--harklight-message-kind-acceptance", motionArgument]
+                                  "--harklight-message-kind-acceptance"]
+            app.launchEnvironment["HARKLIGHT_MESSAGE_KIND_TEST_APPEARANCE"] = appearance
             app.launch()
             XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10), app.debugDescription)
 
             enterSearch("Release package", in: app)
-            let row = app.descendants(matching: .any)["sample-message-kind-success"]
-            XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
-            XCTAssertTrue(row.label.contains("FYI"), row.label)
-            XCTAssertTrue(row.label.contains("Success"), row.label)
-            capture("Success kind inbox · Reduce Motion \(motionLabel)", app)
+            let success = app.descendants(matching: .any)["sample-message-kind-success"]
+            XCTAssertTrue(success.waitForExistence(timeout: 5), app.debugDescription)
+            XCTAssertTrue(success.label.contains("FYI"), success.label)
+            XCTAssertTrue(success.label.contains("Success"), success.label)
+            capture("Success Inbox \(appearance)", app)
 
-            row.tap()
-            XCTAssertTrue(app.buttons["request-heading"].waitForExistence(timeout: 5), app.debugDescription)
-            XCTAssertTrue(app.descendants(matching: .any)["message-type-fyi"].exists,
-                          app.debugDescription)
-            XCTAssertTrue(app.descendants(matching: .any)["message-kind-success"].exists,
-                          app.debugDescription)
-            XCTAssertTrue(app.buttons["request-seen-action"].exists,
-                          "The typed FYI message keeps the existing Seen action available.")
-            XCTAssertFalse(app.descendants(matching: .any)["request-seen-form-label"].exists,
-                           "Revision 7 draws no FYI label above the Seen button.")
-            capture("Success kind detail · Reduce Motion \(motionLabel)", app)
+            success.tap()
+            let heading = app.buttons["request-heading"]
+            XCTAssertTrue(heading.wait(for: \.label, toEqual: "Release package is ready, FYI, Success", timeout: 5),
+                          heading.exists ? heading.label : app.debugDescription)
+            XCTAssertTrue(heading.label.contains("FYI"), heading.label)
+            XCTAssertTrue(heading.label.contains("Success"), heading.label)
+            XCTAssertFalse(app.descendants(matching: .any)["message-metadata-badges"].exists)
+            XCTAssertFalse(app.staticTexts["FYI"].exists)
+            XCTAssertFalse(app.staticTexts["Success"].exists)
+            XCTAssertTrue(app.buttons["request-seen-action"].exists)
+            capture("Success detail \(appearance)", app)
 
             showList(app)
             enterSearch("A note for the studio journal", in: app)
-            let requestRow = app.descendants(matching: .any)["sample-note-0"]
-            XCTAssertTrue(requestRow.waitForExistence(timeout: 5), app.debugDescription)
-            XCTAssertTrue(requestRow.label.contains("Request"), requestRow.label)
-            XCTAssertTrue(requestRow.label.contains("Blocker"), requestRow.label)
-            requestRow.tap()
-            XCTAssertTrue(app.descendants(matching: .any)["message-type-request"].waitForExistence(timeout: 5),
-                          app.debugDescription)
-            XCTAssertTrue(app.descendants(matching: .any)["message-kind-blocker"].exists,
-                          app.debugDescription)
-            XCTAssertTrue(app.buttons["Reply"].exists,
-                          "The existing Reply action remains available for a typed request.")
+            let blocker = app.descendants(matching: .any)["sample-note-0"]
+            XCTAssertTrue(blocker.waitForExistence(timeout: 5), app.debugDescription)
+            XCTAssertTrue(blocker.label.contains("Request"), blocker.label)
+            XCTAssertTrue(blocker.label.contains("Blocker"), blocker.label)
+            capture("Blocker Inbox \(appearance)", app)
+
+            blocker.tap()
+            XCTAssertTrue(heading.wait(for: \.label, toEqual: "A note for the studio journal?, Request, Blocker", timeout: 5),
+                          heading.exists ? heading.label : app.debugDescription)
+            XCTAssertTrue(heading.label.contains("Request"), heading.label)
+            XCTAssertTrue(heading.label.contains("Blocker"), heading.label)
+            XCTAssertFalse(app.descendants(matching: .any)["message-metadata-badges"].exists)
+            XCTAssertFalse(app.staticTexts["Request"].exists)
+            XCTAssertFalse(app.staticTexts["Blocker"].exists)
+            XCTAssertTrue(app.buttons["Reply"].exists)
+            capture("Blocker detail \(appearance)", app)
 
             showList(app)
             enterSearch("review moved to Thursday", in: app)
             let legacySeen = app.descendants(matching: .any)["sample-information-0"]
             XCTAssertTrue(legacySeen.waitForExistence(timeout: 5), app.debugDescription)
-            XCTAssertFalse(legacySeen.label.contains("FYI"),
-                           "The Seen descriptor does not create a stored type label.")
+            XCTAssertFalse(legacySeen.label.contains("FYI"), legacySeen.label)
             legacySeen.tap()
-            XCTAssertTrue(app.buttons["request-seen-action"].waitForExistence(timeout: 5),
-                          app.debugDescription)
-            XCTAssertFalse(app.descendants(matching: .any)["message-type-fyi"].exists,
-                           "An untyped legacy Seen message remains untyped.")
-            XCTAssertTrue(app.buttons["request-seen-action"].exists,
-                          "The original Seen button remains available.")
+            XCTAssertTrue(app.buttons["request-seen-action"].waitForExistence(timeout: 5))
+            XCTAssertFalse(heading.label.contains("FYI"), heading.label)
             app.terminate()
         }
     }

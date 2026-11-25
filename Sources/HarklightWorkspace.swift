@@ -86,7 +86,8 @@ extension HarklightMessageType {
     /// and the web page share it. An untyped legacy message is an fyi when it
     /// carries the Seen descriptor and a request otherwise.
     init(declaredType: MessageTypeValue?, kind: MessageKindValue?, hasSeenDescriptor: Bool) {
-        let type = declaredType ?? (hasSeenDescriptor ? .fyi : .request)
+        let type = MessageMetadataPresentation(declaredType: declaredType, kind: kind,
+                                               hasSeenDescriptor: hasSeenDescriptor).resolvedType
         switch (type, kind) {
         case (.request, .blocker): self = .error
         case (.request, _): self = .request
@@ -787,6 +788,11 @@ struct InboxRequestRow: Identifiable {
     var resolvedMessageType: HarklightMessageType {
         if let messageType { return messageType }
         return HarklightMessageType(declaredType: declaredMessageType, kind: declaredMessageKind,
+                                    hasSeenDescriptor: informationalSeenStatus != nil)
+    }
+
+    var messageMetadata: MessageMetadataPresentation {
+        MessageMetadataPresentation(declaredType: declaredMessageType, kind: declaredMessageKind,
                                     hasSeenDescriptor: informationalSeenStatus != nil)
     }
 
@@ -3003,6 +3009,7 @@ struct InboxRowContent: View {
     }
 
     private var messageType: HarklightMessageType { row.resolvedMessageType }
+    private var iconRole: MessageIconRole { row.messageMetadata.iconRole(for: messageType) }
 
     private var priorityMarkerLevel: InboxPriorityDisplay? {
         guard let level = InboxPriorityDisplay.forEntry(score: row.inboxScore, priority: row.inboxPriority),
@@ -3142,11 +3149,11 @@ struct InboxRowContent: View {
             HStack(alignment: .firstTextBaseline, spacing: symbolSpacing) {
                 HStack(alignment: .firstTextBaseline, spacing: HarklightDesignSystem.shape(.rowLeadingAccessoryGap)) {
                     leadingAccessories
-                    if let messageTab, messageTab == .replied || messageType == .request {
+                    if let messageTab, messageTab == .replied || iconRole == .request {
                         InboxRowMark(answered: messageTab == .replied, palette: palette)
                             .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + HarklightDesignSystem.shape(.rowTypeBaselineOffset) }
                     } else {
-                        Image(systemName: messageType.symbol)
+                        Image(systemName: iconRole.token.sfSymbol)
                             .font(.system(size: HarklightDesignSystem.shape(.rowTypeSymbolSize), weight: .regular))
                             .foregroundStyle(palette.typeColor(messageType))
                             .frame(width: messageTab == nil ? nil : symbolColumn)
@@ -3157,18 +3164,16 @@ struct InboxRowContent: View {
                 .frame(minWidth: messageTab == nil ? symbolColumn - symbolSpacing : symbolColumn, alignment: .leading)
                 VStack(alignment: .leading, spacing: HarklightDesignSystem.shape(.rowContentSpacing)) {
                     HStack(alignment: .firstTextBaseline, spacing: HarklightDesignSystem.shape(.rowTitleStatusGap)) {
-                        Text(MessageMarkdown.attributed(row.title))
+                        let title = Text(MessageMarkdown.attributed(row.title))
+                        title
                             .harklightType(messageTab == nil ? .rowTitle : .inboxMessageTitle)
                             .foregroundStyle(palette.text)
                             .tint(palette.text)
                             .frame(maxWidth: .infinity, alignment: .leading)
+                            .accessibilityLabel(row.messageMetadata.accessibilityTitle(title))
                         titleTrailingStatus
                     }
                     priorityAndDueLine
-                    if row.declaredMessageType != nil || row.declaredMessageKind != nil {
-                        MessageMetadataBadges(messageType: row.declaredMessageType,
-                                              messageKind: row.declaredMessageKind)
-                    }
                     if let bodyText = row.bodyText, !bodyText.isEmpty {
                         Text(MessageMarkdown.attributed(bodyText))
                             .harklightType(.rowBody)
