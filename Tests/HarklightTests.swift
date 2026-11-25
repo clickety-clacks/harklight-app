@@ -660,7 +660,8 @@ final class HarklightTests: XCTestCase {
         }
 
         let item = FocusReport.message(senderID: "sender", messageID: "same-item")
-        let liveFocus = NativeFocusSelection.fyiDetailReport(for: key, in: live, relay: lifecycle)
+        XCTAssertTrue(NativeFocusSelection.canReportFYIItem(in: live, relay: lifecycle))
+        let liveFocus = try XCTUnwrap(NativeFocusSelection.report(for: .fyis, path: [.fyi(key)]))
         XCTAssertEqual(liveFocus, item)
         await expectFocus(liveFocus)
 
@@ -672,12 +673,15 @@ final class HarklightTests: XCTestCase {
         reporter.selectionChanged(to: .fyi)
         lifecycle.v2FocusScenePhaseChanged(.background)
         lifecycle.v2FocusScenePhaseChanged(.active)
-        try await Task.sleep(for: .milliseconds(50))
-        XCTAssertEqual(transport.reportedFocus.count, countBeforeArchive)
+        let archiveDeadline = ContinuousClock.now + .seconds(2)
+        while transport.reportedFocus.count == countBeforeArchive, ContinuousClock.now < archiveDeadline {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertEqual(Array(transport.reportedFocusScreens.dropFirst(countBeforeArchive)), ["not_in_front"])
 
         reporter.setReportsVisiblePresentation(true)
         let deadline = ContinuousClock.now + .seconds(2)
-        while transport.reportedFocus.count == countBeforeArchive, ContinuousClock.now < deadline {
+        while transport.reportedFocus.count == countBeforeArchive + 1, ContinuousClock.now < deadline {
             try await Task.sleep(for: .milliseconds(5))
         }
         XCTAssertEqual(transport.reportedFocusScreens.last, "fyi")
@@ -1144,6 +1148,26 @@ final class HarklightTests: XCTestCase {
             exactRoute, afterDismissedSerial: 50))
         XCTAssertTrue(InboxNotificationNavigationPolicy.shouldApply(
             NativeInboxNavigation(serial: 51, request: nil), afterDismissedSerial: 50))
+    }
+
+    func testManualReopenRestoresInlineChatAfterMessageOnlyShow() {
+        let shown = RequestKey(accountScope: ExactText("person"), senderID: ExactText("sender"),
+                               messageID: ExactText("shown"))
+        let other = RequestKey(accountScope: ExactText("person"), senderID: ExactText("sender"),
+                                messageID: ExactText("other"))
+        let route = NativeInboxNavigation(serial: 10, request: shown, isPushed: true,
+                                          showsMessageOnly: true)
+
+        XCTAssertTrue(InboxNotificationNavigationPolicy.excludesInlineChat(for: .request(shown), route: route))
+        XCTAssertFalse(InboxNotificationNavigationPolicy.excludesInlineChat(for: .request(other), route: route))
+
+        let dismissed = InboxNotificationNavigationPolicy.dismissalSerial(
+            from: .request(shown), to: .request(other), route: route)
+        XCTAssertEqual(dismissed, route.serial)
+        let visibleRoute = InboxNotificationNavigationPolicy.shouldApply(
+            route, afterDismissedSerial: dismissed) ? route : nil
+        XCTAssertFalse(InboxNotificationNavigationPolicy.excludesInlineChat(
+            for: .request(shown), route: visibleRoute))
     }
 
     func testMessageDeepLinkDecodesEachIdentityAsOnePathSegment() {

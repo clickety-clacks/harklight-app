@@ -411,11 +411,19 @@ struct InboxNotificationPendingPresentation: Equatable {
 }
 
 enum InboxNotificationNavigationPolicy {
-    static func dismissalSerial(from previous: InboxSelection?,
-                                to next: InboxSelection?) -> UInt64? {
-        guard previous != next,
-              case let .notificationPending(serial)? = previous else { return nil }
-        return serial
+    static func dismissalSerial(from previous: InboxSelection?, to next: InboxSelection?,
+                                route: NativeInboxNavigation? = nil) -> UInt64? {
+        guard previous != next else { return nil }
+        if case let .notificationPending(serial)? = previous { return serial }
+        return route?.showsMessageOnly == true ? route?.serial : nil
+    }
+
+    static func excludesInlineChat(for selection: InboxSelection?,
+                                   route: NativeInboxNavigation?) -> Bool {
+        guard case let .request(key)? = selection, let route, route.request == key else {
+            return false
+        }
+        return route.chatTargetFallsBackToMessage || route.showsMessageOnly
     }
 
     static func shouldApply(_ route: NativeInboxNavigation,
@@ -1099,6 +1107,9 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
 
     private func reopenInlineChat(for key: RequestKey) {
         withAnimation(.easeInOut(duration: 0.22)) {
+            if let route = visibleNotificationNavigation, route.request == key, route.showsMessageOnly {
+                dismissedNotificationSerial = route.serial
+            }
             dismissedInlineChatRequests.remove(key)
         }
     }
@@ -1125,7 +1136,8 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         }
         guard previous != next else { return }
         if nextRequest != nil, !openedPassivePush { userOpenedMessage() }
-        if let serial = InboxNotificationNavigationPolicy.dismissalSerial(from: previous, to: next) {
+        if let serial = InboxNotificationNavigationPolicy.dismissalSerial(
+            from: previous, to: next, route: visibleNotificationNavigation) {
             dismissedNotificationSerial = serial
         }
         UIDiagnostics.shared.record("inbox.navigate \(UIDiagnostics.describe(previous))->\(UIDiagnostics.describe(next))")
@@ -1407,18 +1419,14 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     @ViewBuilder
     private func detailContent(for item: InboxSelection?, tab: InboxWorkspaceTab, inlineChat: Bool,
                                geometry: GeometryProxy) -> some View {
-        let pushedChatFallsBackToMessage: Bool = if case let .request(key)? = item,
-            let route = activeNotificationNavigation, route.request == key {
-            route.chatTargetFallsBackToMessage
-        } else {
-            false
-        }
+        let pushedChatFallsBackToMessage = InboxNotificationNavigationPolicy.excludesInlineChat(
+            for: item, route: visibleNotificationNavigation)
         HStack(spacing: 0) {
             Group {
                 switch item {
                 case let .request(key)?:
                     let reopenInlineChat: (() -> Void)? = inlineChat &&
-                        !pushedChatFallsBackToMessage &&
+                        (!pushedChatFallsBackToMessage || visibleNotificationNavigation?.showsMessageOnly == true) &&
                         conversationStore?.request(for: key) != nil
                         ? { [self] in self.reopenInlineChat(for: key) }
                         : nil
@@ -1673,12 +1681,8 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         let index = ids.firstIndex(of: id)
         let hasPrevious = index.map { $0 > 0 } ?? false
         let hasNext = index.map { $0 + 1 < ids.count } ?? false
-        let chatTargetFallsBack = if case let .request(key) = id,
-            let route = visibleNotificationNavigation, route.request == key {
-            route.chatTargetFallsBackToMessage || route.showsMessageOnly
-        } else {
-            false
-        }
+        let chatTargetFallsBack = InboxNotificationNavigationPolicy.excludesInlineChat(
+            for: id, route: visibleNotificationNavigation)
         let chatRouteSerial: UInt64?
         var chatScrollTargetTurnID: ExactText? = nil
         var chatRouteDidOpen: (() -> Void)? = nil
@@ -1854,7 +1858,6 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                 selection = destination.selection
                 rememberFYIRestoration(from: previous)
                 if let key = route.request {
-                    if route.showsMessageOnly { dismissedInlineChatRequests.insert(key) }
                     if !route.isPushed, !NativePushedViewCoordinator.shared.isPassive(key) {
                         conversationStore?.newMessageAreaStore?.open(key)
                         reportMessageContentOpen(for: key)

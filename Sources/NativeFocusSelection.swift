@@ -27,12 +27,6 @@ enum NativeFocusSelection {
         return context.transportMode == .relay && relay.isActive(for: context)
     }
 
-    @MainActor
-    static func fyiDetailReport(for key: RequestKey, in store: LivePresentationStore?,
-                                relay: NativeRelayLifecycle = .shared) -> FocusReport {
-        canReportFYIItem(in: store, relay: relay) ? messageReport(for: key) : .inbox
-    }
-
     static func messageReport(for key: RequestKey) -> FocusReport {
         .message(senderID: key.senderID.rawValue, messageID: key.messageID.rawValue)
     }

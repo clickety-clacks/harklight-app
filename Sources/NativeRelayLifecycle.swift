@@ -1083,7 +1083,7 @@ final class NativeRelayLifecycle {
             // The channel may return the last drained reply, so this sender
             // does not treat a reply as acknowledgement of an individual write.
             guard let report else {
-                await focus.pauseReporting()
+                await focus.pauseReporting(sendNotInFront: true)
                 return
             }
             if report.screen == .signedOut {
