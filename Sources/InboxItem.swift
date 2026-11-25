@@ -80,9 +80,15 @@ enum InboxItem: Identifiable {
         return false
     }
 
-    var usesNormalMessageList: Bool {
-        if case let .request(row) = self { return row.progress == nil || row.fyiUsesRepliedForProgress }
-        return true
+    func usesNormalMessageList(inInboxSearch: Bool) -> Bool {
+        guard case let .request(row) = self else { return true }
+        if row.fyiUsesInboxSearchForProgress { return inInboxSearch }
+        return row.progress == nil || row.fyiUsesRepliedForProgress
+    }
+
+    var isSettledFYI: Bool {
+        if case let .request(row) = self { return row.isSettledFYI }
+        return false
     }
 
     var hasProgressMarker: Bool {
@@ -337,7 +343,7 @@ enum InboxNormalListProjection {
         for item in serverItems {
             switch item.kind {
             case .message:
-                guard let row = rowsByKey[item.key], InboxItem.request(row).usesNormalMessageList,
+                guard let row = rowsByKey[item.key], InboxItem.request(row).usesNormalMessageList(inInboxSearch: tab == .inbox && !query.isEmpty),
                       (isFree && !row.fyiUsesRepliedForProgress) || row.belongsToReplied == (tab.messageTab == .replied),
                       query.isEmpty || InboxItem.request(row).matchesSearch(query) else {
                     flushMessages()
@@ -347,7 +353,8 @@ enum InboxNormalListProjection {
                 pendingMessages.append(.request(row))
             case .reply:
                 flushMessages()
-                guard rowsByKey[item.key]?.progress == nil else { continue }
+                guard rowsByKey[item.key]?.progress == nil,
+                      rowsByKey[item.key]?.fyiUsesInboxSearchForProgress != true else { continue }
                 guard let unseenCount = item.unseenCount,
                       isFree || (unseenCount == 0 ? tab == .replied : tab == .inbox),
                       matchesReplySearch(item, query: query, rowsByKey: rowsByKey) else { continue }

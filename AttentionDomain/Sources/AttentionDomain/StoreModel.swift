@@ -232,13 +232,17 @@ public struct PendingMessageOpen: Equatable, Codable, Identifiable, Sendable {
     public let requestKey: RequestKey
     public let requestRevision: UInt64
     public let operationID: UUID
+    /// Absent in queues written before permanent refusals were retained.
+    public let failed: Bool?
 
     public var id: UUID { operationID }
 
-    public init(requestKey: RequestKey, requestRevision: UInt64, operationID: UUID = UUID()) {
+    public init(requestKey: RequestKey, requestRevision: UInt64, operationID: UUID = UUID(),
+                failed: Bool? = nil) {
         self.requestKey = requestKey
         self.requestRevision = requestRevision
         self.operationID = operationID
+        self.failed = failed
     }
 }
 
@@ -985,6 +989,7 @@ public struct AttentionStoreSnapshot: Sendable {
     public let pendingRelayOverlays: [UInt64: RelayEvent]
     public let inboxReferences: [RequestKey: RemoteRequestState]
     public let pendingMessageOpens: [PendingMessageOpen]
+    public let failedMessageOpens: [PendingMessageOpen]
     public let priorityLevels: PriorityLevelsStoreState
 
     public init(requests: [RequestKey: StoredRequest],
@@ -1006,6 +1011,7 @@ public struct AttentionStoreSnapshot: Sendable {
                 pendingRelayOverlays: [UInt64: RelayEvent] = [:],
                 inboxReferences: [RequestKey: RemoteRequestState] = [:],
                 pendingMessageOpens: [PendingMessageOpen] = [],
+                failedMessageOpens: [PendingMessageOpen] = [],
                 priorityLevels: PriorityLevelsStoreState = .empty) {
         self.conversationThreads = conversationThreads
         self.requests = requests
@@ -1026,6 +1032,7 @@ public struct AttentionStoreSnapshot: Sendable {
         self.pendingRelayOverlays = pendingRelayOverlays
         self.inboxReferences = inboxReferences
         self.pendingMessageOpens = pendingMessageOpens
+        self.failedMessageOpens = failedMessageOpens
         self.priorityLevels = priorityLevels
     }
 }

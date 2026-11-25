@@ -145,6 +145,27 @@ final class SampleWorkspaceUITests: XCTestCase {
         capture("Empty FYIs and disabled Mark All Seen", app)
     }
 
+    func testEndedFYIProgressOpensOrdinaryDetailFromInboxSearch() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--harklight-test-fyi-list", "--harklight-test-fyi-ended-progress",
+                               "--harklight-test-fyi-plain-seen"]
+        app.launch()
+        defer { app.terminate() }
+
+        XCTAssertFalse(app.descendants(matching: .any)["inbox-fyi"].firstMatch.exists)
+        let field = workspaceSearchField(in: app)
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        field.tap()
+        field.typeText("Progress with a Seen response")
+        let result = app.staticTexts["Progress with a Seen response"].firstMatch
+        XCTAssertTrue(result.waitForExistence(timeout: 5))
+        result.tap()
+        let heading = app.buttons["request-heading"]
+        XCTAssertTrue(heading.waitForExistence(timeout: 5))
+        XCTAssertTrue(heading.label.contains("Progress with a Seen response"))
+        XCTAssertFalse(app.staticTexts["Progress unavailable"].exists)
+    }
+
     func testLargeFYIListOpensAndScrolls() {
         if UIDevice.current.userInterfaceIdiom == .pad { XCUIDevice.shared.orientation = .landscapeLeft }
         let app = XCUIApplication()

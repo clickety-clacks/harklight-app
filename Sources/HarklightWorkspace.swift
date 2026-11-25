@@ -239,8 +239,11 @@ enum InboxListProjection {
     static func filteredRows(_ rows: [InboxItem], in tab: InboxWorkspaceTab,
                              search: String) -> [InboxItem] {
         let messageTab = tab.messageTab
-        let inTab = rows.filter { $0.usesNormalMessageList && $0.belongsToReplied == (messageTab == .replied) }
         let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
+        let inTab = rows.filter {
+            $0.usesNormalMessageList(inInboxSearch: messageTab == .inbox && !query.isEmpty) &&
+                $0.belongsToReplied == (messageTab == .replied)
+        }
         guard !query.isEmpty else { return inTab }
         return inTab.filter { $0.matchesSearch(query) }
     }
@@ -251,7 +254,8 @@ enum InboxListProjection {
         let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
         return InboxThreadListProjection.grouped(rows).compactMap { entry in
             let matches = entry.members.filter { item in
-                item.usesNormalMessageList && item.belongsToReplied == isRepliedTab &&
+                item.usesNormalMessageList(inInboxSearch: !isRepliedTab && !query.isEmpty) &&
+                    item.belongsToReplied == isRepliedTab &&
                     (query.isEmpty || item.matchesSearch(query))
             }
             guard !matches.isEmpty else { return nil }
@@ -659,6 +663,8 @@ struct InboxRequestRow: Identifiable {
     var fyiServerSeen: Bool? = nil
     var fyiHasEnded = false
     var fyiOpenedFlagPending = false
+    var fyiOpenedFlagFailed = false
+    var fyiUsesInboxSearchForProgress = false
     var canRetryFYISeen = false
     var fyiUsesRepliedForProgress = false
     var fyiProgressIsFinished = false
@@ -693,10 +699,7 @@ struct InboxRequestRow: Identifiable {
 
     var isWaitingForFYISeen: Bool { isFYISeenPending && (!hasFailedResponse || canRetryFYISeen) }
 
-    // Ended, unanswered Progress has no normal list or search destination.
-    var needsFYIHistoryAccess: Bool {
-        isFYI && progress != nil && fyiHasEnded && !fyiUsesRepliedForProgress
-    }
+    var isSettledFYI: Bool { isFYI && !isActiveFYI }
 
     var fyiSeenAction: FYISeenAction? {
         guard !fyiHasEnded, isUnseenFYI, !isFYISeenPending else { return nil }
@@ -895,7 +898,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     private var activeFYIsOnly: Bool { conversationStore?.isReadOnly != true }
     private var fyis: [InboxRequestRow] {
         guard activeFYIsOnly else { return requests.filter(\.isFYI) }
-        return requests.filter { $0.isActiveFYI || $0.needsFYIHistoryAccess }
+        return requests.filter(\.isActiveFYI)
     }
     private var digestFYIs: [InboxRequestRow] {
         requests.filter(activeFYIsOnly ? \.isActiveFYI : \.isFYI)
@@ -1390,7 +1393,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
 
     private var fyiInboxRow: FYIInboxRow? {
         let items = digestFYIs
-        guard !items.isEmpty || (activeFYIsOnly && !fyis.isEmpty) else { return nil }
+        guard !items.isEmpty else { return nil }
         let summary = fyiDigest.summary(for: fyiDigestScope, visibleKeys: Set(items.map(\.key)))
         return FYIInboxRow(items: items, summary: summary) {
             navigationSelection.wrappedValue = .fyis
@@ -1970,7 +1973,8 @@ struct InboxList: View {
         let isRepliedTab = tab.messageTab == .replied
         return conversationStore.expiredRetractionSearchRows.filter { row in
             let item = InboxItem.request(row)
-            return !item.isProgress && item.belongsToReplied == isRepliedTab && item.matchesSearch(query)
+            return item.usesNormalMessageList(inInboxSearch: !isRepliedTab) &&
+                item.belongsToReplied == isRepliedTab && item.matchesSearch(query)
         }
     }
 
@@ -1992,7 +1996,7 @@ struct InboxList: View {
         }
         let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
         return newMessageAreaStore.entries.compactMap { entry in
-            guard let row = requestRows[entry.key], row.progress == nil,
+            guard let row = requestRows[entry.key], row.progress == nil, !row.isSettledFYI,
                   query.isEmpty || InboxItem.request(row).matchesSearch(query) else { return nil }
             return NewMessageAreaListRow(entry: entry, row: row)
         }
@@ -2008,7 +2012,7 @@ struct InboxList: View {
         let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
         return replyItemAreaStore.entries.compactMap { entry in
             let row = conversationStore?.inboxRow(for: entry.parent) ?? requestRows[entry.parent]
-            guard row?.progress == nil else { return nil }
+            guard row?.progress == nil, row?.isSettledFYI != true else { return nil }
             let matchesSearch = row.map { InboxItem.request($0).matchesSearch(query) } ??
                 (entry.parent.senderID.rawValue.localizedCaseInsensitiveContains(query) ||
                  entry.parent.messageID.rawValue.localizedCaseInsensitiveContains(query))
@@ -2038,7 +2042,7 @@ struct InboxList: View {
             case let .request(request): request
             case let .example(_, response): response.inboxRow
             }
-            guard let row, row.progress == nil, row.submissionProgress != nil,
+            guard let row, row.progress == nil, !row.isSettledFYI, row.submissionProgress != nil,
                   query.isEmpty || item.matchesSearch(query) else { return nil }
             return AwaitingAreaItem(item: item, row: row)
         }
@@ -4145,7 +4149,7 @@ private struct FYIList: View {
                     }
                 }
                 .font(.caption)
-            } else if activeFYIsOnly, item.hasFailedResponse, !item.fyiHasEnded {
+            } else if activeFYIsOnly, item.hasFailedResponse || item.fyiOpenedFlagFailed, !item.fyiHasEnded {
                 Text("Seen could not be confirmed.").font(.caption)
             } else if item.hasDeliveryWarning, let status = item.localStatus {
                 Text(status).font(.caption)

@@ -389,6 +389,10 @@ final class InboxVisualRulesTests: XCTestCase {
         let context = ProfileContext(identity: identity, transportMode: .relay)
         let model = ServerModelV2Store(fileURL: nil)
         let repo = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        let suite = UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = try LivePresentationStore(store: repo, context: context, newMessageAreaDefaults: defaults)
 
         let openCount = 135
         let itemCount = 840
@@ -397,8 +401,12 @@ final class InboxVisualRulesTests: XCTestCase {
         try model.apply(initial, cursor: UInt64(itemCount))
         try repo.restoreCachedServerState(ServerModelV2Projection.cachedState(model.snapshot, identity: identity),
                                           context: context)
-        let store = try LivePresentationStore(store: repo, context: context)
+        try store.refreshFromDurableStore()
         let original = store.inboxRows
+        let newBefore = try XCTUnwrap(store.newMessageAreaStore).entries.count
+        let badgeBefore = InboxBadge.count(requests: original, samples: SampleLibrary(), showsLocalExamples: false)
+        XCTAssertEqual(newBefore, openCount)
+        XCTAssertEqual(badgeBefore, openCount)
         XCTAssertEqual(original.filter(\.isActiveFYI).count, openCount)
         XCTAssertEqual(FYIDigest.highlights(original).count, 4)
         XCTAssertTrue(FYIOrder.priority.sorted(original.filter(\.isActiveFYI)).contains { $0.title == "Bulletin 1" })
@@ -413,6 +421,13 @@ final class InboxVisualRulesTests: XCTestCase {
         let liveRows = store.inboxRows
         XCTAssertTrue(liveRows.filter(\.isActiveFYI).isEmpty)
         XCTAssertTrue(FYIDigest.highlights(liveRows).isEmpty)
+        let oldBadgeCount = liveRows.filter { !$0.hasProgressMarker && !$0.belongsToReplied && !$0.isRetracted }.count
+        let badgeCount = InboxBadge.count(requests: liveRows, samples: SampleLibrary(), showsLocalExamples: false)
+        XCTAssertGreaterThan(oldBadgeCount, 0)
+        XCTAssertEqual(badgeCount, 0)
+        let newAfter = try XCTUnwrap(store.newMessageAreaStore).entries.count
+        XCTAssertEqual(newAfter, 0)
+        print("840 FYIs: badge \(badgeBefore) to \(badgeCount), New \(newBefore) to \(newAfter); previous settled badge \(oldBadgeCount)")
         let projected = DispatchTime.now().uptimeNanoseconds
 
         for serverItems in [nil, store.presentation.inboxViewListItems] {
@@ -431,13 +446,44 @@ final class InboxVisualRulesTests: XCTestCase {
     }
 
     @MainActor
+    func testEndedUnansweredProgressIsReachableInInboxSearch() throws {
+        let store = try NativeAppLaunch.makeFYITestStore(includeProgress: true, progressPercent: 40,
+            progressTerminal: #"{"state":"expired","at_ms":1700000003000}"#)
+        let items = store.inboxRows.map(InboxItem.request)
+        let progress = try XCTUnwrap(store.inboxRows.first { $0.isProgressFYI })
+        for list in [nil, store.presentation.inboxViewListItems] {
+            let entries = InboxNormalListProjection.entries(rows: items, serverItems: list,
+                in: .inbox, search: "Progress with a Seen response")
+            XCTAssertEqual(entries.count, 1)
+            XCTAssertTrue(InboxNormalListProjection.entries(rows: items, serverItems: list,
+                in: .inbox, search: "").allSatisfy { entry in
+                    guard case let .message(message) = entry else { return true }
+                    return !message.members.contains { $0.id == .request(progress.key) }
+                })
+        }
+        XCTAssertFalse(store.inboxRows.contains { $0.isProgressFYI && $0.isActiveFYI })
+        XCTAssertFalse(FYIDigest.highlights(store.inboxRows).contains { $0.key.messageID == ExactText("progress-fyi") })
+        store.reportMessageContentOpened(try XCTUnwrap(store.request(for: progress.key)))
+        XCTAssertTrue(try store.fyiTestSnapshot().pendingMessageOpens.isEmpty)
+    }
+
+    @MainActor
+    func testSettledPlainFYIsRemainInInboxWithoutBadgeAttention() throws {
+        let store = try NativeAppLaunch.makeFYITestStore(gardenSeen: true, museumSeen: true)
+        XCTAssertEqual(store.inboxRows.count, 2)
+        XCTAssertTrue(store.inboxRows.allSatisfy { !$0.belongsToReplied })
+        XCTAssertEqual(InboxBadge.count(requests: store.inboxRows, samples: SampleLibrary(),
+                                       showsLocalExamples: false), 0)
+    }
+
+    @MainActor
     func testConfirmedProgressFYIRemainsReachableFromReplied() throws {
         let store = try NativeAppLaunch.makeFYITestStore(includeProgress: true, progressPercent: 100,
             progressTerminal: #"{"state":"answered","at_ms":1700000003000,"answer":{"kind":"seen"}}"#)
         let rows = store.inboxRows
         let progress = try XCTUnwrap(rows.first { $0.isProgressFYI })
         XCTAssertFalse(progress.isActiveFYI)
-        XCTAssertFalse(progress.needsFYIHistoryAccess)
+        XCTAssertFalse(progress.fyiUsesInboxSearchForProgress)
         let entries = InboxNormalListProjection.entries(rows: rows.map(InboxItem.request),
             serverItems: store.presentation.inboxViewListItems, in: .replied, search: "Progress")
         XCTAssertEqual(entries.count, 1)

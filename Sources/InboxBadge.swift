@@ -11,7 +11,7 @@ enum InboxBadge {
                       showsLocalExamples: Bool) -> Int {
         let items = showsLocalExamples ? samples.inboxItems(appendingTo: requests)
             : requests.map(InboxItem.request)
-        return items.filter { !$0.hasProgressMarker && !$0.belongsToReplied && !$0.isRetracted }.count
+        return items.filter { !$0.hasProgressMarker && !$0.belongsToReplied && !$0.isRetracted && !$0.isSettledFYI }.count
     }
 }
 

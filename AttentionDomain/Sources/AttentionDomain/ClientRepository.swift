@@ -353,6 +353,15 @@ public final class ClientRepository: @unchecked Sendable {
         next.inboxCandidate = nil
         next.cachedInboxCurrentKeys = cached.currentRequestKeys
         next.inboxView = cached.inboxView
+        if let opens = next.pendingMessageOpens, opens.contains(where: { $0.failed == true }) {
+            let seenKeys = Set((cached.inboxView?.entries ?? []).filter { $0.itemSeen == true }.map(\.key))
+            next.pendingMessageOpens = opens.filter { open in
+                guard open.failed == true else { return true }
+                return !seenKeys.contains(open.requestKey) &&
+                    cached.remoteStates[open.requestKey]?.isTerminal != true &&
+                    (cached.conversations[open.requestKey].map { $0.currentRevision == open.requestRevision } ?? true)
+            }
+        }
         next.pendingRelayOverlays = cached.pendingRelayOverlays
         next.inboxReferences = cached.inboxReferences
         var priorityLevels = next.priorityLevels ?? .empty
@@ -846,7 +855,7 @@ public final class ClientRepository: @unchecked Sendable {
 
         let pending = state.pendingMessageOpens ?? []
         if let existing = pending.first(where: {
-            $0.requestKey == requestKey && $0.requestRevision == requestRevision
+            $0.failed != true && $0.requestKey == requestKey && $0.requestRevision == requestRevision
         }) {
             return existing
         }
@@ -862,10 +871,11 @@ public final class ClientRepository: @unchecked Sendable {
         return operation
     }
 
-    /// Retire only the exact pending operation that received durable success
-    /// or an explicit permanent rejection from the relay.
+    /// Settle the exact pending operation. A permanent refusal stays visible
+    /// for this revision but is never eligible for automatic delivery.
     @discardableResult
     public func retireMessageOpen(_ operationID: UUID,
+                                  rejected: Bool = false,
                                   context suppliedContext: ProfileContext) throws -> Bool {
         writerLock.lock()
         defer { writerLock.unlock() }
@@ -874,9 +884,18 @@ public final class ClientRepository: @unchecked Sendable {
         try validate(suppliedContext)
         guard suppliedContext.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
         let pending = state.pendingMessageOpens ?? []
-        guard pending.contains(where: { $0.operationID == operationID }) else { return false }
+        guard let settled = pending.first(where: { $0.operationID == operationID && $0.failed != true })
+        else { return false }
         var next = state
-        next.pendingMessageOpens = pending.filter { $0.operationID != operationID }
+        var remaining = pending.filter {
+            $0.operationID != operationID && !($0.failed == true &&
+                $0.requestKey == settled.requestKey && $0.requestRevision == settled.requestRevision && rejected)
+        }
+        if rejected {
+            remaining.append(PendingMessageOpen(requestKey: settled.requestKey,
+                requestRevision: settled.requestRevision, operationID: operationID, failed: true))
+        }
+        next.pendingMessageOpens = remaining
         try commit(next)
         return true
     }
@@ -3120,7 +3139,8 @@ public final class ClientRepository: @unchecked Sendable {
                                       inboxCurrentKeys: inboxCurrentKeys,
                                       pendingRelayOverlays: state.pendingRelayOverlays ?? [:],
                                       inboxReferences: state.inboxReferences ?? [:],
-                                      pendingMessageOpens: state.pendingMessageOpens ?? [],
+                                      pendingMessageOpens: (state.pendingMessageOpens ?? []).filter { $0.failed != true },
+                                      failedMessageOpens: (state.pendingMessageOpens ?? []).filter { $0.failed == true },
                                       priorityLevels: state.priorityLevels ?? .empty)
     }
 

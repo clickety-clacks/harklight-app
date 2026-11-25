@@ -336,6 +336,7 @@ public struct PresentedRequest: Equatable, Sendable {
     /// server has not supplied a usable entry for this row.
     public let fyiInboxEntry: InboxViewEntry?
     public let itemOpenPending: Bool
+    public let itemOpenFailed: Bool
     public let inboxPriority: InboxMessagePriority?
     public let inboxScore: Double?
     public let inboxThread: ExactText?
@@ -400,6 +401,7 @@ public struct PresentedRequest: Equatable, Sendable {
                 attentionTier: AttentionTier = .middle,
                 fyiInboxEntry: InboxViewEntry? = nil,
                 itemOpenPending: Bool = false,
+                itemOpenFailed: Bool = false,
                 inboxPriority: InboxMessagePriority? = nil,
                 inboxScore: Double? = nil,
                 inboxThread: ExactText? = nil,
@@ -444,6 +446,7 @@ public struct PresentedRequest: Equatable, Sendable {
         self.attentionTier = attentionTier
         self.fyiInboxEntry = fyiInboxEntry
         self.itemOpenPending = itemOpenPending
+        self.itemOpenFailed = itemOpenFailed
         self.inboxPriority = inboxPriority
         self.inboxScore = inboxScore
         self.inboxThread = inboxThread
@@ -960,6 +963,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
         } ?? [:]
         let intentsByRequest = Dictionary(grouping: snapshot.intents.values, by: \.requestKey)
         let opensByRequest = Dictionary(grouping: snapshot.pendingMessageOpens, by: \.requestKey)
+        let refusedOpensByRequest = Dictionary(grouping: snapshot.failedMessageOpens, by: \.requestKey)
         var unprojectable: [RequestKey] = []
         let requests = try orderedRequests.map { item in
             let session = snapshot.fixtureSessions[item.request.key]
@@ -1076,6 +1080,9 @@ public final class AttentionDomainPort: @unchecked Sendable {
                             : nil,
                         inboxViewEntry: inboxViewEntry,
                         itemOpenPending: opensByRequest[item.request.key]?.contains {
+                            $0.requestRevision == presentedRevision
+                        } == true,
+                        itemOpenFailed: refusedOpensByRequest[item.request.key]?.contains {
                             $0.requestRevision == presentedRevision
                         } == true,
                         inboxReplyPriorities: Self.replyPriorities(for: item.request.key, in: currentView),
@@ -1240,6 +1247,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
                          defaultAnswerAction: ProjectedActionReference? = nil,
                          inboxViewEntry: InboxViewEntry? = nil,
                          itemOpenPending: Bool = false,
+                         itemOpenFailed: Bool = false,
                          inboxReplyPriorities: [UInt64: InboxMessagePriority] = [:],
                          inboxReplyScores: [UInt64: Double] = [:],
                          onUnprojectableScene: () -> Void = {}) throws -> PresentedRequest {
@@ -1428,6 +1436,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
                                 attentionTier: .middle,
                                 fyiInboxEntry: inboxViewEntry,
                                 itemOpenPending: itemOpenPending,
+                                itemOpenFailed: itemOpenFailed,
                                 inboxPriority: status == .open || status == .pending
                                     ? inboxViewEntry?.priority : nil,
                                 inboxScore: status == .open || status == .pending

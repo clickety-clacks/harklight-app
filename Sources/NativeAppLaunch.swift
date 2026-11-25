@@ -165,8 +165,11 @@ final class NativeAppLaunch {
                 state = .live(seeded)
                 isIsolatedRelayTestSeed = true
             } else if fyiSeed, let seeded = try? Self.makeFYITestStore(
-                includeProgress: arguments.contains("--harklight-test-fyi-finished-progress"),
+                includeProgress: arguments.contains("--harklight-test-fyi-finished-progress") ||
+                    arguments.contains("--harklight-test-fyi-ended-progress"),
                 progressPercent: 100,
+                progressTerminal: arguments.contains("--harklight-test-fyi-ended-progress")
+                    ? #"{"state":"expired","at_ms":1700000003000}"# : "",
                 gardenSeen: arguments.contains("--harklight-test-fyi-garden-seen") ||
                     arguments.contains("--harklight-test-fyi-plain-seen"),
                 museumSeen: arguments.contains("--harklight-test-fyi-plain-seen"),
@@ -1286,6 +1289,20 @@ private struct NoReplyRoutingState: Sendable {
     let requestRevision: UInt64
     let isNoReply: Bool
     let route: NativeDiagnosticNoReplyRoute?
+}
+
+private extension PresentedRequest {
+    var isFYIRequest: Bool {
+        messageType == .fyi || (messageType == nil && informationalSeenStatus != nil)
+    }
+
+    var isSettledFYIRequest: Bool {
+        guard isFYIRequest else { return false }
+        if isResolved || informationalSeenStatus == .confirmed || informationalSeenStatus == .resolvedWithoutSeen {
+            return true
+        }
+        return fyiInboxEntry?.itemSeen == true && (messageProgress != nil || informationalSeenStatus == nil)
+    }
 }
 
 private struct PreparedNoReplyRoutingChange: Sendable {
@@ -2436,7 +2453,8 @@ final class LivePresentationStore {
     var inboxRows: [InboxRequestRow] {
         let skippedMessageRequestTags = completedSkippedMessageRequestTags
         return presentation.requests
-            .filter { $0.lifecycleStatus != .superseded }
+            .filter { $0.lifecycleStatus != .superseded ||
+                (!isReadOnly && $0.messageProgress != nil && $0.isFYIRequest) }
             .filter { request in
                 guard isRetracted(request) else { return true }
                 return !Self.isRetractionExpired(
@@ -2486,7 +2504,7 @@ final class LivePresentationStore {
     ) -> [NewMessageAreaMessage] {
         requests.filter { !progressInboxEnabled || $0.messageProgress == nil }.map {
             NewMessageAreaMessage(key: $0.key, acceptanceOrder: $0.acceptanceOrder,
-                                  isResolved: $0.isResolved,
+                                  isResolved: $0.isResolved || $0.isSettledFYIRequest,
                                   hasSubmittedAnswer: $0.intentReceipt != nil)
         }
     }
@@ -2646,6 +2664,8 @@ final class LivePresentationStore {
                 request.informationalSeenStatus == .resolvedWithoutSeen
             row.fyiUsesRepliedForProgress = !isReadOnly && progress != nil &&
                 !retracted && serverReportedFinalResponse && row.belongsToReplied
+            row.fyiUsesInboxSearchForProgress = !isReadOnly && row.hasProgressMarker &&
+                row.fyiHasEnded && !row.belongsToReplied
         }
         if row.isFYI, let item = request.fyiInboxEntry {
             row.fyiPostedAt = item.itemCreatedAtMilliseconds.map {
@@ -2667,6 +2687,7 @@ final class LivePresentationStore {
             let usesOpenedFlag = request.informationalSeenStatus == nil ||
                 (row.isProgressFYI && !row.fyiProgressIsFinished)
             row.fyiOpenedFlagPending = usesOpenedFlag && request.itemOpenPending
+            row.fyiOpenedFlagFailed = usesOpenedFlag && request.itemOpenFailed && row.isActiveFYI
             let answerIsRetryable: Bool = switch submissionPhases[request.key]?.phase {
             case .sending, .confirmed: request.intentReceipt != nil
             default: false
@@ -2811,6 +2832,7 @@ final class LivePresentationStore {
     /// operation is stored before any best-effort relay send; a reconnect will
     /// retry it with the same message identity and revision.
     func reportMessageContentOpened(_ request: PresentedRequest) {
+        if request.messageProgress != nil, request.isFYIRequest, request.isSettledFYIRequest { return }
         // Opening Progress with an explicit Seen response leaves acknowledgement
         // to the Seen controls. Plain FYIs retain their ordinary open behavior.
         if request.messageProgress != nil, !request.isResolved,
@@ -4411,7 +4433,8 @@ extension NativeAppLaunch {
                                  gardenSeen: Bool = false, museumSeen: Bool = false,
                                  includeBulk: Bool = false) throws -> LivePresentationStore {
         // Measure the large list opening from Inbox, free of the other fixture's restored selection.
-        let personID = includeBulk ? ExactText(UUID().uuidString) : ExactText("fyi-fixture")
+        let personID = includeBulk || !progressTerminal.isEmpty
+            ? ExactText(UUID().uuidString) : ExactText("fyi-fixture")
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("fixture.invalid"),
             personID: personID, deviceID: ExactText("fixture-device"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
