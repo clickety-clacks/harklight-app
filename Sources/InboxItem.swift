@@ -97,6 +97,14 @@ enum InboxItem: Identifiable {
         return false
     }
 
+    @MainActor var hasPendingSeenAnswer: Bool {
+        let row: InboxRequestRow? = switch self {
+        case let .request(row): row
+        case let .example(_, response): response.inboxRow
+        }
+        return row?.informationalSeenStatus == .pending && row?.hasFailedResponse == false
+    }
+
     var hasProgressMarker: Bool {
         if case let .request(row) = self { return row.hasProgressMarker || row.progress != nil }
         return false

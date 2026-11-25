@@ -3,9 +3,8 @@ import XCTest
 import AttentionDomain
 
 /// The icon badge counts the Inbox rows that still need attention: the rows
-/// the Inbox tab lists, judged by the same membership rule the list uses,
-/// except retracted messages, which stay listed but no longer count. Zero
-/// when nothing needs attention.
+/// the Inbox tab lists, excluding retractions and FYIs that no longer
+/// require attention. Zero when nothing needs attention.
 @MainActor
 final class InboxBadgeCountTests: XCTestCase {
     private func row(_ messageID: String, status: String = "Pending",
@@ -41,8 +40,7 @@ final class InboxBadgeCountTests: XCTestCase {
             row("seen-confirmed", informationalSeenStatus: .confirmed),
             row("seen-available", informationalSeenStatus: .available),
         ]
-        // Only "open" and "seen-available" lack an action; Seen counts as a reply
-        // once chosen, even while its delivery is still pending.
+        // The pending answer stays in Inbox FYIs and no longer needs attention.
         XCTAssertEqual(InboxBadge.count(requests: requests, samples: SampleLibrary(),
                                         showsLocalExamples: true), 2)
     }
