@@ -65,6 +65,13 @@ final class ConversationPresentationTests: XCTestCase {
         let turn = ConversationTurn(id: ExactText("sent"), binding: binding, author: .person,
             sessionHandle: ExactText("item"), text: ExactText("Hello"), kind: .discussion)
         let cases: [(String, ConversationSentChatStatusPresentation.Delivery)] = [
+            // Server 0.2.21 migration projection, with no legacy_caption or outcome.
+            (#"{"delivered":true,"acted":false,"receipt_expected":false}"#, .noCaption),
+            (#"{"delivered":true,"receipt_expected":false,"legacy_caption":true}"#, .noCaption),
+            (#"{"delivered":true,"receipt_expected":false,"agent_seen":true}"#, .deliveredAck),
+            (#"{"delivered":true,"receipt_expected":false,"ack2_expected":false,"listener_received":true}"#, .deliveredAck),
+            (#"{"delivered":true,"receipt_expected":false,"outcome":"not_handed","reason":"Try later"}"#, .notDelivered("Try later")),
+            (#"{"delivered":true,"receipt_expected":false,"outcome":"handed","rerouted":true,"agent":"Release"}"#, .deliveredTo("Release")),
             (#"{"delivered":true,"acted":true}"#, .sending),
             (#"{"delivered":true,"ack2_expected":null}"#, .sending),
             (#"{"delivered":true,"ack2_expected":true}"#, .sending),
@@ -222,6 +229,16 @@ final class ConversationPresentationTests: XCTestCase {
         XCTAssertEqual(entry.delivery?.rerouted, true)
     }
 
+    func testReceiptExpectationAcceptsOnlyTheFalseMarker() throws {
+        let entry = try APIEntry(json: receiptJSON(#"{"delivered":true,"receipt_expected":false}"#))
+        XCTAssertEqual(entry.delivery?.receiptExpected, false)
+        for value in ["true", "null", "0", #""false""#, "{}"] {
+            let unknown = try APIEntry(json: receiptJSON(#"{"delivered":true,"receipt_expected":\#(value)}"#))
+            XCTAssertNil(unknown.delivery?.receiptExpected)
+            XCTAssertEqual(unknown.delivery?.delivered, true)
+        }
+    }
+
     func testPersonFeedHandoffUpdatesLiveAndAfterReopeningOldCache() throws {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: url) }
@@ -245,7 +262,23 @@ final class ConversationPresentationTests: XCTestCase {
         XCTAssertEqual(old.snapshot.orderedEntries(of: ExactText("item")).count, 1)
         XCTAssertEqual(try receiptStatus(thread(old)), .delivered)
         try old.setHandoffCaptionsEnabled(true)
-        try apply(#"{"delivered":true,"acted":true,"outcome":"not_handed","reason":"Agent unavailable","agent":"Studio"}"#, rev: 3, to: old)
+        try apply(#"{"delivered":true,"acted":false,"receipt_expected":false}"#, rev: 3, to: old)
+        var migrated = try thread(ServerModelV2Store(fileURL: url))
+        XCTAssertEqual(try receiptStatus(migrated), .noCaption)
+        XCTAssertEqual(try receiptStatus(migrated, availability: .init(state: .gone)), .noOneWillGetThis)
+        let sent = try XCTUnwrap(migrated.turns.first)
+        migrated.handoffCaptions = false
+        XCTAssertEqual(try receiptStatus(migrated), .noCaption, "The explicit marker can be cached before /me.")
+        migrated.turns.append(ConversationTurn(id: ExactText("server"), binding: sent.binding,
+            author: .server, sessionHandle: sent.sessionHandle, text: ExactText("Server event"),
+            inReplyTo: sent.id, kind: .reply))
+        XCTAssertFalse(ConversationSentChatStatusPresentation.replyTargets(in: migrated).contains(sent.id))
+        migrated.turns.append(ConversationTurn(id: ExactText("reply"), binding: sent.binding,
+            author: .origin, sessionHandle: sent.sessionHandle, text: ExactText("Agent reply"),
+            inReplyTo: sent.id, kind: .reply))
+        let hasReply = ConversationSentChatStatusPresentation.replyTargets(in: migrated).contains(sent.id)
+        XCTAssertEqual(try receiptStatus(migrated, hasReply: hasReply), .deliveredAck)
+        try apply(#"{"delivered":true,"acted":true,"outcome":"not_handed","reason":"Agent unavailable","agent":"Studio"}"#, rev: 4, to: old)
         let negative = try thread(old)
         XCTAssertEqual(negative.facts[ExactText("sent")]?.deliveryAck2,
             .notHanded(atMilliseconds: 10, reason: ExactText("Agent unavailable"),
@@ -254,7 +287,7 @@ final class ConversationPresentationTests: XCTestCase {
         XCTAssertEqual(try receiptStatus(negative), .notDelivered("Agent unavailable"))
         let reopened = ServerModelV2Store(fileURL: url)
         XCTAssertEqual(try receiptStatus(thread(reopened)), .notDelivered("Agent unavailable"))
-        try apply(#"{"delivered":true,"outcome":"handed","agent":"Release","rerouted":true}"#, rev: 4, to: reopened)
+        try apply(#"{"delivered":true,"outcome":"handed","agent":"Release","rerouted":true,"receipt_expected":false}"#, rev: 5, to: reopened)
         XCTAssertEqual(try receiptStatus(thread(reopened)), .deliveredTo("Release"))
         XCTAssertEqual(try receiptStatus(thread(ServerModelV2Store(fileURL: url))), .deliveredTo("Release"))
         XCTAssertEqual(reopened.snapshot.orderedEntries(of: ExactText("item")).count, 1)

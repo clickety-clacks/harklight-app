@@ -163,6 +163,7 @@ public struct APIEntryDelivery: Equatable, Codable, Sendable {
     public let agentSeen: Bool?
     public let agentActed: Bool?
     public let legacyCaption: Bool?
+    public let receiptExpected: Bool?
 }
 
 public struct APIEntry: Equatable, Codable, Sendable {
@@ -442,7 +443,9 @@ extension APIEntry {
                              listenerReceived: try delivery.optionalBool("listener_received"),
                              agentSeen: try delivery.optionalBool("agent_seen"),
                              agentActed: try delivery.optionalBool("agent_acted"),
-                             legacyCaption: try delivery.optionalBool("legacy_caption"))
+                             legacyCaption: try delivery.optionalBool("legacy_caption"),
+                             receiptExpected: delivery.value.uniqueValue(named: "receipt_expected") == .bool(false)
+                                 ? false : nil)
         }
         result = try reader.optionalObject("result").map { result in
             APIOriginResult(status: try result.string("status"), resultRef: try result.optionalString("result_ref"),
