@@ -134,8 +134,6 @@ struct HarklightApp: App {
                         NativeEnrollmentView(launch: launch)
                     case .reenrolmentRequired:
                         v2ReenrolmentView
-                    case let .enrollmentPending(record):
-                        NativeEnrollmentView(launch: launch, pending: record)
                     case let .fixture(store):
                         if let presentation = store.presentationStore {
                             LiveContentView(store: presentation, samples: samples,

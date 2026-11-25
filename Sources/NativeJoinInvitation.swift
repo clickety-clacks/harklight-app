@@ -5,7 +5,6 @@ import Security
 enum NativeJoinInvitationError: Error {
     case invalid
     case expired
-    case olderServer
 }
 
 /// An owner-provided claim and trust bootstrap. It conveys no owner/sender
@@ -75,7 +74,6 @@ struct NativeJoinInvitation: Codable, Equatable {
         guard !data.isEmpty else { throw NativeJoinInvitationError.invalid }
         let result: NativeJoinInvitation
         do { result = try JSONDecoder().decode(Self.self, from: data) }
-        catch NativeJoinInvitationError.olderServer { throw NativeJoinInvitationError.olderServer }
         catch { throw NativeJoinInvitationError.invalid }
         try result.validate()
         return result
@@ -130,7 +128,6 @@ extension NativeJoinInvitation {
     init(from decoder: any Decoder) throws {
         let fields = try decoder.container(keyedBy: CodingKeys.self)
         v = try fields.decode(Int.self, forKey: .v)
-        if v == 1 { throw NativeJoinInvitationError.olderServer }
         guard v == 2 else { throw NativeJoinInvitationError.invalid }
         personID = try fields.decode(String.self, forKey: .personID)
         serverName = try fields.decode(String.self, forKey: .serverName)

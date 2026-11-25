@@ -43,7 +43,6 @@ final class NativeAppLaunch {
     enum State {
         case enrollmentRequired
         case reenrolmentRequired(NativeEnrollmentRecord)
-        case enrollmentPending(NativeEnrollmentRecord)
         case fixture(PrototypeStore)
         case live(LivePresentationStore)
         case disconnected(LivePresentationStore?)
@@ -53,8 +52,6 @@ final class NativeAppLaunch {
     private(set) var enrollmentMessage: String?
     private(set) var revokedRecoveryText: [ExactText] = []
     @ObservationIgnored private var stagedRevokedText: [ExactText] = []
-    private(set) var isEnrollmentBusy = false
-    private(set) var isEnrollmentExpired = false
     private(set) var foregroundConnectProgress: NativeForegroundConnectProgress?
     private(set) var foregroundConnectDiagnostic: NativeForegroundConnectDiagnostic?
     private(set) var activeEnrollmentRecord: NativeEnrollmentRecord?
@@ -246,8 +243,6 @@ final class NativeAppLaunch {
                     NativeClientDiagnosticEvent(area: .connection, phase: .foregroundCompletion,
                         transition: .cancelled, causeCode: "foreground_generation_invalidated",
                         terminalReason: NativeDiagnosticTerminalReason.generationInvalidated,
-                        postAckBoundary: connect.lastCompletedPostAckBoundary.journalValue,
-                        postAckDrainTransition: connect.postAckDrainTransition,
                         attemptID: connect.attemptID, transportAttemptID: connect.transportAttemptID)
                 ])
                 return false
@@ -769,153 +764,6 @@ final class NativeAppLaunch {
         return "This phone is disconnected locally from \(account) on \(server). The previous server may still list this phone as registered. Its original identity and saved messages, drafts and receipts are kept for retry.\(pending)"
     }
 
-    func beginEnrollment(host: String,
-                         enrollmentPort: Int,
-                         relayPort: Int,
-                         rootPEM: String,
-                         label: String,
-                         pkcs12: Data,
-                         password: String) async {
-        guard !isEnrollmentBusy else { return }
-        let generation = UUID()
-        activationGeneration = generation
-        let attemptID = UUID()
-        diagnostics.record(area: .enrollment, phase: .enrollmentSubmission, transition: .began,
-                           attemptID: attemptID)
-        isEnrollmentBusy = true
-        defer { isEnrollmentBusy = false }
-        enrollmentMessage = nil
-        do {
-            let settings = try NativeEnrollmentSettings(host: host,
-                                                        enrollmentPort: enrollmentPort,
-                                                        relayPort: relayPort,
-                                                        rootPEM: rootPEM,
-                                                        label: label)
-            let record = try await enrollment.begin(settings: settings,
-                                                    pkcs12: pkcs12,
-                                                    password: password,
-                                                    onPreparedCleanupFailure: { error in
-                                                        self.diagnostics.record(area: .localStore,
-                                                            phase: .enrollmentCleanup, transition: .failed,
-                                                            error: error, attemptID: attemptID)
-                                                    })
-            guard activationGeneration == generation else { return }
-            isEnrollmentExpired = false
-            state = .enrollmentPending(record)
-            diagnostics.record(area: .enrollment, phase: .enrollmentSubmission, transition: .completed,
-                               attemptID: attemptID)
-        } catch NativeEnrollmentError.keyPending {
-            diagnostics.record(area: .enrollment, phase: .enrollmentSubmission, transition: .unresolved,
-                               causeCode: "enrollment_key_pending", attemptID: attemptID)
-            if activationGeneration == generation {
-                enrollmentMessage = "This identity already has a request pending on the server. Keep the same identity file and retry after its code expires, or ask the server owner to check it."
-            }
-        } catch NativeEnrollmentError.keyInUse {
-            diagnostics.record(area: .enrollment, phase: .enrollmentSubmission, transition: .rejected,
-                               causeCode: "enrollment_key_in_use", attemptID: attemptID)
-            if activationGeneration == generation {
-                enrollmentMessage = "This identity is already enrolled. Ask the server owner to recover its approved profile; do not replace the device identity."
-            }
-        } catch NativeEnrollmentError.preparedIdentityMismatch {
-            diagnostics.record(area: .enrollment, phase: .enrollmentSubmission, transition: .failed,
-                               causeCode: "enrollment_identity_mismatch", attemptID: attemptID)
-            if activationGeneration == generation {
-                enrollmentMessage = "A prior request used a different identity or server. Reimport the same identity with the same server settings, or ask the server owner for help."
-            }
-        } catch NativeEnrollmentError.invalidSettings {
-            diagnostics.record(area: .enrollment, phase: .enrollmentSubmission, transition: .failed,
-                               error: NativeEnrollmentError.invalidSettings, attemptID: attemptID)
-            if activationGeneration == generation {
-                enrollmentMessage = "Check the server settings, CA certificate and identity file."
-            }
-        } catch NativeEnrollmentError.invalidIdentity {
-            diagnostics.record(area: .enrollment, phase: .enrollmentSubmission, transition: .failed,
-                               error: NativeEnrollmentError.invalidIdentity, attemptID: attemptID)
-            if activationGeneration == generation {
-                enrollmentMessage = "Check the server settings, CA certificate and identity file."
-            }
-        } catch {
-            diagnostics.record(area: .enrollment, phase: .enrollmentSubmission, transition: .failed,
-                               error: error, attemptID: attemptID)
-            if activationGeneration == generation {
-                enrollmentMessage = "Enrollment could not be confirmed. Keep this identity file; retry with the same file after ten minutes or ask the server owner to check it."
-            }
-        }
-    }
-
-    func retryExpiredEnrollment() async {
-        guard !isEnrollmentBusy else { return }
-        let generation = activationGeneration
-        let attemptID = UUID()
-        diagnostics.record(area: .enrollment, phase: .enrollmentSubmission, transition: .retrying,
-                           attemptID: attemptID)
-        isEnrollmentBusy = true
-        defer { isEnrollmentBusy = false }
-        enrollmentMessage = nil
-        do {
-            let record = try await enrollment.retryExpired()
-            guard activationGeneration == generation else { return }
-            isEnrollmentExpired = false
-            state = .enrollmentPending(record)
-            diagnostics.record(area: .enrollment, phase: .enrollmentSubmission, transition: .completed,
-                               attemptID: attemptID)
-        } catch NativeEnrollmentError.keyPending {
-            diagnostics.record(area: .enrollment, phase: .enrollmentSubmission, transition: .unresolved,
-                               causeCode: "enrollment_key_pending", attemptID: attemptID)
-            if activationGeneration == generation {
-                enrollmentMessage = "The server still has a request pending for this identity. Try again after its code expires."
-            }
-        } catch NativeEnrollmentError.keyInUse {
-            diagnostics.record(area: .enrollment, phase: .enrollmentSubmission, transition: .rejected,
-                               causeCode: "enrollment_key_in_use", attemptID: attemptID)
-            if activationGeneration == generation {
-                enrollmentMessage = "This identity is already enrolled. Ask the server owner to recover its approved profile."
-            }
-        } catch {
-            diagnostics.record(area: .enrollment, phase: .enrollmentSubmission, transition: .failed,
-                               error: error, attemptID: attemptID)
-            if activationGeneration == generation {
-                enrollmentMessage = "A new code could not be confirmed. Keep this device identity and try again or ask the server owner."
-            }
-        }
-    }
-
-    func checkEnrollmentApproval() async {
-        guard !isEnrollmentBusy else { return }
-        let generation = activationGeneration
-        let attemptID = UUID()
-        diagnostics.record(area: .enrollment, phase: .approvalCheck, transition: .began,
-                           attemptID: attemptID)
-        isEnrollmentBusy = true
-        defer { isEnrollmentBusy = false }
-        enrollmentMessage = nil
-        var approvalConfirmed = false
-        do {
-            let record = try await enrollment.checkApproval()
-            guard activationGeneration == generation else { return }
-            approvalConfirmed = true
-            isEnrollmentExpired = false
-            try await activate(enrollment.material(from: record))
-        } catch NativeEnrollmentError.approvalPending {
-            diagnostics.record(area: .enrollment, phase: .approvalCheck, transition: .unresolved,
-                               error: NativeEnrollmentError.approvalPending, attemptID: attemptID)
-            if activationGeneration == generation { enrollmentMessage = "Waiting for server-owner approval." }
-        } catch NativeEnrollmentError.approvalExpired {
-            diagnostics.record(area: .enrollment, phase: .approvalCheck, transition: .failed,
-                               error: NativeEnrollmentError.approvalExpired, attemptID: attemptID)
-            if activationGeneration == generation {
-                isEnrollmentExpired = true
-                enrollmentMessage = "This approval code expired. Request a new code for the same device identity."
-            }
-        } catch {
-            diagnostics.record(area: .enrollment, phase: .approvalCheck, transition: .failed,
-                               error: error, attemptID: attemptID)
-            if approvalConfirmed || activationGeneration == generation {
-                enrollmentMessage = "Approval could not be verified with the trusted server."
-            }
-        }
-    }
-
     /// The same C store drives relay apply/outbox and the visible presentation.
     /// No fixture request is registered on this path.
     func activate(_ installation: NativeInstallationMaterial) async throws {
@@ -927,7 +775,6 @@ final class NativeAppLaunch {
         notificationNavigation = nil
         notificationSynchronized = false
         disconnectMessage = nil
-        isEnrollmentExpired = false
         if case let .live(previous) = state { previous.stopObserving() }
         state = .enrollmentRequired
         await NativeRelayLifecycle.shared.deactivate()
@@ -1039,7 +886,6 @@ final class NativeAppLaunch {
     func deactivate() async {
         activationGeneration = UUID()
         foregroundActivationPushCheckPending = false
-        isEnrollmentExpired = false
         if case let .live(previous) = state { previous.stopObserving() }
         state = .enrollmentRequired
         await NativeRelayLifecycle.shared.deactivate()

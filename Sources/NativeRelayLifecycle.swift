@@ -141,34 +141,6 @@ struct NativeForegroundConnectProgress: Equatable, Sendable {
         case failed
     }
 
-    enum PostAckBoundary: String, Equatable, Sendable {
-        case none = "none_observed"
-        case nativeCursorAcknowledged = "native_sync_acknowledged"
-        case coreDrainCompleted = "post_ack_core_drain_completed"
-        case relayRefreshReturned = "post_ack_relay_refresh_returned"
-        case foregroundConfirmed = "foreground_confirmed"
-
-        var journalValue: NativeDiagnosticPostAckBoundary {
-            switch self {
-            case .none: .none
-            case .nativeCursorAcknowledged: .nativeCursorAcknowledged
-            case .coreDrainCompleted: .coreDrainCompleted
-            case .relayRefreshReturned: .relayRefreshReturned
-            case .foregroundConfirmed: .foregroundConfirmed
-            }
-        }
-
-        fileprivate var rank: Int {
-            switch self {
-            case .none: 0
-            case .nativeCursorAcknowledged: 1
-            case .coreDrainCompleted: 2
-            case .relayRefreshReturned: 3
-            case .foregroundConfirmed: 4
-            }
-        }
-    }
-
     enum TerminalReason: String, Equatable, Sendable {
         case confirmed = "foreground_confirmed"
         case connectionNotConfirmed = "connection_not_confirmed"
@@ -192,37 +164,10 @@ struct NativeForegroundConnectProgress: Equatable, Sendable {
     }
 
     enum Stage: Equatable, Sendable {
-        case serverTrustValidated
-        case clientIdentityOffered
-        case webSocketOpened
-        case relayAdmitted
-        case nativeSyncResynced
-        case nativeSyncAcknowledged
         case foregroundConfirmed
 
-        var label: String {
-            switch self {
-            case .serverTrustValidated: "The server certificate passed the saved host and CA check."
-            case .clientIdentityOffered: "The saved device certificate was selected for the challenge; server acceptance is not known yet."
-            case .webSocketOpened: "The WebSocket open event was received."
-            case .relayAdmitted: "The relay accepted the native sync request."
-            case .nativeSyncResynced: "The replay reached its resynced marker and was saved locally."
-            case .nativeSyncAcknowledged: "The relay acknowledged the saved native sync cursor."
-            case .foregroundConfirmed: "Foreground connection is confirmed."
-            }
-        }
-
-        var rank: Int {
-            switch self {
-            case .serverTrustValidated: 1
-            case .clientIdentityOffered: 2
-            case .webSocketOpened: 3
-            case .relayAdmitted: 4
-            case .nativeSyncResynced: 5
-            case .nativeSyncAcknowledged: 6
-            case .foregroundConfirmed: 7
-            }
-        }
+        var label: String { "Foreground connection is confirmed." }
+        var diagnosticValue: String { "foreground_confirmed" }
     }
 
     enum Issue: Equatable, Sendable {
@@ -244,16 +189,9 @@ struct NativeForegroundConnectProgress: Equatable, Sendable {
     struct PreviousTransportAttempt: Equatable, Sendable {
         let id: UUID
         let lastConfirmedStage: Stage?
-        let webSocketOpenObserved: Bool
-        let nativeSyncReplayRequested: Bool
         let issue: Issue?
         let failureClass: FailureClass?
         let errorDetails: NativeForegroundConnectErrorDetails?
-        let lastCompletedPostAckBoundary: PostAckBoundary
-        let postAckRelayRefresh: Validation
-        let postAckDrainTransition: NativeDiagnosticTransition?
-        let postAckFailureStep: NativeDiagnosticPostAckStep?
-        let postAckFailureErrorCode: String?
         let generationValidation: Validation
         let profileContextValidation: Validation
         let relayContextValidation: Validation
@@ -267,7 +205,6 @@ struct NativeForegroundConnectProgress: Equatable, Sendable {
         case clientIdentityChallengeRejected
         case urlSession(code: Int)
         case relayProtocol
-        case nativeSync
         case unknown
 
         var diagnosticValue: String {
@@ -278,7 +215,6 @@ struct NativeForegroundConnectProgress: Equatable, Sendable {
             case .clientIdentityChallengeRejected: "client_identity_challenge_rejected"
             case let .urlSession(code): "url_session_error_code_\(code)"
             case .relayProtocol: "relay_protocol_error"
-            case .nativeSync: "native_sync_error"
             case .unknown: "unknown_error_class"
             }
         }
@@ -293,7 +229,6 @@ struct NativeForegroundConnectProgress: Equatable, Sendable {
     }
 
     var lastConfirmedStage: Stage?
-    var webSocketOpenObserved: Bool
     var issue: Issue?
     var outcome: Outcome
     var attemptID: UUID? = nil
@@ -301,13 +236,7 @@ struct NativeForegroundConnectProgress: Equatable, Sendable {
     var errorDetails: NativeForegroundConnectErrorDetails? = nil
     var observedErrorMessage: String? = nil
     var transportAttemptID: UUID? = nil
-    var nativeSyncReplayRequested = false
     var previousTransportAttempt: PreviousTransportAttempt? = nil
-    var lastCompletedPostAckBoundary: PostAckBoundary = .none
-    var postAckRelayRefresh: Validation = .notChecked
-    var postAckDrainTransition: NativeDiagnosticTransition? = nil
-    var postAckFailureStep: NativeDiagnosticPostAckStep? = nil
-    var postAckFailureErrorCode: String? = nil
     var generationValidation: Validation = .notChecked
     var profileContextValidation: Validation = .notChecked
     var relayContextValidation: Validation = .notChecked
@@ -326,7 +255,7 @@ struct NativeForegroundConnectProgress: Equatable, Sendable {
         terminalReason = .generationInvalidated
     }
 
-    /// Product status; detailed replay and acknowledgement facts remain in `message`.
+    /// Brief product status for the foreground connection.
     var userFacingMessage: String {
         switch outcome {
         case .confirmed: "Connected"
@@ -335,49 +264,8 @@ struct NativeForegroundConnectProgress: Equatable, Sendable {
         }
     }
 
-    var headline: String {
-        guard outcome != .confirmed else { return "Connected" }
-        switch lastConfirmedStage {
-        case .nativeSyncAcknowledged:
-            return outcome == .connecting
-                ? "Earlier messages synced; finishing connection"
-                : "Earlier messages synced; connection not confirmed"
-        case .nativeSyncResynced:
-            return "Messages saved; relay acknowledgement not confirmed"
-        default:
-            return "Connection not confirmed"
-        }
-    }
-
     var message: String {
-        if let postAckFailureText { return postAckFailureText }
         let last = lastConfirmedStage?.label ?? "No connection milestone was confirmed."
-        if lastConfirmedStage == .nativeSyncAcknowledged, outcome != .confirmed {
-            let status = "At the last confirmed checkpoint, ordinary messages through that replay's cursor were durably applied and the relay acknowledged that cursor. The progress signal does not establish whether a later replay advanced the saved cursor or whether that later cursor was acknowledged. Full foreground completion remains unconfirmed. This does not establish pending-answer delivery, later conversation replay, upload cleanup, or notification registration. The current progress signal cannot identify the exact post-ACK step; Settings diagnostics retains operation-receipt states."
-            switch outcome {
-            case .connecting:
-                return "\(status) The foreground attempt is still running."
-            case .incomplete:
-                return "Foreground sync remains incomplete. \(status)\(observedCauseText)Retry with the same approved identity."
-            case .timedOut:
-                return "Foreground attempt timed out after the ordinary cursor ACK. \(status)\(observedCauseText)Saved state is preserved. Retry with the same approved identity."
-            case .confirmed:
-                break
-            }
-        }
-        if lastConfirmedStage == .nativeSyncResynced, outcome != .confirmed {
-            let status = "Ordinary messages through the replay high-water were durably saved locally, but relay acknowledgement of that cursor is not confirmed. Pending-answer delivery and overall foreground completion are not established."
-            switch outcome {
-            case .connecting:
-                return "\(status) The foreground attempt is still running."
-            case .incomplete:
-                return "Foreground sync remains incomplete. \(status)\(observedCauseText)Retry with the same approved identity."
-            case .timedOut:
-                return "Foreground attempt timed out before cursor acknowledgement. \(status)\(observedCauseText)Saved state is preserved. Retry with the same approved identity."
-            case .confirmed:
-                break
-            }
-        }
         switch outcome {
         case .connecting:
             return issue?.message ?? last
@@ -386,45 +274,12 @@ struct NativeForegroundConnectProgress: Equatable, Sendable {
             return "The connection was not confirmed. \(issueText)\(observedCauseText)Last confirmed step: \(last) Try again with the same approved identity."
         case .timedOut:
             let issueText = issue.map { "\($0.message) " } ?? ""
-            return "The connection timed out. \(issueText)\(observedCauseText)Last confirmed step: \(last) Try again with the same approved identity. Saved profile, local content and pending operation state were preserved; any replay already saved remains saved."
+            return "The connection timed out. \(issueText)\(observedCauseText)Last confirmed step: \(last) Try again with the same approved identity. Saved profile, local content and pending operation state were preserved; saved messages remain available."
         case .confirmed:
             return lastConfirmedStage?.label ?? "Foreground connection is confirmed."
         }
     }
 
-    private var postAckFailureText: String? {
-        guard let step = postAckFailureStep, outcome != .confirmed else { return nil }
-        let detail = "Harklight stopped while \(step.userFacingDescription) after syncing earlier messages. Pending-action delivery is not confirmed. Retry with the same approved identity. Share connection details to include the exact failure code."
-        switch outcome {
-        case .connecting:
-            return "The connection attempt is still in progress. \(detail)"
-        case .incomplete:
-            return "The connection is not confirmed. \(detail)"
-        case .timedOut:
-            return "The connection attempt timed out. \(detail)"
-        case .confirmed:
-            return nil
-        }
-    }
-}
-
-private extension NativeDiagnosticPostAckStep {
-    var userFacingDescription: String {
-        switch self {
-        case .readAcceptedOperationsBeforeDrain: "checking accepted pending actions"
-        case .readOutboxBeforeDrain: "checking pending actions"
-        case .drainPendingOperations: "sending pending actions"
-        case .readOutboxAfterDrain: "checking the pending-action results"
-        case .readAcceptedOperationsAfterDrain: "checking which actions the relay accepted"
-        case .waitForAcceptedOperationAcknowledgement: "waiting for the relay to confirm accepted actions"
-        case .replayInboxAfterDrain: "replaying newly received messages"
-        case .readInboxCursorAfterAcknowledgement: "checking the saved message checkpoint"
-        case .readConversationState: "checking conversation state"
-        case .replayConversationsAndAcknowledge: "updating conversations"
-        case .readFinalRelayCursor: "checking the final saved message checkpoint"
-        case .validateRelayState: "validating the relay connection"
-        }
-    }
 }
 
 struct NativeForegroundOperationDiagnostic: Equatable, Sendable {
@@ -513,7 +368,6 @@ struct NativeForegroundConnectDiagnostic: Equatable, Sendable {
         }
         let terminal = progress.terminalReason?.rawValue ?? "none_observed"
         let failure = Self.failureValue(progress.failureClass, details: progress.errorDetails)
-        let websocket = progress.webSocketOpenObserved ? "yes" : "no"
         var lines = [
             "Harklight connection diagnostics",
             "app_version=\(appVersion)",
@@ -522,18 +376,11 @@ struct NativeForegroundConnectDiagnostic: Equatable, Sendable {
             "attempt_id=\(progress.attemptID?.uuidString.lowercased() ?? "unavailable")",
             "outcome=\(outcome)",
             "last_confirmed_phase=\(stage)",
-            "last_completed_post_ack_boundary=\(progress.lastCompletedPostAckBoundary.rawValue)",
-            "post_ack_relay_refresh=\(progress.postAckRelayRefresh.rawValue)",
-            "post_ack_drain=\(progress.postAckDrainTransition?.rawValue ?? "not_started")",
-            "post_ack_failure_step=\(progress.postAckFailureStep?.rawValue ?? "none_observed")",
-            "post_ack_failure_error_code=\(progress.postAckFailureErrorCode ?? "none_observed")",
             "generation_validated=\(progress.generationValidation.rawValue)",
             "profile_context_validated=\(progress.profileContextValidation.rawValue)",
             "relay_context_validated=\(progress.relayContextValidation.rawValue)",
             "terminal_reason=\(terminal)",
             "transport_attempt_id=\(progress.transportAttemptID?.uuidString.lowercased() ?? "unavailable")",
-            "native_sync_replay_requested_locally=\(progress.nativeSyncReplayRequested ? "yes" : "no")",
-            "websocket_open_observed=\(websocket)",
             "issue=\(issue)",
             "error_class=\(failure)",
             "error_type=\(progress.errorDetails?.type ?? "none_observed")",
@@ -542,17 +389,10 @@ struct NativeForegroundConnectDiagnostic: Equatable, Sendable {
         if let previous = progress.previousTransportAttempt {
             lines.append("previous_transport_attempt_id=\(previous.id.uuidString.lowercased())")
             lines.append("previous_last_confirmed_phase=\(previous.lastConfirmedStage?.diagnosticValue ?? "none_confirmed")")
-            lines.append("previous_websocket_open_observed=\(previous.webSocketOpenObserved ? "yes" : "no")")
-            lines.append("previous_native_sync_replay_requested_locally=\(previous.nativeSyncReplayRequested ? "yes" : "no")")
             lines.append("previous_issue=\(Self.issueValue(previous.issue))")
             lines.append("previous_error_class=\(Self.failureValue(previous.failureClass, details: previous.errorDetails))")
             lines.append("previous_error_type=\(previous.errorDetails?.type ?? "none_observed")")
             lines.append("previous_error_description=\(previous.errorDetails?.description ?? "none_observed")")
-            lines.append("previous_last_completed_post_ack_boundary=\(previous.lastCompletedPostAckBoundary.rawValue)")
-            lines.append("previous_post_ack_relay_refresh=\(previous.postAckRelayRefresh.rawValue)")
-            lines.append("previous_post_ack_drain=\(previous.postAckDrainTransition?.rawValue ?? "not_started")")
-            lines.append("previous_post_ack_failure_step=\(previous.postAckFailureStep?.rawValue ?? "none_observed")")
-            lines.append("previous_post_ack_failure_error_code=\(previous.postAckFailureErrorCode ?? "none_observed")")
             lines.append("previous_generation_validated=\(previous.generationValidation.rawValue)")
             lines.append("previous_profile_context_validated=\(previous.profileContextValidation.rawValue)")
             lines.append("previous_relay_context_validated=\(previous.relayContextValidation.rawValue)")
@@ -607,20 +447,6 @@ struct NativeForegroundConnectDiagnostic: Equatable, Sendable {
     }
 }
 
-extension NativeForegroundConnectProgress.Stage {
-    var diagnosticValue: String {
-        switch self {
-        case .serverTrustValidated: "server_trust_validated"
-        case .clientIdentityOffered: "client_identity_offered"
-        case .webSocketOpened: "websocket_opened"
-        case .relayAdmitted: "relay_admitted"
-        case .nativeSyncResynced: "native_sync_resynced"
-        case .nativeSyncAcknowledged: "native_sync_acknowledged"
-        case .foregroundConfirmed: "foreground_confirmed"
-        }
-    }
-}
-
 /// Tracks one saved-identity foreground connection until its operation finishes.
 /// Catch-up duration is not a failure: only the transport or Server can fail it.
 @MainActor
@@ -635,12 +461,11 @@ final class ForegroundConnectProgressTracker {
     private var acceptsEvents = false
     private var activeTransportAttemptID: UUID?
     private(set) var progress = NativeForegroundConnectProgress(lastConfirmedStage: nil,
-                                                                 webSocketOpenObserved: false,
                                                                  issue: nil, outcome: .incomplete)
 
     func beginSession(transportAttemptID: UUID) {
         guard attempt == nil else { return }
-        progress = NativeForegroundConnectProgress(lastConfirmedStage: nil, webSocketOpenObserved: false,
+        progress = NativeForegroundConnectProgress(lastConfirmedStage: nil,
                                                    issue: nil, outcome: .connecting,
                                                    transportAttemptID: transportAttemptID)
         activeTransportAttemptID = transportAttemptID
@@ -655,16 +480,9 @@ final class ForegroundConnectProgressTracker {
             progress.previousTransportAttempt = NativeForegroundConnectProgress.PreviousTransportAttempt(
                 id: priorID,
                 lastConfirmedStage: progress.lastConfirmedStage,
-                webSocketOpenObserved: progress.webSocketOpenObserved,
-                nativeSyncReplayRequested: progress.nativeSyncReplayRequested,
                 issue: progress.issue,
                 failureClass: progress.failureClass,
                 errorDetails: progress.errorDetails,
-                lastCompletedPostAckBoundary: progress.lastCompletedPostAckBoundary,
-                postAckRelayRefresh: progress.postAckRelayRefresh,
-                postAckDrainTransition: progress.postAckDrainTransition,
-                postAckFailureStep: progress.postAckFailureStep,
-                postAckFailureErrorCode: progress.postAckFailureErrorCode,
                 generationValidation: progress.generationValidation,
                 profileContextValidation: progress.profileContextValidation,
                 relayContextValidation: progress.relayContextValidation,
@@ -673,18 +491,11 @@ final class ForegroundConnectProgressTracker {
         activeTransportAttemptID = transportAttemptID
         progress.transportAttemptID = transportAttemptID
         progress.lastConfirmedStage = nil
-        progress.webSocketOpenObserved = false
-        progress.nativeSyncReplayRequested = false
         progress.issue = nil
         progress.failureClass = nil
         progress.errorDetails = nil
         progress.observedErrorMessage = nil
         progress.outcome = .connecting
-        progress.lastCompletedPostAckBoundary = .none
-        progress.postAckRelayRefresh = .notChecked
-        progress.postAckDrainTransition = nil
-        progress.postAckFailureStep = nil
-        progress.postAckFailureErrorCode = nil
         progress.generationValidation = .notChecked
         progress.profileContextValidation = .notChecked
         progress.relayContextValidation = .notChecked
@@ -749,8 +560,7 @@ final class ForegroundConnectProgressTracker {
         guard acceptsEvents, attempt != nil else { return }
         progress.failureClass = NativeForegroundConnectProgress.FailureClass.classify(error)
         progress.errorDetails = NativeForegroundConnectErrorDetails(error)
-        progress.observedErrorMessage = progress.postAckFailureStep == nil
-            ? error.localizedDescription : nil
+        progress.observedErrorMessage = error.localizedDescription
         if progress.failureClass == .cancelled { progress.terminalReason = .cancelled }
         publishProgress()
     }
@@ -857,7 +667,6 @@ final class NativeRelayLifecycle {
     private var v2PushRetryTask: Task<Void, Never>?
     private var v2PushRetryAttempt = 0
     private let v2NotificationPermission: NativeNotificationPermission
-    private let v2LegacyAddressStore: @MainActor () throws -> DevelopmentAPNsAddressStore
     var onV2FeedOpened: ((ProfileContext, UUID) -> Void)?
     var onV2AccountAccessChanged: ((ClientAPIAccessState, ProfileContext) -> Void)?
     var v2AccountAccess: ClientAPIAccessState? { v2Connection?.access.state }
@@ -898,15 +707,12 @@ final class NativeRelayLifecycle {
          v2ShowCoordinator: NativePushedViewCoordinator = .shared,
          v2NotificationPermission: NativeNotificationPermission = .system,
          enrollment: NativeEnrollmentStore = NativeEnrollmentStore(),
-         foregroundProgress: ForegroundConnectProgressTracker = ForegroundConnectProgressTracker(),
-         v2LegacyAddressStore: @escaping @MainActor () throws -> DevelopmentAPNsAddressStore =
-             DevelopmentPushRegistration.addressStore) {
+         foregroundProgress: ForegroundConnectProgressTracker = ForegroundConnectProgressTracker()) {
         self.v2FocusReporter = v2FocusReporter
         self.v2ShowCoordinator = v2ShowCoordinator
         self.v2NotificationPermission = v2NotificationPermission
         self.enrollment = enrollment
         self.foregroundProgress = foregroundProgress
-        self.v2LegacyAddressStore = v2LegacyAddressStore
     }
 
     func v2FocusScenePhaseChanged(_ phase: ScenePhase) {
@@ -1264,13 +1070,12 @@ final class NativeRelayLifecycle {
             if !allowed { try connection.model.setPushRoutingEnabled(false) }
             guard let record = try enrollment.load(), record.matchesNotificationIdentity(context.identity),
                   record.v2PushRegistration?.removalID == nil else { return false }
-            try v2LegacyAddressStore().clear()
             let held = connection.model.snapshot.settings?.push
             var hasBinding = held?.bindingID != nil
             if !allowed, held == nil, record.v2PushRegistration?.registration == nil,
                record.v2PushRegistration?.permissionRemovalID == nil {
-                // On the first v2 foreground, a legacy binding can already
-                // exist even though the v2 model and journal are both empty.
+                // The server can already hold a binding before the local model
+                // or registration journal has loaded one.
                 do {
                     hasBinding = try await connection.push.status().bindingID != nil
                 } catch {
@@ -1887,8 +1692,6 @@ final class NativeRelayLifecycle {
                                   error: Error? = nil,
                                   causeCode: String? = nil,
                                   terminalReason: NativeDiagnosticTerminalReason? = nil,
-                                  postAckBoundary: NativeDiagnosticPostAckBoundary? = nil,
-                                  postAckDrainTransition: NativeDiagnosticTransition? = nil,
                                   attemptID: UUID? = nil,
                                   transportAttemptID: UUID? = nil,
                                   operationID: UUID? = nil,
@@ -1898,7 +1701,6 @@ final class NativeRelayLifecycle {
         let associatedTransport = transportAttemptID ?? (attemptID == activeTransportAttemptID ? attemptID : nil)
         diagnosticJournal?.record(area: area, phase: phase, transition: transition,
             error: error, causeCode: causeCode, terminalReason: terminalReason,
-            postAckBoundary: postAckBoundary, postAckDrainTransition: postAckDrainTransition,
             attemptID: attemptID,
             transportAttemptID: associatedTransport, operationID: operationID,
             request: request, requestRevision: revision, receiptState: receipt)

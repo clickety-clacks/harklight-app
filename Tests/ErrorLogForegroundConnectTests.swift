@@ -24,28 +24,27 @@ final class ErrorLogForegroundConnectTests: XCTestCase {
         return store
     }
 
-    private func cancelledReplay(attempt: UUID, transport: UUID) -> NativeForegroundConnectProgress {
-        var progress = NativeForegroundConnectProgress(lastConfirmedStage: .nativeSyncResynced,
-            webSocketOpenObserved: true, issue: nil, outcome: .incomplete,
+    private func cancelledConnection(attempt: UUID, transport: UUID) -> NativeForegroundConnectProgress {
+        var progress = NativeForegroundConnectProgress(lastConfirmedStage: nil,
+            issue: nil, outcome: .incomplete,
             attemptID: attempt, transportAttemptID: transport)
-        progress.postAckFailureStep = .replayConversationsAndAcknowledge
-        progress.postAckFailureErrorCode = "posix_error_code_89"
+        progress.errorDetails = NativeForegroundConnectErrorDetails(NSError(domain: NSPOSIXErrorDomain, code: 89))
         progress.terminalReason = .cancelled
         return progress
     }
 
-    func testCancelledReplayIsRecordedWithPhaseCodeAndSafeIDsAndNoInvention() throws {
+    func testCancelledConnectionIsRecordedWithObservedCodeAndIDs() throws {
         let log = makeLog()
         let attempt = UUID()
         let transport = UUID()
         let record = try XCTUnwrap(ErrorLogForegroundConnectBridge.report(
-            for: cancelledReplay(attempt: attempt, transport: transport)))
+            for: cancelledConnection(attempt: attempt, transport: transport)))
         log.report(record)
 
         let stored = try XCTUnwrap(log.records.first)
         XCTAssertEqual(stored.concern, .sync)
         XCTAssertEqual(stored.operation, "foreground_connect")
-        XCTAssertEqual(stored.phase, "replay_conversations_and_acknowledge")
+        XCTAssertEqual(stored.phase, "none_confirmed")
         XCTAssertEqual(stored.domain, "POSIX")
         XCTAssertEqual(stored.code, "89")
         XCTAssertEqual(stored.initiator, .unknown, "a bare cancel has no observed initiator")
@@ -54,7 +53,7 @@ final class ErrorLogForegroundConnectTests: XCTestCase {
     }
 
     func testOnlyObservedInitiatorsAreAttributed() {
-        var progress = cancelledReplay(attempt: UUID(), transport: UUID())
+        var progress = cancelledConnection(attempt: UUID(), transport: UUID())
         progress.terminalReason = .generationInvalidated
         XCTAssertEqual(ErrorLogForegroundConnectBridge.initiator(for: progress), .appLifecycle)
         progress.terminalReason = .deadlineExceeded
@@ -65,18 +64,18 @@ final class ErrorLogForegroundConnectTests: XCTestCase {
 
     func testConnectingAttemptReportsNothing() {
         let progress = NativeForegroundConnectProgress(lastConfirmedStage: nil,
-            webSocketOpenObserved: false, issue: nil, outcome: .connecting, attemptID: UUID())
+            issue: nil, outcome: .connecting, attemptID: UUID())
         XCTAssertNil(ErrorLogForegroundConnectBridge.report(for: progress))
     }
 
     func testRecoveryResolvesButNeverErasesTheFailure() throws {
         let log = makeLog()
-        let failed = cancelledReplay(attempt: UUID(), transport: UUID())
+        let failed = cancelledConnection(attempt: UUID(), transport: UUID())
         ErrorLogForegroundConnectBridge.record(failed, in: log)
         let before = try XCTUnwrap(log.records.first)
 
         let confirmed = NativeForegroundConnectProgress(lastConfirmedStage: .foregroundConfirmed,
-            webSocketOpenObserved: true, issue: nil, outcome: .confirmed, attemptID: UUID())
+            issue: nil, outcome: .confirmed, attemptID: UUID())
         ErrorLogForegroundConnectBridge.record(confirmed, in: log)
 
         let after = try XCTUnwrap(log.records.first)
@@ -91,13 +90,13 @@ final class ErrorLogForegroundConnectTests: XCTestCase {
     func testLaunchKeepsFailureAfterTheNextAttemptReplacesLiveProgress() throws {
         let log = makeLog()
         let launch = NativeAppLaunch(arguments: ["Harklight"], errorLog: log)
-        let failed = cancelledReplay(attempt: UUID(), transport: UUID())
+        let failed = cancelledConnection(attempt: UUID(), transport: UUID())
         launch.recordForegroundConnectProgress(failed, operationSnapshot: .unavailable)
         let next = NativeForegroundConnectProgress(lastConfirmedStage: nil,
-            webSocketOpenObserved: false, issue: nil, outcome: .connecting, attemptID: UUID())
+            issue: nil, outcome: .connecting, attemptID: UUID())
         launch.recordForegroundConnectProgress(next, operationSnapshot: .unavailable)
         let confirmed = NativeForegroundConnectProgress(lastConfirmedStage: .foregroundConfirmed,
-            webSocketOpenObserved: true, issue: nil, outcome: .confirmed, attemptID: next.attemptID)
+            issue: nil, outcome: .confirmed, attemptID: next.attemptID)
         launch.recordForegroundConnectProgress(confirmed, operationSnapshot: .unavailable)
 
         launch.errorLogModel.refresh()
@@ -241,7 +240,7 @@ extension ErrorLogForegroundConnectTests {
 
         // A stale .live from a replaced transport cannot clear even when the
         // current transport really is live.
-        let replacementFailure = cancelledReplay(attempt: UUID(), transport: attempt)
+        let replacementFailure = cancelledConnection(attempt: UUID(), transport: attempt)
         launch.recordForegroundConnectProgress(replacementFailure, operationSnapshot: .unavailable)
         let replacementKey = try XCTUnwrap(launch.foregroundConnectFailureKey)
         launch.dismissForegroundConnectFailure(replacementKey)

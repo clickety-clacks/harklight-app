@@ -30,11 +30,10 @@ final class DevelopmentPushRegistration: NSObject, UIApplicationDelegate, UNUser
         }
 
         do {
-            try Self.persistToken(deviceToken,
-                                  legacyStore: Self.addressStore(), enrollment: NativeEnrollmentStore())
+            try NativeEnrollmentStore().storeV2APNsToken(deviceToken)
             UserDefaults.standard.set("registered", forKey: Self.statusKey)
             Task { await NativeRelayLifecycle.shared.refreshAfterPushAddressStored() }
-        } catch DevelopmentAPNsAddressStore.AddressError.emptyToken {
+        } catch NativeEnrollmentError.emptyAPNsToken {
             NativeRelayLifecycle.shared.recordPushRegistrationFailure(
                 causeCode: "notification_empty_token")
             UserDefaults.standard.set("refused", forKey: Self.statusKey)
@@ -112,7 +111,6 @@ final class DevelopmentPushRegistration: NSObject, UIApplicationDelegate, UNUser
 
     private func clearAddressAndSetStatus(_ status: String) {
         do {
-            try Self.addressStore().clear()
             try NativeEnrollmentStore().clearV2APNsToken()
             UserDefaults.standard.set(status, forKey: Self.statusKey)
         } catch {
@@ -120,43 +118,4 @@ final class DevelopmentPushRegistration: NSObject, UIApplicationDelegate, UNUser
             UserDefaults.standard.set("storage-failed", forKey: Self.statusKey)
         }
     }
-
-    static func persistToken(_ token: Data, legacyStore: DevelopmentAPNsAddressStore,
-                             enrollment: NativeEnrollmentStore) throws {
-        // Remove the previous release's address file. Current bytes come from APNs.
-        try legacyStore.clear()
-        try enrollment.storeV2APNsToken(token)
-    }
-
-    static func addressStore() throws -> DevelopmentAPNsAddressStore {
-        let support = try FileManager.default.url(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask,
-            appropriateFor: nil,
-            create: true
-        )
-        return DevelopmentAPNsAddressStore(
-            directory: support.appendingPathComponent("APNsSandbox", isDirectory: true)
-        )
-    }
-}
-
-struct DevelopmentAPNsAddressStore {
-    enum AddressError: Error {
-        case emptyToken
-        case invalidStoredToken
-    }
-
-    let directory: URL
-
-    private var file: URL {
-        directory.appendingPathComponent("device-token.hex")
-    }
-
-    func clear() throws {
-        if FileManager.default.fileExists(atPath: file.path) {
-            try FileManager.default.removeItem(at: file)
-        }
-    }
-
 }

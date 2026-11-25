@@ -645,7 +645,6 @@ struct LiveContentView: View {
     }
 
     var body: some View {
-        let progress = launch?.foregroundConnectProgress
         let failureKey = launch?.foregroundConnectFailureKey
         let diagnostic = launch?.foregroundConnectDiagnostic
         let failureAlertPresented = Binding<Bool>(
@@ -727,10 +726,6 @@ struct LiveContentView: View {
                 testNotificationRouter: testNotificationRouter,
                 testOpenForegroundChatIndicator: testOpenForegroundChatIndicator)
             .environment(\.errorLogModel, launch?.errorLogModel)
-            .uiDiagnostics("inbox-catch-up-diagnostics",
-                "source=\(launch != nil && !store.isLocalExample ? "live" : "fixture") " +
-                "post_ack_drain=\(progress?.outcome == .connecting && progress?.postAckDrainTransition == .began ? "running" : "not_running") " +
-                "transport=\(progress?.transportAttemptID?.uuidString ?? "none")")
             .alert("Connection needs attention", isPresented: failureAlertPresented,
                    presenting: diagnostic) { diagnostic in
                 Button("Copy details") {

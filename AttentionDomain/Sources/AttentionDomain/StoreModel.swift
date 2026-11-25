@@ -783,152 +783,6 @@ public struct RelayEvent: Equatable, Codable, Sendable {
 
 /// An item in the immutable server inbox view at one event watermark. These
 /// projections are durable page data, not individually ACKable relay events.
-public struct InboxSnapshotItem: Equatable, Codable, Sendable {
-    public let acceptance: RelayEvent
-    public let terminal: RelayEvent?
-    public let attentionTier: AttentionTier
-
-    public init(acceptance: RelayEvent,
-                terminal: RelayEvent? = nil,
-                attentionTier: AttentionTier = .middle) {
-        self.acceptance = acceptance
-        self.terminal = terminal
-        self.attentionTier = attentionTier
-    }
-
-    private enum CodingKeys: String, CodingKey {
-        case acceptance, terminal, attentionTier
-    }
-
-    public init(from decoder: Decoder) throws {
-        let values = try decoder.container(keyedBy: CodingKeys.self)
-        acceptance = try values.decode(RelayEvent.self, forKey: .acceptance)
-        terminal = try values.decodeIfPresent(RelayEvent.self, forKey: .terminal)
-        attentionTier = try values.decodeIfPresent(AttentionTier.self, forKey: .attentionTier) ?? .middle
-    }
-
-    public var key: RequestKey {
-        switch acceptance.body {
-        case let .delivery(request, _): request.key
-        case let .originReference(key), let .terminal(key, _, _), let .attentionTierChange(key): key
-        }
-    }
-}
-
-public enum InboxOperationReceiptStatus: String, Equatable, Codable, Sendable {
-    case committed
-    case operationConflict = "operation_conflict"
-    case notCommittedAtSnapshot = "not_committed_at_snapshot"
-    case refused
-}
-
-public enum InboxOperationRefusalReason: String, Equatable, Codable, Sendable {
-    case staleRevision = "stale_revision"
-    case closed
-    case notFound = "not_found"
-    case invalidField = "invalid_field"
-}
-
-/// The server's per-operation disposition for one exact locally retained original.
-public struct InboxOperationReceipt: Equatable, Codable, Sendable {
-    public let operationID: UUID
-    public let status: InboxOperationReceiptStatus
-    public let result: JSONValue?
-    public let terminal: RelayEvent?
-    public let reason: String?
-
-    public init(operationID: UUID,
-                status: InboxOperationReceiptStatus,
-                result: JSONValue? = nil,
-                terminal: RelayEvent? = nil,
-                reason: String? = nil) {
-        self.operationID = operationID
-        self.status = status
-        self.result = result
-        self.terminal = terminal
-        self.reason = reason
-    }
-}
-
-public struct InboxReceiptBatch: Equatable, Codable, Sendable {
-    public let batchID: String
-    public let operationIDs: [UUID]
-    public var results: [InboxOperationReceipt]?
-    /// Missing server results recorded as local unconfirmed outcomes. The
-    /// corresponding operation remains pending and retries with the same ID.
-    /// Optional so earlier checkpoints remain decodable.
-    public var missingOperationIDs: [UUID]?
-
-    public init(batchID: String,
-                operationIDs: [UUID],
-                results: [InboxOperationReceipt]? = nil,
-                missingOperationIDs: [UUID]? = nil) {
-        self.batchID = batchID
-        self.operationIDs = operationIDs
-        self.results = results
-        self.missingOperationIDs = missingOperationIDs
-    }
-}
-
-/// Persisted candidate or accepted generation for the native bounded inbox.
-/// `nextCursor == nil` is meaningful only after `hasInitialPage` is true.
-public struct InboxPagingCheckpoint: Equatable, Codable, Sendable {
-    public let startupID: String
-    public let since: UInt64
-    public var snapshotID: String?
-    public var highWater: UInt64?
-    public var nextCursor: String?
-    public var receiptCursor: String?
-    /// Source order of saved page identities; nil for older schema-2 checkpoints.
-    public var sourceOrder: [RequestKey]?
-    public var hasInitialPage: Bool
-    public var loadedKeys: Set<RequestKey>
-    /// Request identities whose lifecycle is known at this checkpoint. This
-    /// includes page items and exact receipt projections, not merely pages.
-    /// Optional keeps checkpoints written by earlier schema-2 clients readable.
-    public var freshKeys: Set<RequestKey>?
-    /// Last sequence observed in the ordered receipt-only stream.
-    public var receiptLastSequence: UInt64?
-    public var batches: [InboxReceiptBatch]
-    public var checkpointEligible: Bool
-    public var checkpointRequestStarted: Bool
-    public var checkpointAccepted: Bool
-
-    public init(startupID: String,
-                since: UInt64,
-                snapshotID: String? = nil,
-                highWater: UInt64? = nil,
-                nextCursor: String? = nil,
-                receiptCursor: String? = nil,
-                sourceOrder: [RequestKey]? = nil,
-                hasInitialPage: Bool = false,
-                loadedKeys: Set<RequestKey> = [],
-                freshKeys: Set<RequestKey>? = nil,
-                receiptLastSequence: UInt64? = nil,
-                batches: [InboxReceiptBatch] = [],
-                checkpointEligible: Bool = false,
-                checkpointRequestStarted: Bool = false,
-                checkpointAccepted: Bool = false) {
-        self.startupID = startupID
-        self.since = since
-        self.snapshotID = snapshotID
-        self.highWater = highWater
-        self.nextCursor = nextCursor
-        self.receiptCursor = receiptCursor
-        self.sourceOrder = sourceOrder
-        self.hasInitialPage = hasInitialPage
-        self.loadedKeys = loadedKeys
-        self.freshKeys = freshKeys
-        self.receiptLastSequence = receiptLastSequence
-        self.batches = batches
-        self.checkpointEligible = checkpointEligible
-        self.checkpointRequestStarted = checkpointRequestStarted
-        self.checkpointAccepted = checkpointAccepted
-    }
-
-    public var currentKeys: Set<RequestKey> { freshKeys ?? loadedKeys }
-}
-
 /// Additive ordinary-stream metadata initializes or closes a conversation without
 /// borrowing a conversation sequence number or changing the sender's message JSON.
 public struct RelayConversationMetadata: Equatable, Codable, Sendable {
@@ -977,9 +831,6 @@ public struct AttentionStoreSnapshot: Sendable {
     public let cursor: UInt64
     public let replayBarrier: UInt64?
     public let repairIssues: [StoreRepairIssue]
-    public let inboxCheckpoint: InboxPagingCheckpoint?
-    public let inboxCandidate: InboxPagingCheckpoint?
-    public let inboxSourceOrder: [RequestKey]?
     public let inboxView: InboxView?
     /// `nil` before bounded paging is established; an empty set while a new
     /// candidate is being reconciled; otherwise identities current at H plus
@@ -1002,9 +853,6 @@ public struct AttentionStoreSnapshot: Sendable {
                 replayBarrier: UInt64?,
                 repairIssues: [StoreRepairIssue],
                 conversationThreads: [RequestKey: ConversationThread] = [:],
-                inboxCheckpoint: InboxPagingCheckpoint? = nil,
-                inboxCandidate: InboxPagingCheckpoint? = nil,
-                inboxSourceOrder: [RequestKey]? = nil,
                 inboxView: InboxView? = nil,
                 inboxCurrentKeys: Set<RequestKey>? = nil,
                 pendingRelayOverlays: [UInt64: RelayEvent] = [:],
@@ -1023,9 +871,6 @@ public struct AttentionStoreSnapshot: Sendable {
         self.cursor = cursor
         self.replayBarrier = replayBarrier
         self.repairIssues = repairIssues
-        self.inboxCheckpoint = inboxCheckpoint
-        self.inboxCandidate = inboxCandidate
-        self.inboxSourceOrder = inboxSourceOrder
         self.inboxView = inboxView
         self.inboxCurrentKeys = inboxCurrentKeys
         self.pendingRelayOverlays = pendingRelayOverlays
@@ -1102,8 +947,6 @@ public enum AttentionStoreError: Error, Equatable, LocalizedError, Sendable {
     case missingAcceptanceOrder
     case duplicateAcceptanceOrder
     case invalidProjection
-    case inboxCheckpointPending
-    case inboxCheckpointIncomplete
     case inboxPageConflict
     case inboxStateUnrefreshed
     case persistence(String)
@@ -1130,8 +973,6 @@ public enum AttentionStoreError: Error, Equatable, LocalizedError, Sendable {
         case .missingAcceptanceOrder: return "The accepted request is missing its durable native order."
         case .duplicateAcceptanceOrder: return "Accepted requests contain a conflicting durable native order."
         case .invalidProjection: return "The admitted sender scene could not be projected with its authorized evidence."
-        case .inboxCheckpointPending: return "A bounded inbox checkpoint is still being reconciled; try the saved answer again after synchronization."
-        case .inboxCheckpointIncomplete: return "The bounded inbox checkpoint is missing durable page or receipt evidence."
         case .inboxPageConflict: return "The server inbox page conflicts with the saved message history."
         case .inboxStateUnrefreshed: return "This cached request has not been refreshed by the current inbox checkpoint."
         case let .persistence(message): return "Durable state could not be committed: \(message)"

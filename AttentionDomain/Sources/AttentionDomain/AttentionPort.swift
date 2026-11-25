@@ -1122,21 +1122,6 @@ public final class AttentionDomainPort: @unchecked Sendable {
         } else {
             sourceOrderedRequests = displayRequests
         }
-        if currentView == nil, let sourceOrder = snapshot.inboxSourceOrder {
-            var sourceRank: [RequestKey: Int] = [:]
-            for (index, key) in sourceOrder.enumerated() where sourceRank[key] == nil {
-                sourceRank[key] = index
-            }
-            let pagePositions = displayRequests.indices.filter {
-                sourceRank[displayRequests[$0].key] != nil
-            }
-            let pageRows = pagePositions.map { displayRequests[$0] }.sorted {
-                sourceRank[$0.key, default: .max] < sourceRank[$1.key, default: .max]
-            }
-            for (position, row) in zip(pagePositions, pageRows) {
-                sourceOrderedRequests[position] = row
-            }
-        }
         return PresentationSnapshot(revision: snapshot.revision,
                                     cursor: snapshot.cursor,
                                     replayBarrier: snapshot.replayBarrier,

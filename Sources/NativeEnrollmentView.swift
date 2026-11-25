@@ -3,7 +3,6 @@ import SwiftUI
 @MainActor
 struct NativeEnrollmentView: View {
     let launch: NativeAppLaunch
-    var pending: NativeEnrollmentRecord? = nil
     @State private var pastedInvitation = ""
     @Environment(\.colorScheme) private var colorScheme
     private var flow: NativeGuidedJoinCoordinator { launch.guidedJoin }

@@ -351,8 +351,6 @@ public final class ClientRepository: @unchecked Sendable {
         next.replayPublishedIntents = nil
         next.replayPublishedInboxCurrentKeys = nil
         next.appliedEvents = [:]
-        next.inboxCheckpoint = nil
-        next.inboxCandidate = nil
         next.cachedInboxCurrentKeys = cached.currentRequestKeys
         next.inboxView = cached.inboxView
         if let failedOpens = next.failedMessageOpens, !failedOpens.isEmpty {
@@ -1584,7 +1582,6 @@ public final class ClientRepository: @unchecked Sendable {
             dropUnsentAnswer(for: key, in: &next)
         }
         if let requestKey = Self.requestKey(in: event) {
-            Self.markInboxCurrent(requestKey, at: event.sequence, in: &next)
         }
         next.appliedEvents[event.sequence] = event
         next.cursor = max(next.cursor, event.sequence)
@@ -1752,216 +1749,6 @@ public final class ClientRepository: @unchecked Sendable {
         next.conversation = conversation
     }
 
-    private func applyInboxSnapshotItem(_ item: InboxSnapshotItem,
-                                        highWater: UInt64,
-                                        restoredTurns: [UInt64: ConversationEvent] = [:],
-                                        skippingHeldEvents: [UInt64: ConversationEvent] = [:],
-                                        onHeldEventFailure: ((ConversationEvent, ConversationValidationRejection?) -> Void)? = nil,
-                                        to next: inout ClientSessionState) throws {
-        let acceptance = item.acceptance
-        let key = item.key
-        guard acceptance.sequence > 0, acceptance.sequence <= highWater,
-              key.accountScope == context.identity.personID else {
-            throw AttentionStoreError.inboxPageConflict
-        }
-        let classification: RemoteDeliveryClassification?
-        switch acceptance.body {
-        case let .delivery(request, value):
-            guard request.key == key else { throw AttentionStoreError.inboxPageConflict }
-            try validate(request.key, in: context.identity)
-            classification = value
-            next.requests[key] = request.assigningAcceptanceOrder(acceptance.sequence)
-            if let reference = next.inboxReferences?.removeValue(forKey: key), next.remoteStates[key] == nil {
-                next.remoteStates[key] = reference
-            }
-        case .originReference:
-            classification = nil
-            if let existing = next.requests[key] {
-                next.requests[key] = existing.assigningAcceptanceOrder(acceptance.sequence)
-            }
-        case .terminal:
-            throw AttentionStoreError.inboxPageConflict
-        case .attentionTierChange:
-            throw AttentionStoreError.inboxPageConflict
-        }
-        let hasContent = next.requests[key] != nil
-        let previous = hasContent ? next.remoteStates[key] : next.inboxReferences?[key]
-        if let terminal = item.terminal {
-            guard case let .terminal(terminalKey, terminalState, answer) = terminal.body,
-                  terminalKey == key,
-                  terminal.sequence > acceptance.sequence,
-                  terminal.sequence <= highWater else { throw AttentionStoreError.inboxPageConflict }
-            if (previous?.eventSequence ?? 0) <= highWater {
-                let current = RemoteRequestState(state: terminalState,
-                    authorizedOriginAnswer: answer,
-                    accountAnswerOutcome: terminal.accountAnswerOutcome,
-                    classification: classification,
-                    eventSequence: terminal.sequence,
-                    attentionTier: previous?.attentionTier,
-                    attentionTierSequence: previous?.attentionTierSequence,
-                    attentionTierFeed: previous?.attentionTierFeed,
-                    attentionTierOrigin: previous?.attentionTierOrigin,
-                    supersedesOriginTarget: previous?.supersedesOriginTarget,
-                    supersededByMessageKeys: previous?.supersededByMessageKeys)
-                if hasContent {
-                    next.remoteStates[key] = current
-                    try applyOrdinaryConversationMetadata(acceptance,
-                        terminalReceiptTarget: terminal.conversation?.eventID,
-                        restoredTurns: restoredTurns, skippingHeldEvents: skippingHeldEvents,
-                        onHeldEventFailure: onHeldEventFailure, to: &next)
-                    try applyOrdinaryConversationMetadata(terminal, to: &next)
-                } else {
-                    var references = next.inboxReferences ?? [:]
-                    references[key] = current
-                    next.inboxReferences = references
-                }
-            }
-        } else {
-            if (previous?.eventSequence ?? 0) <= highWater {
-                let current = RemoteRequestState(state: nil,
-                    authorizedOriginAnswer: nil,
-                    accountAnswerOutcome: nil,
-                    classification: classification,
-                    eventSequence: acceptance.sequence,
-                    attentionTier: previous?.attentionTier,
-                    attentionTierSequence: previous?.attentionTierSequence,
-                    attentionTierFeed: previous?.attentionTierFeed,
-                    attentionTierOrigin: previous?.attentionTierOrigin,
-                    supersedesOriginTarget: previous?.supersedesOriginTarget,
-                    supersededByMessageKeys: previous?.supersededByMessageKeys)
-                if hasContent {
-                    next.remoteStates[key] = current
-                } else {
-                    var references = next.inboxReferences ?? [:]
-                    references[key] = current
-                    next.inboxReferences = references
-                }
-            }
-        }
-        var tierState = hasContent
-            ? (next.remoteStates[key] ?? RemoteRequestState())
-            : (next.inboxReferences?[key] ?? RemoteRequestState())
-        try updateAttentionTier(item.attentionTier, sequence: highWater, feed: .relay,
-                                origin: acceptance.origin, allowSameSequenceReplacement: true,
-                                in: &tierState)
-        if hasContent {
-            next.remoteStates[key] = tierState
-        } else {
-            var references = next.inboxReferences ?? [:]
-            references[key] = tierState
-            next.inboxReferences = references
-        }
-        if hasContent {
-            try applyOrdinaryConversationMetadata(acceptance, restoredTurns: restoredTurns,
-                skippingHeldEvents: skippingHeldEvents, onHeldEventFailure: onHeldEventFailure, to: &next)
-        }
-
-        if hasContent {
-            refreshEditableDraft(for: key, additionalFiles: Set(acceptance.conversation?.files?.map(\.name) ?? []), in: &next)
-        }
-
-        let pending = (next.pendingRelayOverlays ?? [:]).values
-            .filter { Self.requestKey(in: $0) == key }
-            .sorted { $0.sequence < $1.sequence }
-        for event in pending where next.requests[key] != nil || next.inboxReferences?[key] != nil {
-            try applyInboxProjection(event, to: &next)
-            next.appliedEvents[event.sequence] = event
-            next.pendingRelayOverlays?.removeValue(forKey: event.sequence)
-        }
-    }
-
-    /// Applies a terminal/reference fact without claiming that its sequence was contiguous.
-    /// Missing message content is kept as exact pending work until a later page hydrates G.
-    private func recordInboxTerminalProjection(_ event: RelayEvent,
-                                               into next: inout ClientSessionState) throws {
-        guard let key = Self.requestKey(in: event),
-              key.accountScope == context.identity.personID,
-              event.sequence > 0 else { throw AttentionStoreError.inboxPageConflict }
-        switch event.body {
-        case .delivery:
-            throw AttentionStoreError.inboxPageConflict
-        case .originReference, .attentionTierChange, .terminal:
-            break
-        }
-        try validate(key, in: context.identity)
-        guard next.requests[key] != nil || next.inboxReferences?[key] != nil else {
-            next.pendingRelayOverlays = next.pendingRelayOverlays ?? [:]
-            next.pendingRelayOverlays?[event.sequence] = event
-            return
-        }
-        try applyInboxProjection(event, to: &next)
-        next.appliedEvents[event.sequence] = event
-        next.pendingRelayOverlays?.removeValue(forKey: event.sequence)
-    }
-
-    private func applyInboxProjection(_ event: RelayEvent,
-                                      to next: inout ClientSessionState) throws {
-        guard let key = Self.requestKey(in: event),
-              next.requests[key] != nil || next.inboxReferences?[key] != nil else {
-            throw AttentionStoreError.inboxPageConflict
-        }
-        let hasContent = next.requests[key] != nil
-        let previous = hasContent ? next.remoteStates[key] : next.inboxReferences?[key]
-        let currentPrevious = previous ?? RemoteRequestState()
-        switch event.body {
-        case let .terminal(_, terminalState, answer):
-            if event.sequence < (currentPrevious.eventSequence ?? 0) { return }
-            var updated = RemoteRequestState(state: terminalState,
-                authorizedOriginAnswer: answer ?? currentPrevious.authorizedOriginAnswer,
-                accountAnswerOutcome: event.accountAnswerOutcome ?? currentPrevious.accountAnswerOutcome,
-                classification: currentPrevious.classification,
-                eventSequence: event.sequence,
-                attentionTier: currentPrevious.attentionTier,
-                attentionTierSequence: currentPrevious.attentionTierSequence,
-                attentionTierFeed: currentPrevious.attentionTierFeed,
-                attentionTierOrigin: currentPrevious.attentionTierOrigin,
-                supersedesOriginTarget: currentPrevious.supersedesOriginTarget,
-                supersededByMessageKeys: currentPrevious.supersededByMessageKeys)
-            if hasContent {
-                next.remoteStates[key] = updated
-                try applyOrdinaryConversationMetadata(event, to: &next)
-            } else {
-                var references = next.inboxReferences ?? [:]
-                references[key] = updated
-                next.inboxReferences = references
-            }
-            if terminalState == .superseded {
-                try recordSupersedesOriginTarget(for: key, terminalEvent: event, in: &next)
-            }
-        case .originReference:
-            if event.sequence < (currentPrevious.eventSequence ?? 0) { return }
-            var updated = currentPrevious
-            updated.classification = nil
-            updated.eventSequence = event.sequence
-            try updateAttentionTier(event.attentionTier, sequence: event.sequence, feed: .relay,
-                                    origin: event.origin, in: &updated)
-            if hasContent {
-                next.remoteStates[key] = updated
-                try applyOrdinaryConversationMetadata(event, to: &next)
-            } else {
-                var references = next.inboxReferences ?? [:]
-                references[key] = updated
-                next.inboxReferences = references
-            }
-        case .attentionTierChange:
-            var updated = currentPrevious
-            try updateAttentionTier(event.attentionTier, sequence: event.sequence, feed: .relay,
-                                    origin: event.origin, in: &updated)
-            if hasContent {
-                next.remoteStates[key] = updated
-            } else {
-                var references = next.inboxReferences ?? [:]
-                references[key] = updated
-                next.inboxReferences = references
-            }
-        case .delivery:
-            throw AttentionStoreError.inboxPageConflict
-        }
-    }
-
-    /// The accepted forward event precedes its superseded lifecycle events.
-    /// Several targets can be superseded by one forward, so walk back across
-    /// that event's adjacent superseded terminals when resolving later targets.
     private func recordSupersedesOriginTarget(for target: RequestKey,
                                               terminalEvent: RelayEvent,
                                               in next: inout ClientSessionState) throws {
@@ -2003,119 +1790,6 @@ public final class ClientRepository: @unchecked Sendable {
     /// Older account files and paged inbox projections may lack the inverse
     /// relationship field. Reconstruct it from retained terminal and accepted
     /// request identities so older messages can show their forward link.
-    private static func backfillSupersededByMessageKeys(
-        in state: inout ClientSessionState,
-        affectedTargets: Set<RequestKey>? = nil,
-        additionalEvents: [UInt64: RelayEvent] = [:]
-    ) {
-        let targetKeys: Set<RequestKey>
-        if let affectedTargets {
-            targetKeys = affectedTargets
-        } else {
-            targetKeys = Set(state.remoteStates.compactMap { key, remote in
-                remote.state == .superseded ? key : nil
-            } + (state.inboxReferences ?? [:]).compactMap { key, remote in
-                remote.state == .superseded ? key : nil
-            })
-        }
-        guard !targetKeys.isEmpty else { return }
-
-        var terminalSequences: [RequestKey: UInt64] = [:]
-        for target in targetKeys {
-            let remote = state.remoteStates[target] ?? state.inboxReferences?[target]
-            if remote?.state == .superseded, let sequence = remote?.eventSequence, sequence > 0 {
-                terminalSequences[target] = sequence
-            }
-        }
-        guard !terminalSequences.isEmpty else { return }
-
-        // Build the inverse lookup once, then visit only superseded targets
-        // touched by this load/page. The former per-terminal scan repeated a
-        // full request scan and could grow as O(superseded × request history).
-        var acceptanceSequences: [RequestKey: UInt64] = [:]
-        for (sequence, event) in state.appliedEvents.merging(additionalEvents, uniquingKeysWith: { _, new in new }) {
-            switch event.body {
-            case let .delivery(request, _):
-                acceptanceSequences[request.key] = min(acceptanceSequences[request.key] ?? sequence, sequence)
-            case let .originReference(key):
-                acceptanceSequences[key] = min(acceptanceSequences[key] ?? sequence, sequence)
-            case .terminal, .attentionTierChange:
-                break
-            }
-        }
-
-        var replacementsByTarget: [RequestKey: [(UInt64, RequestKey)]] = [:]
-        for request in state.requests.values {
-            guard let acceptanceSequence = request.acceptanceOrder ?? acceptanceSequences[request.key] else {
-                continue
-            }
-            for messageID in request.supersedesMessageIDs {
-                let target = RequestKey(accountScope: request.key.accountScope,
-                                        senderID: request.key.senderID,
-                                        messageID: messageID)
-                guard terminalSequences[target] != nil else { continue }
-                replacementsByTarget[target, default: []].append((acceptanceSequence, request.key))
-            }
-        }
-        for target in replacementsByTarget.keys {
-            replacementsByTarget[target]?.sort {
-                if $0.0 != $1.0 { return $0.0 < $1.0 }
-                return $0.1.messageID.rawValue < $1.1.messageID.rawValue
-            }
-        }
-
-        var affectedReplacementKeys = Set<RequestKey>()
-        for (target, sequence) in terminalSequences {
-            var replacementOrders = (replacementsByTarget[target] ?? []).filter { $0.0 < sequence }
-            if replacementOrders.isEmpty,
-               let inferred = supersedingReplacementKey(
-                    for: target, before: sequence,
-                    requests: state.requests, appliedEvents: state.appliedEvents,
-                    pendingEvents: state.pendingRelayOverlays ?? [:],
-                    replacementIndex: replacementsByTarget,
-                    additionalEvents: additionalEvents) {
-                replacementOrders.append((acceptanceSequences[inferred] ?? sequence - 1, inferred))
-            }
-            var seen = Set<RequestKey>()
-            let replacementKeys = replacementOrders.compactMap { pair in
-                seen.insert(pair.1).inserted ? pair.1 : nil
-            }
-            affectedReplacementKeys.formUnion(replacementKeys)
-
-            if var targetState = state.remoteStates[target] {
-                var replacements = targetState.supersededByMessageKeys ?? []
-                for replacementKey in replacementKeys where !replacements.contains(replacementKey) {
-                    replacements.append(replacementKey)
-                }
-                targetState.supersededByMessageKeys = replacements
-                state.remoteStates[target] = targetState
-            } else if var references = state.inboxReferences,
-                      var targetState = references[target] {
-                var replacements = targetState.supersededByMessageKeys ?? []
-                for replacementKey in replacementKeys where !replacements.contains(replacementKey) {
-                    replacements.append(replacementKey)
-                }
-                targetState.supersededByMessageKeys = replacements
-                references[target] = targetState
-                state.inboxReferences = references
-            }
-        }
-
-        // Inbox pages can arrive in display order rather than terminal-event
-        // order. Recompute each affected forward request's slot from the
-        // earliest superseded target currently known, allowing an older page
-        // to refine an origin first learned from a newer page.
-        for replacementKey in affectedReplacementKeys {
-            guard let replacement = state.requests[replacementKey],
-                  let acceptanceSequence = replacement.acceptanceOrder ?? acceptanceSequences[replacementKey],
-                  let originTarget = firstSupersededOriginTarget(
-                    for: replacement, after: acceptanceSequence, in: state) else { continue }
-            var replacementState = state.remoteStates[replacementKey] ?? RemoteRequestState()
-            replacementState.supersedesOriginTarget = originTarget
-            state.remoteStates[replacementKey] = replacementState
-        }
-    }
-
     private static func firstSupersededOriginTarget(
         for replacement: StoredRequest,
         after acceptanceSequence: UInt64? = nil,
@@ -2138,41 +1812,13 @@ public final class ClientRepository: @unchecked Sendable {
         return first?.root
     }
 
-    private static func supersedeTargets(in items: [InboxSnapshotItem]) -> Set<RequestKey> {
-        var targets = Set<RequestKey>()
-        for item in items {
-            if let terminal = item.terminal,
-               case let .terminal(target, .superseded, _) = terminal.body {
-                targets.insert(target)
-            }
-            if case let .delivery(request, _) = item.acceptance.body {
-                for messageID in request.supersedesMessageIDs {
-                    targets.insert(RequestKey(accountScope: request.key.accountScope,
-                                              senderID: request.key.senderID,
-                                              messageID: messageID))
-                }
-            }
-        }
-        return targets
-    }
-
-    private static func events(in items: [InboxSnapshotItem]) -> [UInt64: RelayEvent] {
-        var events: [UInt64: RelayEvent] = [:]
-        for item in items {
-            events[item.acceptance.sequence] = item.acceptance
-            if let terminal = item.terminal { events[terminal.sequence] = terminal }
-        }
-        return events
-    }
-
     private static func supersedingReplacementKey(
         for target: RequestKey,
         before terminalSequence: UInt64,
         requests: [RequestKey: StoredRequest],
         appliedEvents: [UInt64: RelayEvent],
         pendingEvents: [UInt64: RelayEvent],
-        replacementIndex: [RequestKey: [(UInt64, RequestKey)]]? = nil,
-        additionalEvents: [UInt64: RelayEvent] = [:]
+        replacementIndex: [RequestKey: [(UInt64, RequestKey)]]? = nil
     ) -> RequestKey? {
         func latestAcceptedReplacement() -> RequestKey? {
             if let replacementIndex {
@@ -2192,7 +1838,7 @@ public final class ClientRepository: @unchecked Sendable {
         guard terminalSequence > 1 else { return nil }
         var sequence = terminalSequence - 1
         while sequence > 0 {
-            guard let previousEvent = appliedEvents[sequence] ?? additionalEvents[sequence] ?? pendingEvents[sequence] else {
+            guard let previousEvent = appliedEvents[sequence] ?? pendingEvents[sequence] else {
                 return latestAcceptedReplacement()
             }
             switch previousEvent.body {
@@ -2252,61 +1898,10 @@ public final class ClientRepository: @unchecked Sendable {
         if let origin { state.attentionTierOrigin = origin }
     }
 
-    private func refreshAcceptedReplayIndexes(for requestKeys: some Sequence<RequestKey>) {
-        for key in requestKeys { refreshAcceptedReplayIndex(for: key) }
-    }
-
     private static func requestKey(in event: RelayEvent) -> RequestKey? {
         switch event.body {
         case let .delivery(request, _): request.key
         case let .originReference(key), let .terminal(key, _, _), let .attentionTierChange(key): key
-        }
-    }
-
-    private static func markInboxCurrent(_ key: RequestKey,
-                                         at sequence: UInt64,
-                                         in next: inout ClientSessionState) {
-        guard var checkpoint = next.inboxCheckpoint,
-              checkpoint.checkpointAccepted,
-              let highWater = checkpoint.highWater,
-              sequence > highWater else { return }
-        var current = checkpoint.currentKeys
-        current.insert(key)
-        checkpoint.freshKeys = current
-        next.inboxCheckpoint = checkpoint
-    }
-
-    private static func acceptedSequence(_ submission: Submission) -> UInt64 {
-        guard case let .accepted(sequence) = submission.disposition else { return .max }
-        return sequence ?? .max
-    }
-
-    private static func isAccepted(_ submission: Submission) -> Bool {
-        if case .accepted = submission.disposition { return true }
-        return false
-    }
-
-    private static func resultSequence(_ result: JSONValue) -> UInt64? {
-        guard let raw = result.uniqueValue(named: "seq"),
-              case let .number(number) = raw else { return nil }
-        return UInt64(number.lexeme)
-    }
-
-    private static func recordInboxOperationFailure(_ submission: Submission,
-                                                    reason: String? = nil,
-                                                    in state: inout ClientSessionState) {
-        var failed = submission
-        switch submission.disposition {
-        case .refusedClosed, .refusedNotFound: break
-        default:
-            failed.disposition = reason == "closed" ? .refusedClosed :
-                reason == "not_found" ? .refusedNotFound : .failed
-        }
-        state.intents[submission.intentID] = failed
-        state.outboxOrder.removeAll(where: { $0 == submission.intentID })
-        if var published = state.replayPublishedIntents {
-            published[submission.intentID] = failed
-            state.replayPublishedIntents = published
         }
     }
 
@@ -2375,7 +1970,6 @@ public final class ClientRepository: @unchecked Sendable {
             var overlays = next.pendingRelayOverlays ?? [:]
             overlays[event.sequence] = event
             next.pendingRelayOverlays = overlays
-            Self.markInboxCurrent(key, at: event.sequence, in: &next)
             next.cursor = max(next.cursor, event.sequence)
             try commit(next)
             return .deferred(contiguousCursor: state.cursor)
@@ -2413,11 +2007,7 @@ public final class ClientRepository: @unchecked Sendable {
         next.replayPublishedRequests = state.requests
         next.replayPublishedStates = state.remoteStates
         next.replayPublishedIntents = state.intents
-        // A replay barrier publishes the last accepted inbox view while fresh
-        // state is checked. A recoverable candidate must not dim every row.
-        next.replayPublishedInboxCurrentKeys = state.inboxCheckpoint.flatMap {
-            $0.checkpointAccepted ? $0.currentKeys : nil
-        }
+        next.replayPublishedInboxCurrentKeys = state.cachedInboxCurrentKeys
         try commit(next)
     }
 
@@ -2491,165 +2081,6 @@ public final class ClientRepository: @unchecked Sendable {
         }.sorted { $0.operationID.uuidString < $1.operationID.uuidString }
     }
 
-    public func beginInboxCandidate(startupID: String,
-                                    since: UInt64,
-                                    batches: [InboxReceiptBatch],
-                                    context suppliedContext: ProfileContext) throws -> InboxPagingCheckpoint {
-        writerLock.lock()
-        defer { writerLock.unlock() }
-        lock.lock()
-        defer { lock.unlock() }
-        try validate(suppliedContext)
-        guard suppliedContext.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
-        if let existing = state.inboxCandidate {
-            guard existing.since == state.cursor else { throw AttentionStoreError.inboxCheckpointIncomplete }
-            return existing
-        }
-        guard !startupID.isEmpty, since == state.cursor else {
-            throw AttentionStoreError.inboxCheckpointIncomplete
-        }
-        let inventory = try inboxOperationInventory(context: suppliedContext)
-        let expected = inventory.map(\.operationID)
-        let submitted = batches.flatMap(\.operationIDs)
-        guard Set(submitted).count == submitted.count,
-              Set(submitted) == Set(expected),
-              Set(batches.map(\.batchID)).count == batches.count,
-              batches.allSatisfy({ !$0.batchID.isEmpty && !$0.operationIDs.isEmpty && $0.results == nil }) else {
-            throw AttentionStoreError.inboxCheckpointIncomplete
-        }
-        let candidate = InboxPagingCheckpoint(startupID: startupID, since: since, batches: batches)
-        var next = state
-        // Starting a request is not a server update. Keep the last accepted
-        // cache available if the transport fails before returning a snapshot.
-        next.inboxCandidate = candidate
-        try commit(next)
-        return candidate
-    }
-
-    public func discardInboxCandidate(context suppliedContext: ProfileContext) throws {
-        writerLock.lock()
-        defer { writerLock.unlock() }
-        lock.lock()
-        defer { lock.unlock() }
-        try validate(suppliedContext)
-        guard let candidate = state.inboxCandidate else { return }
-        guard !candidate.checkpointRequestStarted else { throw AttentionStoreError.inboxCheckpointPending }
-        var next = state
-        next.inboxCandidate = nil
-        try commit(next)
-    }
-
-    /// A server `snapshot_replaced` refusal proves the saved continuation no
-    /// longer names the current generation. Retain every receipt/overlay and
-    /// operation record, but allow a new bounded candidate from the durable C.
-    public func discardReplacedInboxCandidate(snapshotID: String,
-                                              context suppliedContext: ProfileContext) throws {
-        writerLock.lock()
-        defer { writerLock.unlock() }
-        lock.lock()
-        defer { lock.unlock() }
-        try validate(suppliedContext)
-        guard let candidate = state.inboxCandidate,
-              candidate.snapshotID == snapshotID else {
-            throw AttentionStoreError.inboxCheckpointIncomplete
-        }
-        var next = state
-        next.inboxCandidate = nil
-        try commit(next)
-    }
-
-    public func saveInboxInitialPage(snapshotID: String,
-                                     highWater: UInt64,
-                                     items: [InboxSnapshotItem],
-                                     nextCursor: String?,
-                                     receiptCursor: String?,
-                                     context suppliedContext: ProfileContext) throws {
-        var validationRejection: ConversationValidationRejection?
-        try saveInboxInitialPage(snapshotID: snapshotID, highWater: highWater, items: items,
-            nextCursor: nextCursor, receiptCursor: receiptCursor, context: suppliedContext,
-            validationRejection: &validationRejection)
-    }
-
-    public func saveInboxInitialPage(snapshotID: String,
-                                     highWater: UInt64,
-                                     items: [InboxSnapshotItem],
-                                     nextCursor: String?,
-                                     receiptCursor: String?,
-                                     context suppliedContext: ProfileContext,
-                                     validationRejection: inout ConversationValidationRejection?,
-                                     restoredTurns: [UInt64: ConversationEvent] = [:],
-                                     skippingHeldEvents: [UInt64: ConversationEvent] = [:],
-                                     onHeldEventFailure: ((ConversationEvent, ConversationValidationRejection?) -> Void)? = nil) throws {
-        validationRejection = nil
-        writerLock.lock()
-        defer { writerLock.unlock() }
-        lock.lock()
-        defer { lock.unlock() }
-        try validate(suppliedContext)
-        guard suppliedContext.transportMode == .relay,
-              var candidate = state.inboxCandidate,
-              !snapshotID.isEmpty,
-              highWater >= candidate.since else { throw AttentionStoreError.inboxCheckpointIncomplete }
-        let keys = items.map(\.key)
-        guard Set(keys).count == keys.count,
-              keys.allSatisfy({ $0.accountScope == context.identity.personID }) else {
-            throw AttentionStoreError.inboxPageConflict
-        }
-        if candidate.hasInitialPage {
-            guard candidate.snapshotID == snapshotID,
-                  candidate.highWater == highWater,
-                  candidate.nextCursor == nextCursor,
-                  candidate.receiptCursor == receiptCursor,
-                  candidate.loadedKeys == Set(keys),
-                  candidate.sourceOrder == nil || candidate.sourceOrder == keys else {
-                throw AttentionStoreError.inboxPageConflict
-            }
-            if candidate.sourceOrder == nil {
-                candidate.sourceOrder = keys
-                var next = state
-                next.inboxCandidate = candidate
-                try commit(next)
-            }
-            return
-        }
-        var next = state
-        // Inbox snapshots replace the ordinary projection, including an empty
-        // snapshot. User intents remain in their own queue. Conversation
-        // history has its own sequence: preserve its committed prefix so a
-        // reconnect resumes that stream instead of starting it over.
-        let conversation = next.server.conversation
-        next.server = ServerProjectionCache()
-        next.server.conversation = conversation
-        next.cursor = candidate.since
-        do {
-            for item in items {
-                try applyInboxSnapshotItem(item, highWater: highWater, restoredTurns: restoredTurns,
-                    skippingHeldEvents: skippingHeldEvents, onHeldEventFailure: onHeldEventFailure, to: &next)
-            }
-            Self.backfillSupersededByMessageKeys(in: &next,
-                affectedTargets: Self.supersedeTargets(in: items),
-                additionalEvents: Self.events(in: items))
-        } catch let error as ConversationValidationRejectionError {
-            validationRejection = error.rejection
-            throw ConversationError.invalidBinding
-        }
-        candidate.snapshotID = snapshotID
-        candidate.highWater = highWater
-        candidate.nextCursor = nextCursor
-        candidate.receiptCursor = receiptCursor
-        candidate.sourceOrder = keys
-        candidate.hasInitialPage = true
-        candidate.loadedKeys = Set(keys)
-        candidate.freshKeys = Set(keys)
-        candidate.receiptLastSequence = candidate.since
-        candidate.checkpointEligible = false
-        candidate.checkpointRequestStarted = false
-        candidate.checkpointAccepted = false
-        next.inboxCandidate = candidate
-        try commit(next)
-        refreshAcceptedReplayIndexes(for: keys)
-    }
-
     /// Replaces the unsequenced, server-reported ordering view without moving
     /// the ordinary relay cursor. A failed view fetch clears only this cache.
     public func setInboxView(_ view: InboxView?,
@@ -2691,372 +2122,6 @@ public final class ClientRepository: @unchecked Sendable {
         try commit(next)
     }
 
-    public func saveInboxOlderPage(snapshotID: String,
-                                   highWater: UInt64,
-                                   cursor: String,
-                                   items: [InboxSnapshotItem],
-                                   nextCursor: String?,
-                                   context suppliedContext: ProfileContext) throws {
-        var validationRejection: ConversationValidationRejection?
-        try saveInboxOlderPage(snapshotID: snapshotID, highWater: highWater, cursor: cursor,
-            items: items, nextCursor: nextCursor, context: suppliedContext,
-            validationRejection: &validationRejection)
-    }
-
-    public func saveInboxOlderPage(snapshotID: String,
-                                   highWater: UInt64,
-                                   cursor: String,
-                                   items: [InboxSnapshotItem],
-                                   nextCursor: String?,
-                                   context suppliedContext: ProfileContext,
-                                   validationRejection: inout ConversationValidationRejection?,
-                                     restoredTurns: [UInt64: ConversationEvent] = [:],
-                                     skippingHeldEvents: [UInt64: ConversationEvent] = [:],
-                                     onHeldEventFailure: ((ConversationEvent, ConversationValidationRejection?) -> Void)? = nil) throws {
-        validationRejection = nil
-        writerLock.lock()
-        defer { writerLock.unlock() }
-        lock.lock()
-        defer { lock.unlock() }
-        try validate(suppliedContext)
-        guard suppliedContext.transportMode == .relay,
-              var checkpoint = state.inboxCheckpoint,
-              checkpoint.checkpointAccepted,
-              checkpoint.snapshotID == snapshotID,
-              checkpoint.highWater == highWater,
-              checkpoint.hasInitialPage,
-              checkpoint.nextCursor == cursor,
-              (items.count > 0 || nextCursor == nil) else {
-            throw AttentionStoreError.inboxPageConflict
-        }
-        let keys = items.map(\.key)
-        guard Set(keys).count == keys.count,
-              keys.allSatisfy({ $0.accountScope == context.identity.personID }),
-              keys.allSatisfy({ !checkpoint.loadedKeys.contains($0) }),
-              nextCursor != cursor else { throw AttentionStoreError.inboxPageConflict }
-        var next = state
-        do {
-            for item in items {
-                try applyInboxSnapshotItem(item, highWater: highWater, restoredTurns: restoredTurns,
-                    skippingHeldEvents: skippingHeldEvents, onHeldEventFailure: onHeldEventFailure, to: &next)
-            }
-            Self.backfillSupersededByMessageKeys(in: &next,
-                affectedTargets: Self.supersedeTargets(in: items),
-                additionalEvents: Self.events(in: items))
-        } catch let error as ConversationValidationRejectionError {
-            validationRejection = error.rejection
-            throw ConversationError.invalidBinding
-        }
-        let previousSourceOrder: [RequestKey]
-        if let sourceOrder = checkpoint.sourceOrder {
-            previousSourceOrder = sourceOrder
-        } else {
-            previousSourceOrder = checkpoint.loadedKeys.sorted { left, right in
-                let leftOrder = state.requests[left]?.acceptanceOrder ??
-                    state.remoteStates[left]?.eventSequence ?? state.inboxReferences?[left]?.eventSequence ?? 0
-                let rightOrder = state.requests[right]?.acceptanceOrder ??
-                    state.remoteStates[right]?.eventSequence ?? state.inboxReferences?[right]?.eventSequence ?? 0
-                if leftOrder != rightOrder { return leftOrder > rightOrder }
-                if left.senderID.rawValue != right.senderID.rawValue {
-                    return left.senderID.rawValue < right.senderID.rawValue
-                }
-                return left.messageID.rawValue < right.messageID.rawValue
-            }
-        }
-        checkpoint.sourceOrder = previousSourceOrder + keys
-        checkpoint.loadedKeys.formUnion(keys)
-        checkpoint.freshKeys = checkpoint.currentKeys.union(keys)
-        checkpoint.nextCursor = nextCursor
-        next.inboxCheckpoint = checkpoint
-        dropAnswersInvalidatedBySnapshot(checkpoint, in: &next)
-        try commit(next, allowingCommittedReads: true)
-        refreshAcceptedReplayIndexes(for: keys)
-    }
-
-    public func appendInboxReceiptBatches(_ batches: [InboxReceiptBatch],
-                                         context suppliedContext: ProfileContext) throws {
-        guard !batches.isEmpty else { return }
-        writerLock.lock()
-        defer { writerLock.unlock() }
-        lock.lock()
-        defer { lock.unlock() }
-        try validate(suppliedContext)
-        guard suppliedContext.transportMode == .relay,
-              var candidate = state.inboxCandidate,
-              candidate.hasInitialPage,
-              !candidate.checkpointRequestStarted else { throw AttentionStoreError.inboxCheckpointPending }
-        let existingIDs = Set(candidate.batches.flatMap(\.operationIDs))
-        let newIDs = batches.flatMap(\.operationIDs)
-        let inventoryIDs = Set(try inboxOperationInventory(context: suppliedContext).map(\.operationID))
-        guard Set(newIDs).count == newIDs.count,
-              Set(newIDs).isDisjoint(with: existingIDs),
-              Set(newIDs).isSubset(of: inventoryIDs),
-              Set(batches.map(\.batchID)).count == batches.count,
-              batches.allSatisfy({ !$0.batchID.isEmpty && !$0.operationIDs.isEmpty && $0.results == nil }) else {
-            throw AttentionStoreError.inboxCheckpointIncomplete
-        }
-        candidate.batches.append(contentsOf: batches)
-        candidate.checkpointEligible = false
-        var next = state
-        next.inboxCandidate = candidate
-        try commit(next)
-    }
-
-    public func saveInboxReceiptBatch(_ batchID: String,
-                                      results: [InboxOperationReceipt],
-                                      missingOperationIDs: [UUID] = [],
-                                      context suppliedContext: ProfileContext) throws {
-        writerLock.lock()
-        defer { writerLock.unlock() }
-        lock.lock()
-        defer { lock.unlock() }
-        try validate(suppliedContext)
-        guard suppliedContext.transportMode == .relay,
-              var candidate = state.inboxCandidate,
-              candidate.hasInitialPage,
-              !candidate.checkpointRequestStarted,
-              let index = candidate.batches.firstIndex(where: { $0.batchID == batchID }) else {
-            throw AttentionStoreError.inboxCheckpointIncomplete
-        }
-        let batch = candidate.batches[index]
-        let resultIDs = results.map(\.operationID)
-        let resultIDSet = Set(resultIDs)
-        let missingIDSet = Set(missingOperationIDs)
-        let orderedResultIDs = batch.operationIDs.filter { resultIDSet.contains($0) }
-        guard resultIDSet.count == resultIDs.count,
-              missingIDSet.count == missingOperationIDs.count,
-              resultIDSet.isDisjoint(with: missingIDSet),
-              orderedResultIDs == resultIDs,
-              resultIDSet.union(missingIDSet) == Set(batch.operationIDs),
-              Set(batch.operationIDs).count == batch.operationIDs.count else {
-            throw AttentionStoreError.inboxPageConflict
-        }
-        if let existing = batch.results {
-            guard existing == results,
-                  (batch.missingOperationIDs ?? []) == missingOperationIDs else {
-                throw AttentionStoreError.inboxPageConflict
-            }
-            return
-        }
-        var next = state
-        var touchedKeys = Set<RequestKey>()
-        var refreshedKeys = Set<RequestKey>()
-        for receipt in results {
-            guard let submission = next.intents.values.first(where: { $0.operationID == receipt.operationID }) else {
-                throw AttentionStoreError.inboxCheckpointIncomplete
-            }
-            touchedKeys.insert(submission.requestKey)
-            switch receipt.status {
-            case .committed:
-                guard let result = receipt.result,
-                      let sequence = Self.resultSequence(result),
-                      let terminal = receipt.terminal,
-                      case let .terminal(key, _, _) = terminal.body,
-                      key == submission.requestKey,
-                      terminal.sequence == sequence,
-                      case let .bool(duplicate)? = result.uniqueValue(named: "duplicate") else {
-                    throw AttentionStoreError.inboxPageConflict
-                }
-                if submission.isNoComment {
-                    guard result.uniqueValue(named: "terminal_kind")?.stringValue?.rawValue == "no_comment",
-                          case let .terminal(_, .noComment, _) = terminal.body,
-                          terminal.accountAnswerOutcome == .noComment else {
-                        throw AttentionStoreError.inboxPageConflict
-                    }
-                } else {
-                    guard duplicate,
-                          terminal.sequence <= (candidate.highWater ?? 0) else {
-                        throw AttentionStoreError.inboxPageConflict
-                    }
-                }
-                if case let .accepted(priorSequence) = submission.disposition {
-                    guard priorSequence == sequence else { throw AttentionStoreError.inboxPageConflict }
-                } else {
-                    var accepted = submission
-                    accepted.disposition = .accepted(sequence: sequence)
-                    next.intents[submission.intentID] = accepted
-                    next.outboxOrder.removeAll(where: { $0 == submission.intentID })
-                    if var published = next.replayPublishedIntents {
-                        published[submission.intentID] = accepted
-                        next.replayPublishedIntents = published
-                    }
-                }
-                try recordInboxTerminalProjection(terminal, into: &next)
-                // The Server holds this operation's terminal: it is settled,
-                // whether or not its message is loaded yet, so it leaves the
-                // queue instead of waiting for a replay that may never cover it.
-                dropUnsentAnswer(for: submission.requestKey, in: &next)
-                if var published = next.replayPublishedIntents {
-                    published.removeValue(forKey: submission.intentID)
-                    next.replayPublishedIntents = published
-                }
-                touchedKeys.insert(submission.requestKey)
-                refreshedKeys.insert(submission.requestKey)
-            case .operationConflict:
-                guard receipt.result == nil, receipt.terminal == nil, receipt.reason == nil,
-                      !Self.isAccepted(submission) else { throw AttentionStoreError.inboxPageConflict }
-                Self.recordInboxOperationFailure(submission, in: &next)
-            case .notCommittedAtSnapshot:
-                guard receipt.result == nil, receipt.reason == nil else {
-                    throw AttentionStoreError.inboxPageConflict
-                }
-                // An independent send can commit after this frozen snapshot.
-                // Its accepted receipt must survive the older "not committed"
-                // answer until the later terminal is replayed.
-                if case let .accepted(sequence) = submission.disposition {
-                    guard let sequence, sequence > (candidate.highWater ?? 0) else {
-                        throw AttentionStoreError.inboxPageConflict
-                    }
-                }
-                if let terminal = receipt.terminal {
-                    guard case let .terminal(key, _, _) = terminal.body,
-                          key == submission.requestKey,
-                          terminal.sequence <= (candidate.highWater ?? 0) else {
-                        throw AttentionStoreError.inboxPageConflict
-                    }
-                    try recordInboxTerminalProjection(terminal, into: &next)
-                    touchedKeys.insert(submission.requestKey)
-                    refreshedKeys.insert(submission.requestKey)
-                }
-            case .refused:
-                // An accepted operation whose message is now gone or closed is
-                // retired: the Server has nothing left to settle for it.
-                guard receipt.result == nil, receipt.terminal == nil,
-                      let reason = receipt.reason,
-                      InboxOperationRefusalReason(rawValue: reason) != nil,
-                      !Self.isAccepted(submission) || reason == "not_found" || reason == "closed" else {
-                    throw AttentionStoreError.inboxPageConflict
-                }
-                Self.recordInboxOperationFailure(submission, reason: reason, in: &next)
-            }
-        }
-        candidate.batches[index].results = results
-        candidate.batches[index].missingOperationIDs = missingOperationIDs
-        for operationID in missingOperationIDs {
-            guard let submission = next.intents.values.first(where: { $0.operationID == operationID }) else {
-                throw AttentionStoreError.inboxCheckpointIncomplete
-            }
-            touchedKeys.insert(submission.requestKey)
-            switch submission.disposition {
-            case .pending, .accepted, .lost:
-                break
-            default:
-                throw AttentionStoreError.inboxPageConflict
-            }
-        }
-        candidate.freshKeys = candidate.currentKeys.union(refreshedKeys)
-        next.inboxCandidate = candidate
-        try commit(next)
-        refreshAcceptedReplayIndexes(for: touchedKeys)
-    }
-
-    public func saveInboxReceiptChunk(snapshotID: String,
-                                      cursor: String,
-                                      events: [RelayEvent],
-                                      nextCursor: String?,
-                                      context suppliedContext: ProfileContext) throws {
-        writerLock.lock()
-        defer { writerLock.unlock() }
-        lock.lock()
-        defer { lock.unlock() }
-        try validate(suppliedContext)
-        guard suppliedContext.transportMode == .relay,
-              var candidate = state.inboxCandidate,
-              !candidate.checkpointRequestStarted,
-              candidate.snapshotID == snapshotID,
-              candidate.highWater != nil,
-              candidate.receiptCursor == cursor,
-              nextCursor != cursor,
-              let highWater = candidate.highWater else { throw AttentionStoreError.inboxPageConflict }
-        var priorSequence = candidate.receiptLastSequence ?? candidate.since
-        var touchedKeys = Set<RequestKey>()
-        var next = state
-        for event in events {
-            guard event.sequence > priorSequence, event.sequence <= highWater,
-                  event.sequence > candidate.since else {
-                throw AttentionStoreError.inboxPageConflict
-            }
-            switch event.body {
-            case let .terminal(key, _, _):
-                guard key.accountScope == context.identity.personID else { throw AttentionStoreError.wrongAccount }
-                touchedKeys.insert(key)
-                try recordInboxTerminalProjection(event, into: &next)
-            default:
-                throw AttentionStoreError.inboxPageConflict
-            }
-            priorSequence = event.sequence
-        }
-        if !events.isEmpty { candidate.receiptLastSequence = priorSequence }
-        candidate.freshKeys = candidate.currentKeys.union(touchedKeys)
-        candidate.receiptCursor = nextCursor
-        next.inboxCandidate = candidate
-        try commit(next)
-        refreshAcceptedReplayIndexes(for: touchedKeys)
-    }
-
-    /// Durably freezes the exact manifest immediately before the distinct server checkpoint ACK.
-    public func prepareInboxCheckpointAcknowledgement(context suppliedContext: ProfileContext) throws -> InboxPagingCheckpoint {
-        writerLock.lock()
-        defer { writerLock.unlock() }
-        lock.lock()
-        defer { lock.unlock() }
-        try validate(suppliedContext)
-        guard suppliedContext.transportMode == .relay,
-              var candidate = state.inboxCandidate,
-              candidate.hasInitialPage,
-              candidate.snapshotID != nil,
-              candidate.highWater != nil,
-              candidate.receiptCursor == nil,
-              candidate.batches.allSatisfy({ $0.results != nil }) else {
-            throw AttentionStoreError.inboxCheckpointIncomplete
-        }
-        let operationIDs = candidate.batches.flatMap(\.operationIDs)
-        let inventoryIDs = try inboxOperationInventory(context: suppliedContext).map(\.operationID)
-        guard Set(operationIDs).count == operationIDs.count,
-              Set(inventoryIDs).isSubset(of: Set(operationIDs)) else {
-            throw AttentionStoreError.inboxCheckpointIncomplete
-        }
-        candidate.checkpointEligible = true
-        candidate.checkpointRequestStarted = true
-        var next = state
-        next.inboxCandidate = candidate
-        try commit(next)
-        return candidate
-    }
-
-    /// This is the only local operation that promotes a checkpoint H to the event cursor.
-    @discardableResult
-    public func acceptInboxCheckpoint(snapshotID: String,
-                                      highWater: UInt64,
-                                      context suppliedContext: ProfileContext) throws -> UInt64 {
-        writerLock.lock()
-        defer { writerLock.unlock() }
-        lock.lock()
-        defer { lock.unlock() }
-        try validate(suppliedContext)
-        guard suppliedContext.transportMode == .relay,
-              var candidate = state.inboxCandidate,
-              candidate.checkpointEligible,
-              candidate.checkpointRequestStarted,
-              candidate.snapshotID == snapshotID,
-              candidate.highWater == highWater,
-              state.cursor == candidate.since else { throw AttentionStoreError.inboxCheckpointIncomplete }
-        candidate.checkpointAccepted = true
-        var next = state
-        next.inboxCheckpoint = candidate
-        dropAnswersInvalidatedBySnapshot(candidate, in: &next)
-        next.inboxCandidate = nil
-        next.cachedInboxCurrentKeys = nil
-        next.cursor = highWater
-        next.replayBarrier = nil
-        next.replayPublishedRequests = nil
-        next.replayPublishedStates = nil
-        next.replayPublishedIntents = nil
-        next.replayPublishedInboxCurrentKeys = nil
-        try commit(next)
-        return state.cursor
-    }
-
     public func snapshot(context suppliedContext: ProfileContext) throws -> AttentionStoreSnapshot {
         try snapshot(context: suppliedContext, published: true)
     }
@@ -3087,29 +2152,8 @@ public final class ClientRepository: @unchecked Sendable {
             visibleSessions = state.fixtureSessions.filter { visibleKeys.contains($0.key) }
         }
         let sortedOutbox = state.outboxOrder.compactMap { state.intents[$0] }
-        var inboxCurrentKeys: Set<RequestKey>?
-        if published && state.replayBarrier != nil {
-            inboxCurrentKeys = state.replayPublishedInboxCurrentKeys
-        } else if state.inboxCandidate != nil,
-                  let checkpoint = state.inboxCheckpoint, checkpoint.checkpointAccepted {
-            // A failed candidate remains durable for recovery. It must not erase
-            // the last accepted current-message set while that recovery waits.
-            inboxCurrentKeys = checkpoint.currentKeys
-        } else if state.inboxCandidate != nil {
-            // Before the first accepted snapshot, keep the messages actionable
-            // until freshness is known instead of presenting them as dimmed.
-            inboxCurrentKeys = nil
-        } else if let checkpoint = state.inboxCheckpoint, checkpoint.checkpointAccepted {
-            inboxCurrentKeys = checkpoint.currentKeys
-        } else {
-            inboxCurrentKeys = nil
-        }
-        if state.inboxCheckpoint == nil && state.inboxCandidate == nil {
-            inboxCurrentKeys = state.cachedInboxCurrentKeys
-        }
-        let inboxSourceOrder = state.inboxCheckpoint.flatMap {
-            $0.checkpointAccepted ? $0.sourceOrder : nil
-        }
+        let inboxCurrentKeys = published && state.replayBarrier != nil
+            ? state.replayPublishedInboxCurrentKeys : state.cachedInboxCurrentKeys
         var visibleIntents = state.intents
         if published, let priorIntents = state.replayPublishedIntents {
             // A replayed terminal retires the operation at once, but the
@@ -3134,9 +2178,6 @@ public final class ClientRepository: @unchecked Sendable {
                                       replayBarrier: state.replayBarrier,
                                       repairIssues: state.repairIssues,
                                       conversationThreads: state.conversation?.threads ?? [:],
-                                      inboxCheckpoint: state.inboxCheckpoint,
-                                      inboxCandidate: state.inboxCandidate,
-                                      inboxSourceOrder: inboxSourceOrder,
                                       inboxView: state.inboxView,
                                       inboxCurrentKeys: inboxCurrentKeys,
                                       pendingRelayOverlays: state.pendingRelayOverlays ?? [:],
@@ -4617,26 +3658,6 @@ public final class ClientRepository: @unchecked Sendable {
                           attentionTier: event.attentionTierWasProvided ? event.attentionTier : nil)
     }
 
-    private static func externalizingConversationFiles(in checkpoint: InboxPagingCheckpoint,
-        using references: (any ConversationFileReferenceStore)?, allowInlinePersistence: Bool) throws -> InboxPagingCheckpoint {
-        var next = checkpoint
-        next.batches = try checkpoint.batches.map { batch in
-            var updated = batch
-            updated.results = try batch.results.map { results in
-                try results.map { receipt in
-                    InboxOperationReceipt(operationID: receipt.operationID, status: receipt.status,
-                        result: receipt.result,
-                        terminal: try receipt.terminal.map {
-                            try externalizingConversationFiles(in: $0, using: references,
-                                                              allowInlinePersistence: allowInlinePersistence)
-                        }, reason: receipt.reason)
-                }
-            }
-            return updated
-        }
-        return next
-    }
-
     private static func externalizingConversationFiles(in thread: ConversationThread,
         using references: (any ConversationFileReferenceStore)?, allowInlinePersistence: Bool) throws -> ConversationThread {
         var next = thread
@@ -4675,23 +3696,6 @@ public final class ClientRepository: @unchecked Sendable {
         next.drafts.removeValue(forKey: key)
         if next.conversation?.threads[key]?.isRetracted != true {
             next.pendingConversations[key]?.answerDrafts = nil
-        }
-    }
-
-    private func dropAnswersInvalidatedBySnapshot(_ checkpoint: InboxPagingCheckpoint,
-                                                       in next: inout ClientSessionState) {
-        guard checkpoint.checkpointAccepted else { return }
-        let queuedKeys = Set(next.drafts.keys).union(next.intentByRequest.keys)
-        for key in queuedKeys {
-            let terminal = next.remoteStates[key]?.isTerminal == true || next.inboxReferences?[key]?.isTerminal == true
-            let absent = checkpoint.nextCursor == nil && !checkpoint.currentKeys.contains(key)
-            if terminal {
-                dropUnsentAnswer(for: key, in: &next)
-            } else if absent, next.intentByRequest[key] == nil {
-                // Missing cached content may clear an editor, but it is not a
-                // Server rejection of an already accepted user operation.
-                dropUnsentAnswer(for: key, in: &next)
-            }
         }
     }
 
@@ -4987,14 +3991,6 @@ private struct ClientSessionState {
     var repairIssues: [StoreRepairIssue] {
         get { server.repairIssues }
         set { server.repairIssues = newValue }
-    }
-    var inboxCheckpoint: InboxPagingCheckpoint? {
-        get { server.inboxCheckpoint }
-        set { server.inboxCheckpoint = newValue }
-    }
-    var inboxCandidate: InboxPagingCheckpoint? {
-        get { server.inboxCandidate }
-        set { server.inboxCandidate = newValue }
     }
     var inboxView: InboxView? {
         get { server.inboxView }

@@ -345,33 +345,22 @@ final class NativeClientDiagnosticJournal {
 
     nonisolated static func causeCode(for error: Error) -> String {
         if error is CancellationError { return "cancelled" }
-        if let value = error as? DevelopmentAPNsAddressStore.AddressError {
-            switch value {
-            case .emptyToken: return "notification_empty_token"
-            case .invalidStoredToken: return "notification_stored_token_invalid"
-            }
-        }
         if let value = error as? NativeEnrollmentError {
             switch value {
-            case .invalidSettings: return "enrollment_invalid_settings"
+            case .emptyAPNsToken: return "notification_empty_token"
             case .invalidIdentity: return "enrollment_invalid_identity"
             case .identityStorage: return "enrollment_identity_storage"
             case .invalidServerResponse: return "enrollment_invalid_response"
-            case .serverRejected: return "enrollment_server_rejected"
-            case .approvalPending: return "enrollment_approval_pending"
-            case .approvalExpired: return "enrollment_approval_expired"
             case .noPendingEnrollment: return "enrollment_no_pending_request"
             case .wrongApprovedDevice: return "enrollment_wrong_approved_device"
             case .keyPending: return "enrollment_key_pending"
             case .keyInUse: return "enrollment_key_in_use"
-            case .preparedIdentityMismatch: return "enrollment_identity_mismatch"
             }
         }
         if let value = error as? NativeJoinInvitationError {
             switch value {
             case .invalid: return "invitation_invalid"
             case .expired: return "invitation_expired"
-            case .olderServer: return "invitation_older_server"
             }
         }
         if let value = error as? NativeJoinError {
@@ -444,8 +433,6 @@ final class NativeClientDiagnosticJournal {
             case .missingAcceptanceOrder: return "store_acceptance_order_missing"
             case .duplicateAcceptanceOrder: return "store_acceptance_order_duplicate"
             case .invalidProjection: return "store_invalid_projection"
-            case .inboxCheckpointPending: return "store_inbox_checkpoint_pending"
-            case .inboxCheckpointIncomplete: return "store_inbox_checkpoint_incomplete"
             case .inboxPageConflict: return "store_inbox_page_conflict"
             case .inboxStateUnrefreshed: return "store_inbox_state_unrefreshed"
             case .persistence: return "store_persistence_failure"

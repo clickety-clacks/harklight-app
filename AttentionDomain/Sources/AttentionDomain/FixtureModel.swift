@@ -103,8 +103,6 @@ public struct FixtureRequest: Equatable, Identifiable, Sendable {
 public struct FixtureSet: Equatable, Sendable {
     public let accountScope: ExactText
     public let requests: [FixtureRequest]
-    public let legacyValueConformanceVectors: [JSONValue]
-    public let legacyTextConformanceVectors: [ExactText]
     public let validSubmissions: [JSONValue]
     public let invalidSubmissions: [JSONValue]
     public let pointVectors: [JSONValue]
@@ -113,8 +111,6 @@ public struct FixtureSet: Equatable, Sendable {
 
     public init(accountScope: ExactText,
                 requests: [FixtureRequest],
-                legacyValueConformanceVectors: [JSONValue],
-                legacyTextConformanceVectors: [ExactText],
                 validSubmissions: [JSONValue],
                 invalidSubmissions: [JSONValue],
                 pointVectors: [JSONValue],
@@ -122,8 +118,6 @@ public struct FixtureSet: Equatable, Sendable {
                 additionalCases: [ExactText]) {
         self.accountScope = accountScope
         self.requests = requests
-        self.legacyValueConformanceVectors = legacyValueConformanceVectors
-        self.legacyTextConformanceVectors = legacyTextConformanceVectors
         self.validSubmissions = validSubmissions
         self.invalidSubmissions = invalidSubmissions
         self.pointVectors = pointVectors
@@ -132,14 +126,13 @@ public struct FixtureSet: Equatable, Sendable {
     }
 
     public static func loadBundled(from bundle: Bundle = .main) throws -> FixtureSet {
-        guard let fixtureURL = bundle.url(forResource: "attention-client-m2-fixtures", withExtension: "json"),
-              let compatibilityURL = bundle.url(forResource: "attention-client-m2-r1-compat", withExtension: "json") else {
+        guard let fixtureURL = bundle.url(forResource: "attention-client-m2-fixtures", withExtension: "json") else {
             throw FixtureLoadError.missingResource
         }
-        return try parse(Data(contentsOf: fixtureURL), compatibilityData: Data(contentsOf: compatibilityURL))
+        return try parse(Data(contentsOf: fixtureURL))
     }
 
-    public static func parse(_ data: Data, compatibilityData: Data) throws -> FixtureSet {
+    public static func parse(_ data: Data) throws -> FixtureSet {
         let root = try JSONValue.parse(data)
         guard let accountScope = root.uniqueValue(named: "account")?.stringValue,
               let requestValues = root.uniqueValue(named: "requests")?.arrayValues,
@@ -188,21 +181,9 @@ public struct FixtureSet: Equatable, Sendable {
             throw FixtureLoadError.duplicateRequestKey
         }
 
-        let compatibility = try JSONValue.parse(compatibilityData)
-        guard let legacyValues = compatibility.uniqueValue(named: "value_conformance_vectors")?.arrayValues,
-              let legacyTexts = compatibility.uniqueValue(named: "text_conformance_vectors")?.arrayValues else {
-            throw FixtureLoadError.invalidCompatibilityData
-        }
-        let textVectors = try legacyTexts.map { value -> ExactText in
-            guard let string = value.stringValue else { throw FixtureLoadError.invalidVector }
-            return string
-        }
-
         return FixtureSet(
             accountScope: accountScope,
             requests: requests,
-            legacyValueConformanceVectors: legacyValues,
-            legacyTextConformanceVectors: textVectors,
             validSubmissions: root.uniqueValue(named: "validSubmissions")?.arrayValues ?? [],
             invalidSubmissions: root.uniqueValue(named: "invalidSubmissions")?.arrayValues ?? [],
             pointVectors: root.uniqueValue(named: "pointVectors")?.arrayValues ?? [],
@@ -217,8 +198,6 @@ enum FixtureLoadError: Error {
     case invalidRoot
     case invalidRequest
     case duplicateRequestKey
-    case invalidCompatibilityData
-    case invalidVector
 }
 
 public enum AnswerComposer {

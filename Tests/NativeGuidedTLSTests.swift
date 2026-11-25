@@ -420,8 +420,8 @@ final class NativeGuidedTLSTests: XCTestCase {
         let earlier = NativeClientDiagnosticEvent(area: .connection, phase: .serverTrust,
             transition: .completed, causeCode: "server_trust_validated",
             attemptID: UUID(), transportAttemptID: UUID(), id: UUID(), occurredAtMilliseconds: 100)
-        let later = NativeClientDiagnosticEvent(area: .connection, phase: .webSocketOpen,
-            transition: .completed, causeCode: "websocket_opened",
+        let later = NativeClientDiagnosticEvent(area: .connection, phase: .clientIdentity,
+            transition: .completed, causeCode: "client_identity_offered",
             attemptID: earlier.attemptID, transportAttemptID: earlier.transportAttemptID,
             id: UUID(), occurredAtMilliseconds: 200)
 

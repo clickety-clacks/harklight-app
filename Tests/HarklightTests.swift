@@ -1460,18 +1460,15 @@ final class HarklightTests: XCTestCase {
         XCTAssertEqual(magnitude.jsonString, "1e1000", "The original fixture exponent remains compact: \(coverB.jsonString)")
     }
 
-    func testLegacyActionsCompatibilityRetainsValuesAndExactText() throws {
-        let fixtures = try loadFixtures()
-        XCTAssertFalse(fixtures.legacyValueConformanceVectors.isEmpty)
-        XCTAssertFalse(fixtures.legacyTextConformanceVectors.isEmpty)
-
-        for value in fixtures.legacyValueConformanceVectors {
+    func testSessionActionsPreserveStructuredValuesAndExactText() throws {
+        let values = try XCTUnwrap(JSONValue.parse(Data(#"[false,null,9007199254740993,{"choice":[1,"a"]}]"#.utf8)).arrayValues)
+        for value in values {
             let action = AnswerAction(id: ExactText("compat-value"), label: ExactText("Value"), kind: .value, value: value)
             let answer = try XCTUnwrap(AnswerComposer.compose(action: action, editedText: ExactText("ignored")))
             XCTAssertEqual(answer, value)
             XCTAssertEqual(try JSONValue.parse(Data(answer.jsonString.utf8)), value)
         }
-        for text in fixtures.legacyTextConformanceVectors {
+        for text in ["  Another option?\n", "e\u{301}"].map({ ExactText($0) }) {
             let action = AnswerAction(id: ExactText("compat-text"), label: ExactText("Text"), kind: .text, value: nil)
             let answer = try XCTUnwrap(AnswerComposer.compose(action: action, editedText: text))
             XCTAssertEqual(answer, .string(text))
