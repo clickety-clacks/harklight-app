@@ -1524,6 +1524,11 @@ final class NativeRelayLifecycle {
         }
         try await connection.saveAlerts(choice)
     }
+
+    func acknowledgeAlertsRefusal(_ id: UUID, expected: ProfileContext) async {
+        guard context == expected else { return }
+        await v2Connection?.acknowledgeAlertsRefusal(id)
+    }
     private var priorityLevelsFeatureEnabled: Bool {
         featureFlags.isEnabled(.priorityLevelEditing)
     }

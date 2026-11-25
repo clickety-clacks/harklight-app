@@ -11,12 +11,14 @@ extension EnvironmentValues {
 struct FeatureCatalogueView: View {
     let store: LivePresentationStore?
     let flags: RemoteFeatureFlags
+    let alertsAvailable: Bool
     let onOpen: ((FeatureCatalogueRoute) -> Void)?
 
-    init(store: LivePresentationStore? = nil, flags: RemoteFeatureFlags? = nil,
+    init(store: LivePresentationStore? = nil, flags: RemoteFeatureFlags? = nil, alertsAvailable: Bool = false,
          onOpen: ((FeatureCatalogueRoute) -> Void)? = nil) {
         self.store = store
         self.flags = flags ?? NativeRelayLifecycle.shared.featureFlags
+        self.alertsAvailable = alertsAvailable
         self.onOpen = onOpen
     }
 
@@ -84,8 +86,11 @@ struct FeatureCatalogueView: View {
                         }
                         .accessibilityIdentifier("feature-\(feature.rawValue)-open")
                     }
-                    if feature == .accountAwareNotifications {
+                    if feature == .accountAwareNotifications, alertsAvailable {
                         Text("With Questions and urgent, questions and high-priority or urgent messages alert you. Other messages arrive quietly and still appear in your Inbox and on the badge. Choose Everything in Harklight Settings to alert for all new messages. Manage device permission in iOS Settings under Notifications, then Harklight.")
+                            .accessibilityIdentifier("feature-notifications-quiet-alerts")
+                    } else if feature == .accountAwareNotifications {
+                        Text("To review your device’s permission, open iOS Settings, then Notifications, then Harklight.")
                     }
                 } header: {
                     Text(feature.title)

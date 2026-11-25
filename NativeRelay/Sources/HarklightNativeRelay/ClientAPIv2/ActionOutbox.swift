@@ -181,6 +181,7 @@ public actor ActionOutbox {
     public func submit(target: String, operation: String, write: FrozenWrite,
                        idempotencyKey: UUID = UUID(), now: Date = Date(),
                        retryRefused: Bool = true, answerIntentID: UUID? = nil,
+                       replacingPausedWrite: UUID? = nil,
                        stillPending: @Sendable () throws -> Bool = { true }) async throws -> OutboxEntry {
         guard !closed else { throw CancellationError() }
         if let existing = entries.first(where: { $0.idempotencyKey == idempotencyKey }) {
@@ -203,7 +204,15 @@ public actor ActionOutbox {
         let entry = OutboxEntry(idempotencyKey: idempotencyKey, target: target, operation: operation, write: write,
                                 createdAt: now, outcomeUnknown: false, attempts: 0, answerIntentID: answerIntentID)
         var next = entries
-        next.append(entry)
+        if let replacingPausedWrite {
+            guard let index = next.firstIndex(where: {
+                $0.id == replacingPausedWrite && $0.target == target && $0.operation == operation &&
+                    $0.waitsForInternalErrorRetry == true
+            }) else { throw CancellationError() }
+            next[index] = entry
+        } else {
+            next.append(entry)
+        }
         try persistence.save(next)
         entries = next
         startSending(entry.sendingLane)

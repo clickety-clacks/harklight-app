@@ -12,6 +12,8 @@ final class InboxStockTabsUITests: XCTestCase {
         settings.tap()
         XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 5))
         XCTAssertFalse(app.descendants(matching: .any)["settings-alerts"].exists)
+        openAlertsFeature(in: app)
+        XCTAssertFalse(app.staticTexts["feature-notifications-quiet-alerts"].exists)
     }
 
     func testAlertsSettingsOffersBothChoicesInLightAndDark() {
@@ -35,11 +37,23 @@ final class InboxStockTabsUITests: XCTestCase {
                 row.tap()
                 XCTAssertTrue(app.buttons["Questions and urgent"].waitForExistence(timeout: 5))
                 XCTAssertTrue(app.buttons["Everything"].exists)
+                app.buttons["Questions and urgent"].tap()
+                openAlertsFeature(in: app)
+                let wording = app.staticTexts["feature-notifications-quiet-alerts"]
+                for _ in 0..<6 where !wording.isHittable { app.swipeUp() }
+                XCTAssertTrue(wording.isHittable)
             } else {
                 XCTFail("Supported Settings must expose the Alerts picker.")
             }
             app.terminate()
         }
+    }
+
+    private func openAlertsFeature(in app: XCUIApplication) {
+        app.buttons["settings-features"].tap()
+        let feature = app.staticTexts["feature-accountAwareNotifications-title"]
+        for _ in 0..<6 where !feature.isHittable { app.swipeUp() }
+        XCTAssertTrue(feature.isHittable)
     }
 
     override func setUpWithError() throws {

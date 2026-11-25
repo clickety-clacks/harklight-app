@@ -211,10 +211,6 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
             let available = access.state == .available
             let editingEnabled = available && me.features["priority_level_editing"] == true
             priorityLevelsEnabledFromServer = editingEnabled
-            if !editingEnabled {
-                settingsETag = nil
-                settingsReadID = nil
-            }
             return (editingEnabled, wasPaused && available)
         }
         guard let update else { return me }
@@ -760,24 +756,36 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
         public let canSave: Bool
         public let isSaving: Bool
         public let hasFailure: Bool
+        public let refusedWriteID: UUID?
+        public let hasUnconfirmedWrite: Bool
 
-        public init(confirmed: APIAlerts, canSave: Bool, isSaving: Bool, hasFailure: Bool) {
+        public init(confirmed: APIAlerts, canSave: Bool, isSaving: Bool, hasFailure: Bool,
+                    refusedWriteID: UUID? = nil, hasUnconfirmedWrite: Bool = false) {
             self.confirmed = confirmed
             self.canSave = canSave
             self.isSaving = isSaving
             self.hasFailure = hasFailure
+            self.refusedWriteID = refusedWriteID
+            self.hasUnconfirmedWrite = hasUnconfirmedWrite
         }
     }
 
     public func alertsState() async -> AlertsState? {
         let pending = await outbox.pending.filter { $0.operation == "alerts" }
-        let refused = await outbox.failedWrites.contains { $0.operation == "alerts" }
+        let refused = await outbox.failedWrites.first { $0.operation == "alerts" }?.id
+        let unconfirmed = pending.contains { $0.waitsForInternalErrorRetry == true }
         return lock.withLock {
             guard let confirmed = model.snapshot.settings?.alerts else { return nil }
             return AlertsState(confirmed: confirmed, canSave: currentSettingsETag() != nil,
                                isSaving: startingAlertsSave || pending.contains { $0.waitsForInternalErrorRetry != true },
-                               hasFailure: refused || pending.contains { $0.waitsForInternalErrorRetry == true })
+                               hasFailure: refused != nil || unconfirmed,
+                               refusedWriteID: refused, hasUnconfirmedWrite: unconfirmed)
         }
+    }
+
+    public func acknowledgeAlertsRefusal(_ id: UUID) async {
+        guard await outbox.failedWrites.contains(where: { $0.id == id && $0.operation == "alerts" }) else { return }
+        await outbox.discardFailed(id)
     }
 
     public func saveAlerts(_ value: APIAlerts) async throws {
@@ -793,15 +801,18 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
             lock.withLock { startingAlertsSave = false }
             onPriorityLevelsChanged()
         }
-        if let pending = await outbox.pending.first(where: { $0.operation == "alerts" }) {
-            if pending.waitsForInternalErrorRetry == true {
+        let write = ClientAPIWrites.alerts(value, ifMatch: tag)
+        let pending = await outbox.pending.first { $0.operation == "alerts" }
+        if let pending {
+            guard pending.waitsForInternalErrorRetry == true else { return }
+            if pending.write.body == write.write.body {
                 await outbox.retryInternalErrors(id: pending.id)
+                return
             }
-            return
         }
         let failures = await outbox.failedWrites.filter { $0.operation == "alerts" }
-        let write = ClientAPIWrites.alerts(value, ifMatch: tag)
-        try await outbox.submit(target: write.target, operation: write.operation, write: write.write)
+        try await outbox.submit(target: write.target, operation: write.operation, write: write.write,
+                                replacingPausedWrite: pending?.id)
         for failure in failures { await outbox.discardFailed(failure.id) }
     }
 

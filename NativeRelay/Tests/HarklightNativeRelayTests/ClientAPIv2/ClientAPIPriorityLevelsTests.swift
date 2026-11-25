@@ -12,6 +12,63 @@ private func waitForSettings(_ condition: () async throws -> Bool) async throws 
 }
 
 final class ClientAPIAlertsSettingsTests: XCTestCase {
+    private func makeConnection(_ transport: PrioritySettingsTransport) throws -> ClientAPIv2Connection {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+            personID: ExactText("person"), deviceID: ExactText("device"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let repository = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        return try ClientAPIv2Connection(transport: transport, repository: repository,
+            context: context, directory: nil, errors: NoopErrorLog())
+    }
+
+    func testMeWithoutPriorityEditingDoesNotDisableAlertsAfterASettingsRead() async throws {
+        let transport = PrioritySettingsTransport(featureEnabled: false)
+        await transport.enableAlerts()
+        let connection = try makeConnection(transport)
+        await connection.refreshSettings()
+        _ = try await connection.refreshMe()
+        let state = await connection.alertsState()
+        XCTAssertEqual(state?.confirmed, .important)
+        XCTAssertTrue(state?.canSave == true)
+        XCTAssertFalse(connection.priorityLevelsCanSave)
+    }
+
+    func testMeWithoutPriorityEditingDoesNotCancelAnInFlightSettingsRead() async throws {
+        let transport = PrioritySettingsTransport(featureEnabled: false)
+        await transport.enableAlerts()
+        let gate = AsyncGate()
+        await transport.holdSettings(gate)
+        let connection = try makeConnection(transport)
+        let reading = Task { await connection.refreshSettings() }
+        defer { gate.release() }
+        try await waitForSettings { await transport.settingsReads == 1 }
+        _ = try await connection.refreshMe()
+        gate.release()
+        await reading.value
+        let state = await connection.alertsState()
+        XCTAssertEqual(state?.confirmed, .important)
+        XCTAssertTrue(state?.canSave == true)
+    }
+
+    func testAnInternalErrorDoesNotResendAnOlderAlertsChoiceOverTheLatestChoice() async throws {
+        let transport = PrioritySettingsTransport(featureEnabled: false)
+        await transport.enableAlerts()
+        await transport.failNextAlertsWriteWithInternalError()
+        let connection = try makeConnection(transport)
+        await connection.refreshSettings()
+        try await connection.saveAlerts(.all)
+        try await waitForSettings { await connection.alertsState()?.hasFailure == true }
+        try await connection.saveAlerts(.important)
+        try await waitForSettings {
+            guard let state = await connection.alertsState() else { return false }
+            return !state.isSaving && !state.hasFailure
+        }
+        let writes = await transport.puts
+        XCTAssertEqual(writes.compactMap(\.body).map { String(decoding: $0, as: UTF8.self) },
+                       [#"{"alerts":"all"}"#, #"{"alerts":"important"}"#])
+        XCTAssertNotEqual(writes.first?.idempotencyKey, writes.last?.idempotencyKey)
+    }
+
     func testSettingsAlertsDecodesSupportedValuesWithoutRejectingOtherSettings() throws {
         for (field, expected) in [("", nil), (#","alerts":"important""#, APIAlerts.important),
                                   (#","alerts":"all""#, .all), (#","alerts":"future""#, nil)] {
@@ -65,6 +122,11 @@ final class ClientAPIAlertsSettingsTests: XCTestCase {
         let refused = await connection.alertsState()
         XCTAssertEqual(refused?.confirmed, .important)
         XCTAssertTrue(refused?.hasFailure == true)
+        let refusedID = try XCTUnwrap(refused?.refusedWriteID)
+        await connection.acknowledgeAlertsRefusal(refusedID)
+        let acknowledged = await connection.alertsState()
+        XCTAssertEqual(acknowledged?.confirmed, .important)
+        XCTAssertFalse(acknowledged?.hasFailure == true)
 
         try await connection.saveAlerts(.all)
         try await waitForSettings {
@@ -229,6 +291,7 @@ private actor PrioritySettingsTransport: ClientAPITransport {
     private var meGate: AsyncGate?
     private var alerts: APIAlerts?
     private var alertsGate: AsyncGate?
+    private var alertsInternalError = false
 
     init(featureEnabled: Bool = true) {
         self.featureEnabled = featureEnabled
@@ -243,13 +306,17 @@ private actor PrioritySettingsTransport: ClientAPITransport {
 
     func holdMe(_ gate: AsyncGate) { meGate = gate }
 
+    func holdSettings(_ gate: AsyncGate) { settingsGate = gate }
+
     func enablePriorityEditing() { featureEnabled = true }
 
-    func enableAlerts(holdingWrite gate: AsyncGate) {
+    func enableAlerts(holdingWrite gate: AsyncGate? = nil) {
         alerts = .important
         alertsGate = gate
         revision = 2
     }
+
+    func failNextAlertsWriteWithInternalError() { alertsInternalError = true }
 
     func send(_ request: APIRequest) async throws -> APIResponse {
         switch (request.method, request.path) {
@@ -276,13 +343,18 @@ private actor PrioritySettingsTransport: ClientAPITransport {
             return settings(etag: nil)
         case (.put, "/v2/settings/alerts"):
             puts.append(request)
+            if alertsInternalError {
+                alertsInternalError = false
+                throw APIError(status: 500, token: .internalError, retryable: false, requestID: "unknown")
+            }
             if let alertsGate {
                 self.alertsGate = nil
                 await alertsGate.wait()
                 throw APIError(status: 400, token: .invalidField, retryable: false, requestID: "refused")
             }
             revision += 1
-            alerts = .all
+            alerts = request.body.flatMap { try? JSONValue.parse($0) }?
+                .uniqueValue(named: "alerts")?.stringValue.flatMap { APIAlerts(rawValue: $0.rawValue) }
             return settings(etag: nil)
         default:
             return try await base.send(request)
