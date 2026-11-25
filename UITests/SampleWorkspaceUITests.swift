@@ -1238,7 +1238,7 @@ final class SampleWorkspaceUITests: XCTestCase {
 
     private func selectMessageTab(_ title: String, in app: XCUIApplication,
                                   file: StaticString = #filePath, line: UInt = #line) {
-        let closeSearch = app.buttons["Close"]
+        let closeSearch = app.buttons.matching(NSPredicate(format: "label ==[c] %@", "close")).firstMatch
         if closeSearch.exists { closeSearch.tap() }
 
         let destination = workspaceTab(title, in: app)
@@ -1695,7 +1695,7 @@ final class SampleWorkspaceUITests: XCTestCase {
         for kind in kinds {
             showList(app)
             clearSearch(in: app)
-            let closeSearch = app.buttons["Close"]
+            let closeSearch = app.buttons.matching(NSPredicate(format: "label ==[c] %@", "close")).firstMatch
             if closeSearch.exists && closeSearch.isHittable { closeSearch.tap() }
             let inboxTab = workspaceTab("Inbox", in: app)
             let repliedTab = workspaceTab("Replied", in: app)

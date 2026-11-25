@@ -7,7 +7,7 @@ func workspaceTab(_ title: String, in app: XCUIApplication) -> XCUIElement {
     return app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", title)).firstMatch
 }
 
-/// Search is a tab: selecting it raises the one search field.
+/// Search belongs to the list: a field, or a search button that raises it.
 @MainActor
 func workspaceSearchField(in app: XCUIApplication) -> XCUIElement {
     let field = app.searchFields.firstMatch
@@ -25,11 +25,11 @@ func workspaceSearchField(in app: XCUIApplication) -> XCUIElement {
 }
 
 /// Leaves search through the system's close control, which returns to the
-/// tab the person searched from.
+/// unfiltered list the person searched.
 @MainActor
 func leaveWorkspaceSearch(in app: XCUIApplication) {
-    for label in ["Close", "Cancel"] {
-        let button = app.buttons[label]
+    for label in ["close", "cancel"] {
+        let button = app.buttons.matching(NSPredicate(format: "label ==[c] %@", label)).firstMatch
         if button.exists && button.isHittable {
             button.tap()
             return

@@ -2614,8 +2614,8 @@ struct LiveRequestDetail: View {
                     failedResponseWarningButton
                 }
             }
-            ToolbarItemGroup(placement: .bottomBar) {
-                Spacer()
+            ToolbarSpacer(.flexible, placement: .bottomBar)
+            ToolbarItem(placement: .bottomBar) {
                 chatButton
             }
             // The action check stays in place once it cannot apply (completed,

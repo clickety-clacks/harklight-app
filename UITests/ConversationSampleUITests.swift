@@ -347,7 +347,7 @@ final class ConversationSampleUITests: XCTestCase {
             ]) + ["--harklight-test-reply-item-area",
                   "--harklight-test-normal-reply-priority=\(scenario)"]
             app.launch()
-            if historical { app.tabBars.buttons["Replied"].tap() }
+            if historical { workspaceTab("Replied", in: app).tap() }
             let row = app.descendants(matching: .any)["normal-reply-item-sample-information-0"]
             let list = app.collectionViews.firstMatch
             XCTAssertTrue(list.waitForExistence(timeout: 10), app.debugDescription)
@@ -487,7 +487,7 @@ final class ConversationSampleUITests: XCTestCase {
             let searchTab = workspaceTab("Search", in: app)
             XCTAssertTrue(inboxTab.waitForExistence(timeout: 5), app.debugDescription)
             XCTAssertTrue(repliedTab.exists, app.debugDescription)
-            // The Search tab exists on iPhone only; iPad searches from the list.
+            // Search sits beside the list switch where the width allows a bottom bar.
             let tabFrames = [inboxTab, repliedTab] + (searchTab.exists ? [searchTab] : [])
             let tabBarTop = tabFrames.map(\.frame.minY).min()!
             capture("last-normal-reply-above-tab-bar-\(size.name)", app)
@@ -1516,7 +1516,7 @@ private func workspaceTab(_ title: String, in app: XCUIApplication) -> XCUIEleme
     return app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", title)).firstMatch
 }
 
-/// Search is a tab: selecting it raises the one search field.
+/// Search belongs to the list: a field, or a search button that raises it.
 @MainActor
 private func workspaceSearchField(in app: XCUIApplication) -> XCUIElement {
     let field = app.searchFields.firstMatch

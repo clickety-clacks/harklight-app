@@ -109,7 +109,8 @@ final class FreeRenderedUITests: XCTestCase {
             capture("free-\(appearance)-generated-subdued-history", app)
             // This row required an actual list scroll, unlike the small
             // captured view. Returning must preserve its stable row target.
-            historical.tap()
+            // Tap its upper part: the floating list toolbar can cover its centre.
+            historical.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.2)).tap()
             let heading = app.buttons["request-heading"]
             XCTAssertTrue(heading.waitForExistence(timeout: 5), app.debugDescription)
             XCTAssertTrue(heading.label.contains("Common historical message"), app.debugDescription)

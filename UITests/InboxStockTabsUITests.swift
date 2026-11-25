@@ -192,10 +192,7 @@ final class InboxStockTabsUITests: XCTestCase {
         }
     }
 
-    func testSearchTabSearchesTheListItWasOpenedFrom() throws {
-        guard UIDevice.current.userInterfaceIdiom == .phone else {
-            throw XCTSkip("The Search tab is iPhone only; iPad searches from a field in the list.")
-        }
+    func testListSearchSearchesTheSelectedMailbox() throws {
         let app = XCUIApplication()
         app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
         app.launch()
@@ -208,18 +205,14 @@ final class InboxStockTabsUITests: XCTestCase {
         let list = app.collectionViews.firstMatch
         XCTAssertTrue(list.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(list.cells.firstMatch.waitForExistence(timeout: 5), app.debugDescription)
-        // Revision 7: search is its own tab, and no field floats above the tab bar.
-        XCTAssertTrue(app.tabBars.buttons["Search"].exists, app.debugDescription)
-        XCTAssertFalse(app.searchFields.firstMatch.exists,
-                       "No search field shows until the search tab is tapped.")
+        // Inbox and Replied switch in the list's own toolbar; there is no app tab bar.
+        XCTAssertFalse(app.tabBars.firstMatch.exists, app.debugDescription)
         assertListHeader(in: app)
-        attachScreenshot("Inbox with the search tab", from: app)
+        attachScreenshot("Inbox with list search", from: app)
 
-        // One tap on the search tab focuses the field above the keyboard.
-        app.tabBars.buttons["Search"].tap()
-        let searchField = app.searchFields.firstMatch
+        let searchField = workspaceSearchField(in: app)
         XCTAssertTrue(searchField.waitForExistence(timeout: 5), app.debugDescription)
-        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5), app.debugDescription)
+        searchField.tap()
         searchField.typeText("Archive\n")
         let approval = app.descendants(matching: .any)["sample-approval-0"]
         XCTAssertTrue(approval.waitForExistence(timeout: 5), app.debugDescription)
@@ -237,21 +230,20 @@ final class InboxStockTabsUITests: XCTestCase {
         finish.tap()
 
         let back = workspaceBackButton(in: app)
-        XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
-        back.tap()
+        if back.waitForExistence(timeout: 3) { back.tap() }
         XCTAssertFalse(approval.waitForExistence(timeout: 2),
                        "An answered request leaves the Inbox search results.")
 
-        // Leaving search returns to the tab it was opened from.
         leaveWorkspaceSearch(in: app)
         XCTAssertTrue(inboxTab.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(inboxTab.isSelected, app.debugDescription)
 
         repliedTab.tap()
         XCTAssertTrue(repliedTab.isSelected, app.debugDescription)
-        app.tabBars.buttons["Search"].tap()
-        XCTAssertTrue(searchField.waitForExistence(timeout: 5), app.debugDescription)
-        searchField.typeText("Archive\n")
+        let repliedSearch = workspaceSearchField(in: app)
+        XCTAssertTrue(repliedSearch.waitForExistence(timeout: 5), app.debugDescription)
+        repliedSearch.tap()
+        repliedSearch.typeText("Archive\n")
         XCTAssertTrue(approval.waitForExistence(timeout: 5),
                       "Searching from Replied finds the answered request there.")
         attachScreenshot("Replied results for Archive", from: app)
@@ -286,13 +278,7 @@ final class InboxStockTabsUITests: XCTestCase {
                 let back = workspaceBackButton(in: app)
                 XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
                 back.tap()
-                if UIDevice.current.userInterfaceIdiom == .phone {
-                    // Close the system Search tab before selecting Replied.
-                    let closeSearch = app.buttons["Close"]
-                    closeSearch.tap()
-                } else {
-                    leaveWorkspaceSearch(in: app)
-                }
+                leaveWorkspaceSearch(in: app)
             }
 
             let tab = workspaceTab(title, in: app)
@@ -319,12 +305,9 @@ final class InboxStockTabsUITests: XCTestCase {
         }
     }
 
-    /// On iPad search is a field at the top of the list rather than a tab, so
-    /// it stays beside an open message and filters the list in place.
+    /// In a regular width search is a field at the top of the list, so it
+    /// stays beside an open message and filters the list in place.
     func testIPadListSearchFieldFiltersBesideDetail() throws {
-        guard UIDevice.current.userInterfaceIdiom == .pad else {
-            throw XCTSkip("The list search field is the iPad search; iPhone uses the Search tab.")
-        }
         let app = XCUIApplication()
         app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
         app.launch()
@@ -340,8 +323,8 @@ final class InboxStockTabsUITests: XCTestCase {
         let fullTotal = positionTotal(in: app)
         XCTAssertNotNil(fullTotal, app.debugDescription)
 
-        XCTAssertFalse(app.tabBars.buttons["Search"].exists,
-                       "iPad has no Search tab.\n\(app.debugDescription)")
+        XCTAssertFalse(app.tabBars.firstMatch.exists,
+                       "There is no app tab bar.\n\(app.debugDescription)")
         let list = app.collectionViews.firstMatch
         let field = app.searchFields.firstMatch
         XCTAssertTrue(list.waitForExistence(timeout: 5), app.debugDescription)
@@ -418,7 +401,7 @@ final class InboxStockTabsUITests: XCTestCase {
 
     private func selectMessageTab(_ title: String, in app: XCUIApplication,
                                   file: StaticString = #filePath, line: UInt = #line) {
-        let closeSearch = app.buttons["Close"]
+        let closeSearch = app.buttons.matching(NSPredicate(format: "label ==[c] %@", "close")).firstMatch
         if closeSearch.exists { closeSearch.tap() }
 
         let destination = workspaceTab(title, in: app)
