@@ -82,6 +82,7 @@ enum InboxItem: Identifiable {
 
     func usesNormalMessageList(inInboxSearch: Bool) -> Bool {
         guard case let .request(row) = self else { return true }
+        if row.isRepliedFYI { return true }
         if row.fyiUsesInboxSearchForProgress { return inInboxSearch }
         return row.progress == nil || row.fyiUsesRepliedForProgress
     }

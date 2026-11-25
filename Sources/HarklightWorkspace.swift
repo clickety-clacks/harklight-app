@@ -686,13 +686,14 @@ struct InboxRequestRow: Identifiable {
 
     var isUnseenFYI: Bool {
         guard !isRetracted, !localSeenSelected else { return false }
-        if isProgressFYI, fyiServerSeen == true { return false }
+        if hasProgressMarker, fyiServerSeen == true { return false }
         if let informationalSeenStatus {
             return informationalSeenStatus == .available || informationalSeenStatus == .pending
         }
         return fyiServerSeen != true
     }
 
+    // Membership of unseen terminal items is decided here for all Inbox FYI surfaces.
     var isActiveFYI: Bool {
         isFYI && !fyiHasEnded && !isRepliedFYI && (isFYISeenPending || isUnseenFYI)
     }
@@ -700,7 +701,8 @@ struct InboxRequestRow: Identifiable {
     var isRepliedFYI: Bool {
         guard fyiGroupingEnabled, isFYI, !isRetracted, !fyiAnsweredOtherwise else { return false }
         if informationalSeenStatus == .confirmed { return true }
-        return !hasProgressMarker && !isFYISeenPending && fyiServerSeen == true
+        return !isFYISeenPending && fyiServerSeen == true &&
+            (hasProgressMarker || informationalSeenStatus == nil)
     }
 
     func isBundledFYI(in tab: InboxMessageTab) -> Bool {
@@ -1278,10 +1280,12 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         if item == .fyis { return tab == .inbox || activeFYIsOnly }
         guard let row = currentItem(for: item) else { return false }
         if case let .request(request) = row {
+            if tab == .inbox, request.progress != nil, !request.isResolved, !request.isRetracted {
+                return true
+            }
             if request.isActiveFYI { return tab == .inbox }
             if request.isRepliedFYI { return tab == .replied }
             if request.fyiUsesInboxSearchForProgress { return false }
-            if request.progress != nil, !request.isResolved, !request.isRetracted { return tab == .inbox }
         }
         return cardNavigationIDs(for: tab, query: "").contains(item)
     }
@@ -4137,11 +4141,11 @@ struct FYIInboxRow: View {
                 HStack(alignment: .top, spacing: 8) {
                     ViewThatFits(in: .horizontal) {
                         HStack(spacing: 8) {
-                            Text(items.isEmpty ? "FYIs" : "FYI digest").font(.caption.weight(.semibold))
+                            Text(showsUnseenBadge ? "FYI digest" : "Seen FYIs").font(.caption.weight(.semibold))
                             if showsUnseenBadge { unseenBadge(unseen, border: colors.badgeBorder) }
                         }
                         VStack(alignment: .leading, spacing: 4) {
-                            Text(items.isEmpty ? "FYIs" : "FYI digest").font(.caption.weight(.semibold))
+                            Text(showsUnseenBadge ? "FYI digest" : "Seen FYIs").font(.caption.weight(.semibold))
                             if showsUnseenBadge { unseenBadge(unseen, border: colors.badgeBorder) }
                         }
                     }
@@ -4223,7 +4227,7 @@ private struct FYIList: View {
         .harklightListSurface()
         .overlay {
             if items.isEmpty {
-                ContentUnavailableView(isReplied ? "No Seen FYIs" :
+                ContentUnavailableView(isReplied ? "No seen FYIs yet" :
                     (activeFYIsOnly ? "All FYIs are seen" : "No FYIs"), systemImage: "tray")
             }
         }

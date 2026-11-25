@@ -1303,7 +1303,8 @@ private extension PresentedRequest {
         if isResolved || informationalSeenStatus == .confirmed || informationalSeenStatus == .resolvedWithoutSeen {
             return true
         }
-        return fyiInboxEntry?.itemSeen == true && informationalSeenStatus != .pending
+        return fyiInboxEntry?.itemSeen == true && informationalSeenStatus != .pending &&
+            (messageProgress != nil || informationalSeenStatus == nil)
     }
 }
 

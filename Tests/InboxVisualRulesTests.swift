@@ -364,12 +364,17 @@ final class InboxVisualRulesTests: XCTestCase {
             progressPercent: 40, progressSeen: true)
         let original = try XCTUnwrap(store.inboxRows.first { $0.isProgressFYI })
         XCTAssertFalse(original.isUnseenFYI)
+        XCTAssertTrue(original.isRepliedFYI)
+        XCTAssertEqual(InboxListProjection.filteredRows([.request(original)],
+            in: .replied, search: "Progress").count, 1)
         XCTAssertFalse(store.markProgressFYISeen(original.key, requestRevision: original.requestRevision))
 
         try store.applyFYIProgressTestSnapshot(percent: 70, seen: false, revision: 6)
         let updated = try XCTUnwrap(store.inboxRow(for: original.key))
         XCTAssertTrue(updated.isUnseenFYI, "Server 0.2.8 clears Seen on a substantive Progress update")
         XCTAssertEqual(updated.fyiSeenAction, .openedFlag)
+        XCTAssertTrue(updated.isActiveFYI)
+        XCTAssertFalse(updated.isRepliedFYI)
         XCTAssertFalse(store.markProgressFYISeen(original.key, requestRevision: original.requestRevision))
 
         try store.applyFYIProgressTestSnapshot(percent: 100, seen: true, revision: 7)
@@ -499,8 +504,16 @@ final class InboxVisualRulesTests: XCTestCase {
         XCTAssertTrue(confirmed.isRepliedFYI)
         XCTAssertFalse(answeredOtherwise.isRepliedFYI)
         XCTAssertTrue(answeredOtherwise.belongsToReplied)
-        XCTAssertFalse(liveProgress.isRepliedFYI)
+        XCTAssertTrue(liveProgress.isRepliedFYI)
         XCTAssertFalse(liveProgress.isActiveFYI)
+        liveProgress.fyiServerSeen = false
+        XCTAssertFalse(liveProgress.isRepliedFYI)
+        XCTAssertTrue(liveProgress.isActiveFYI)
+        var seenAction = opened
+        seenAction.fyiHasEnded = false
+        seenAction.informationalSeenStatus = .available
+        XCTAssertFalse(seenAction.isRepliedFYI)
+        XCTAssertTrue(seenAction.isActiveFYI)
         XCTAssertTrue(pending.isActiveFYI)
         XCTAssertFalse(pending.isRepliedFYI)
         XCTAssertTrue(pending.belongsToReplied)

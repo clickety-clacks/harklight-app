@@ -182,6 +182,7 @@ final class SampleWorkspaceUITests: XCTestCase {
         workspaceTab("Replied", in: app).tap()
         let card = app.buttons["replied-fyi"]
         XCTAssertTrue(card.waitForExistence(timeout: 5))
+        XCTAssertTrue(card.label.contains("Seen FYIs"))
         XCTAssertFalse(card.label.contains("unseen"))
         XCTAssertFalse(app.descendants(matching: .any)["request-row-legacy/fyi-garden"].firstMatch.exists)
         if !isPad { card.tap() }
