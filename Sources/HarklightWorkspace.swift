@@ -1641,8 +1641,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                       notificationPendingPresentation: notificationPendingListPresentation,
                       triggerNotification: exposesNotificationTestAction
                           ? { triggerNotificationTestAction() } : nil)
-            .modifier(InboxListSearchFieldModifier(active: usesListSearch || (searching && horizontalSizeClass == .regular),
-                                                   text: searchTextBinding))
+            .modifier(InboxListSearchFieldModifier(active: usesListSearch, text: searchTextBinding))
             .background(alignment: .topLeading) {
                 InboxSplitPresentationReader(presentation: splitPresentation)
                     .frame(width: 1, height: 1)
@@ -1661,10 +1660,12 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             }
         }
         Group {
-            // A real framework overlay fixture, including on iPads whose
-            // automatic style keeps adjacent columns in portrait.
-            if UIDiagnostics.shared.enabled &&
+            if searching && horizontalSizeClass == .regular {
+                // A sidebar overlay intercepts taps on the system Search field.
+                splitView.navigationSplitViewStyle(.balanced)
+            } else if UIDiagnostics.shared.enabled &&
                 ProcessInfo.processInfo.arguments.contains("--harklight-test-overlay") {
+                // Some iPads keep adjacent columns in portrait by default.
                 splitView.navigationSplitViewStyle(.prominentDetail)
             } else {
                 splitView
@@ -1825,15 +1826,11 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                 // tab, iPad reply editors could no longer take the keyboard.
                 if !usesListSearch {
                     Tab(value: .search, role: .search) {
-                        let results = inboxSplitView(for: workspaceTab, inlineChat: inlineChat,
-                                                     geometry: geometry, searching: true)
+                        inboxSplitView(for: workspaceTab, inlineChat: inlineChat,
+                                       geometry: geometry, searching: true)
                             .id(workspaceTab)
-                        if horizontalSizeClass == .regular {
-                            results
-                        } else {
-                            results.searchable(text: searchTextBinding, prompt: "Search messages")
-                                .searchFocused($searchFieldFocused)
-                        }
+                            .searchable(text: searchTextBinding, prompt: "Search messages")
+                            .searchFocused($searchFieldFocused)
                     }
                 }
             }

@@ -36,6 +36,7 @@ final class AdaptiveDuoNavigationUITests: XCTestCase {
         let review = app.descendants(matching: .any)["request-row-review-01"].firstMatch
         XCTAssertTrue(review.waitForExistence(timeout: 5) && review.isHittable)
         XCTAssertFalse(app.descendants(matching: .any)["request-row-facilities-01"].exists)
+        attachScreenshot("search-filters-visible-sidebar")
     }
 
     private func openDetailWithHiddenSidebar(searchTab: Bool = false) throws -> XCUIApplication {
