@@ -24,6 +24,8 @@ public enum NativeDiagnosticPhase: String, Codable, Sendable {
     case approvedConnection
     case serverTrust
     case clientIdentity
+    /// A transport event retained from a pre-0.2 journal.
+    case archivedWebSocketOpen
     case relayAdmission
     case ordinaryReplay
     case inboxPage
@@ -56,6 +58,18 @@ public enum NativeDiagnosticPhase: String, Codable, Sendable {
     case noReplyRouting
     /// An error reply the Server sent on a relay connection.
     case relayErrorReply
+
+    public init(from decoder: Decoder) throws {
+        let value = try decoder.singleValueContainer()
+        let name = try value.decode(String.self)
+        if name == "webSocketOpen" {
+            self = .archivedWebSocketOpen
+        } else if let phase = Self(rawValue: name) {
+            self = phase
+        } else {
+            throw DecodingError.dataCorruptedError(in: value, debugDescription: "Unknown diagnostic phase.")
+        }
+    }
 }
 
 /// The wire type of the request a relay error reply answered. Only known
@@ -405,7 +419,7 @@ public enum NativeDiagnosticCauseCode {
         "answer_projection_unsupported", "file_access_error", "file_retention_error", "file_preview_error",
         "local_store_error", "local_projection_error", "notification_bundle_mismatch",
         "notification_empty_token", "server_trust_validated", "client_identity_offered",
-        "relay_admitted", "replay_requested_locally", "relay_resynced",
+        "websocket_opened", "relay_admitted", "replay_requested_locally", "relay_resynced",
         "relay_acknowledged", "follow_on_replay_not_reached", "original_operation_terminal_not_observed",
         "original_operation_state_unavailable", "saved_server_state_rebuilt", "unprojectable_request_shown_unsupported",
         "pending_actions_partly_recovered", "pending_actions_replaced_unreadable", "pending_actions_replaced_foreign",

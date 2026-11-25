@@ -376,6 +376,34 @@ final class NativeGuidedTLSTests: XCTestCase {
                        .unavailable)
     }
 
+    func testClientDiagnosticJournalPreservesArchivedWebSocketEvent() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HarklightDiagnosticArchive-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let prior = UUID()
+        let saved = """
+        {"version":1,"events":[{"id":"\(prior.uuidString)","occurredAtMilliseconds":100,
+          "area":"connection","phase":"webSocketOpen","transition":"completed",
+          "causeCode":"websocket_opened"}]}
+        """
+        try Data(saved.utf8).write(to: url)
+        let journal = NativeClientDiagnosticJournal(fileURL: url)
+        XCTAssertEqual(journal.persistenceStatus, .saved)
+        XCTAssertEqual(journal.events.map(\.id), [prior])
+
+        let current = NativeClientDiagnosticEvent(area: .connection, phase: .foregroundCompletion,
+            transition: .completed, occurredAtMilliseconds: 200)
+        journal.record(current)
+        let restored = NativeClientDiagnosticJournal(fileURL: url)
+        XCTAssertEqual(restored.persistenceStatus, .saved)
+        XCTAssertEqual(restored.events.map(\.id), [prior, current.id])
+        XCTAssertTrue(restored.shareText.contains("cause=websocket_opened"))
+        let rewritten = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        let writtenEvents = try XCTUnwrap(rewritten["events"] as? [[String: Any]])
+        XCTAssertEqual(writtenEvents.compactMap { $0["phase"] as? String },
+                       ["archivedWebSocketOpen", "foregroundCompletion"])
+    }
+
     func testClientDiagnosticJournalKeepsCallbackHistoryInOccurrenceOrder() throws {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("HarklightDiagnosticOrder-\(UUID().uuidString).json")
