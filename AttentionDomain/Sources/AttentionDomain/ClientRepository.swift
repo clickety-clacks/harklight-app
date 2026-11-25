@@ -399,8 +399,8 @@ public final class ClientRepository: @unchecked Sendable {
     }
 
     /// Saved Server state failed validation. The inbox and conversation
-    /// projections, cursors, checkpoint and receipts are a cache of Server
-    /// truth, so discard all of it and let the next connection rebuild it.
+    /// projections, cursors and receipts cache the server state. Discard it
+    /// and let the next connection rebuild it.
     /// Only the person's own queue survives: unsent answers under their
     /// original operation IDs, so the Server deduplicates a resend, plus
     /// message opens, Chat drafts, uploads and read positions. Accepted,
@@ -900,7 +900,7 @@ public final class ClientRepository: @unchecked Sendable {
         return true
     }
 
-    /// Reuses the exact saved operation without waiting for replay or its ACK.
+    /// Reuses the exact saved operation while the server state is refreshing.
     /// Explicit Retry may also reactivate a definitive failure; automatic
     /// recovery only selects pending or uncertain operations.
     @discardableResult
@@ -917,8 +917,8 @@ public final class ClientRepository: @unchecked Sendable {
             throw AttentionStoreError.intentMissing
         }
         // The saved request already binds the intended revision and exact bytes.
-        // Server validation, not a local catch-up checkpoint, decides whether it
-        // can still apply. A known final state is item-specific unavailability.
+        // The server decides whether it can still apply. A request with a known
+        // final state is already unavailable.
         guard state.remoteStates[submission.requestKey]?.isTerminal != true else {
             throw AttentionStoreError.requestClosed
         }
@@ -935,7 +935,7 @@ public final class ClientRepository: @unchecked Sendable {
         return submission
     }
 
-    /// Queue locally accepted work even before replay supplies any request page.
+    /// Queue locally accepted work before the server has supplied the request.
     /// The operation's saved identity and bytes are sufficient for Server retry.
     public func queueRecoverableOperations(context suppliedContext: ProfileContext) throws {
         writerLock.lock()

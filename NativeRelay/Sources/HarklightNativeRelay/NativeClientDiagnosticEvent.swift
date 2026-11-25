@@ -116,7 +116,7 @@ public enum NativeDiagnosticTerminalReason: String, Codable, Sendable {
     case relayContextUnconfirmed = "relay_context_unconfirmed"
 }
 
-/// The furthest post-ACK foreground boundary that actually completed.
+/// The recorded foreground boundary in saved connection diagnostics.
 public enum NativeDiagnosticPostAckBoundary: String, Codable, Sendable {
     case none = "none_observed"
     case nativeCursorAcknowledged = "native_sync_acknowledged"
@@ -125,8 +125,7 @@ public enum NativeDiagnosticPostAckBoundary: String, Codable, Sendable {
     case foregroundConfirmed = "foreground_confirmed"
 }
 
-/// A bounded operation name for a failed post-ACK drain. These values identify
-/// code paths only; they never contain relay data or user content.
+/// Stored operation names for earlier connection diagnostics.
 public enum NativeDiagnosticPostAckStep: String, Codable, Sendable {
     case readAcceptedOperationsBeforeDrain = "read_accepted_operations_before_drain"
     case readOutboxBeforeDrain = "read_outbox_before_drain"

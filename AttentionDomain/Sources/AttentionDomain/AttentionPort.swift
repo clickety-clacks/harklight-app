@@ -1268,7 +1268,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
                 } ?? false
                 let evidenceLabel = terminal == .noComment
                     ? "The sender recorded your No comment answer."
-                    : "Relay lifecycle evidence is recorded; original operation outcome is shown separately."
+                    : "The server’s request status and your answer’s outcome are shown separately."
                 receiptFacts = ReceiptPresentationFacts(evidenceLabel: refusal?.evidence ?? evidenceLabel,
                     ownOutcome: refusal != nil ? .refused : (hasAcceptedIntent ? .accepted : .unconfirmed),
                     originalOperationUncertainty: refusal == nil && !hasAcceptedIntent)
@@ -1282,7 +1282,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
                                                             ownOutcome: .refused,
                                                             originalOperationUncertainty: false)
                 } else if case .accepted = submission.disposition {
-                    receiptFacts = ReceiptPresentationFacts(evidenceLabel: "The relay accepted your original answer; the request outcome is still pending.",
+                    receiptFacts = ReceiptPresentationFacts(evidenceLabel: "The server accepted your answer. The request outcome is still pending.",
                                                             ownOutcome: .accepted,
                                                             originalOperationUncertainty: false)
                 } else {

@@ -134,14 +134,14 @@ public enum IntentDisposition: Equatable, Codable, Sendable {
     case pending
     case accepted(sequence: UInt64?)
     case lost
-    /// The relay explicitly rejected this operation. Stop automatic attempts
+    /// The server explicitly rejected this operation. Stop automatic attempts
     /// but retain its identity and payload for an explicit Retry.
     case failed
-    /// The Server definitively closed the request. Never resend this operation;
-    /// replay supplies the specific final state without guessing it locally.
+    /// The server definitively closed the request. Never resend this operation.
+    /// The server supplies the specific final state.
     case refusedClosed
     case refusedNotFound
-    /// The relay declined the submitted revision and named the current one.
+    /// The server declined the submitted revision and named the current one.
     case staleRevision(currentRevision: UInt64)
     case terminal(state: TerminalState, sequence: UInt64, authorizedAnswer: JSONValue?)
     case refusedByRetraction(retractedAtMilliseconds: UInt64)
@@ -781,8 +781,6 @@ public struct RelayEvent: Equatable, Codable, Sendable {
     }
 }
 
-/// An item in the immutable server inbox view at one event watermark. These
-/// projections are durable page data, not individually ACKable relay events.
 /// Additive ordinary-stream metadata initializes or closes a conversation without
 /// borrowing a conversation sequence number or changing the sender's message JSON.
 public struct RelayConversationMetadata: Equatable, Codable, Sendable {
@@ -969,12 +967,12 @@ public enum AttentionStoreError: Error, Equatable, LocalizedError, Sendable {
         case .replayAlreadyActive: return "A replay barrier is already active."
         case .replayNotActive: return "There is no active replay barrier."
         case let .replayIncomplete(expected, actual): return "Replay cannot publish: barrier \(expected), applied cursor \(actual)."
-        case .fixtureOnlyOperation: return "Fixture outcomes are separate from authenticated relay state."
+        case .fixtureOnlyOperation: return "Local examples and signed-in accounts keep separate data."
         case .missingAcceptanceOrder: return "The accepted request is missing its durable native order."
         case .duplicateAcceptanceOrder: return "Accepted requests contain a conflicting durable native order."
         case .invalidProjection: return "The admitted sender scene could not be projected with its authorized evidence."
-        case .inboxPageConflict: return "The server inbox page conflicts with the saved message history."
-        case .inboxStateUnrefreshed: return "This cached request has not been refreshed by the current inbox checkpoint."
+        case .inboxPageConflict: return "The server’s Inbox order conflicts with the saved messages."
+        case .inboxStateUnrefreshed: return "This saved request hasn’t been refreshed from the server."
         case let .persistence(message): return "Durable state could not be committed: \(message)"
         }
     }

@@ -102,7 +102,7 @@ struct NativeRelayRefreshResult: Equatable, Sendable {
     static func failed(error: Error, connectivityFailure: ConnectivityFailure? = nil) -> Self {
         Self(relayConfirmed: false, pushRegistration: .notAttempted,
              confirmedContext: nil, confirmedTransportAttemptID: nil,
-             failureMessage: "The relay refresh failed: \(error.localizedDescription). Saved requests and answers remain on this device.",
+             failureMessage: "Couldn’t refresh from the server: \(error.localizedDescription). Saved requests and answers remain on this device.",
              connectivityFailure: connectivityFailure)
     }
 
@@ -179,7 +179,7 @@ struct NativeForegroundConnectProgress: Equatable, Sendable {
             case .serverTrustRejected:
                 "The server certificate did not pass the saved host and CA check."
             case .clientIdentityChallengeRejected:
-                "The client could not offer its identity to the saved relay host."
+                "Harklight couldn’t present this device’s identity to the saved server."
             }
         }
     }

@@ -1,6 +1,6 @@
 import Foundation
 
-/// A question version is independent of either replay stream's cursor.
+/// A question revision is independent of the sync cursor.
 public struct ConversationBinding: Equatable, Hashable, Codable, Sendable {
     public let request: RequestKey
     public let revision: UInt64

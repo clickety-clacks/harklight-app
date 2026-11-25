@@ -764,8 +764,7 @@ final class NativeAppLaunch {
         return "This phone is disconnected locally from \(account) on \(server). The previous server may still list this phone as registered. Its original identity and saved messages, drafts and receipts are kept for retry.\(pending)"
     }
 
-    /// The same C store drives relay apply/outbox and the visible presentation.
-    /// No fixture request is registered on this path.
+    /// Opens the signed-in account’s local store and connects it to the Client API v2 projection.
     func activate(_ installation: NativeInstallationMaterial) async throws {
         guard installation.context.transportMode == .relay else {
             throw AttentionStoreError.fixtureOnlyOperation
@@ -843,7 +842,7 @@ final class NativeAppLaunch {
             await notifications.resume { self.activationGeneration == generation }
         }
         // A person can leave the notification permission prompt unanswered.
-        // Start the authenticated replay immediately so foreground requests
+        // Start the Inbox refresh immediately so foreground requests
         // still appear; the later token callback schedules its own pass.
         Task { await refreshLive() }
     }
@@ -1368,8 +1367,7 @@ final class LivePresentationStore {
         return conversationAvailability.message(for: profileContext)
     }
     private var sendingDiscussionBindings: Set<ConversationBinding> = []
-    /// Client API v2: receives each queued chat message for the outbox. Set by
-    /// the v2 lifecycle; nil under the current protocol.
+    /// Sends a durably queued chat message through the active Client API v2 connection.
     @ObservationIgnored var chatMessageQueued: ((ConversationDraft) -> Void)?
 
     func isSendingDiscussion(for key: RequestKey, revision: UInt64) -> Bool {
@@ -1895,8 +1893,7 @@ final class LivePresentationStore {
         return thread.hasUnreadAgentReply
     }
 
-    // Reading is never gated on catch-up. The queued read shows at once and
-    // the relay sends it once the connection is free.
+    // The saved read position is visible immediately, while the client sends it to the server.
     func markConversationRead(_ key: RequestKey) {
         guard !isReadOnly,
               let latest = conversationThreads[key]?.latestAgentReply else { return }
@@ -3378,7 +3375,7 @@ final class LivePresentationStore {
         if !NativeRelayLifecycle.shared.didRecover(result, for: notificationContext) {
             connectionWarning = confirmedForCurrentContext ? nil :
                 result.failureMessage ??
-                    "The relay could not be refreshed. Saved requests, answers and confirmed receipts remain on this device."
+                    "Couldn’t refresh from the server. Saved requests, answers and confirmed receipts remain on this device."
         }
         if confirmedForCurrentContext {
             confirmedRelayRefresh?()
