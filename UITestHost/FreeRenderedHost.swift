@@ -58,7 +58,7 @@ private final class FreeRenderedFixture {
         let defaults = UserDefaults(suiteName: "free-rendered-\(UUID().uuidString)")!
         // Establish the ordinary empty New baseline before generated arrivals.
         viewModel = try LivePresentationStore(localFixtureStore: domain, context: context,
-                                               newMessageAreaDefaults: legacy ? nil : defaults)
+                                               replyItemAreaDefaults: legacy ? nil : defaults)
         if legacy {
             try populateLegacy()
         } else {

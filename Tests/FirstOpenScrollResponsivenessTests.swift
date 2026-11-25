@@ -79,39 +79,6 @@ private final class DelayedAttentionPersistence: PendingActionPersistence, @unch
 final class FirstOpenScrollResponsivenessTests: XCTestCase {
     private let persistenceDelay: TimeInterval = 0.5
 
-    func testInboxFirstSeenPersistenceDoesNotBlockTheMainActor() async throws {
-        let defaults = DelayedUserDefaults()
-        let key = "first-open-list-\(UUID().uuidString)"
-        let store = NewMessageAreaStore(defaults: defaults, defaultsKey: key)
-        let account = ExactText("account")
-        let baseline = message("baseline", order: 1)
-        store.reconcile([baseline], revisions: [baseline.key: 1], accountScopes: [account])
-        await waitForWriteCount(defaults, atLeast: 1)
-
-        let newMessages = (2...1001).map { message("message-\($0)", order: UInt64($0)) }
-        let allMessages = [baseline] + newMessages
-        store.reconcile(allMessages,
-            revisions: Dictionary(uniqueKeysWithValues: allMessages.map { ($0.key, 1) }),
-            accountScopes: [account])
-        await waitForLedger(defaults, key: key, entryCount: newMessages.count)
-
-        let writesBefore = defaults.writes
-        defaults.delayNextWrite(by: persistenceDelay)
-        let mainActorDelay = await measureMainActorDelay {
-            store.markFirstSeen(newMessages.last!.key)
-        }
-        await waitForWriteCount(defaults, atLeast: writesBefore + 1)
-
-        XCTAssertLessThan(mainActorDelay, persistenceDelay * 1_000 * 0.5,
-                          "First-seen persistence must not hold the list's main actor.")
-        XCTAssertEqual(defaults.delayedWriteThreadWasMain, false,
-                       "The ledger encoding and UserDefaults write belong off main.")
-        await waitForFirstSeen(defaults, key: key, expected: newMessages.last!.key)
-        print(String(format: "list persistence main-actor block: %.3f ms (controlled write delay: %.0f ms; writer on main: %@)",
-                     mainActorDelay, persistenceDelay * 1000,
-                     String(describing: defaults.delayedWriteThreadWasMain)))
-    }
-
     func testDetailReadPersistenceDoesNotBlockTheMainActor() async throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
             personID: ExactText("person"), deviceID: ExactText("device"))
@@ -165,7 +132,7 @@ final class FirstOpenScrollResponsivenessTests: XCTestCase {
             batches: [], context: context)
         let defaults = DelayedUserDefaults()
         let presentation = try LivePresentationStore(store: domain, context: context,
-            newMessageAreaDefaults: defaults)
+            replyItemAreaDefaults: defaults)
 
         let arrivingKey = RequestKey(accountScope: identity.personID,
             senderID: ExactText("sender"), messageID: ExactText("first-page"))
@@ -215,7 +182,7 @@ final class FirstOpenScrollResponsivenessTests: XCTestCase {
         try domain.applyConversation(ConversationEvent(sequence: 2, binding: binding,
             fact: .turn(question)), context: context)
         let presentation = try LivePresentationStore(store: domain, context: context,
-            newMessageAreaDefaults: DelayedUserDefaults())
+            replyItemAreaDefaults: DelayedUserDefaults())
         let reply = ConversationTurn(id: ExactText("reply"), binding: binding,
             author: .origin, sessionHandle: session, text: ExactText("Reply"),
             inReplyTo: question.id, kind: .reply)
@@ -294,7 +261,7 @@ final class FirstOpenScrollResponsivenessTests: XCTestCase {
             let diagnostics = NativeClientDiagnosticJournal(fileURL: nil)
             let activation = try await LivePresentationStore.makeForActivation(
                 store: domain, context: context, diagnostics: diagnostics,
-                newMessageAreaDefaults: defaults)
+                replyItemAreaDefaults: defaults)
             let model = activation.presentation
             let initialAdoption = activation.mainActorWorkMilliseconds
             let initialPreparationWall = activation.activationPreparationMilliseconds
@@ -325,8 +292,8 @@ final class FirstOpenScrollResponsivenessTests: XCTestCase {
                               "Initial inbox adoption with \(count) retained messages must fit a 60 Hz frame.")
             XCTAssertLessThan(maximumRevisionWait, scrollBudgetMilliseconds,
                               "Catch-up adoption with \(count + 16) messages must fit a 60 Hz frame.")
-            XCTAssertEqual(model.newMessageAreaStore?.entries.count, 16,
-                           "Catch-up messages must retain their existing new-message behavior.")
+            XCTAssertEqual(model.inboxRows.count, count + 16,
+                           "Catch-up messages must remain available in the Inbox.")
             print(String(format: "inbox adoption backlog %d: initial MainActor %.3f ms / prep %.3f ms; max catch-up MainActor %.3f ms / prep %.3f ms",
                          count, initialAdoption, initialPreparationWall, maximumRevisionWait,
                          try XCTUnwrap(revisionPreparationTimes.max())))
@@ -374,7 +341,7 @@ final class FirstOpenScrollResponsivenessTests: XCTestCase {
             let diagnostics = NativeClientDiagnosticJournal(fileURL: nil)
             let activation = try await LivePresentationStore.makeForActivation(
                 store: domain, context: context, diagnostics: diagnostics,
-                newMessageAreaDefaults: defaults)
+                replyItemAreaDefaults: defaults)
             let model = activation.presentation
             let initialAdoption = activation.mainActorWorkMilliseconds
             let initialPreparationWall = activation.activationPreparationMilliseconds
@@ -414,7 +381,7 @@ final class FirstOpenScrollResponsivenessTests: XCTestCase {
         }
     }
 
-    func testInboxReplyFirstSeenPersistenceDoesNotBlockTheMainActor() async throws {
+    func testInboxReplyArrivalPersistenceDoesNotBlockTheMainActor() async throws {
         let defaults = DelayedUserDefaults()
         let key = "first-open-replies-\(UUID().uuidString)"
         let store = ReplyItemAreaStore(defaults: defaults, defaultsKey: key)
@@ -424,37 +391,23 @@ final class FirstOpenScrollResponsivenessTests: XCTestCase {
 
         let parent = RequestKey(accountScope: account,
             senderID: ExactText("sender"), messageID: ExactText("request"))
-        store.reconcile([ReplyItemObservation(parent: parent, turnID: ExactText("reply"),
-            conversationSequence: 1, isSeen: false, text: "Reply")])
-        await waitForReplyLedger(defaults, key: key, entryCount: 1)
-
+        let arrival = ReplyItemObservation(parent: parent, turnID: ExactText("reply"),
+            conversationSequence: 1, isSeen: false, text: "Reply")
         let writesBefore = defaults.writes
         defaults.delayNextWrite(by: persistenceDelay)
         let mainActorDelay = await measureMainActorDelay {
-            store.markFirstSeen(parent)
+            store.reconcile([arrival])
         }
         await waitForWriteCount(defaults, atLeast: writesBefore + 1)
-        await waitUntil {
-            guard let data = defaults.data(forKey: key),
-                  let ledger = try? JSONDecoder().decode(ReplyItemLedger.self, from: data) else {
-                return false
-            }
-            return ledger.entriesByParent[parent]?.firstSeenAt != nil
-        }
+        await waitForReplyLedger(defaults, key: key, entryCount: 1)
 
         XCTAssertLessThan(mainActorDelay, persistenceDelay * 1_000 * 0.5,
-                          "First-seen reply persistence must not hold the list's main actor.")
+                          "Reply-arrival persistence must not hold the list's main actor.")
         XCTAssertEqual(defaults.delayedWriteThreadWasMain, false,
                        "Reply ledger encoding and UserDefaults writes belong off main.")
         print(String(format: "list reply persistence main-actor block: %.3f ms (controlled write delay: %.0f ms; writer on main: %@)",
                      mainActorDelay, persistenceDelay * 1000,
                      String(describing: defaults.delayedWriteThreadWasMain)))
-    }
-
-    private func message(_ id: String, order: UInt64) -> NewMessageAreaMessage {
-        NewMessageAreaMessage(key: RequestKey(accountScope: ExactText("account"),
-            senderID: ExactText("sender"), messageID: ExactText(id)),
-            acceptanceOrder: order, isResolved: false, hasSubmittedAnswer: false)
     }
 
     private func measureMainActorDelay(_ operation: () -> Void) async -> Double {
@@ -473,16 +426,6 @@ final class FirstOpenScrollResponsivenessTests: XCTestCase {
         await waitUntil { persistence.writes >= count }
     }
 
-    private func waitForLedger(_ defaults: DelayedUserDefaults, key: String, entryCount: Int) async {
-        await waitUntil {
-            guard let data = defaults.data(forKey: key),
-                  let ledger = try? JSONDecoder().decode(NewMessageAreaLedger.self, from: data) else {
-                return false
-            }
-            return ledger.entriesByKey.count == entryCount
-        }
-    }
-
     private func waitForReplyLedger(_ defaults: DelayedUserDefaults, key: String,
                                    entryCount: Int) async {
         await waitUntil {
@@ -491,17 +434,6 @@ final class FirstOpenScrollResponsivenessTests: XCTestCase {
                 return false
             }
             return ledger.entriesByParent.count == entryCount
-        }
-    }
-
-    private func waitForFirstSeen(_ defaults: DelayedUserDefaults, key: String,
-                                  expected: RequestKey) async {
-        await waitUntil {
-            guard let data = defaults.data(forKey: key),
-                  let ledger = try? JSONDecoder().decode(NewMessageAreaLedger.self, from: data) else {
-                return false
-            }
-            return ledger.entriesByKey[expected]?.firstSeenAt != nil
         }
     }
 

@@ -230,12 +230,6 @@ enum HarklightShape: String, CaseIterable, Sendable {
     case messageIDPillRadius
     case rowVerticalPadding
     case rowHorizontalPadding
-    case newRowVerticalPadding
-    case newRowSpacing
-    case newHeaderTopPadding
-    case newHeaderBottomPadding
-    case newMoreTopPadding
-    case newMoreBottomPadding
     case glassButton
     case lineWidth
     case priorityEdge

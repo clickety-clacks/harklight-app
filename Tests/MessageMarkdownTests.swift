@@ -40,11 +40,10 @@ final class MessageMarkdownTests: XCTestCase {
         })
     }
 
-    func testPlainTextRemainsReadableAndCanUseGeneratedSummary() {
+    func testPlainTextRemainsReadable() {
         let source = "A plain message with no Markdown formatting."
 
         XCTAssertEqual(String(MessageMarkdown.attributed(source).characters), source)
-        XCTAssertFalse(MessageMarkdown.hasFormattingOrLinks(source))
     }
 
     @MainActor
@@ -202,7 +201,7 @@ final class MessageMarkdownTests: XCTestCase {
         XCTAssertEqual(linkRun.link?.absoluteString, targetURL ?? authoredURL, file: file, line: line)
     }
 
-    func testCompactPreviewTruncatesParsedTextAndRetainsLinkAndEmphasis() throws {
+    func testPreviewTruncatesParsedTextAndRetainsLinkAndEmphasis() throws {
         let rendered = MessageMarkdown.preview(
             "A **bold** [link](https://example.com) followed by more authored words.",
             characterLimit: 11)
@@ -216,30 +215,4 @@ final class MessageMarkdownTests: XCTestCase {
                        URL(string: "https://example.com"))
     }
 
-    func testCompactPreviewFallsBackToGeneratedSummaryOnlyForPlainAuthoredText() throws {
-        let plain = MessageMarkdown.compactPreview(
-            authored: "A plain authored message with several details.",
-            generatedSummary: "A concise summary.",
-            characterLimit: 100)
-        XCTAssertEqual(String(plain.characters), "A concise summary.")
-
-        let formatted = MessageMarkdown.compactPreview(
-            authored: "A **bold** [link](https://example.com) with details.",
-            generatedSummary: "A concise summary.",
-            characterLimit: 100)
-        XCTAssertEqual(String(formatted.characters), "A bold link with details.")
-        XCTAssertTrue(formatted.runs.contains { $0.link != nil })
-        XCTAssertTrue(formatted.runs.contains {
-            $0.inlinePresentationIntent?.contains(.stronglyEmphasized) == true
-        })
-    }
-
-    func testFormattedTextAndLinksMustUseTheAuthoredPreview() {
-        XCTAssertTrue(MessageMarkdown.hasFormattingOrLinks("A **bold** message."))
-        XCTAssertTrue(MessageMarkdown.hasFormattingOrLinks("[Open](https://example.com)"))
-        XCTAssertTrue(MessageMarkdown.hasFormattingOrLinks("Read https://example.com"))
-        XCTAssertTrue(MessageMarkdown.hasFormattingOrLinks("- First item"))
-        XCTAssertTrue(MessageMarkdown.hasFormattingOrLinks("> Quoted text"))
-        XCTAssertTrue(MessageMarkdown.hasFormattingOrLinks("`let count = 2`"))
-    }
 }

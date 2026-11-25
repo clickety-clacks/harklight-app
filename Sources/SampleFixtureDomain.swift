@@ -21,10 +21,10 @@ final class SampleFixtureDomain {
 #if DEBUG
         viewModel = try LivePresentationStore(localFixtureStore: fixtureDomain, context: fixtureContext,
             syntheticAvailability: Self.syntheticAvailabilityInput(for: fixtureContext),
-            newMessageAreaDefaults: Self.replyItemAreaTestDefaults())
+            replyItemAreaDefaults: Self.replyItemAreaTestDefaults())
 #else
         viewModel = try LivePresentationStore(localFixtureStore: fixtureDomain, context: fixtureContext,
-            newMessageAreaDefaults: Self.replyItemAreaTestDefaults())
+            replyItemAreaDefaults: Self.replyItemAreaTestDefaults())
 #endif
     }
 
@@ -49,7 +49,7 @@ final class SampleFixtureDomain {
     }
 #endif
 
-    /// The reply-item UI test runs the ordinary new-message-area stores
+    /// The reply-item UI test runs the ordinary reply ledger
     /// against a scratch defaults suite; other launches keep them absent.
     private static func replyItemAreaTestDefaults() -> UserDefaults? {
         let arguments = ProcessInfo.processInfo.arguments

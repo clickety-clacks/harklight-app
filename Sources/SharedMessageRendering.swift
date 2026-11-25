@@ -59,11 +59,9 @@ enum MessageMarkdown {
 
     private final class CachedValue: NSObject, @unchecked Sendable {
         let attributed: AttributedString
-        let hasFormattingOrLinks: Bool
 
-        init(attributed: AttributedString, hasFormattingOrLinks: Bool) {
+        init(attributed: AttributedString) {
             self.attributed = attributed
-            self.hasFormattingOrLinks = hasFormattingOrLinks
         }
     }
 
@@ -105,20 +103,6 @@ enum MessageMarkdown {
         truncate(attributed(source), characterLimit: characterLimit)
     }
 
-    /// Keeps generated summaries for plain authored text, but uses the source
-    /// whenever Markdown formatting or a link target would be lost.
-    static func compactPreview(authored source: String,
-                               generatedSummary: String?,
-                               characterLimit: Int) -> AttributedString {
-        let content: AttributedString
-        if hasFormattingOrLinks(source) {
-            content = attributed(source)
-        } else {
-            content = AttributedString(generatedSummary ?? source)
-        }
-        return truncate(content, characterLimit: characterLimit)
-    }
-
     private static func truncate(_ content: AttributedString,
                                  characterLimit: Int) -> AttributedString {
         let limit = max(0, characterLimit)
@@ -129,10 +113,6 @@ enum MessageMarkdown {
         var result = AttributedString(content[..<end])
         result += AttributedString("…")
         return result
-    }
-
-    static func hasFormattingOrLinks(_ source: String) -> Bool {
-        cache.value(for: source).hasFormattingOrLinks
     }
 
     private static func makeValue(_ source: String) -> CachedValue {
@@ -225,18 +205,7 @@ enum MessageMarkdown {
         }
 
         linkifyPlainWebURLs(in: &rendered)
-        let hasFormattingOrLinks = rendered.runs.contains { run in
-            if run.link != nil { return true }
-            if let inlineIntent = run.inlinePresentationIntent, !inlineIntent.isEmpty {
-                return true
-            }
-            return run.presentationIntent?.components.contains {
-                isNonParagraphBlockComponent($0.kind)
-            } == true
-        }
-
-        return CachedValue(attributed: rendered,
-                           hasFormattingOrLinks: hasFormattingOrLinks)
+        return CachedValue(attributed: rendered)
     }
 
     private static func parse(_ source: String) -> AttributedString {
@@ -258,15 +227,6 @@ enum MessageMarkdown {
             return true
         @unknown default:
             return false
-        }
-    }
-
-    private static func isNonParagraphBlockComponent(_ kind: PresentationIntent.Kind) -> Bool {
-        switch kind {
-        case .paragraph:
-            return false
-        default:
-            return true
         }
     }
 

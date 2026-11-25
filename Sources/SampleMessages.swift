@@ -704,16 +704,14 @@ enum SampleCatalog {
 /// sample as not sent, so the inbox spinner and not-sent mark can be checked
 /// without a server. Inactive in normal launches.
 enum SampleSubmissionProgressHook {
-    private static let launchDate = Date()
-
     static func progress(for sampleID: String) -> InboxRowSubmissionProgress? {
         guard ProcessInfo.processInfo.arguments.contains("--harklight-test-submission-progress") else {
             return nil
         }
         switch sampleID {
-        case "sample-approval-0": return InboxRowSubmissionProgress(state: .awaiting, since: launchDate)
+        case "sample-approval-0": return InboxRowSubmissionProgress(state: .awaiting)
         case "sample-textChoice-0":
-            return InboxRowSubmissionProgress(state: .notSent(detail: nil), since: launchDate.addingTimeInterval(-60))
+            return InboxRowSubmissionProgress(state: .notSent(detail: nil))
         default: return nil
         }
     }

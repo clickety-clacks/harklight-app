@@ -23,7 +23,7 @@ final class ProgressRenderedUITests: XCTestCase {
         }
     }
 
-    func testProgressAndNewMoreExpandIndependently() {
+    func testProgressMoreExpandsWithoutANewSection() {
         let app = XCUIApplication()
         app.launchArguments = ["--progress-rendered", "--harklight-test-inbox-list-light"]
         app.launch()
@@ -33,18 +33,11 @@ final class ProgressRenderedUITests: XCTestCase {
         let more = app.buttons["progress-more"]
         reveal(more, in: app)
         more.tap()
-        let newHeader = app.staticTexts["new-message-area-header"]
-        reveal(newHeader, in: app)
-        XCTAssertEqual(newHeader.label, "New · 5 of 7")
-        let newMore = app.buttons["new-message-area-more"]
-        reveal(newMore, in: app)
-        newMore.tap()
-        reveal(newHeader, in: app, towardTop: true)
-        XCTAssertEqual(newHeader.label, "New · 7 of 7")
         for _ in 0..<12 where !progressHeader.isHittable {
             app.collectionViews.firstMatch.swipeDown()
         }
         XCTAssertEqual(progressHeader.label, "Progress · 7 of 7")
+        XCTAssertFalse(app.staticTexts["new-message-area-header"].exists)
         app.terminate()
     }
 

@@ -882,34 +882,6 @@ final class HarklightTests: XCTestCase {
     }
 
     @MainActor
-    func testReplyCanRemainInCompactNewAndItsOwnNormalRowThenLeaveNewAlone() {
-        let key = RequestKey(accountScope: ExactText("person"), senderID: ExactText("sender"),
-                             messageID: ExactText("parent"))
-        let reference = InboxViewListItem(kind: .reply, key: key,
-            conversationSequence: 4, openAtConversationSequence: 4,
-            unseenCount: 1, score: 0.84, scoreKind: .current)
-        let observation = ReplyItemObservation(parent: key, turnID: ExactText("reply-4"),
-            conversationSequence: 4, isSeen: false, text: "A live reply")
-        var newLedger = ReplyItemLedger()
-        newLedger.reconcile([], accountScopes: [key.accountScope], now: .now)
-        newLedger.reconcile([observation], now: .now)
-
-        let normalBeforeSelection = InboxNormalListProjection.entries(
-            rows: [], serverItems: [reference], in: .inbox, search: "")
-        XCTAssertEqual(newLedger.entries.map(\.parent), [key],
-                       "The compact New group is present while its normal row is already present.")
-        XCTAssertEqual(normalBeforeSelection.map(\.id), [.reply(key)])
-
-        XCTAssertTrue(newLedger.removeForSelection(key),
-                      "Selecting the compact New copy removes that membership locally.")
-        let normalAfterSelection = InboxNormalListProjection.entries(
-            rows: [], serverItems: [reference], in: .inbox, search: "")
-        XCTAssertTrue(newLedger.entries.isEmpty)
-        XCTAssertEqual(normalAfterSelection.map(\.id), [.reply(key)],
-                       "New departure leaves the server-ordered normal row in place.")
-    }
-
-    @MainActor
     func testLiveInboxRowCarriesBaselinePriorityWithoutScore() throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
                                        personID: ExactText("baseline-reader"),
@@ -929,7 +901,7 @@ final class HarklightTests: XCTestCase {
         let live = try LivePresentationStore(store: store, context: context)
         let row = try XCTUnwrap(live.inboxRows.first { $0.key == key })
         XCTAssertEqual(row.inboxPriority, .now,
-                       "The list and New area must receive the Server priority through the live row projection.")
+                       "The list must receive the Server priority through the live row projection.")
         XCTAssertNil(row.inboxScore)
         XCTAssertEqual(InboxPriorityDisplay.forEntry(score: row.inboxScore,
                                                     priority: row.inboxPriority), .urgent)
