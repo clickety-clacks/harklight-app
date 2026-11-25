@@ -283,7 +283,9 @@ struct InboxNotificationDestination: Equatable {
         }
 
         let selection = InboxSelection.request(key)
-        let isReplied = !usesFreeOrder && rows.first(where: { $0.id == selection })?.belongsToReplied == true
+        let item = rows.first(where: { $0.id == selection })
+        let isRepliedFYI: Bool = if case let .request(row)? = item { row.isRepliedFYI } else { false }
+        let isReplied = isRepliedFYI || (!usesFreeOrder && item?.belongsToReplied == true)
         let messageTab: InboxMessageTab = isReplied ? .replied : .inbox
         self.selection = selection
         selectedTab = messageTab
@@ -664,6 +666,8 @@ struct InboxRequestRow: Identifiable {
     var fyiHasEnded = false
     var fyiOpenedFlagPending = false
     var fyiOpenedFlagFailed = false
+    var fyiGroupingEnabled = true
+    var fyiAnsweredOtherwise = false
     var fyiUsesInboxSearchForProgress = false
     var canRetryFYISeen = false
     var fyiUsesRepliedForProgress = false
@@ -690,7 +694,21 @@ struct InboxRequestRow: Identifiable {
     }
 
     var isActiveFYI: Bool {
-        isFYI && !fyiHasEnded && (isFYISeenPending || isUnseenFYI)
+        isFYI && !fyiHasEnded && !isRepliedFYI && (isFYISeenPending || isUnseenFYI)
+    }
+
+    var isRepliedFYI: Bool {
+        guard fyiGroupingEnabled, isFYI, !isRetracted, !fyiAnsweredOtherwise else { return false }
+        if informationalSeenStatus == .confirmed { return true }
+        return !hasProgressMarker && !isFYISeenPending && fyiServerSeen == true
+    }
+
+    func isBundledFYI(in tab: InboxMessageTab) -> Bool {
+        guard isFYI else { return false }
+        switch tab {
+        case .inbox: return isActiveFYI || isRepliedFYI || (fyiHasEnded && belongsToReplied)
+        case .replied: return isRepliedFYI
+        }
     }
 
     var isFYISeenPending: Bool {
@@ -749,6 +767,7 @@ struct InboxRequestRow: Identifiable {
     }
 
     var belongsToReplied: Bool {
+        if isRepliedFYI { return true }
         // A failed delivery returns a response-marked row to Inbox, even if its
         // previous Seen state was still reported as pending.
         guard !hasFailedResponse else { return false }
@@ -871,10 +890,13 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     @State private var preferredCompactColumn: NavigationSplitViewColumn = .sidebar
     @State private var splitPresentation = InboxSplitPresentation()
     @State private var relatedMessageNavigationPath: [RelatedMessageTarget] = []
+    @State private var rememberedTabDetails: [InboxWorkspaceTab: TabDetail] = [:]
+    @State private var restoringTabPath = false
     @State private var settings = false
     @State private var fyiDigest = FYIDigest()
     @State private var fyiSeenActionError: String?
     @AppStorage("harklight.fyi-list-account") private var restoredFYIAccount: Data?
+    @AppStorage("harklight.fyi-list-replied") private var restoredFYIWasReplied = false
     @State private var checkedFYIRestoration = false
     @State private var selectedTab: InboxMessageTab = .inbox
     @State private var workspaceTab: InboxWorkspaceTab = .inbox
@@ -896,12 +918,9 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     }
 
     private var activeFYIsOnly: Bool { conversationStore?.isReadOnly != true }
-    private var fyis: [InboxRequestRow] {
-        guard activeFYIsOnly else { return requests.filter(\.isFYI) }
-        return requests.filter(\.isActiveFYI)
-    }
-    private var digestFYIs: [InboxRequestRow] {
-        requests.filter(activeFYIsOnly ? \.isActiveFYI : \.isFYI)
+    private func fyis(for tab: InboxWorkspaceTab) -> [InboxRequestRow] {
+        guard activeFYIsOnly else { return tab == .inbox ? requests.filter(\.isFYI) : [] }
+        return requests.filter(tab == .inbox ? \.isActiveFYI : \.isRepliedFYI)
     }
 
     private var visibleWarnings: [String] {
@@ -929,27 +948,30 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         rootTab == .search || usesListSearch ? search : ""
     }
 
-    private var orderedIDs: [InboxSelection] {
-        InboxListProjection.filteredRows(rows, in: .inbox, search: activeSearch).map(\.id)
-    }
     private var usesFreeOrder: Bool {
         InboxFreeOrder.isSupported(version: conversationStore?.presentation.inboxFreeOrderVersion,
                                    items: conversationStore?.presentation.inboxViewListItems)
     }
+
     private var cardNavigationIDs: [InboxSelection] {
-        // Keep detail navigation aligned with the current Inbox list, including
-        // its search results and server-ranked ordering when free order is active.
-        if usesFreeOrder {
-            return InboxNormalListProjection.entries(rows: rows,
-                serverItems: conversationStore?.presentation.inboxViewListItems,
-                freeOrderVersion: conversationStore?.presentation.inboxFreeOrderVersion,
-                in: .inbox, search: activeSearch).flatMap { entry -> [InboxSelection] in
-                    guard case let .message(message) = entry else { return [] }
-                    return message.members.map(\.id)
-                }
-        }
-        return orderedIDs
+        cardNavigationIDs(for: workspaceTab, query: activeSearch.trimmingCharacters(in: .whitespacesAndNewlines))
     }
+
+    private func cardNavigationIDs(for tab: InboxWorkspaceTab, query: String) -> [InboxSelection] {
+        let visibleRows = rows.filter { item in
+            guard query.isEmpty, case let .request(row) = item else { return true }
+            return activeFYIsOnly ? !row.isBundledFYI(in: tab.messageTab) :
+                (tab != .inbox || !row.isFYI)
+        }
+        return InboxNormalListProjection.entries(rows: visibleRows,
+            serverItems: conversationStore?.presentation.inboxViewListItems,
+            freeOrderVersion: conversationStore?.presentation.inboxFreeOrderVersion,
+            in: tab, search: query).flatMap { entry -> [InboxSelection] in
+                guard case let .message(message) = entry else { return [] }
+                return message.members.map(\.id)
+            }
+    }
+
     private var activeNotificationNavigation: NativeInboxNavigation? {
         notificationNavigation ?? testNotificationNavigation
     }
@@ -1048,7 +1070,9 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                 navigatedBetweenMessages = true
             }
         }
+        relatedMessageNavigationPath.removeAll()
         selection = next
+        rememberFYIRestoration(from: previous)
         // Keep departure cleanup bound to the explicit identity transition;
         // split-view adaptation changes columns without leaving this message.
         selectionDidChange(from: previous, to: next)
@@ -1204,15 +1228,114 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         ].joined(separator: " | ")
     }
 
+    private struct TabDetail {
+        let selection: InboxSelection
+        let path: [RelatedMessageTarget]
+    }
+
+    private func switchBrowsingTab(to tab: InboxWorkspaceTab) {
+        guard workspaceTab != tab else { return }
+        let previous = selection
+        let oldPath = relatedMessageNavigationPath
+        rememberedTabDetails[workspaceTab] = previous.flatMap { item in
+            if case .notificationPending = item { return nil }
+            return TabDetail(selection: item, path: oldPath)
+        }
+        let stored = rememberedTabDetails[tab]
+        let next: InboxSelection?
+        var nextPath: [RelatedMessageTarget] = []
+        if horizontalSizeClass != .compact, previous == .fyis, oldPath.isEmpty, activeFYIsOnly {
+            next = .fyis
+        } else if let stored, isSelection(stored.selection, availableIn: tab) {
+            next = stored.selection
+            if case let .fyi(key)? = stored.path.first {
+                if fyis(for: tab).contains(where: { $0.key == key }) { nextPath = stored.path }
+            } else {
+                nextPath = stored.path
+            }
+        } else {
+            next = nil
+        }
+
+        let oldKey = detailRequest(selection: previous, path: oldPath)
+        let newKey = detailRequest(selection: next, path: nextPath)
+        if let oldKey, oldKey != newKey { conversationStore?.flushPendingDraft(for: oldKey) }
+        conversationStore?.navigateMessage(from: oldKey, to: newKey)
+        if let newKey { selectRequest(newKey) }
+        workspaceTab = tab
+        selectedTab = tab.messageTab
+        selection = next
+        restoringTabPath = oldPath != nextPath
+        relatedMessageNavigationPath = nextPath
+        fyiSeenActionError = nil
+        replyChatRoute = nil
+        preferredCompactColumn = next == nil ? .sidebar : .detail
+        rememberFYIRestoration(from: previous)
+        reportVisibleDetailFocus()
+    }
+
+    private func isSelection(_ item: InboxSelection, availableIn tab: InboxWorkspaceTab) -> Bool {
+        if item == .fyis { return tab == .inbox || activeFYIsOnly }
+        guard let row = currentItem(for: item) else { return false }
+        if case let .request(request) = row {
+            if request.isActiveFYI { return tab == .inbox }
+            if request.isRepliedFYI { return tab == .replied }
+            if request.fyiUsesInboxSearchForProgress { return false }
+            if request.progress != nil, !request.isResolved, !request.isRetracted { return tab == .inbox }
+        }
+        return cardNavigationIDs(for: tab, query: "").contains(item)
+    }
+
+    private func detailRequest(selection: InboxSelection?, path: [RelatedMessageTarget]) -> RequestKey? {
+        switch path.last {
+        case let .fyi(key)?, let .supersedes(key)?, let .replacement(key)?: return key
+        case nil:
+            if case let .request(key)? = selection { return key }
+            return nil
+        }
+    }
+
+    private func reportVisibleDetailFocus() {
+        guard let key = detailRequest(selection: selection, path: relatedMessageNavigationPath) else {
+            NativeFocusReporter.shared.selectionChanged(to: NativeFocusSelection.report(for: selection))
+            return
+        }
+        let report = selection == .fyis
+            ? NativeFocusSelection.fyiDetailReport(for: key, in: conversationStore)
+            : NativeFocusSelection.messageReport(for: key)
+        NativeFocusReporter.shared.selectionChanged(to: report)
+    }
+
+    private func rememberFYIRestoration(from previous: InboxSelection?) {
+        if selection == .fyis {
+            restoredFYIAccount = fyiRestorationAccount.flatMap { try? JSONEncoder().encode($0) }
+            restoredFYIWasReplied = workspaceTab == .replied
+        } else if previous == .fyis {
+            restoredFYIAccount = nil
+        }
+    }
+
     private var navigationSelection: Binding<InboxSelection?> {
-        Binding(get: { selection }, set: { next in
+        navigationSelection(for: workspaceTab)
+    }
+
+    private func navigationSelection(for tab: InboxWorkspaceTab) -> Binding<InboxSelection?> {
+        Binding(get: { workspaceTab == tab ? selection : nil }, set: { next in
+            guard workspaceTab == tab else { return }
             if next != nil { splitPresentation.dismissOverlay() }
             navigate(to: next)
         })
     }
 
+    private func detailPath(for tab: InboxWorkspaceTab) -> Binding<[RelatedMessageTarget]> {
+        Binding(get: { workspaceTab == tab ? relatedMessageNavigationPath : [] }, set: { path in
+            guard workspaceTab == tab else { return }
+            relatedMessageNavigationPath = path
+        })
+    }
+
     @ViewBuilder
-    private func detailContent(for item: InboxSelection?, inlineChat: Bool,
+    private func detailContent(for item: InboxSelection?, tab: InboxWorkspaceTab, inlineChat: Bool,
                                geometry: GeometryProxy) -> some View {
         let pushedChatFallsBackToMessage: Bool = if case let .request(key)? = item,
             let route = activeNotificationNavigation, route.request == key {
@@ -1244,11 +1367,11 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                             .id(id)
                     }
                 case .fyis?:
-                    FYIList(items: fyis, activeFYIsOnly: activeFYIsOnly,
-                            actionError: fyiSeenActionError,
+                    FYIList(items: fyis(for: tab), activeFYIsOnly: activeFYIsOnly,
+                            isReplied: tab == .replied, actionError: tab == .inbox ? fyiSeenActionError : nil,
                             clearActionError: { fyiSeenActionError = nil },
                             markSeen: markFYISeen, retrySeen: retryFYISeen) { key in
-                        guard fyis.contains(where: { $0.key == key && !$0.isRetracted }) else { return }
+                        guard fyis(for: tab).contains(where: { $0.key == key && !$0.isRetracted }) else { return }
                         relatedMessageNavigationPath.append(.fyi(key))
                     }
                 case let .notificationPending(serial)?:
@@ -1391,11 +1514,12 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         return .inbox(conversationStore.notificationContext)
     }
 
-    private var fyiInboxRow: FYIInboxRow? {
-        let items = digestFYIs
+    private func fyiInboxRow(for tab: InboxWorkspaceTab) -> FYIInboxRow? {
+        let items = fyis(for: tab)
         guard !items.isEmpty else { return nil }
-        let summary = fyiDigest.summary(for: fyiDigestScope, visibleKeys: Set(items.map(\.key)))
-        return FYIInboxRow(items: items, summary: summary) {
+        let summary = tab == .inbox
+            ? fyiDigest.summary(for: fyiDigestScope, visibleKeys: Set(items.map(\.key))) : nil
+        return FYIInboxRow(items: items, summary: summary, showsUnseenBadge: tab == .inbox) {
             navigationSelection.wrappedValue = .fyis
         }
     }
@@ -1403,9 +1527,11 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     @ViewBuilder
     private func inboxSplitView(for tab: InboxWorkspaceTab, inlineChat: Bool,
                                 geometry: GeometryProxy, searching: Bool = false) -> some View {
-        let splitView = NavigationSplitView(preferredCompactColumn: $preferredCompactColumn) {
+        let column = Binding(get: { workspaceTab == tab ? preferredCompactColumn : .sidebar },
+                             set: { if workspaceTab == tab { preferredCompactColumn = $0 } })
+        let splitView = NavigationSplitView(preferredCompactColumn: column) {
             InboxList(tab: tab, rows: rows, warnings: visibleWarnings,
-                  fyiInboxRow: tab == .inbox && !searching ? fyiInboxRow : nil,
+                  fyiInboxRow: !searching ? fyiInboxRow(for: tab) : nil,
                   activeFYIsOnly: activeFYIsOnly,
                   showsBasicOrderMarker: showsBasicOrderMarker, isRefreshing: isRefreshing,
                   refreshInbox: refreshInbox,
@@ -1413,7 +1539,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                   newMessageAreaStore: conversationStore?.newMessageAreaStore,
                   replyItemAreaStore: conversationStore?.replyItemAreaStore,
                   openReplyItem: openReplyItem,
-                  selected: navigationSelection,
+                  selected: navigationSelection(for: tab),
                       workspaceTab: $workspaceTab,
                       search: searching || usesListSearch ? $search : .constant(""),
                       lastViewedSelection: lastViewedSelection,
@@ -1435,8 +1561,8 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                     .allowsHitTesting(false)
             }
         } detail: {
-            NavigationStack(path: $relatedMessageNavigationPath) {
-                detailContent(for: selection, inlineChat: inlineChat,
+            NavigationStack(path: detailPath(for: tab)) {
+                detailContent(for: workspaceTab == tab ? selection : nil, tab: tab, inlineChat: inlineChat,
                               geometry: geometry)
             }
 
@@ -1537,7 +1663,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
 
     var body: some View {
         let digestRequest = FYIDigest.Request(
-            highlights: FYIDigest.highlights(digestFYIs),
+            highlights: FYIDigest.highlights(fyis(for: .inbox)),
             unavailability: OnDeviceMessageSummarizer.unavailability,
             active: scenePhase == .active, scope: fyiDigestScope)
         workspace.task(id: digestRequest) {
@@ -1601,11 +1727,11 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             }
             .tint(HarklightDesignSystem.palette(for: colorScheme).amber)
             .onChange(of: rootTab) { _, newRootTab in
-                if newRootTab != .inbox, selection == .fyis { navigate(to: nil) }
                 switch newRootTab {
-                case .inbox: workspaceTab = .inbox
-                case .replied: workspaceTab = .replied
+                case .inbox: switchBrowsingTab(to: .inbox)
+                case .replied: switchBrowsingTab(to: .replied)
                 case .search:
+                    if selection == .fyis { navigate(to: nil) }
                     // One tap on the search tab focuses its field on iPhone. The
                     // search list is rebuilt for the tab it searches, so focus is
                     // set here as well as by the system activation. iPad leaves the
@@ -1648,11 +1774,22 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                 // of ordinary navigation cleanup so a tap cannot mutate the domain.
                 let destination = InboxNotificationDestination(route: route, rows: rows,
                                                                usesFreeOrder: usesFreeOrder)
+                if workspaceTab != destination.workspaceTab {
+                    if let selection, case .notificationPending = selection {
+                        rememberedTabDetails[workspaceTab] = nil
+                    } else if let selection {
+                        rememberedTabDetails[workspaceTab] = TabDetail(selection: selection,
+                            path: relatedMessageNavigationPath)
+                    }
+                }
+                let previous = selection
+                relatedMessageNavigationPath.removeAll()
                 workspaceTab = destination.workspaceTab
                 rootTab = destination.workspaceTab.rootTab
                 selectedTab = destination.selectedTab
                 search = destination.search
                 selection = destination.selection
+                rememberFYIRestoration(from: previous)
                 if let key = route.request {
                     if !NativePushedViewCoordinator.shared.isPassive(key) {
                         conversationStore?.newMessageAreaStore?.open(key)
@@ -1662,16 +1799,9 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                     selectRequest(key)
                 }
             }
-            .onChange(of: selection) { previous, next in
-                if next == .fyis {
-                    restoredFYIAccount = fyiRestorationAccount.flatMap { try? JSONEncoder().encode($0) }
-                } else if previous == .fyis {
-                    restoredFYIAccount = nil
-                }
-            }
             .onChange(of: selection, initial: true) { _, next in
                 preferredCompactColumn = next == nil ? .sidebar : .detail
-                NativeFocusReporter.shared.selectionChanged(to: next)
+                reportVisibleDetailFocus()
             }
             .onChange(of: settings) { _, isPresented in
                 if isPresented {
@@ -1707,13 +1837,18 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         }
         .onChange(of: selection) { _, _ in
             fyiSeenActionError = nil
-            relatedMessageNavigationPath.removeAll()
         }
         .onChange(of: relatedMessageNavigationPath) { oldPath, newPath in
-            relatedPathChanged(from: oldPath, to: newPath)
+            if restoringTabPath {
+                restoringTabPath = false
+                reportVisibleDetailFocus()
+            } else {
+                relatedPathChanged(from: oldPath, to: newPath)
+            }
         }
         // Archived presentations share the view and have no persistence key.
         .onChange(of: fyiRoutePresentation) { _, _ in
+            rememberedTabDetails.removeAll()
             guard selection == .fyis else { return }
             relatedMessageNavigationPath.removeAll()
             navigate(to: nil)
@@ -1724,6 +1859,10 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             if let current, let data = restoredFYIAccount,
                current == (try? JSONDecoder().decode(ProfileIdentity.self, from: data)),
                selection == nil, notificationNavigation == nil {
+                if restoredFYIWasReplied {
+                    switchBrowsingTab(to: .replied)
+                    rootTab = .replied
+                }
                 navigate(to: .fyis)
             }
         }
@@ -1741,9 +1880,8 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             Button("Review message") {
                 conversationStore?.dismissStaleAnswerDialog()
                 settings = false
-                workspaceTab = .inbox
+                switchBrowsingTab(to: .inbox)
                 rootTab = .inbox
-                selectedTab = .inbox
                 search = ""
                 navigate(to: .request(dialog.requestKey))
             }
@@ -1960,11 +2098,10 @@ struct InboxList: View {
     }
 
     private func isBundledFYI(_ item: InboxItem) -> Bool {
-        guard tab == .inbox, search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+        guard search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               case let .request(row) = item, row.isFYI else { return false }
-        if activeFYIsOnly, row.fyiHasEnded, row.belongsToReplied { return true }
-        guard fyiInboxRow != nil else { return false }
-        return !activeFYIsOnly || row.isActiveFYI
+        if activeFYIsOnly { return row.isBundledFYI(in: tab.messageTab) }
+        return tab == .inbox && fyiInboxRow != nil
     }
 
     private var matchingExpiredRetractionRows: [InboxRequestRow] {
@@ -3988,11 +4125,12 @@ final class FYIDigest {
 struct FYIInboxRow: View {
     let items: [InboxRequestRow]
     let summary: String?
+    var showsUnseenBadge = true
     let open: () -> Void
 
     var body: some View {
         let latest = FYIOrder.posted.sorted(items).first
-        let unseen = items.filter(\.isUnseenFYI).count
+        let unseen = showsUnseenBadge ? items.filter(\.isUnseenFYI).count : 0
         let colors = HarklightDesignSystem.source.fyiDigest
         Button(action: open) {
             VStack(alignment: .leading, spacing: 6) {
@@ -4000,11 +4138,11 @@ struct FYIInboxRow: View {
                     ViewThatFits(in: .horizontal) {
                         HStack(spacing: 8) {
                             Text(items.isEmpty ? "FYIs" : "FYI digest").font(.caption.weight(.semibold))
-                            if !items.isEmpty { unseenBadge(unseen, border: colors.badgeBorder) }
+                            if showsUnseenBadge { unseenBadge(unseen, border: colors.badgeBorder) }
                         }
                         VStack(alignment: .leading, spacing: 4) {
                             Text(items.isEmpty ? "FYIs" : "FYI digest").font(.caption.weight(.semibold))
-                            if !items.isEmpty { unseenBadge(unseen, border: colors.badgeBorder) }
+                            if showsUnseenBadge { unseenBadge(unseen, border: colors.badgeBorder) }
                         }
                     }
                     Spacer(minLength: 0)
@@ -4043,7 +4181,7 @@ struct FYIInboxRow: View {
             .contentShape(RoundedRectangle(cornerRadius: 12))
         }
         .buttonStyle(.plain)
-        .accessibilityIdentifier("inbox-fyi")
+        .accessibilityIdentifier(showsUnseenBadge ? "inbox-fyi" : "replied-fyi")
     }
 
     private func unseenBadge(_ unseen: Int, border: String) -> some View {
@@ -4058,6 +4196,7 @@ struct FYIInboxRow: View {
 private struct FYIList: View {
     let items: [InboxRequestRow]
     let activeFYIsOnly: Bool
+    let isReplied: Bool
     let actionError: String?
     let clearActionError: () -> Void
     let markSeen: (InboxRequestRow) -> Void
@@ -4068,7 +4207,7 @@ private struct FYIList: View {
 
     private var markAllDisabledReason: LocalizedStringKey? {
         guard !items.contains(where: \.canMarkFYISeen) else { return nil }
-        guard activeFYIsOnly else { return nil }
+        guard activeFYIsOnly, !isReplied else { return nil }
         let active = items.filter(\.isActiveFYI)
         if active.isEmpty { return "All FYIs are seen" }
         if active.allSatisfy(\.isWaitingForFYISeen) { return "Waiting for confirmation" }
@@ -4084,7 +4223,8 @@ private struct FYIList: View {
         .harklightListSurface()
         .overlay {
             if items.isEmpty {
-                ContentUnavailableView(activeFYIsOnly ? "All FYIs are seen" : "No FYIs", systemImage: "tray")
+                ContentUnavailableView(isReplied ? "No Seen FYIs" :
+                    (activeFYIsOnly ? "All FYIs are seen" : "No FYIs"), systemImage: "tray")
             }
         }
         .safeAreaInset(edge: .top, spacing: 0) {
@@ -4116,12 +4256,14 @@ private struct FYIList: View {
                 }
                 .accessibilityLabel(Text("Sort: \(order.rawValue)"))
                 .accessibilityIdentifier("fyi-sort")
-                Button("Mark All Seen") {
-                    clearActionError()
-                    for item in items where item.canMarkFYISeen { markSeen(item) }
+                if !isReplied {
+                    Button("Mark All Seen") {
+                        clearActionError()
+                        for item in items where item.canMarkFYISeen { markSeen(item) }
+                    }
+                    .disabled(!activeFYIsOnly || disabledReason != nil)
+                    .accessibilityHint(Text(disabledReason ?? ""))
                 }
-                .disabled(!activeFYIsOnly || disabledReason != nil)
-                .accessibilityHint(Text(disabledReason ?? ""))
             }
         }
     }
@@ -4149,7 +4291,7 @@ private struct FYIList: View {
                     }
                 }
                 .font(.caption)
-            } else if activeFYIsOnly, item.hasFailedResponse || item.fyiOpenedFlagFailed, !item.fyiHasEnded {
+            } else if activeFYIsOnly, !isReplied, item.hasFailedResponse || item.fyiOpenedFlagFailed, !item.fyiHasEnded {
                 Text("Seen could not be confirmed.").font(.caption)
             } else if item.hasDeliveryWarning, let status = item.localStatus {
                 Text(status).font(.caption)
@@ -4170,7 +4312,7 @@ private struct FYIList: View {
 
     @ViewBuilder
     private func seenAction(for item: InboxRequestRow) -> some View {
-        if item.canMarkFYISeen {
+        if !isReplied, item.canMarkFYISeen {
             Button {
                 clearActionError()
                 markSeen(item)

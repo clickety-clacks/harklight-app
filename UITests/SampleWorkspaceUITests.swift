@@ -166,6 +166,136 @@ final class SampleWorkspaceUITests: XCTestCase {
         XCTAssertFalse(app.staticTexts["Progress unavailable"].exists)
     }
 
+    func testRepliedFYIsHaveTheirOwnListAndControls() {
+        let isPad = UIDevice.current.userInterfaceIdiom == .pad
+        if isPad { XCUIDevice.shared.orientation = .landscapeLeft }
+        let app = XCUIApplication()
+        app.launchArguments = ["--harklight-test-fyi-list", "--harklight-test-fyi-garden-seen",
+                               "--harklight-test-fyi-tab-switch"]
+        app.launch()
+        defer { app.terminate() }
+
+        if isPad {
+            openFYIListIfNeeded(app)
+            XCTAssertTrue(app.collectionViews["fyi-list"].staticTexts["Museum hours"].exists)
+        }
+        workspaceTab("Replied", in: app).tap()
+        let card = app.buttons["replied-fyi"]
+        XCTAssertTrue(card.waitForExistence(timeout: 5))
+        XCTAssertFalse(card.label.contains("unseen"))
+        XCTAssertFalse(app.descendants(matching: .any)["request-row-legacy/fyi-garden"].firstMatch.exists)
+        if !isPad { card.tap() }
+        let list = app.collectionViews["fyi-list"]
+        XCTAssertTrue(list.staticTexts["Community garden"].waitForExistence(timeout: 5))
+        XCTAssertFalse(list.staticTexts["Museum hours"].exists)
+        XCTAssertFalse(app.buttons["Mark All Seen"].exists)
+        capture("Replied FYIs", app)
+        if isPad {
+            list.staticTexts["Community garden"].tap()
+            XCTAssertTrue(app.buttons["request-heading"].waitForExistence(timeout: 5))
+            workspaceTab("Inbox", in: app).tap()
+            XCTAssertTrue(list.staticTexts["Museum hours"].waitForExistence(timeout: 5))
+            XCTAssertFalse(app.buttons["request-heading"].exists)
+            workspaceTab("Replied", in: app).tap()
+            XCTAssertTrue(list.staticTexts["Community garden"].waitForExistence(timeout: 5))
+            XCUIDevice.shared.orientation = .portrait
+            XCTAssertTrue(list.staticTexts["Community garden"].waitForExistence(timeout: 5))
+        }
+        app.terminate()
+        app.launch()
+        XCTAssertTrue(list.staticTexts["Community garden"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["Mark All Seen"].exists)
+        if isPad {
+            workspaceTab("Inbox", in: app).tap()
+            XCTAssertTrue(list.staticTexts["Museum hours"].waitForExistence(timeout: 5))
+            XCTAssertTrue(app.buttons["Mark All Seen"].exists)
+            XCTAssertFalse(list.staticTexts["Community garden"].exists)
+            capture("Inbox FYIs after switching back", app)
+        }
+    }
+
+    func testSeenFYICanBeFoundInRepliedSearch() {
+        let isPad = UIDevice.current.userInterfaceIdiom == .pad
+        let app = XCUIApplication()
+        app.launchArguments = ["--harklight-test-fyi-list", "--harklight-test-fyi-plain-seen"]
+        app.launch()
+        defer { app.terminate() }
+
+        if !isPad, app.buttons["fyi-sort"].exists {
+            workspaceBackButton(in: app).tap()
+        }
+        workspaceTab("Replied", in: app).tap()
+        let field = workspaceSearchField(in: app)
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        field.tap()
+        field.typeText("Community garden")
+        let result = app.descendants(matching: .any)["request-row-legacy/fyi-garden"].firstMatch
+        XCTAssertTrue(result.waitForExistence(timeout: 5))
+        result.tap()
+        let heading = app.buttons["request-heading"]
+        XCTAssertTrue(heading.waitForExistence(timeout: 5))
+        XCTAssertTrue(heading.label.contains("Community garden"))
+    }
+
+    func testLargeRepliedFYIListOpensAndScrolls() {
+        let isPad = UIDevice.current.userInterfaceIdiom == .pad
+        if isPad { XCUIDevice.shared.orientation = .landscapeLeft }
+        let app = XCUIApplication()
+        app.launchArguments = ["--harklight-test-fyi-list", "--harklight-test-fyi-bulk-replied"]
+        app.launch()
+        defer { app.terminate() }
+
+        let replied = workspaceTab("Replied", in: app)
+        XCTAssertTrue(replied.waitForExistence(timeout: 10))
+        replied.tap()
+        let card = app.buttons["replied-fyi"]
+        guard card.waitForExistence(timeout: 10) else {
+            XCTFail("The bulk Replied card is missing.")
+            return
+        }
+        let start = ProcessInfo.processInfo.systemUptime
+        card.tap()
+        let list = app.collectionViews["fyi-list"]
+        let first = list.staticTexts["Bulletin 1034"]
+        XCTAssertTrue(first.waitForExistence(timeout: 5))
+        let opened = ProcessInfo.processInfo.systemUptime
+        list.swipeUp()
+        XCTAssertFalse(first.isHittable)
+        let scrolled = ProcessInfo.processInfo.systemUptime
+        if isPad {
+            for _ in 0..<2 {
+                workspaceTab("Inbox", in: app).tap()
+                XCTAssertTrue(list.staticTexts["Community garden"].waitForExistence(timeout: 5))
+                replied.tap()
+                XCTAssertTrue(list.waitForExistence(timeout: 5))
+                XCTAssertFalse(app.buttons["Mark All Seen"].exists)
+            }
+        }
+        let switched = ProcessInfo.processInfo.systemUptime
+        print("900 Seen FYIs: open \((opened - start) * 1000) ms, swipe and inspect \((scrolled - opened) * 1000) ms, switch round trips \((switched - scrolled) * 1000) ms")
+    }
+
+    func testIPadTabSwitchClearsOtherSideDetailAndRemembersOrdinarySelection() throws {
+        guard UIDevice.current.userInterfaceIdiom == .pad else { throw XCTSkip("Regular iPad split view") }
+        XCUIDevice.shared.orientation = .landscapeLeft
+        let app = XCUIApplication()
+        app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
+        app.launch()
+        defer { app.terminate() }
+
+        let facilities = app.descendants(matching: .any)["request-row-facilities-01"]
+        XCTAssertTrue(facilities.waitForExistence(timeout: 5))
+        facilities.tap()
+        let heading = app.buttons["request-heading"]
+        XCTAssertTrue(heading.waitForExistence(timeout: 5))
+        XCTAssertTrue(heading.label.contains("Facilities desk"))
+        workspaceTab("Replied", in: app).tap()
+        XCTAssertFalse(heading.exists)
+        workspaceTab("Inbox", in: app).tap()
+        XCTAssertTrue(heading.waitForExistence(timeout: 5))
+        XCTAssertTrue(heading.label.contains("Facilities desk"))
+    }
+
     func testLargeFYIListOpensAndScrolls() {
         if UIDevice.current.userInterfaceIdiom == .pad { XCUIDevice.shared.orientation = .landscapeLeft }
         let app = XCUIApplication()

@@ -468,12 +468,71 @@ final class InboxVisualRulesTests: XCTestCase {
     }
 
     @MainActor
-    func testSettledPlainFYIsRemainInInboxWithoutBadgeAttention() throws {
+    func testSettledPlainFYIsJoinRepliedWithoutBadgeAttention() throws {
         let store = try NativeAppLaunch.makeFYITestStore(gardenSeen: true, museumSeen: true)
         XCTAssertEqual(store.inboxRows.count, 2)
-        XCTAssertTrue(store.inboxRows.allSatisfy { !$0.belongsToReplied })
+        XCTAssertTrue(store.inboxRows.allSatisfy { $0.isRepliedFYI && $0.belongsToReplied })
         XCTAssertEqual(InboxBadge.count(requests: store.inboxRows, samples: SampleLibrary(),
                                        showsLocalExamples: false), 0)
+    }
+
+    @MainActor
+    func testFYIPlacementUsesAuthoritativeSeenAndKeepsOrdinaryAnswersUngrouped() {
+        var opened = fyiRow("Opened")
+        opened.fyiServerSeen = true
+        opened.fyiHasEnded = true
+        var answeredOtherwise = opened
+        answeredOtherwise.fyiAnsweredOtherwise = true
+        answeredOtherwise.informationalSeenStatus = .resolvedWithoutSeen
+        answeredOtherwise.hasUserAction = true
+        var pending = fyiRow("Waiting")
+        pending.informationalSeenStatus = .pending
+        var liveProgress = opened
+        liveProgress.fyiHasEnded = false
+        liveProgress.hasProgressMarker = true
+        var confirmed = fyiRow("Confirmed")
+        confirmed.declaredMessageType = nil
+        confirmed.fyiServerSeen = false
+        confirmed.informationalSeenStatus = .confirmed
+
+        XCTAssertTrue(opened.isRepliedFYI)
+        XCTAssertTrue(confirmed.isRepliedFYI)
+        XCTAssertFalse(answeredOtherwise.isRepliedFYI)
+        XCTAssertTrue(answeredOtherwise.belongsToReplied)
+        XCTAssertFalse(liveProgress.isRepliedFYI)
+        XCTAssertFalse(liveProgress.isActiveFYI)
+        XCTAssertTrue(pending.isActiveFYI)
+        XCTAssertFalse(pending.isRepliedFYI)
+        XCTAssertTrue(pending.belongsToReplied)
+        opened.fyiHasEnded = false
+        opened.fyiServerSeen = false
+        XCTAssertTrue(opened.isActiveFYI)
+    }
+
+    @MainActor
+    func testLargeSeenFYIGroupRemainsSearchableAndDoesNotCountAsUnseen() {
+        var seen = (0..<900).map { index in
+            var row = fyiRow("Seen bulletin \(index)")
+            row.informationalSeenStatus = .confirmed
+            row.fyiServerSeen = false
+            return row
+        }
+        let inbox = (0..<100).map { fyiRow("New bulletin \($0)") }
+        let start = DispatchTime.now().uptimeNanoseconds
+        let rows = seen + inbox
+        XCTAssertEqual(FYIOrder.priority.sorted(rows.filter(\.isRepliedFYI)).count, 900)
+        XCTAssertEqual(rows.filter(\.isActiveFYI).count, 100)
+        XCTAssertEqual(FYIDigest.highlights(rows).count, 4)
+        XCTAssertEqual(InboxBadge.count(requests: rows, samples: SampleLibrary(), showsLocalExamples: false), 100)
+        XCTAssertEqual(InboxListProjection.filteredRows(rows.map(InboxItem.request),
+            in: .replied, search: "Seen bulletin 899").count, 1)
+        let destination = InboxNotificationDestination(route: NativeInboxNavigation(serial: 1, request: seen[0].key),
+            rows: rows.map(InboxItem.request), usesFreeOrder: true)
+        XCTAssertEqual(destination.workspaceTab, .replied)
+        seen[0].informationalSeenStatus = .available
+        XCTAssertTrue(seen[0].isActiveFYI)
+        XCTAssertFalse(seen[0].isRepliedFYI)
+        print("FYI 900 Seen + 100 Inbox: sort, search, digest, badge and move \(Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000) ms")
     }
 
     @MainActor

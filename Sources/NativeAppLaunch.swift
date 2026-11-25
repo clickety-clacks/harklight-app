@@ -173,7 +173,9 @@ final class NativeAppLaunch {
                 gardenSeen: arguments.contains("--harklight-test-fyi-garden-seen") ||
                     arguments.contains("--harklight-test-fyi-plain-seen"),
                 museumSeen: arguments.contains("--harklight-test-fyi-plain-seen"),
-                includeBulk: arguments.contains("--harklight-test-fyi-bulk")) {
+                includeBulk: arguments.contains("--harklight-test-fyi-bulk"),
+                repliedFixture: arguments.contains("--harklight-test-fyi-tab-switch"),
+                includeBulkReplied: arguments.contains("--harklight-test-fyi-bulk-replied")) {
                 state = .live(seeded)
                 isIsolatedRelayTestSeed = true
             } else {
@@ -1301,7 +1303,7 @@ private extension PresentedRequest {
         if isResolved || informationalSeenStatus == .confirmed || informationalSeenStatus == .resolvedWithoutSeen {
             return true
         }
-        return fyiInboxEntry?.itemSeen == true && (messageProgress != nil || informationalSeenStatus == nil)
+        return fyiInboxEntry?.itemSeen == true && informationalSeenStatus != .pending
     }
 }
 
@@ -2660,6 +2662,9 @@ final class LivePresentationStore {
             defaultAnswerStatus: request.defaultAnswerStatusText)
 
         if row.isFYI {
+            row.fyiGroupingEnabled = !isReadOnly
+            row.fyiAnsweredOtherwise = (request.lifecycleStatus == .answered || request.lifecycleStatus == .noComment) &&
+                request.informationalSeenStatus != .confirmed
             row.fyiHasEnded = retracted || request.isResolved ||
                 request.informationalSeenStatus == .resolvedWithoutSeen
             row.fyiUsesRepliedForProgress = !isReadOnly && progress != nil &&
@@ -2832,7 +2837,7 @@ final class LivePresentationStore {
     /// operation is stored before any best-effort relay send; a reconnect will
     /// retry it with the same message identity and revision.
     func reportMessageContentOpened(_ request: PresentedRequest) {
-        if request.messageProgress != nil, request.isFYIRequest, request.isSettledFYIRequest { return }
+        if request.isFYIRequest, request.isSettledFYIRequest { return }
         // Opening Progress with an explicit Seen response leaves acknowledgement
         // to the Seen controls. Plain FYIs retain their ordinary open behavior.
         if request.messageProgress != nil, !request.isResolved,
@@ -4431,10 +4436,11 @@ extension NativeAppLaunch {
     static func makeFYITestStore(includeProgress: Bool = false, progressPercent: Int? = nil,
                                  progressSeen: Bool = false, progressTerminal: String = "",
                                  gardenSeen: Bool = false, museumSeen: Bool = false,
-                                 includeBulk: Bool = false) throws -> LivePresentationStore {
+                                 includeBulk: Bool = false, repliedFixture: Bool = false,
+                                 includeBulkReplied: Bool = false) throws -> LivePresentationStore {
         // Measure the large list opening from Inbox, free of the other fixture's restored selection.
-        let personID = includeBulk || !progressTerminal.isEmpty
-            ? ExactText(UUID().uuidString) : ExactText("fyi-fixture")
+        let personID = includeBulk || includeBulkReplied || !progressTerminal.isEmpty
+            ? ExactText(UUID().uuidString) : ExactText(repliedFixture ? "fyi-tab-fixture" : "fyi-fixture")
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("fixture.invalid"),
             personID: personID, deviceID: ExactText("fixture-device"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
@@ -4474,7 +4480,11 @@ extension NativeAppLaunch {
         try model.apply([ServerModelV2Store.Change(rev: 5, kind: "item_removed",
             data: Data(#"{"item_id":"gone"}"#.utf8))], cursor: 5)
         try model.apply(olderPage)
-        if includeBulk {
+        if includeBulkReplied {
+            let active = fyiBulkTestChanges(indices: 0..<135, firstRevision: 6, openCount: 135)
+            let seen = fyiBulkTestChanges(indices: 135..<1035, firstRevision: 141, openCount: 0, allSeen: true)
+            try model.apply(active + seen, cursor: 1040)
+        } else if includeBulk {
             try model.apply(fyiBulkTestChanges(indices: 0..<840, firstRevision: 6, openCount: 135), cursor: 845)
         }
         let cached = ServerModelV2Projection.cachedState(model.snapshot, identity: identity)
@@ -4484,14 +4494,14 @@ extension NativeAppLaunch {
     }
 
     static func fyiBulkTestChanges(indices: Range<Int>, firstRevision: Int,
-                                   openCount: Int) -> [ServerModelV2Store.Change] {
+                                   openCount: Int, allSeen: Bool = false) -> [ServerModelV2Store.Change] {
         func item(_ index: Int, revision: Int, ended: Bool) -> String {
             let type = index.isMultiple(of: 2) ? #""message_type":"fyi","# : ""
             let terminal: String
             if !ended { terminal = "" }
-            else if index.isMultiple(of: 7) { terminal = #","terminal":{"state":"superseded","at_ms":1700000003000}"# }
-            else if index.isMultiple(of: 11) { terminal = #","terminal":{"state":"retracted","at_ms":1700000003000}"# }
-            else if index.isMultiple(of: 13) { terminal = #","terminal":{"state":"expired","at_ms":1700000003000}"# }
+            else if !allSeen && index.isMultiple(of: 7) { terminal = #","terminal":{"state":"superseded","at_ms":1700000003000}"# }
+            else if !allSeen && index.isMultiple(of: 11) { terminal = #","terminal":{"state":"retracted","at_ms":1700000003000}"# }
+            else if !allSeen && index.isMultiple(of: 13) { terminal = #","terminal":{"state":"expired","at_ms":1700000003000}"# }
             else { terminal = #","terminal":{"state":"answered","at_ms":1700000003000,"answer":{"kind":"seen"}}"# }
             return #"""
             {"item_id":"fyi-\#(index)","rev":\#(revision),"sender":"fixture:community",
