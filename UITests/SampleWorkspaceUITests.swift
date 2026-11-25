@@ -153,7 +153,10 @@ final class SampleWorkspaceUITests: XCTestCase {
         defer { app.terminate() }
 
         let digest = app.descendants(matching: .any)["inbox-fyi"].firstMatch
-        XCTAssertTrue(digest.waitForExistence(timeout: 10))
+        guard digest.waitForExistence(timeout: 10) else {
+            XCTFail("The bulk fixture should start in Inbox. " + app.debugDescription)
+            return
+        }
         XCTAssertTrue(digest.label.contains("137 unseen") || app.staticTexts["137 unseen"].exists)
         let start = ProcessInfo.processInfo.systemUptime
         openFYIListIfNeeded(app)

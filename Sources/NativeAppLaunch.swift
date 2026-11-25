@@ -4410,8 +4410,10 @@ extension NativeAppLaunch {
                                  progressSeen: Bool = false, progressTerminal: String = "",
                                  gardenSeen: Bool = false, museumSeen: Bool = false,
                                  includeBulk: Bool = false) throws -> LivePresentationStore {
+        // Measure the large list opening from Inbox, free of the other fixture's restored selection.
+        let personID = includeBulk ? ExactText(UUID().uuidString) : ExactText("fyi-fixture")
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("fixture.invalid"),
-            personID: ExactText("fyi-fixture"), deviceID: ExactText("fixture-device"))
+            personID: personID, deviceID: ExactText("fixture-device"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
         let model = ServerModelV2Store(fileURL: nil)
         // Separate pages with opaque server and legacy-shaped identifiers. The
