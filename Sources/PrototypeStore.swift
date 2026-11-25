@@ -99,8 +99,6 @@ final class PrototypeStore {
         } catch {
             let empty = FixtureSet(accountScope: ExactText("fictional-sample-account"),
                                   requests: [],
-                                  legacyValueConformanceVectors: [],
-                                  legacyTextConformanceVectors: [],
                                   validSubmissions: [],
                                   invalidSubmissions: [],
                                   pointVectors: [],

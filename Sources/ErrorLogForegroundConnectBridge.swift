@@ -16,8 +16,7 @@ enum ErrorLogForegroundConnectBridge {
             concern: .sync,
             connectionRole: .stream,
             operation: operation,
-            phase: progress.postAckFailureStep?.rawValue
-                ?? progress.lastConfirmedStage?.diagnosticValue ?? "none_confirmed",
+            phase: progress.lastConfirmedStage?.diagnosticValue ?? "none_confirmed",
             reason: reason(for: progress),
             initiator: initiator(for: progress),
             retryable: true,
@@ -39,9 +38,7 @@ enum ErrorLogForegroundConnectBridge {
     }
 
     static func reason(for progress: NativeForegroundConnectProgress) -> ErrorLogReason {
-        // The post-ACK code and the observed error's cause are already
-        // allowlisted tokens such as `posix_error_code_89`.
-        let token = progress.postAckFailureErrorCode ?? progress.errorDetails?.cause
+        let token = progress.errorDetails?.cause
         if let token, let parsed = numericReason(from: token) { return parsed }
         if let token { return .app(token) }
         if let failure = progress.failureClass { return .app(failure.diagnosticValue) }

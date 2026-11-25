@@ -6,24 +6,6 @@ import XCTest
 @testable import Harklight
 
 final class ServerCacheReplacementTests: XCTestCase {
-    func testBothInitialAndOlderServerPagesMayContainMoreThanTwentyItems() throws {
-        let context = context()
-        let repository = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
-        let items = (1...42).map { index in
-            InboxSnapshotItem(acceptance: RelayEvent(sequence: UInt64(index),
-                body: .delivery(request(key("row-\(index)", context: context), title: "Row \(index)"), .message)),
-                terminal: nil)
-        }
-        _ = try repository.beginInboxCandidate(startupID: "large-pages", since: 0, batches: [], context: context)
-        try repository.saveInboxInitialPage(snapshotID: "large-pages", highWater: 42,
-            items: Array(items.prefix(21)), nextCursor: "older", receiptCursor: nil, context: context)
-        _ = try repository.prepareInboxCheckpointAcknowledgement(context: context)
-        _ = try repository.acceptInboxCheckpoint(snapshotID: "large-pages", highWater: 42, context: context)
-        try repository.saveInboxOlderPage(snapshotID: "large-pages", highWater: 42, cursor: "older",
-            items: Array(items.suffix(21)), nextCursor: nil, context: context)
-        XCTAssertEqual(try repository.snapshot(context: context).requests.count, 42)
-    }
-
 
     func testSnapshotReplacesChangedPayloadAndAcceptanceOrderWithoutStoppingOtherRows() throws {
         let context = context()
@@ -32,43 +14,32 @@ final class ServerCacheReplacementTests: XCTestCase {
         let repository = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
         _ = try repository.apply(RelayEvent(sequence: 1,
             body: .delivery(request(first, title: "Cached"), .message)), context: context)
-        _ = try repository.beginInboxCandidate(startupID: UUID().uuidString,
-            since: 1, batches: [], context: context)
-
-        try repository.saveInboxInitialPage(snapshotID: UUID().uuidString,
-            highWater: 3, items: [
-                InboxSnapshotItem(acceptance: RelayEvent(sequence: 2,
-                    body: .delivery(request(first, title: "Server"), .message))),
-                InboxSnapshotItem(acceptance: RelayEvent(sequence: 3,
-                    body: .delivery(request(second, title: "Other request"), .message)))
-            ], nextCursor: nil, receiptCursor: nil, context: context)
+        let model = ServerModelV2Store(fileURL: nil)
+        try model.apply([
+            v2CacheItem(first, message: request(first, title: "Server").originalPayload, revision: 2),
+            v2CacheItem(second, message: request(second, title: "Other request").originalPayload, revision: 3)
+        ], cursor: 3, onUnreadable: { _, error in throw error })
+        let replacement = ServerModelV2Projection.cachedState(model.snapshot, identity: context.identity)
+        try repository.restoreCachedServerState(replacement, context: context)
 
         let state = try repository.snapshot(context: context)
-        XCTAssertEqual(state.requests[first]?.originalPayload, request(first, title: "Server").originalPayload)
-        XCTAssertEqual(state.requests[first]?.acceptanceOrder, 2)
-        XCTAssertEqual(state.requests[second]?.acceptanceOrder, 3)
-        XCTAssertTrue(state.inboxCandidate?.hasInitialPage == true)
+        XCTAssertEqual(state.requests[first]?.originalPayload.uniqueValue(named: "title"), .string(ExactText("Server")))
+        XCTAssertLessThan(try XCTUnwrap(state.requests[first]?.acceptanceOrder),
+                          try XCTUnwrap(state.requests[second]?.acceptanceOrder))
     }
 
 
-    func testRefreshKeepsCacheUntilServerRespondsThenReplacesItEvenWhenEmpty() throws {
+    func testEmptyServerSnapshotReplacesCache() throws {
         let context = context()
         let cachedKey = key("cached", context: context)
         let repository = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
         _ = try repository.apply(RelayEvent(sequence: 1,
             body: .delivery(request(cachedKey, title: "Last server value"), .message)), context: context)
 
-        _ = try repository.beginInboxCandidate(startupID: "unanswered-start", since: 1,
-            batches: [], context: context)
         XCTAssertNotNil(try repository.snapshot(context: context).requests[cachedKey])
-        try repository.discardInboxCandidate(context: context)
-        XCTAssertNotNil(try repository.snapshot(context: context).requests[cachedKey],
-                        "A request without a server response cannot erase cached content.")
-
-        _ = try repository.beginInboxCandidate(startupID: "empty-server-snapshot", since: 1,
-            batches: [], context: context)
-        try repository.saveInboxInitialPage(snapshotID: "empty", highWater: 1,
-            items: [], nextCursor: nil, receiptCursor: nil, context: context)
+        try repository.restoreCachedServerState(CachedAttentionServerState(identity: context.identity,
+            requests: [:], remoteStates: [:], cursor: 1, conversationCursor: 0,
+            conversations: [:], inboxView: nil, currentRequestKeys: []), context: context)
         XCTAssertTrue(try repository.snapshot(context: context).requests.isEmpty,
                       "The server's empty replacement must not fall back to the old cache.")
     }
@@ -234,10 +205,13 @@ final class ServerCacheReplacementTests: XCTestCase {
         let context = context()
         let key = key("answer", context: context)
         let payload = try JSONValue.parse(Data(#"{"title":"Question","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"yes","label":"Yes","kind":"value","value":"yes"}]}}"#.utf8))
-        let request = StoredRequest(key: key, originalPayload: payload)
+        let model = ServerModelV2Store(fileURL: nil)
+        try model.apply([v2CacheItem(key, message: payload, revision: 1)], cursor: 1,
+                        onUnreadable: { _, error in throw error })
         let persistence = MemoryPendingActionPersistence()
         let first = try ClientRepository(context: context, persistence: persistence)
-        _ = try first.apply(RelayEvent(sequence: 1, body: .delivery(request, .message)), context: context)
+        try first.restoreCachedServerState(
+            ServerModelV2Projection.cachedState(model.snapshot, identity: context.identity), context: context)
         let port = AttentionDomainPort(store: first)
         let selector = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first?.selector)
         let receipt = try port.submit(SubmitIntent(context: port.context, selector: selector,
@@ -249,26 +223,17 @@ final class ServerCacheReplacementTests: XCTestCase {
         XCTAssertEqual(restored.operationID, queued.operationID)
         XCTAssertEqual(restored.wireFrame, queued.wireFrame)
         XCTAssertTrue(try restarted.snapshot(context: context).requests.isEmpty)
-        // The saved operation is reported to the Server with the snapshot request.
-        let batch = InboxReceiptBatch(batchID: "saved-answer", operationIDs: [queued.operationID])
-        _ = try restarted.beginInboxCandidate(startupID: UUID().uuidString, since: 0,
-            batches: [batch], context: context)
-        let snapshotID = UUID().uuidString
-        let answered = RelayEvent(sequence: 2, body: .terminal(key, .answered, nil),
-            accountAnswerOutcome: .reply(ExactText("Server answer")))
-        try restarted.saveInboxInitialPage(snapshotID: snapshotID, highWater: 2,
-            items: [InboxSnapshotItem(acceptance: RelayEvent(sequence: 1,
-                body: .delivery(request, .message)), terminal: answered)],
-            nextCursor: nil, receiptCursor: nil, context: context)
-        try restarted.saveInboxReceiptBatch(batch.batchID, results: [InboxOperationReceipt(
-            operationID: queued.operationID, status: .notCommittedAtSnapshot)], context: context)
-        _ = try restarted.prepareInboxCheckpointAcknowledgement(context: context)
-        _ = try restarted.acceptInboxCheckpoint(snapshotID: snapshotID, highWater: 2, context: context)
+        let terminal = try JSONValue.parse(Data(
+            #"{"state":"answered","at_ms":2,"by_this_person":true,"answer":{"kind":"reply","text":"Server answer"}}"#.utf8))
+        try model.apply([v2CacheItem(key, message: payload, revision: 2, terminal: terminal)], cursor: 2,
+                        onUnreadable: { _, error in throw error })
+        try restarted.restoreCachedServerState(
+            ServerModelV2Projection.cachedState(model.snapshot, identity: context.identity), context: context)
 
         XCTAssertThrowsError(try restarted.queueOriginalOperationForUserTap(receipt.intentID, context: context)) {
-            XCTAssertEqual($0 as? AttentionStoreError, .intentMissing)
+            XCTAssertEqual($0 as? AttentionStoreError, .requestClosed)
         }
-        XCTAssertNil(try restarted.lookupIntent(receipt.intentID, context: context))
+        try restarted.queueRecoverableOperations(context: context)
         XCTAssertTrue(try restarted.snapshot(context: context).outbox.isEmpty)
         let currentPort = AttentionDomainPort(store: restarted)
         let shown = try XCTUnwrap(currentPort.inspect(context: currentPort.context, request: key).requests.first)
@@ -291,20 +256,11 @@ final class ServerCacheReplacementTests: XCTestCase {
             intentID: UUID(), inputs: [.compatibilityValue(action: ExactText("yes"))]))
         let restarted = try ClientRepository(context: context, persistence: persistence)
         let operationID = try XCTUnwrap(restarted.lookupIntent(receipt.intentID, context: context)).operationID
-        let batch = InboxReceiptBatch(batchID: "saved-answer", operationIDs: [operationID])
-        _ = try restarted.beginInboxCandidate(startupID: "fresh", since: 0, batches: [batch], context: context)
-        try restarted.saveInboxInitialPage(snapshotID: "fresh", highWater: 2,
-            items: [InboxSnapshotItem(acceptance: RelayEvent(sequence: 2,
-                body: .delivery(StoredRequest(key: other, originalPayload: payload), .message)))],
-            nextCursor: "older", receiptCursor: nil, context: context)
-        try restarted.saveInboxReceiptBatch(batch.batchID, results: [InboxOperationReceipt(
-            operationID: operationID, status: .notCommittedAtSnapshot)], context: context)
-        _ = try restarted.prepareInboxCheckpointAcknowledgement(context: context)
-        _ = try restarted.acceptInboxCheckpoint(snapshotID: "fresh", highWater: 2, context: context)
-        XCTAssertNotNil(try restarted.lookupIntent(receipt.intentID, context: context),
-                        "An unloaded page does not prove the request is gone.")
-        try restarted.saveInboxOlderPage(snapshotID: "fresh", highWater: 2,
-            cursor: "older", items: [], nextCursor: nil, context: context)
+        let model = ServerModelV2Store(fileURL: nil)
+        try model.apply([v2CacheItem(other, message: payload, revision: 2)], cursor: 2,
+                        onUnreadable: { _, error in throw error })
+        try restarted.restoreCachedServerState(
+            ServerModelV2Projection.cachedState(model.snapshot, identity: context.identity), context: context)
         XCTAssertEqual(try restarted.lookupIntent(receipt.intentID, context: context)?.operationID, operationID,
                        "A complete snapshot without the request is not the Server's outcome for the queued answer.")
         let again = try ClientRepository(context: context, persistence: persistence)
@@ -325,39 +281,28 @@ final class ServerCacheReplacementTests: XCTestCase {
 
     private func assertChangedInterfaceCanSubmit(_ payload: JSONValue,
                                                  inputs: [TypedInputRecord]) throws {
-        for viaPage in [false, true] {
-            let context = context()
-            let key = key("changed-draft", context: context)
-            let repository = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
-            if viaPage {
-                _ = try repository.beginInboxCandidate(startupID: UUID().uuidString, since: 0,
-                    batches: [], context: context)
-            }
-            let oldPayload = try JSONValue.parse(Data(#"{"title":"Old form","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"old-text","label":"Old","kind":"text"}]}}"#.utf8))
-            _ = try repository.apply(RelayEvent(sequence: 1,
-                body: .delivery(StoredRequest(key: key, originalPayload: oldPayload), .message)), context: context)
-            let port = AttentionDomainPort(store: repository)
-            let oldSelector = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first?.selector)
-            let oldDraft = RequestDraft(inputs: [:], compatibility: CompatibilityDraft(
-                selectedActionID: ExactText("old-text"), textByActionID: [ExactText("old-text"): ExactText("Earlier edit")]))
-            try repository.saveDraft(oldDraft, selector: oldSelector, context: context)
-            let replacement = StoredRequest(key: key, originalPayload: payload)
-            let event = RelayEvent(sequence: 2, body: .delivery(replacement, .message))
-            if viaPage {
-                try repository.saveInboxInitialPage(snapshotID: UUID().uuidString, highWater: 2,
-                    items: [InboxSnapshotItem(acceptance: event)], nextCursor: nil, receiptCursor: nil, context: context)
-            } else {
-                _ = try repository.apply(event, context: context)
-            }
-            XCTAssertEqual(try repository.snapshot(context: context).drafts[key],
-                           RequestDraft(interface: replacement.interface))
-            let shown = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first)
-            let selector = try XCTUnwrap(shown.selector)
-            let receipt = try port.submit(SubmitIntent(context: port.context, selector: selector,
-                intentID: UUID(), inputs: inputs))
-            XCTAssertEqual(receipt.inputs, inputs, "The fresh current interface must accept the new tap.")
-            XCTAssertNotNil(try repository.lookupIntent(receipt.intentID, context: context))
-        }
+        let context = context()
+        let key = key("changed-draft", context: context)
+        let repository = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        let oldPayload = try JSONValue.parse(Data(#"{"title":"Old form","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"old-text","label":"Old","kind":"text"}]}}"#.utf8))
+        _ = try repository.apply(RelayEvent(sequence: 1,
+            body: .delivery(StoredRequest(key: key, originalPayload: oldPayload), .message)), context: context)
+        let port = AttentionDomainPort(store: repository)
+        let oldSelector = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first?.selector)
+        let oldDraft = RequestDraft(inputs: [:], compatibility: CompatibilityDraft(
+            selectedActionID: ExactText("old-text"), textByActionID: [ExactText("old-text"): ExactText("Earlier edit")]))
+        try repository.saveDraft(oldDraft, selector: oldSelector, context: context)
+        let replacement = StoredRequest(key: key, originalPayload: payload)
+        let event = RelayEvent(sequence: 2, body: .delivery(replacement, .message))
+        _ = try repository.apply(event, context: context)
+        XCTAssertEqual(try repository.snapshot(context: context).drafts[key],
+                       RequestDraft(interface: replacement.interface))
+        let shown = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first)
+        let selector = try XCTUnwrap(shown.selector)
+        let receipt = try port.submit(SubmitIntent(context: port.context, selector: selector,
+            intentID: UUID(), inputs: inputs))
+        XCTAssertEqual(receipt.inputs, inputs, "The fresh current interface must accept the new tap.")
+        XCTAssertNotNil(try repository.lookupIntent(receipt.intentID, context: context))
     }
 
     func testServerRetractionReplacesEarlierOperationRefusalTimestamp() throws {
@@ -421,6 +366,17 @@ final class ServerCacheReplacementTests: XCTestCase {
     private func request(_ key: RequestKey, title: String) -> StoredRequest {
         StoredRequest(key: key, originalPayload: .object([JSONMember("title", .string(ExactText(title)))]))
     }
+}
+
+func v2CacheItem(_ key: RequestKey, message: JSONValue, revision: UInt64,
+                 terminal: JSONValue? = nil) -> ServerModelV2Store.Change {
+    let json = """
+    {"item_id":\(JSONValue.string(key.messageID).jsonString),"rev":\(revision),
+     "sender":\(JSONValue.string(key.senderID).jsonString),"request_revision":1,
+     "message":\(message.jsonString),"files":[],"seen":false,"chat":{"started":false},
+     "rank":{"key":"a","section":"current"},"terminal":\(terminal?.jsonString ?? "null")}
+    """
+    return .init(rev: revision, kind: "item", data: Data(json.utf8))
 }
 
 /// Only the historical user-input field names matter. These deliberately
@@ -509,5 +465,48 @@ final class SavedStateRecoveryPresentationTests: XCTestCase {
                        "Counts and known section names are kept; anything else is not recorded.")
         XCTAssertTrue(reloaded.shareText.contains("dropped_entries=2"))
         XCTAssertTrue(reloaded.shareText.contains("lost_sections=readPositions"))
+    }
+}
+
+
+// The focused upgrade run seeds this sandbox by running build 356's source on
+// the same simulator. Ordinary unit runs do not make or reuse enrollment state.
+@MainActor
+final class Build356StoreUpgradeTests: XCTestCase {
+    func testOpensBuild356AccountInboxAndDrafts() throws {
+        let directory = try FileManager.default.url(for: .documentDirectory, in: .userDomainMask,
+            appropriateFor: nil, create: false).appendingPathComponent("Build356Fixture", isDirectory: true)
+        let writer = directory.appendingPathComponent("writer-build")
+        guard FileManager.default.fileExists(atPath: writer.path) else {
+            throw XCTSkip("Requires the synthetic sandbox written by build 356.")
+        }
+        XCTAssertEqual(try String(contentsOf: writer, encoding: .utf8), "356")
+        let enrollment = NativeEnrollmentStore(service: "harklight-build-356-upgrade-test")
+        let record = try XCTUnwrap(enrollment.load())
+        let material = try enrollment.material(from: record)
+        let context = material.context
+        XCTAssertEqual(context.identity.trustedRelayAuthority, ExactText("relay.example.test"))
+        XCTAssertEqual(context.identity.personID, ExactText("synthetic-account"))
+        XCTAssertEqual(context.identity.deviceID, ExactText(record.deviceID))
+
+        let model = ServerModelV2Store(fileURL: directory.appendingPathComponent("server-model-v2.json"))
+        XCTAssertEqual(model.snapshot.items.count, 1)
+        let repository = try ClientRepository(context: context,
+            persistence: FilePendingActionPersistence(directoryURL: directory))
+        try repository.migratePendingItemActionsToClientAPI(context: context)
+        try repository.restoreCachedServerState(
+            ServerModelV2Projection.cachedState(model.snapshot, identity: context.identity), context: context)
+
+        let key = RequestKey(accountScope: context.identity.personID,
+            senderID: ExactText("fixture-sender"), messageID: ExactText("fixture-item"))
+        let live = try LivePresentationStore(store: repository, context: context)
+        XCTAssertEqual(live.presentation.requests.map(\.key), [key])
+        let port = AttentionDomainPort(store: repository)
+        let shown = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first)
+        XCTAssertEqual(shown.title, ExactText("Build 356 question"))
+        XCTAssertNotNil(shown.selector)
+        XCTAssertEqual(try repository.snapshot(context: context).drafts[key]?
+            .compatibility.textByActionID[ExactText("reply")], ExactText("Build 356 answer draft"))
+        XCTAssertEqual(live.conversationDraft(for: key, revision: 1).text, ExactText("Build 356 conversation draft"))
     }
 }

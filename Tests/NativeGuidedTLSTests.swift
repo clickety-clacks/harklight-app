@@ -278,42 +278,6 @@ final class NativeGuidedTLSTests: XCTestCase {
         XCTAssertFalse(restored.shareText.contains("secret-marker"))
     }
 
-    func testPostAckFailureJournalRetainsBoundedStepAndErrorCode() throws {
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("HarklightPostAckFailure-\(UUID().uuidString).json")
-        defer { try? FileManager.default.removeItem(at: url) }
-        let journal = NativeClientDiagnosticJournal(fileURL: url)
-        let code = "url_session_error_code_-1005"
-        let event = NativeClientDiagnosticEvent(
-            area: .relay,
-            phase: .postAckDrain,
-            transition: .failed,
-            causeCode: code,
-            postAckFailureStep: .drainPendingOperations,
-            postAckFailureErrorCode: code,
-            id: UUID(),
-            occurredAtMilliseconds: 1)
-
-        journal.record(event)
-        let restored = NativeClientDiagnosticJournal(fileURL: url)
-        XCTAssertEqual(restored.events.first?.postAckFailureStep, .drainPendingOperations)
-        XCTAssertEqual(restored.events.first?.postAckFailureErrorCode, code)
-        XCTAssertTrue(restored.shareText.contains("post_ack_failure_step=drain_pending_operations"))
-        XCTAssertTrue(restored.shareText.contains("post_ack_failure_error_code=\(code)"))
-
-        let unsafeEvent = NativeClientDiagnosticEvent(
-            area: .relay,
-            phase: .postAckDrain,
-            transition: .failed,
-            postAckFailureStep: .drainPendingOperations,
-            postAckFailureErrorCode: "token=secret-marker",
-            id: UUID(),
-            occurredAtMilliseconds: 2)
-        journal.record(unsafeEvent)
-        XCTAssertFalse(journal.shareText.contains("secret-marker"))
-        XCTAssertTrue(journal.shareText.contains("post_ack_failure_error_code=unknown_error"))
-    }
-
     func testNoReplyJournalPersistsPayloadFreeOperationAndRoutingChain() throws {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("HarklightNoReplyChain-\(UUID().uuidString).json")
@@ -412,6 +376,34 @@ final class NativeGuidedTLSTests: XCTestCase {
                        .unavailable)
     }
 
+    func testClientDiagnosticJournalPreservesArchivedWebSocketEvent() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HarklightDiagnosticArchive-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let prior = UUID()
+        let saved = """
+        {"version":1,"events":[{"id":"\(prior.uuidString)","occurredAtMilliseconds":100,
+          "area":"connection","phase":"webSocketOpen","transition":"completed",
+          "causeCode":"websocket_opened"}]}
+        """
+        try Data(saved.utf8).write(to: url)
+        let journal = NativeClientDiagnosticJournal(fileURL: url)
+        XCTAssertEqual(journal.persistenceStatus, .saved)
+        XCTAssertEqual(journal.events.map(\.id), [prior])
+
+        let current = NativeClientDiagnosticEvent(area: .connection, phase: .foregroundCompletion,
+            transition: .completed, occurredAtMilliseconds: 200)
+        journal.record(current)
+        let restored = NativeClientDiagnosticJournal(fileURL: url)
+        XCTAssertEqual(restored.persistenceStatus, .saved)
+        XCTAssertEqual(restored.events.map(\.id), [prior, current.id])
+        XCTAssertTrue(restored.shareText.contains("cause=websocket_opened"))
+        let rewritten = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        let writtenEvents = try XCTUnwrap(rewritten["events"] as? [[String: Any]])
+        XCTAssertEqual(writtenEvents.compactMap { $0["phase"] as? String },
+                       ["archivedWebSocketOpen", "foregroundCompletion"])
+    }
+
     func testClientDiagnosticJournalKeepsCallbackHistoryInOccurrenceOrder() throws {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("HarklightDiagnosticOrder-\(UUID().uuidString).json")
@@ -420,8 +412,8 @@ final class NativeGuidedTLSTests: XCTestCase {
         let earlier = NativeClientDiagnosticEvent(area: .connection, phase: .serverTrust,
             transition: .completed, causeCode: "server_trust_validated",
             attemptID: UUID(), transportAttemptID: UUID(), id: UUID(), occurredAtMilliseconds: 100)
-        let later = NativeClientDiagnosticEvent(area: .connection, phase: .webSocketOpen,
-            transition: .completed, causeCode: "websocket_opened",
+        let later = NativeClientDiagnosticEvent(area: .connection, phase: .clientIdentity,
+            transition: .completed, causeCode: "client_identity_offered",
             attemptID: earlier.attemptID, transportAttemptID: earlier.transportAttemptID,
             id: UUID(), occurredAtMilliseconds: 200)
 

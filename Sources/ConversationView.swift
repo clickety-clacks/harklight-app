@@ -1138,8 +1138,7 @@ enum ConversationSentChatStatusPresentation {
                          availability: ConversationAvailabilityObservation? = nil, hasReply: Bool,
                          conversationAgentName: String, nowMilliseconds: UInt64,
                          personFeed: Bool = false, handoffCaptions: Bool = false) -> Delivery {
-        // On 0.2 Delivered records Server delivery, independently of handoff.
-        // Keep 0.1 receipt/acted precedence below unchanged.
+        // Server delivery and agent handoff are separate facts in the person feed.
         if personFeed, turn.author == .person, turn.kind == .discussion {
             let receiptEvidence = facts.personDelivery
             let receiptNotExpected = receiptEvidence?.receiptExpected == false

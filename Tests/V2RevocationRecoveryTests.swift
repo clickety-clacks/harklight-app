@@ -56,15 +56,12 @@ final class V2RevocationRecoveryTests: XCTestCase {
         XCTAssertEqual(try launch.recoveredUnsentText(for: archive), text)
         XCTAssertEqual(launch.guidedJoin.screen, .welcome)
 
-        // Reopening while approval is pending reloads the same read-only
+        // Reopening before re-enrollment reloads the same read-only
         // destination from the archive catalog, without an active account.
-        var pending = record
-        pending.personID = nil
-        pending.v2Revoked = nil
         let relaunched = NativeAppLaunch(arguments: [], enrollmentStore: enrollment, joinStore: join,
-            initialState: .enrollmentPending(pending), archivedPersistence: { persistence })
+            archivedPersistence: { persistence })
         await relaunched.restoreInstallation()
-        guard case .enrollmentPending = relaunched.state else { return XCTFail("Expected pending enrollment.") }
+        guard case .enrollmentRequired = relaunched.state else { return XCTFail("Expected invitation entry.") }
         let recovered = try XCTUnwrap(relaunched.enrollmentRecoveryArchives.first)
         XCTAssertEqual(recovered.archiveID, archive.archiveID)
         XCTAssertEqual(try relaunched.recoveredUnsentText(for: recovered), text)

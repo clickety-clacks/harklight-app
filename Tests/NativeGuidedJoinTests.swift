@@ -961,42 +961,38 @@ final class NativeGuidedJoinTests: XCTestCase {
         }
     }
 
-    func testOlderServerInvitationAsksForReplacementBeforeAnyRequest() async throws {
+    func testUnsupportedInvitationVersionIsRefusedBeforeAnyRequest() async throws {
         let fixture = try Fixture()
         defer { fixture.cleanup() }
         var fields = fixture.payload
-        fields["v"] = 1
-        fields.removeValue(forKey: "device_url")
-        fields["relay_url"] = "wss://relay.example.test:18443/relay"
+        fields["v"] = 3
         let data = try JSONSerialization.data(withJSONObject: fields)
         let encoded = data.base64EncodedString().replacingOccurrences(of: "+", with: "-")
             .replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
         let url = try XCTUnwrap(URL(string: "harklight://join#" + encoded))
         let transport = FakeTransport()
         transport.handler = { _, _, _ in
-            XCTFail("A v1 invitation must not reach the network.")
+            XCTFail("An unsupported invitation must not reach the network.")
             throw NativeJoinError.refused
         }
         let store = NativeGuidedJoinStore(namespace: fixture.namespace, transport: transport)
         let flow = NativeGuidedJoinCoordinator(store: store, deviceName: "My phone")
         await flow.receive(url)
         XCTAssertEqual(flow.screen, .refused)
-        XCTAssertEqual(flow.message, "This invitation is from an older Server. Ask the owner for a new invitation.")
+        XCTAssertEqual(flow.message, "Joining could not be confirmed. Ask the owner for help; your existing account and identity have been kept.")
         XCTAssertNil(try store.loadAttempt())
     }
 
-    func testSavedV1AttemptDoesNotBlockAReissuedInvitation() throws {
+    func testUnsupportedSavedInvitationDoesNotBlockAReissuedInvitation() throws {
         let fixture = try Fixture()
         defer { fixture.cleanup() }
         let store = NativeGuidedJoinStore(namespace: fixture.namespace, transport: FakeTransport())
         let prior = try store.prepare(fixture.invitation, deviceLabel: "My phone")
         fixture.retainForCleanup(prior)
         var saved = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(prior)) as? [String: Any])
-        var legacy = fixture.payload
-        legacy["v"] = 1
-        legacy.removeValue(forKey: "device_url")
-        legacy["relay_url"] = "wss://relay.example.test:18443/relay"
-        saved["invitation"] = legacy
+        var unsupported = fixture.payload
+        unsupported["v"] = 3
+        saved["invitation"] = unsupported
         try fixture.saveAttemptData(JSONSerialization.data(withJSONObject: saved))
 
         XCTAssertNil(try store.loadAttempt())
@@ -1985,22 +1981,6 @@ final class NativeGuidedJoinTests: XCTestCase {
         XCTAssertNoThrow(try JSONDecoder().decode(NativeEnrollmentRecord.self, from: recordJSON([:])))
         let reencoded = try JSONDecoder().decode(NativeEnrollmentRecord.self, from: JSONEncoder().encode(none))
         XCTAssertEqual(reencoded, none)
-    }
-
-    func testEnrollStartResponseAcceptsNullAndNumericExpiry() throws {
-        func decode(_ expiry: [String: Any]) throws -> NativeEnrollmentStore.StartResponse {
-            var fields: [String: Any] = ["approval_code": "ABCDEF2345", "status_secret": String(repeating: "a", count: 64)]
-            fields.merge(expiry) { $1 }
-            return try JSONDecoder().decode(NativeEnrollmentStore.StartResponse.self,
-                                            from: JSONSerialization.data(withJSONObject: fields))
-        }
-        let numeric = try decode(["expires_at": 1_700_000_000_000, "status_expires_at": 1_700_086_400_000])
-        XCTAssertEqual(numeric.expiresAt, 1_700_000_000_000)
-        XCTAssertEqual(numeric.statusExpiresAt, 1_700_086_400_000)
-        for none in [try decode(["expires_at": NSNull(), "status_expires_at": NSNull()]), try decode([:])] {
-            XCTAssertNil(none.expiresAt)
-            XCTAssertNil(none.statusExpiresAt)
-        }
     }
 
     private final class FakeTransport: NativeJoinTransport {

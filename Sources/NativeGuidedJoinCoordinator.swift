@@ -626,9 +626,6 @@ final class NativeGuidedJoinCoordinator {
     private func explain(_ error: Error) {
         approvalObservationCurrent = false
         switch error {
-        case NativeJoinInvitationError.olderServer:
-            screen = .refused
-            message = "This invitation is from an older Server. Ask the owner for a new invitation."
         case NativeJoinInvitationError.expired:
             screen = .invitationExpired
             message = "This invitation cannot add a device now. Ask the owner for a fresh invitation."

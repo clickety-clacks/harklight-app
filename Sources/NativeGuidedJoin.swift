@@ -81,8 +81,8 @@ extension NativeAccountDeparture {
         record = try fields.decode(NativeEnrollmentRecord.self, forKey: .record)
         do {
             replacement = try fields.decodeIfPresent(NativeJoinInvitation.self, forKey: .replacement)
-        } catch NativeJoinInvitationError.olderServer {
-            // An obsolete invitation must not hide the old account's removal receipt.
+        } catch NativeJoinInvitationError.invalid {
+            // An unusable replacement must not hide the account removal receipt.
             replacement = nil
         }
         removed = try fields.decode(Bool.self, forKey: .removed)
@@ -178,8 +178,8 @@ final class NativeGuidedJoinStore {
         let attempt: NativeJoinAttempt
         do {
             attempt = try JSONDecoder().decode(NativeJoinAttempt.self, from: data)
-        } catch NativeJoinInvitationError.olderServer {
-            // A new invitation can replace a saved v1 request. Approved enrollment
+        } catch NativeJoinInvitationError.invalid {
+            // A fresh invitation can replace an invalid saved request. Approved enrollment
             // is stored separately and remains usable with its existing identity.
             return nil
         }
@@ -686,7 +686,6 @@ final class NativeGuidedJoinStore {
                     try enrollment.clearV2APNsToken()
                 }
             }
-            try enrollment.discardLegacyPushDeparture(for: record)
             try enrollment.retireDeviceIdentity(record)
         }
         if let attempt = try loadAttempt(), attempt.deviceID == record.deviceID {

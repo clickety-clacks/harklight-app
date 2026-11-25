@@ -7,6 +7,18 @@ import XCTest
 @testable import Harklight
 
 final class V2PushPermissionTests: XCTestCase {
+    @MainActor
+    func testV2RegistrationStoresTheCurrentTokenAndClearsItIfEmpty() throws {
+        let enrollment = NativeEnrollmentStore(service: "push-token-test-" + UUID().uuidString)
+        defer { try? enrollment.clearV2APNsToken() }
+
+        try enrollment.storeV2APNsToken(Data(repeating: 0x2a, count: 32))
+        XCTAssertEqual(try enrollment.v2APNsAddress(), String(repeating: "2a", count: 32))
+
+        XCTAssertThrowsError(try enrollment.storeV2APNsToken(Data()))
+        XCTAssertNil(try enrollment.v2APNsAddress())
+    }
+
     private func saveEnrollment() throws
         -> (NativeEnrollmentStore, NativeEnrollmentRecord, () -> Void) {
         let service = "v2-push-permission-test-" + UUID().uuidString
@@ -35,24 +47,23 @@ final class V2PushPermissionTests: XCTestCase {
                                        personID: ExactText("person"), deviceID: ExactText("device"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
         let repository = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
-        let transport = V2PermissionTransport(hasLegacyBinding: true, holdFirstDelete: true)
+        let transport = V2PermissionTransport(hasServerBinding: true, holdFirstDelete: true)
         let connection = try ClientAPIv2Connection(transport: transport, repository: repository, context: context,
                                                     directory: nil, errors: NoopErrorLog(), foregroundOnlyWrites: true)
         // Keep the initial inbox baseline from superseding the settings read.
         // The push settings and the registration journal are still both empty.
         try connection.model.rebaseline(items: [], counts: APICounts(unresolved: 0), position: 0)
-        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let lifecycle = NativeRelayLifecycle(
             v2NotificationPermission: NativeNotificationPermission(status: { .denied },
                                                                    request: { false }, register: {}),
-            enrollment: enrollment, v2LegacyAddressStore: { DevelopmentAPNsAddressStore(directory: folder) })
+            enrollment: enrollment)
         XCTAssertNil(connection.model.snapshot.settings)
         XCTAssertNil(try enrollment.load()?.v2PushRegistration)
         lifecycle.installV2Connection(connection, context: context)
         lifecycle.sceneActivityChanged(isActive: true)
         let firstPass = Task { await lifecycle.refreshAfterPushAddressStored() }
         let firstDeleteStarted = await transport.waitForFirstDelete()
-        XCTAssertTrue(firstDeleteStarted, "The denied first foreground must look up and remove the legacy binding.")
+        XCTAssertTrue(firstDeleteStarted, "The denied first foreground must look up and remove the server binding.")
         let persistedRemoval = Result { try enrollment.load()?.v2PushRegistration?.permissionRemovalID }
         let firstDeleteKey = await transport.writes.first(where: { $0.method == .delete })?.idempotencyKey
         XCTAssertNotNil(connection.model.snapshot.settings?.push?.bindingID)
@@ -91,11 +102,10 @@ final class V2PushPermissionTests: XCTestCase {
         let connection = try ClientAPIv2Connection(transport: transport, repository: repository, context: context,
                                                     directory: nil, errors: NoopErrorLog(), foregroundOnlyWrites: true)
         var permission = UNAuthorizationStatus.notDetermined
-        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let lifecycle = NativeRelayLifecycle(
             v2NotificationPermission: NativeNotificationPermission(status: { permission },
                                                                    request: { false }, register: {}),
-            enrollment: enrollment, v2LegacyAddressStore: { DevelopmentAPNsAddressStore(directory: folder) })
+            enrollment: enrollment)
         lifecycle.installV2Connection(connection, context: context)
         lifecycle.sceneActivityChanged(isActive: true)
         _ = await lifecycle.refreshAfterPushAddressStored()
@@ -138,10 +148,10 @@ private actor V2PermissionTransport: ClientAPITransport {
     private var holdFirstDelete: Bool
     private var firstDeleteRelease: CheckedContinuation<Void, Never>?
 
-    init(hasLegacyBinding: Bool = false, holdFirstDelete: Bool = false) {
-        revision = hasLegacyBinding ? 7 : 0
+    init(hasServerBinding: Bool = false, holdFirstDelete: Bool = false) {
+        revision = hasServerBinding ? 7 : 0
         self.holdFirstDelete = holdFirstDelete
-        environment = hasLegacyBinding ? "sandbox" : nil
+        environment = hasServerBinding ? "sandbox" : nil
     }
 
     func send(_ request: APIRequest) async throws -> APIResponse {

@@ -12,8 +12,6 @@ struct ServerProjectionCache {
     var replayPublishedStates: [RequestKey: RemoteRequestState]?
     var replayPublishedInboxCurrentKeys: Set<RequestKey>?
     var repairIssues: [StoreRepairIssue] = []
-    var inboxCheckpoint: InboxPagingCheckpoint?
-    var inboxCandidate: InboxPagingCheckpoint?
     var inboxView: InboxView?
     var cachedInboxCurrentKeys: Set<RequestKey>?
     var pendingRelayOverlays: [UInt64: RelayEvent]?

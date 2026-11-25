@@ -1122,21 +1122,6 @@ public final class AttentionDomainPort: @unchecked Sendable {
         } else {
             sourceOrderedRequests = displayRequests
         }
-        if currentView == nil, let sourceOrder = snapshot.inboxSourceOrder {
-            var sourceRank: [RequestKey: Int] = [:]
-            for (index, key) in sourceOrder.enumerated() where sourceRank[key] == nil {
-                sourceRank[key] = index
-            }
-            let pagePositions = displayRequests.indices.filter {
-                sourceRank[displayRequests[$0].key] != nil
-            }
-            let pageRows = pagePositions.map { displayRequests[$0] }.sorted {
-                sourceRank[$0.key, default: .max] < sourceRank[$1.key, default: .max]
-            }
-            for (position, row) in zip(pagePositions, pageRows) {
-                sourceOrderedRequests[position] = row
-            }
-        }
         return PresentationSnapshot(revision: snapshot.revision,
                                     cursor: snapshot.cursor,
                                     replayBarrier: snapshot.replayBarrier,
@@ -1283,7 +1268,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
                 } ?? false
                 let evidenceLabel = terminal == .noComment
                     ? "The sender recorded your No comment answer."
-                    : "Relay lifecycle evidence is recorded; original operation outcome is shown separately."
+                    : "The server’s request status and your answer’s outcome are shown separately."
                 receiptFacts = ReceiptPresentationFacts(evidenceLabel: refusal?.evidence ?? evidenceLabel,
                     ownOutcome: refusal != nil ? .refused : (hasAcceptedIntent ? .accepted : .unconfirmed),
                     originalOperationUncertainty: refusal == nil && !hasAcceptedIntent)
@@ -1297,7 +1282,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
                                                             ownOutcome: .refused,
                                                             originalOperationUncertainty: false)
                 } else if case .accepted = submission.disposition {
-                    receiptFacts = ReceiptPresentationFacts(evidenceLabel: "The relay accepted your original answer; the request outcome is still pending.",
+                    receiptFacts = ReceiptPresentationFacts(evidenceLabel: "The server accepted your answer. The request outcome is still pending.",
                                                             ownOutcome: .accepted,
                                                             originalOperationUncertainty: false)
                 } else {

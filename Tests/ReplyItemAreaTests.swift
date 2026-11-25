@@ -46,7 +46,7 @@ final class ReplyItemAreaTests: XCTestCase {
         try restored.restoreCachedServerState(CachedAttentionServerState(
             identity: context.identity, requests: inbox.requests, remoteStates: inbox.remoteStates,
             cursor: inbox.cursor, conversationCursor: conversations.cursor, conversations: serverThreads,
-            inboxView: inbox.inboxView, currentRequestKeys: inbox.inboxCandidate?.currentKeys ?? inbox.inboxCurrentKeys,
+            inboxView: inbox.inboxView, currentRequestKeys: inbox.inboxCurrentKeys,
             chatReadPositions: conversations.chatReadPositions, pendingRelayOverlays: inbox.pendingRelayOverlays,
             inboxReferences: inbox.inboxReferences, conversationEvents: conversations.heldEvents,
             priorityLevels: inbox.priorityLevels.confirmedLevels), context: context)

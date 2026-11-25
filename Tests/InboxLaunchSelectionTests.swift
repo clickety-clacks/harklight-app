@@ -45,15 +45,9 @@ final class InboxLaunchSelectionTests: XCTestCase {
         synchronous.selectRequest(keys[0])
         asynchronous.selectRequest(keys[0])
         let remaining = try XCTUnwrap(repository.snapshot(context: context).requests[keys[1]])
-        _ = try repository.beginInboxCandidate(startupID: "replacement", since: 2,
-                                              batches: [], context: context)
-        try repository.saveInboxInitialPage(snapshotID: "replacement", highWater: 2,
-            items: [InboxSnapshotItem(acceptance: RelayEvent(sequence: 2,
-                body: .delivery(remaining, .message)))],
-            nextCursor: nil, receiptCursor: nil, context: context)
-        _ = try repository.prepareInboxCheckpointAcknowledgement(context: context)
-        _ = try repository.acceptInboxCheckpoint(snapshotID: "replacement", highWater: 2,
-                                                  context: context)
+        try repository.restoreCachedServerState(CachedAttentionServerState(identity: context.identity,
+            requests: [keys[1]: remaining], remoteStates: [:], cursor: 2, conversationCursor: 0,
+            conversations: [:], inboxView: nil, currentRequestKeys: [keys[1]]), context: context)
         try synchronous.refreshFromDurableStore()
         _ = try await asynchronous.adoptForLiveUpdates(snapshot(repository))
         XCTAssertEqual(synchronous.presentation.requests.map(\.key), [keys[1]])

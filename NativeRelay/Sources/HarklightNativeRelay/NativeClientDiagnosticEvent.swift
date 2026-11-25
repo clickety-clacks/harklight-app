@@ -24,7 +24,8 @@ public enum NativeDiagnosticPhase: String, Codable, Sendable {
     case approvedConnection
     case serverTrust
     case clientIdentity
-    case webSocketOpen
+    /// A transport event retained from a pre-0.2 journal.
+    case archivedWebSocketOpen
     case relayAdmission
     case ordinaryReplay
     case inboxPage
@@ -57,6 +58,18 @@ public enum NativeDiagnosticPhase: String, Codable, Sendable {
     case noReplyRouting
     /// An error reply the Server sent on a relay connection.
     case relayErrorReply
+
+    public init(from decoder: Decoder) throws {
+        let value = try decoder.singleValueContainer()
+        let name = try value.decode(String.self)
+        if name == "webSocketOpen" {
+            self = .archivedWebSocketOpen
+        } else if let phase = Self(rawValue: name) {
+            self = phase
+        } else {
+            throw DecodingError.dataCorruptedError(in: value, debugDescription: "Unknown diagnostic phase.")
+        }
+    }
 }
 
 /// The wire type of the request a relay error reply answered. Only known
@@ -117,7 +130,7 @@ public enum NativeDiagnosticTerminalReason: String, Codable, Sendable {
     case relayContextUnconfirmed = "relay_context_unconfirmed"
 }
 
-/// The furthest post-ACK foreground boundary that actually completed.
+/// The recorded foreground boundary in saved connection diagnostics.
 public enum NativeDiagnosticPostAckBoundary: String, Codable, Sendable {
     case none = "none_observed"
     case nativeCursorAcknowledged = "native_sync_acknowledged"
@@ -126,8 +139,7 @@ public enum NativeDiagnosticPostAckBoundary: String, Codable, Sendable {
     case foregroundConfirmed = "foreground_confirmed"
 }
 
-/// A bounded operation name for a failed post-ACK drain. These values identify
-/// code paths only; they never contain relay data or user content.
+/// Stored operation names for earlier connection diagnostics.
 public enum NativeDiagnosticPostAckStep: String, Codable, Sendable {
     case readAcceptedOperationsBeforeDrain = "read_accepted_operations_before_drain"
     case readOutboxBeforeDrain = "read_outbox_before_drain"
@@ -141,18 +153,6 @@ public enum NativeDiagnosticPostAckStep: String, Codable, Sendable {
     case replayConversationsAndAcknowledge = "replay_conversations_and_acknowledge"
     case readFinalRelayCursor = "read_final_relay_cursor"
     case validateRelayState = "validate_relay_state"
-}
-
-/// Safe detail retained when a post-ACK operation fails. The error is reduced
-/// to a named client code or bounded numeric code before it crosses layers.
-public struct NativePostAckFailureDetails: Equatable, Sendable {
-    public let step: NativeDiagnosticPostAckStep
-    public let errorCode: String
-
-    public init(step: NativeDiagnosticPostAckStep, errorCode: String?) {
-        self.step = step
-        self.errorCode = NativeDiagnosticCauseCode.safeCode(errorCode) ?? "unknown_error"
-    }
 }
 
 public enum NativeDiagnosticReceiptState: String, Codable, Sendable {
@@ -407,19 +407,18 @@ public enum NativeDiagnosticCauseCode {
         "store_event_conflict", "store_origin_content_missing", "store_replay_already_active",
         "store_replay_not_active", "store_replay_incomplete", "store_fixture_operation",
         "store_acceptance_order_missing", "store_acceptance_order_duplicate", "store_invalid_projection",
-        "store_inbox_checkpoint_pending", "store_inbox_checkpoint_incomplete",
         "store_inbox_page_conflict", "store_inbox_state_unrefreshed",
         "store_persistence_failure", "enrollment_invalid_settings", "enrollment_invalid_identity",
         "enrollment_identity_storage", "enrollment_invalid_response", "enrollment_server_rejected",
         "enrollment_approval_pending", "enrollment_approval_expired", "enrollment_no_pending_request",
         "enrollment_wrong_approved_device", "enrollment_key_pending", "enrollment_key_in_use",
-        "enrollment_identity_mismatch", "invitation_invalid", "invitation_expired", "invitation_older_server", "join_existing_account",
+        "enrollment_identity_mismatch", "invitation_invalid", "invitation_expired", "join_existing_account",
         "join_saved_request_exists", "join_attempt_superseded", "join_request_expired", "join_invitation_used",
         "join_transport_refused", "join_request_not_found", "join_service_unavailable", "join_response_invalid",
         "join_approval_identity_mismatch", "local_example_operation_refused", "answer_request_not_open", "answer_input_incomplete",
         "answer_projection_unsupported", "file_access_error", "file_retention_error", "file_preview_error",
         "local_store_error", "local_projection_error", "notification_bundle_mismatch",
-        "notification_empty_token", "notification_stored_token_invalid", "server_trust_validated", "client_identity_offered",
+        "notification_empty_token", "server_trust_validated", "client_identity_offered",
         "websocket_opened", "relay_admitted", "replay_requested_locally", "relay_resynced",
         "relay_acknowledged", "follow_on_replay_not_reached", "original_operation_terminal_not_observed",
         "original_operation_state_unavailable", "saved_server_state_rebuilt", "unprojectable_request_shown_unsupported",
@@ -523,8 +522,6 @@ public enum NativeDiagnosticCauseCode {
             case .missingAcceptanceOrder: return "store_acceptance_order_missing"
             case .duplicateAcceptanceOrder: return "store_acceptance_order_duplicate"
             case .invalidProjection: return "store_invalid_projection"
-            case .inboxCheckpointPending: return "store_inbox_checkpoint_pending"
-            case .inboxCheckpointIncomplete: return "store_inbox_checkpoint_incomplete"
             case .inboxPageConflict: return "store_inbox_page_conflict"
             case .inboxStateUnrefreshed: return "store_inbox_state_unrefreshed"
             case .persistence: return "store_persistence_failure"

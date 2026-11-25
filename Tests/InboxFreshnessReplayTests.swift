@@ -49,41 +49,6 @@ final class InboxFreshnessReplayTests: XCTestCase {
 
 
 
-    func testPagedTerminalWithoutMatchingReceiptIdentityRemainsFatal() throws {
-        for suppliedID in [nil, ExactText("different-terminal")] as [ExactText?] {
-            let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
-                personID: ExactText("receipt-person"), deviceID: ExactText("reader"))
-            let context = ProfileContext(identity: identity, transportMode: .relay)
-            let store = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
-            let key = RequestKey(accountScope: identity.personID,
-                senderID: ExactText("author"), messageID: ExactText("answered-request"))
-            _ = try store.beginInboxCandidate(startupID: "startup", since: 0, batches: [], context: context)
-            try store.saveInboxInitialPage(snapshotID: "snapshot", highWater: 2,
-                items: [], nextCursor: "older", receiptCursor: nil, context: context)
-            _ = try store.prepareInboxCheckpointAcknowledgement(context: context)
-            _ = try store.acceptInboxCheckpoint(snapshotID: "snapshot", highWater: 2, context: context)
-            try store.applyConversation(ConversationEvent(sequence: 1,
-                binding: ConversationBinding(request: key, revision: 1),
-                fact: .delivered(turn: ExactText("answer-terminal"))), context: context)
-            let item = InboxSnapshotItem(acceptance: RelayEvent(sequence: 1,
-                body: .delivery(StoredRequest(key: key, originalPayload: .null), .message),
-                conversation: RelayConversationMetadata(revision: 1, sessionHandle: ExactText("session"),
-                    eventID: ExactText("initial-question"))),
-                terminal: RelayEvent(sequence: 2, body: .terminal(key, .answered, nil),
-                    conversation: suppliedID.map { RelayConversationMetadata(revision: 1, eventID: $0, author: .person) }))
-            var rejection: ConversationValidationRejection?
-            XCTAssertThrowsError(try store.saveInboxOlderPage(snapshotID: "snapshot", highWater: 2,
-                cursor: "older", items: [item], nextCursor: nil, context: context,
-                validationRejection: &rejection)) {
-                XCTAssertEqual($0 as? ConversationError, .invalidBinding)
-            }
-            XCTAssertEqual(rejection?.guardID, .referencedTurnExists)
-            XCTAssertEqual(try store.snapshot(context: context).cursor, 2)
-            XCTAssertEqual(try store.conversationSnapshot(context: context).cursor, 1)
-            XCTAssertNil(try store.conversationSnapshot(context: context).threads[key])
-        }
-    }
-
 
 
     @MainActor
