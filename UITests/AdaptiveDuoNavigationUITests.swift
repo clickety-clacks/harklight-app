@@ -2,6 +2,67 @@ import XCTest
 
 @MainActor
 final class AdaptiveDuoNavigationUITests: XCTestCase {
+    func testSwitchingBrowsingTabsRevealsHiddenSidebar() throws {
+        let app = try openDetailWithHiddenSidebar()
+        defer { app.terminate() }
+        let replied = workspaceTab("Replied", in: app)
+        XCTAssertTrue(replied.isHittable)
+        replied.tap()
+        attachScreenshot("replied-after-hidden-sidebar-tab-switch")
+        let search = app.searchFields.firstMatch
+        guard search.waitForExistence(timeout: 5), search.isHittable else {
+            XCTFail("Switching to Replied must reveal its list and search field. \(app.debugDescription)")
+            return
+        }
+        XCTAssertTrue(listVisibleBesideDetail(in: app))
+        search.tap()
+        search.typeText("Studio")
+        XCTAssertEqual(search.value as? String, "Studio")
+    }
+
+    func testSearchTabRevealsHiddenSidebarAndFilters() throws {
+        let app = try openDetailWithHiddenSidebar(searchTab: true)
+        defer { app.terminate() }
+        let search = workspaceSearchField(in: app)
+        attachScreenshot("search-tab-with-detail-open")
+        guard search.exists, search.isHittable else {
+            XCTFail("Search must expose a field the user can type into. \(app.debugDescription)")
+            return
+        }
+        XCTAssertTrue(listVisibleBesideDetail(in: app))
+        search.tap()
+        search.typeText("Studio\n")
+        XCTAssertEqual(search.value as? String, "Studio")
+        let review = app.descendants(matching: .any)["request-row-review-01"].firstMatch
+        XCTAssertTrue(review.waitForExistence(timeout: 5) && review.isHittable)
+        XCTAssertFalse(app.descendants(matching: .any)["request-row-facilities-01"].exists)
+    }
+
+    private func openDetailWithHiddenSidebar(searchTab: Bool = false) throws -> XCUIApplication {
+        guard UIDevice.current.userInterfaceIdiom == .pad else {
+            throw XCTSkip("This fixture needs a regular-width split view.")
+        }
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication()
+        app.launchArguments = ["--reset-attention-fixture", "--harklight-samples",
+                               "--harklight-ui-diagnostics", "--harklight-test-overlay"]
+        if searchTab { app.launchArguments.append("--harklight-test-search-tab") }
+        app.launch()
+
+        let sidebar = app.buttons["Show Sidebar"].firstMatch
+        if sidebar.waitForExistence(timeout: 3), sidebar.isHittable { sidebar.tap() }
+        let row = app.descendants(matching: .any)["request-row-facilities-01"].firstMatch
+        XCTAssertTrue(row.waitForExistence(timeout: 10), app.debugDescription)
+        row.tap()
+        XCTAssertTrue(app.scrollViews["message-card-scroll"].waitForExistence(timeout: 5))
+        XCTAssertFalse(row.isHittable, "Start with the detail visible and the sidebar hidden.")
+        let diagnostic = app.descendants(matching: .any)["inbox-ui-diagnostics"].firstMatch
+        XCTAssertTrue(diagnostic.waitForExistence(timeout: 5))
+        print("HIDDEN_SIDEBAR \(diagnostic.label)")
+        attachScreenshot("hidden-sidebar-before-tab-switch")
+        return app
+    }
+
     func testFreshLaunchWithoutSelectionShowsInboxAndOpensSelectedMessage() {
         XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()

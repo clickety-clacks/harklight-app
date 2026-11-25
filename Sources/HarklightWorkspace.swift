@@ -21,19 +21,25 @@ private final class InboxSplitPresentation {
 }
 
 private struct InboxSplitPresentationReader: UIViewControllerRepresentable {
-    let presentation: InboxSplitPresentation
+    var presentation: InboxSplitPresentation? = nil
+    var claimPrimaryReveal: (() -> Bool)? = nil
 
     func makeUIViewController(context: Context) -> Reader {
-        Reader(presentation: presentation)
+        Reader(presentation: presentation, claimPrimaryReveal: claimPrimaryReveal)
     }
 
-    func updateUIViewController(_ controller: Reader, context: Context) {}
+    func updateUIViewController(_ controller: Reader, context: Context) {
+        controller.claimPrimaryReveal = claimPrimaryReveal
+        controller.revealPrimaryIfRequested()
+    }
 
     final class Reader: UIViewController {
-        let presentation: InboxSplitPresentation
+        let presentation: InboxSplitPresentation?
+        var claimPrimaryReveal: (() -> Bool)?
 
-        init(presentation: InboxSplitPresentation) {
+        init(presentation: InboxSplitPresentation?, claimPrimaryReveal: (() -> Bool)?) {
             self.presentation = presentation
+            self.claimPrimaryReveal = claimPrimaryReveal
             super.init(nibName: nil, bundle: nil)
         }
 
@@ -43,7 +49,7 @@ private struct InboxSplitPresentationReader: UIViewControllerRepresentable {
             let probe = Probe()
             probe.reader = self
             probe.backgroundColor = .clear
-            probe.isAccessibilityElement = UIDiagnostics.shared.enabled
+            probe.isAccessibilityElement = presentation != nil && UIDiagnostics.shared.enabled
             probe.accessibilityIdentifier = "inbox-split-presentation"
             probe.accessibilityLabel = "Inbox split presentation"
             view = probe
@@ -51,13 +57,24 @@ private struct InboxSplitPresentationReader: UIViewControllerRepresentable {
 
         override func viewDidAppear(_ animated: Bool) {
             super.viewDidAppear(animated)
-            presentation.reader = self
-
+            presentation?.reader = self
+            revealPrimaryIfRequested()
         }
 
         override func viewDidLayoutSubviews() {
             super.viewDidLayoutSubviews()
-            if view.window != nil { presentation.reader = self }
+            if view.window != nil { presentation?.reader = self }
+            revealPrimaryIfRequested()
+        }
+
+        func revealPrimaryIfRequested() {
+            guard claimPrimaryReveal != nil, viewIfLoaded?.window != nil else { return }
+            Task { @MainActor [weak self] in
+                guard let self, viewIfLoaded?.window != nil,
+                      let split = splitViewController, !split.isCollapsed,
+                      claimPrimaryReveal?() == true else { return }
+                split.show(.primary)
+            }
         }
     }
 
@@ -942,10 +959,12 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     var testNotificationRouter: NativeNotificationRouter? = nil
     var testOpenForegroundChatIndicator: (() -> Void)? = nil
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.scenePhase) private var scenePhase
     @State private var selection: InboxSelection?
     @State private var preferredCompactColumn: NavigationSplitViewColumn = .sidebar
+    @State private var pendingListTab: InboxRootTab?
     @State private var splitPresentation = InboxSplitPresentation()
     @State private var relatedMessageNavigationPath: [RelatedMessageTarget] = []
     @State private var rememberedTabDetails: [InboxWorkspaceTab: TabDetail] = [:]
@@ -1285,6 +1304,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             "selection=\(UIDiagnostics.describe(selection)) tab=\(selectedTab.rawValue) entryTab=\(listTabOnMessageEntry?.rawValue ?? "nil") lastViewed=\(UIDiagnostics.describe(lastViewedSelection))",
             "betweenMessages=\(navigatedBetweenMessages) restoreOnReturn=\(restoreLastViewedOnReturn)",
             "sizeClass=\(horizontalSizeClass.map { "\($0)" } ?? "nil") landscape=\(landscape)",
+            "verticalSizeClass=\(verticalSizeClass.map { "\($0)" } ?? "nil") windowWidth=\(windowSize.map { "\($0.width)" } ?? "unknown") preferredColumn=\(preferredCompactColumn == .sidebar ? "sidebar" : "detail") splitMode=\(splitPresentation.reader?.splitViewController.map { String(describing: $0.displayMode) } ?? "unknown")",
             "samples.selected=\(samples.selectedID ?? "nil") samples.lastViewed=\(samples.lastViewedID ?? "nil") loadError=\(samples.loadError ?? "nil")",
             "rows=\(rowSummary)",
             UIDiagnostics.shared.eventSummary,
@@ -1592,6 +1612,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     @ViewBuilder
     private func inboxSplitView(for tab: InboxWorkspaceTab, inlineChat: Bool,
                                 geometry: GeometryProxy, searching: Bool = false) -> some View {
+        let destination: InboxRootTab = searching ? .search : tab.rootTab
         let column = Binding(get: { workspaceTab == tab ? preferredCompactColumn : .sidebar },
                              set: { if workspaceTab == tab { preferredCompactColumn = $0 } })
         let splitView = NavigationSplitView(preferredCompactColumn: column) {
@@ -1620,7 +1641,8 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                       notificationPendingPresentation: notificationPendingListPresentation,
                       triggerNotification: exposesNotificationTestAction
                           ? { triggerNotificationTestAction() } : nil)
-            .modifier(InboxListSearchFieldModifier(active: usesListSearch, text: searchTextBinding))
+            .modifier(InboxListSearchFieldModifier(active: usesListSearch || (searching && horizontalSizeClass == .regular),
+                                                   text: searchTextBinding))
             .background(alignment: .topLeading) {
                 InboxSplitPresentationReader(presentation: splitPresentation)
                     .frame(width: 1, height: 1)
@@ -1631,7 +1653,12 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                 detailContent(for: workspaceTab == tab ? selection : nil, tab: tab, inlineChat: inlineChat,
                               geometry: geometry)
             }
-
+            .background(alignment: .topLeading) {
+                InboxSplitPresentationReader(claimPrimaryReveal: pendingListTab == destination
+                    ? { claimListReveal(for: destination) } : nil)
+                .frame(width: 1, height: 1)
+                .allowsHitTesting(false)
+            }
         }
         Group {
             // A real framework overlay fixture, including on iPads whose
@@ -1651,7 +1678,13 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     /// panel to the screen edge; with nothing open the page shows.
     /// iPad searches with a field at the top of the list; iPhone uses the
     /// Search tab.
-    private var usesListSearch: Bool { UIDevice.current.userInterfaceIdiom == .pad }
+    private var usesListSearch: Bool {
+        if UIDiagnostics.shared.enabled &&
+            ProcessInfo.processInfo.arguments.contains("--harklight-test-search-tab") {
+            return false
+        }
+        return UIDevice.current.userInterfaceIdiom == .pad
+    }
 
     private var searchTextBinding: Binding<String> {
         Binding(get: { search }, set: { value in
@@ -1744,13 +1777,30 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         })
     }
 
+    private var workspaceTabSelection: Binding<InboxRootTab> {
+        Binding(get: { rootTab }, set: { destination in
+            guard destination != rootTab else { return }
+            // A user choosing a tab is asking to browse its list. Programmatic
+            // routes set rootTab directly so they can still show their detail.
+            pendingListTab = horizontalSizeClass == .regular ? destination : nil
+            preferredCompactColumn = .sidebar
+            rootTab = destination
+        })
+    }
+
+    private func claimListReveal(for tab: InboxRootTab) -> Bool {
+        guard rootTab == tab, pendingListTab == tab else { return false }
+        pendingListTab = nil
+        return true
+    }
+
     private var workspace: some View {
         GeometryReader { geometry in
             let layout = WorkspaceChatLayout(window: windowSize, container: geometry.size,
                                              isPad: UIDevice.current.userInterfaceIdiom == .pad)
             let landscape = layout.landscape
             let inlineChat = layout.inlineChat
-            let tabs = TabView(selection: $rootTab) {
+            let tabs = TabView(selection: workspaceTabSelection) {
                 Tab(value: .inbox) {
                     inboxSplitView(for: .inbox, inlineChat: inlineChat,
                                    geometry: geometry)
@@ -1775,11 +1825,15 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                 // tab, iPad reply editors could no longer take the keyboard.
                 if !usesListSearch {
                     Tab(value: .search, role: .search) {
-                        inboxSplitView(for: workspaceTab, inlineChat: inlineChat,
-                                       geometry: geometry, searching: true)
+                        let results = inboxSplitView(for: workspaceTab, inlineChat: inlineChat,
+                                                     geometry: geometry, searching: true)
                             .id(workspaceTab)
-                            .searchable(text: searchTextBinding, prompt: "Search messages")
-                            .searchFocused($searchFieldFocused)
+                        if horizontalSizeClass == .regular {
+                            results
+                        } else {
+                            results.searchable(text: searchTextBinding, prompt: "Search messages")
+                                .searchFocused($searchFieldFocused)
+                        }
                     }
                 }
             }
