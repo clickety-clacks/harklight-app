@@ -185,7 +185,7 @@ final class HarklightDesignTokenTests: XCTestCase {
         }
     }
 
-    func testSharedFillAndTypeTokensPreserveTheAppMetrics() {
+    func testSharedFillAndTypeTokensPreserveTheAppMetrics() throws {
         let source = HarklightDesignSystem.source
         for appearance in [source.light, source.dark] {
             XCTAssertEqual(appearance.derived.openRowFillShare, 0.15)
@@ -201,6 +201,17 @@ final class HarklightDesignTokenTests: XCTestCase {
         XCTAssertNil(preview.lineHeight)
         XCTAssertNil(source.type.token(for: .choiceTitle).lineHeight)
         XCTAssertNil(source.type.token(for: .choiceDetail).lineHeight)
+
+        let url = try XCTUnwrap(Bundle.main.url(forResource: "tokens", withExtension: "json")
+            ?? Bundle.main.url(forResource: "tokens", withExtension: "json", subdirectory: "Design"))
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        let type = try XCTUnwrap(json["type"] as? [String: Any])
+        let styles = try XCTUnwrap(type["styles"] as? [String: [String: Any]])
+        let roles: [HarklightTextStyle] = [.fyiDigestPreview, .choiceTitle, .choiceDetail]
+        for role in roles {
+            let style = try XCTUnwrap(styles[role.rawValue], role.rawValue)
+            XCTAssertTrue(style["lineHeight"] is NSNull, "\(role.rawValue).lineHeight must be explicitly null")
+        }
     }
 
     func testHeadingFontIsBundled() {
