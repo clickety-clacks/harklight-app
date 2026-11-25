@@ -110,7 +110,10 @@ public actor ActionOutbox {
     private let errors: any ErrorLogging
     private let waitBeforeRetry: @Sendable (_ attempt: Int, _ retryAfter: TimeInterval?) async throws -> Void
     private let canSend: @Sendable (OutboxEntry) -> Bool
-    private var entries: [OutboxEntry]
+    private let onEntriesChanged: @Sendable ([OutboxEntry], [OutboxEntry]) -> Void
+    private var entries: [OutboxEntry] {
+        didSet { onEntriesChanged(oldValue, entries) }
+    }
     private var sendingTasks: [String: Task<Void, Never>] = [:]
     private var sendingPaused: Bool
     private var closed = false
@@ -125,6 +128,7 @@ public actor ActionOutbox {
                 outcomes: any OutboxOutcomeHandling, errors: any ErrorLogging,
                 startsPaused: Bool = false, canSend: @escaping @Sendable (OutboxEntry) -> Bool = { _ in true },
                 excludingSavedKeys: Set<UUID> = [],
+                onEntriesChanged: @escaping @Sendable ([OutboxEntry], [OutboxEntry]) -> Void = { _, _ in },
                 waitBeforeRetry: @escaping @Sendable (_ attempt: Int, _ retryAfter: TimeInterval?) async throws -> Void
                     = ActionOutbox.backoff) throws {
         self.persistence = persistence
@@ -133,6 +137,7 @@ public actor ActionOutbox {
         self.errors = errors
         self.waitBeforeRetry = waitBeforeRetry
         self.canSend = canSend
+        self.onEntriesChanged = onEntriesChanged
         sendingPaused = startsPaused
         let saved = try persistence.load()
         let admitted = saved.filter { !excludingSavedKeys.contains($0.id) }
@@ -176,6 +181,7 @@ public actor ActionOutbox {
     public func submit(target: String, operation: String, write: FrozenWrite,
                        idempotencyKey: UUID = UUID(), now: Date = Date(),
                        retryRefused: Bool = true, answerIntentID: UUID? = nil,
+                       replacingPausedWrite: UUID? = nil,
                        stillPending: @Sendable () throws -> Bool = { true }) async throws -> OutboxEntry {
         guard !closed else { throw CancellationError() }
         if let existing = entries.first(where: { $0.idempotencyKey == idempotencyKey }) {
@@ -198,7 +204,15 @@ public actor ActionOutbox {
         let entry = OutboxEntry(idempotencyKey: idempotencyKey, target: target, operation: operation, write: write,
                                 createdAt: now, outcomeUnknown: false, attempts: 0, answerIntentID: answerIntentID)
         var next = entries
-        next.append(entry)
+        if let replacingPausedWrite {
+            guard let index = next.firstIndex(where: {
+                $0.id == replacingPausedWrite && $0.target == target && $0.operation == operation &&
+                    $0.waitsForInternalErrorRetry == true
+            }) else { throw CancellationError() }
+            next[index] = entry
+        } else {
+            next.append(entry)
+        }
         try persistence.save(next)
         entries = next
         startSending(entry.sendingLane)

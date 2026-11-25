@@ -199,8 +199,12 @@ public struct APICounts: Equatable, Codable, Sendable {
     public init(unresolved: Int) { self.unresolved = unresolved }
 }
 
-/// Settings are kept as the server sent them; priority levels and push are
-/// read from them where used.
+public enum APIAlerts: String, Sendable {
+    case important
+    case all
+}
+
+/// Settings are kept as the server sent them. Typed projections read the fields they use.
 public struct APISettings: Equatable, Codable, Sendable {
     public let rev: UInt64
     public let body: JSONValue
@@ -462,6 +466,10 @@ extension APISettings {
         let reader = try Reader(json, "settings")
         rev = try reader.unsigned("rev")
         body = json
+    }
+
+    public var alerts: APIAlerts? {
+        body.uniqueValue(named: "alerts")?.stringValue.flatMap { APIAlerts(rawValue: $0.rawValue) }
     }
 
     /// A malformed or missing table leaves the other settings usable.

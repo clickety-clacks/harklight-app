@@ -926,6 +926,9 @@ struct LiveInboxSettings: View {
     let connectionStatus: String?
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openCatalogueMessage) private var openCatalogueMessage
+    @State private var alertsState: ClientAPIv2Connection.AlertsState?
+    @State private var startingAlertsSave = false
+    @State private var alertsSaveFailed = false
     @State private var showsFeatures = false
     @State private var confirmingDisconnect = false
 
@@ -1111,6 +1114,16 @@ struct LiveInboxSettings: View {
                         }
                     }
                 }
+                if !store.isReadOnly && !store.isLocalExample, let alertsState {
+                    AlertsSettingsSection(state: alertsState, startingSave: startingAlertsSave,
+                                          showsFailure: alertsSaveFailed, save: saveAlerts)
+                        .task(id: alertsState.refusedWriteID) {
+                            guard let id = alertsState.refusedWriteID else { return }
+                            alertsSaveFailed = true
+                            await NativeRelayLifecycle.shared.acknowledgeAlertsRefusal(
+                                id, expected: store.notificationContext)
+                        }
+                }
                 if NativeRelayLifecycle.shared.featureFlags.isEnabled(.priorityLevelEditing),
                    !store.isReadOnly && !store.isLocalExample {
                     PriorityLevelsSettingsSection(store: store)
@@ -1131,7 +1144,7 @@ struct LiveInboxSettings: View {
                 HarklightDoneButton { dismiss() }
             } }
             .navigationDestination(isPresented: $showsFeatures) {
-                FeatureCatalogueView(store: store) { route in
+                FeatureCatalogueView(store: store, alertsAvailable: alertsState != nil) { route in
                     switch route {
                     case let .progressMessage(key):
                         openCatalogueMessage?(key)
@@ -1144,6 +1157,87 @@ struct LiveInboxSettings: View {
             }
         }
         .harklightSheetSurface()
+        .task(id: store.notificationContext) {
+            guard !store.isReadOnly && !store.isLocalExample else { return }
+            await observeAlerts(expected: store.notificationContext)
+        }
+    }
+
+    private func observeAlerts(expected: ProfileContext) async {
+        #if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("--harklight-test-alerts-settings") {
+            let settings = try? APISettings(json: JSONValue.parse(Data(#"{"rev":1,"alerts":"important"}"#.utf8)))
+            alertsState = settings?.alerts.map {
+                .init(confirmed: $0, canSave: true, isSaving: false, hasFailure: false)
+            }
+            return
+        }
+        #endif
+        let relay = NativeRelayLifecycle.shared
+        let updates = relay.priorityLevelsUpdates(for: expected)
+        alertsState = await relay.alertsState(for: expected)
+        await relay.refreshAlerts(expected: expected)
+        alertsState = await relay.alertsState(for: expected)
+        for await _ in updates {
+            alertsState = await relay.alertsState(for: expected)
+        }
+    }
+
+    private func saveAlerts(_ choice: APIAlerts) {
+        guard let alertsState, !startingAlertsSave,
+              choice != alertsState.confirmed || alertsState.hasUnconfirmedWrite else { return }
+        startingAlertsSave = true
+        alertsSaveFailed = false
+        let context = store.notificationContext
+        Task {
+            let relay = NativeRelayLifecycle.shared
+            do { try await relay.saveAlerts(choice, expected: context) }
+            catch { alertsSaveFailed = true }
+            self.alertsState = await relay.alertsState(for: context)
+            startingAlertsSave = false
+        }
+    }
+}
+
+private struct AlertsSettingsSection: View {
+    let state: ClientAPIv2Connection.AlertsState
+    let startingSave: Bool
+    let showsFailure: Bool
+    let save: (APIAlerts) -> Void
+
+    var body: some View {
+        Section {
+            Group {
+                if state.hasUnconfirmedWrite {
+                    // Even choosing the displayed value must supersede a paused write.
+                    Menu {
+                        Button("Questions and urgent") { save(.important) }
+                        Button("Everything") { save(.all) }
+                    } label: {
+                        LabeledContent("Alerts") {
+                            Text(state.confirmed == .important ? "Questions and urgent" : "Everything")
+                        }
+                    }
+                } else {
+                    Picker("Alerts", selection: Binding(get: { state.confirmed }, set: save)) {
+                        Text("Questions and urgent").tag(APIAlerts.important)
+                        Text("Everything").tag(APIAlerts.all)
+                    }
+                    .pickerStyle(.menu)
+                }
+            }
+            .disabled(startingSave || state.isSaving || !state.canSave)
+            .accessibilityIdentifier("settings-alerts")
+        } footer: {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Other messages arrive quietly. They still appear in your Inbox and on the badge.")
+                if startingSave || state.isSaving {
+                    Text("Saving alerts…")
+                } else if showsFailure || state.hasFailure {
+                    Text("Your choice wasn’t saved. The Server’s current setting is shown.")
+                }
+            }
+        }
     }
 }
 
