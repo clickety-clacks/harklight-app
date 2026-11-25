@@ -162,6 +162,26 @@ final class ClientAPIFocusTests: XCTestCase {
         await focus.stop()
     }
 
+    func testOlderServerKeepsFocusAndShowWorkingFromTheFYIList() async {
+        let transport = FocusTransport()
+        transport.failNext = APIError(status: 400, token: .invalidField, retryable: false, requestID: nil)
+        transport.respond("{}")
+        transport.respond("{\"show\":\(showJSON)}")
+        let shows = ShowLog()
+        let focus = channel(transport, log: shows)
+        let first = await focus.report(.fyi)
+        let second = await focus.report(.fyi)
+        XCTAssertEqual(first, .accepted)
+        XCTAssertEqual(second, .accepted)
+        XCTAssertEqual(transport.sentBodies, [
+            #"{"screen":"fyi","ttl_s":120}"#,
+            #"{"screen":"inbox","ttl_s":120}"#,
+            #"{"screen":"inbox","ttl_s":120}"#,
+        ])
+        XCTAssertEqual(shows.ids, ["s1"])
+        await focus.stop()
+    }
+
     func testTheFocusBodyCarriesTodaysFieldsUnderV2Names() {
         func body(_ report: FocusReport) -> String {
             String(decoding: ClientAPIFocusWire.request(for: report, ttlSeconds: 120).body ?? Data(), as: UTF8.self)

@@ -98,6 +98,7 @@ public actor ClientAPIFocusChannel {
     private var retryTimer: Task<Void, Never>?
     private var drainTask: Task<Void, Never>?
     private var isClosing = false
+    private var rejectsFYIFocus = false
     private var backgroundFailures = 0
     private var deliveredShows: [String] = []
     private static let rememberedShows = 64
@@ -261,7 +262,7 @@ public actor ClientAPIFocusChannel {
 
     private func send(_ report: FocusReport) async -> FocusReportReply {
         do {
-            let response = try await transport.send(ClientAPIFocusWire.request(for: report, ttlSeconds: ttlSeconds))
+            let response = try await writeFocus(report)
             errors.resolve(concern: .actions, operation: "focus")
             if let show = ClientAPIFocusWire.show(inResponse: response.body) { await deliver(show) }
             return .accepted
@@ -282,6 +283,18 @@ public actor ClientAPIFocusChannel {
                 correlation: .request((error as? APIError)?.requestID),
                 httpStatus: (error as? APIError)?.status))
             return .rejected
+        }
+    }
+
+    private func writeFocus(_ report: FocusReport) async throws -> APIResponse {
+        let compatibleReport = rejectsFYIFocus && report == .fyi ? .inbox : report
+        do {
+            return try await transport.send(ClientAPIFocusWire.request(for: compatibleReport,
+                                                                      ttlSeconds: ttlSeconds))
+        } catch let error as APIError where compatibleReport == .fyi && error.token == .invalidField {
+            // Older servers accept the rest of focus and Show with the Inbox code.
+            rejectsFYIFocus = true
+            return try await transport.send(ClientAPIFocusWire.request(for: .inbox, ttlSeconds: ttlSeconds))
         }
     }
 
