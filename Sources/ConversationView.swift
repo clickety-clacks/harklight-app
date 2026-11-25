@@ -1105,6 +1105,7 @@ private struct ConversationDraftStatus: View {
 
 enum ConversationSentChatStatusPresentation {
     enum Delivery: Equatable {
+        case noCaption
         case sent
         case notDeliveredYet
         case noOneWillGetThis
@@ -1140,12 +1141,13 @@ enum ConversationSentChatStatusPresentation {
         // On 0.2 Delivered records Server delivery, independently of handoff.
         // Keep 0.1 receipt/acted precedence below unchanged.
         if personFeed, turn.author == .person, turn.kind == .discussion {
-            if !handoffCaptions || facts.handoffCaptionRefreshPending == true {
+            let receiptEvidence = facts.personDelivery
+            let receiptNotExpected = receiptEvidence?.receiptExpected == false
+            if !receiptNotExpected && (!handoffCaptions || facts.handoffCaptionRefreshPending == true) {
                 return delivery(for: facts, availability: availability, hasReply: hasReply,
                                 nowMilliseconds: nowMilliseconds)
             }
-            if hasReply || (handoffCaptions && (facts.personDelivery?.agentSeen == true ||
-                                                facts.personDelivery?.agentActed == true)) {
+            if hasReply || receiptEvidence?.agentSeen == true || receiptEvidence?.agentActed == true {
                 return .deliveredAck
             }
             if case let .handed(_, rerouted, _, agent)? = facts.deliveryAck2 {
@@ -1160,20 +1162,18 @@ enum ConversationSentChatStatusPresentation {
                 }
                 return .notDelivered(reason.rawValue)
             }
-            if handoffCaptions {
-                let delivery = facts.personDelivery
-                if delivery?.ack2Expected == false && delivery?.listenerReceived == true {
-                    return .deliveredAck
-                }
-                if delivery?.legacyCaption == true && facts.delivered { return .delivered }
-                if let availability {
-                    switch availability.state {
-                    case .gone, .unsupported: return .noOneWillGetThis
-                    default: break
-                    }
-                }
-                if facts.delivered { return .sending }
+            if receiptEvidence?.ack2Expected == false && receiptEvidence?.listenerReceived == true {
+                return .deliveredAck
             }
+            if !receiptNotExpected && receiptEvidence?.legacyCaption == true && facts.delivered { return .delivered }
+            if let availability {
+                switch availability.state {
+                case .gone, .unsupported: return .noOneWillGetThis
+                default: break
+                }
+            }
+            if receiptNotExpected { return .noCaption }
+            if facts.delivered { return .sending }
             var legacyFacts = facts
             legacyFacts.actedBy = nil
             return delivery(for: legacyFacts, availability: availability, hasReply: hasReply,
@@ -1211,13 +1211,14 @@ enum ConversationSentChatStatusPresentation {
 
     static func replyTargets(in thread: ConversationThread) -> Set<ExactText> {
         Set(thread.turns.compactMap { turn -> ExactText? in
-            guard turn.author != .person,
-                  turn.kind == nil || turn.kind == .reply else { return nil }
-            if thread.chatNeverCloses == true && thread.handoffCaptions == true {
+            guard turn.author != .person, turn.kind == nil || turn.kind == .reply,
+                  let target = turn.inReplyTo else { return nil }
+            if thread.chatNeverCloses == true &&
+                (thread.handoffCaptions == true || thread.facts[target]?.personDelivery?.receiptExpected == false) {
                 guard turn.author == .origin || turn.author == .agent,
                       turn.contentRedacted != true else { return nil }
             }
-            return turn.inReplyTo
+            return target
         })
     }
 
@@ -1310,6 +1311,8 @@ private struct ConversationSentChatStatus: View {
     @ViewBuilder
     private func deliveryLabel(_ delivery: ConversationSentChatStatusPresentation.Delivery) -> some View {
         switch delivery {
+        case .noCaption:
+            EmptyView()
         case .sent:
             Text("Sent")
                 .foregroundStyle(.hkLabel)
