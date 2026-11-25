@@ -341,44 +341,54 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
         try await sync.catchUp(userInitiated: userInitiated)
     }
 
-    /// Applies a push's change batch only when its revision is newer than
-    /// the durable position. The push revision is a hint, never a cursor.
+    /// Catches up from the saved cursor. A locator revision can skip
+    /// a fetch when the durable cursor already covers it.
     @discardableResult
-    public func catchUp(forPushRevision revision: Rev) async throws -> Bool {
+    public func catchUp(forPushRevision revision: Rev?) async throws -> Bool {
         let before = model.heldCursor
-        if let persisted = model.persistedCursor(), persisted >= revision { return false }
+        if let revision, let persisted = model.persistedCursor(), persisted >= revision { return false }
         try await catchUp()
         return model.heldCursor != before
     }
 
-    public func matchPush(_ payload: JSONValue) -> ClientAPIPushHint? {
+    public func matchPush(_ payload: JSONValue) -> ClientAPIPushMatch? {
         guard let attention = payload.uniqueValue(named: "attention"),
               attention.uniqueValue(named: "v")?.integerValue == 2,
-              attention.uniqueValue(named: "type")?.stringValue?.rawValue == "sync",
-              let locator = attention.uniqueValue(named: "locator"),
-              locator.uniqueValue(named: "v")?.integerValue == 2 else { return nil }
+              attention.uniqueValue(named: "type")?.stringValue?.rawValue == "sync" else { return nil }
+        let locator = attention.uniqueValue(named: "locator")
+        if attention.value(named: "locator") != nil, locator?.uniqueValue(named: "v")?.integerValue != 2 {
+            return nil
+        }
+
         let held = model.snapshot
         guard let principal = held.pushPrincipal,
               let device = principal.deviceID,
-              let binding = held.routablePushBindingID,
-              !binding.rawValue.isEmpty,
               principal.personID == context.identity.personID, device == context.identity.deviceID,
-              attention.uniqueValue(named: "server")?.stringValue == principal.serverID,
+              attention.uniqueValue(named: "server")?.stringValue == principal.serverID else {
+            reportPushIdentityMismatch()
+            return nil
+        }
+        guard let locator else { return .syncOnly(serverID: principal.serverID) }
+        guard let binding = held.routablePushBindingID, !binding.rawValue.isEmpty,
               locator.uniqueValue(named: "person_id")?.stringValue == principal.personID,
               locator.uniqueValue(named: "device_id")?.stringValue == device,
               locator.uniqueValue(named: "binding_id")?.stringValue == binding else {
-            errors.report(ErrorLogReport(concern: .sync, connectionRole: .request,
-                operation: "push_wake", phase: "match", reason: .app("push_identity_mismatch"),
-                initiator: .unknown, retryable: false,
-                correlation: ErrorLogCorrelation(resourceID: context.identity.deviceID.rawValue)))
+            reportPushIdentityMismatch()
             return nil
         }
         guard let item = locator.uniqueValue(named: "item_id")?.stringValue, !item.rawValue.isEmpty,
               case let .number(rev)? = locator.uniqueValue(named: "rev"),
               let revision = Rev(rev.lexeme), revision > 0 else { return nil }
-        return ClientAPIPushHint(serverID: principal.serverID, personID: principal.personID,
+        return .located(ClientAPIPushHint(serverID: principal.serverID, personID: principal.personID,
             deviceID: device, bindingID: binding, itemID: item, revision: revision,
-            target: locator.uniqueValue(named: "target")?.stringValue?.rawValue)
+            target: locator.uniqueValue(named: "target")?.stringValue?.rawValue))
+    }
+
+    private func reportPushIdentityMismatch() {
+        errors.report(ErrorLogReport(concern: .sync, connectionRole: .request,
+            operation: "push_wake", phase: "match", reason: .app("push_identity_mismatch"),
+            initiator: .unknown, retryable: false,
+            correlation: ErrorLogCorrelation(resourceID: context.identity.deviceID.rawValue)))
     }
 
     public func catchUp(forPush payload: JSONValue) async throws -> Bool {

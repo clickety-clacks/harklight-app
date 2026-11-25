@@ -36,6 +36,16 @@ struct NativeNotificationLocator: Codable, Equatable {
 
 }
 
+enum NativePushDestination {
+    case inbox
+    case item(NativeNotificationLocator)
+
+    var locator: NativeNotificationLocator? {
+        guard case let .item(locator) = self else { return nil }
+        return locator
+    }
+}
+
 struct NativeNotificationIntent: Codable, Equatable {
     let serial: UInt64
     var locator: NativeNotificationLocator?
@@ -48,13 +58,17 @@ struct NativeInboxNavigation: Equatable {
     var chatTargetFallsBackToMessage = false
     var isPushed = false
     var showsMessageOnly = false
+    var opensInbox = false
+
+    var isPending: Bool { request == nil && !opensInbox }
 
     static func == (lhs: Self, rhs: Self) -> Bool {
         // Consuming the one-shot chat presentation must not replay workspace
         // selection or its existing Seen/unread-related presentation effects.
         lhs.serial == rhs.serial && lhs.request == rhs.request &&
             lhs.chatTargetFallsBackToMessage == rhs.chatTargetFallsBackToMessage &&
-            lhs.isPushed == rhs.isPushed && lhs.showsMessageOnly == rhs.showsMessageOnly
+            lhs.isPushed == rhs.isPushed && lhs.showsMessageOnly == rhs.showsMessageOnly &&
+            lhs.opensInbox == rhs.opensInbox
     }
 }
 

@@ -435,6 +435,60 @@ final class HarklightTests: XCTestCase {
     }
 
     @MainActor
+    func testLocatorlessPushWakesSyncAndOnlyTheTapOpensTheInbox() async throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+            personID: ExactText("person"), deviceID: ExactText("device"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let transport = V2ScenePushTransport()
+        let store = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        let connection = try ClientAPIv2Connection(transport: transport, repository: store, context: context,
+            directory: nil, errors: NoopErrorLog())
+        try await connection.refreshMe()
+        let payload = try JSONValue.parse(Data(#"{"aps":{"alert":{"body":"New message in Harklight"},"badge":3,"content-available":1,"mutable-content":1},"attention":{"v":2,"type":"sync","server":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}"#.utf8))
+
+        let defaultsName = UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: defaultsName))
+        defer { defaults.removePersistentDomain(forName: defaultsName) }
+        let router = NativeNotificationRouter(defaults: defaults)
+        let presentation = try LivePresentationStore(store: store, context: context)
+        let launch = NativeAppLaunch(initialState: .live(presentation), notificationRouter: router)
+        let denied = NativeRelayLifecycle(v2NotificationPermission: NativeNotificationPermission(
+            status: { .denied }, request: { false }, register: {}))
+        denied.installV2Connection(connection, context: context)
+        let deniedRefresh = await denied.refreshForRemotePush(payload)
+        XCTAssertFalse(deniedRefresh)
+        router.pendingV2Tap = payload
+        await launch.handleNotification(lifecycle: denied)
+        XCTAssertNil(launch.notificationNavigation)
+        XCTAssertEqual(transport.counts.batches, 0)
+
+        let allowed = NativeRelayLifecycle(v2NotificationPermission: NativeNotificationPermission(
+            status: { .authorized }, request: { true }, register: {}))
+        allowed.installV2Connection(connection, context: context)
+        _ = await allowed.refreshForRemotePush(payload)
+        XCTAssertEqual(transport.counts.batches, 1)
+        XCTAssertEqual(transport.counts.opened, 0)
+
+        let foregroundLocator = await allowed.v2LocatorForPush(payload)
+        XCTAssertNil(foregroundLocator, "A sync-only alert must not reach foreground chat presentation.")
+        XCTAssertEqual(transport.counts.batches, 2)
+        XCTAssertNil(router.intent)
+        XCTAssertNil(launch.notificationNavigation)
+
+        router.pendingV2Tap = payload
+        await launch.handleNotification(lifecycle: allowed)
+        XCTAssertEqual(transport.counts.batches, 3)
+        let route = try XCTUnwrap(launch.notificationNavigation)
+        let destination = InboxNotificationDestination(route: route, rows: [])
+        XCTAssertEqual(destination.workspaceTab, .inbox)
+        XCTAssertNil(destination.selection)
+        XCTAssertFalse(route.opensChat)
+        XCTAssertFalse(route.isPending)
+        await allowed.deactivate()
+        await denied.deactivate()
+    }
+
+    @MainActor
     func testOpeningAnUnloadedV2ThreadRefetchesAfterAReset() async throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
                                        personID: ExactText("person"), deviceID: ExactText("device"))

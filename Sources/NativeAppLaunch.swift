@@ -1257,11 +1257,10 @@ final class NativeAppLaunch {
         notificationNavigation = consumed
     }
 
-    func handleNotification() async {
+    func handleNotification(lifecycle: NativeRelayLifecycle = .shared) async {
         guard didFinishRestoring, let payload = notificationRouter.pendingV2Tap else { return }
         notificationRouter.pendingV2Tap = nil
-        let lifecycle = NativeRelayLifecycle.shared
-        guard let locator = await lifecycle.v2LocatorForPush(payload),
+        guard let destination = await lifecycle.v2DestinationForPush(payload),
               case let .live(presentation) = state,
               !presentation.isReadOnly, !presentation.isLocalExample,
               lifecycle.isActive(for: presentation.notificationContext) else { return }
@@ -1271,6 +1270,7 @@ final class NativeAppLaunch {
             notificationNavigationMessage = "Could not load this notification."
             return
         }
+        let locator = destination.locator
         notificationRouter.receive(locator: locator)
         guard let intent = notificationRouter.intent else { return }
         handledNotificationSerial = intent.serial
@@ -1278,9 +1278,9 @@ final class NativeAppLaunch {
         selectedArchivedAccount = nil
         selectedArchivedPresentation = nil
         isShowingDisconnectedArchive = false
-        presentation.selectRequest(locator.request)
-        notificationNavigation = NativeInboxNavigation(serial: intent.serial, request: locator.request,
-                                                         opensChat: locator.target == "chat")
+        presentation.selectRequest(locator?.request)
+        notificationNavigation = NativeInboxNavigation(serial: intent.serial, request: locator?.request,
+            opensChat: locator?.target == "chat", opensInbox: locator == nil)
         notificationNavigationMessage = nil
         notificationRouter.consumed()
     }

@@ -239,6 +239,45 @@ final class ClientAPIPushTests: XCTestCase {
         XCTAssertEqual(errors.reports.filter { $0.operation == "push_wake" }.count, 7)
     }
 
+    func testLocatorlessSyncMatchesOnlyTheHeldServerAndFetchesFromTheSavedCursor() async throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+            personID: ExactText("person"), deviceID: ExactText("device"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let transport = PushSettingsTransport()
+        let errors = RecordingErrorLogV2()
+        let repository = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        let connection = try ClientAPIv2Connection(transport: transport, repository: repository,
+            context: context, directory: directory, errors: errors, foregroundOnlyWrites: true)
+        try connection.model.rebaseline(items: [], counts: APICounts(unresolved: 0), position: 3)
+
+        func sync(server: String = "server", version: Int = 2, type: String = "sync",
+                  extra: String = "") throws -> JSONValue {
+            try JSONValue.parse(Data(#"{"attention":{"v":\#(version),"type":"\#(type)","server":"\#(server)"\#(extra)}}"#.utf8))
+        }
+
+        let matching = try sync()
+        XCTAssertNil(connection.matchPush(matching))
+        try await connection.refreshMe()
+        let reopened = try ClientAPIv2Connection(transport: transport, repository: repository,
+            context: context, directory: directory, errors: errors, foregroundOnlyWrites: true)
+        XCTAssertNotNil(reopened.matchPush(matching))
+        XCTAssertNil(reopened.matchPush(try sync(server: "other-server")))
+        XCTAssertNil(reopened.matchPush(try sync(version: 1)))
+        XCTAssertNil(reopened.matchPush(try sync(type: "alert")))
+        XCTAssertNil(reopened.matchPush(try sync(extra: #","locator":null"#)))
+        XCTAssertNil(reopened.matchPush(try sync(extra: #","locator":{"v":1}"#)))
+        XCTAssertNil(reopened.matchPush(try sync(extra: #","locator":{"v":2},"locator":{"v":2}"#)))
+        XCTAssertEqual(errors.reports.filter { $0.operation == "push_wake" }.last?.reason,
+                       .app("push_identity_mismatch"))
+
+        _ = try await reopened.catchUp(forPush: matching)
+        let batches = await transport.batches
+        XCTAssertEqual(batches, [3])
+        XCTAssertEqual(reopened.model.persistedCursor(), 3)
+    }
+
     private func payload(server: String = "server", person: String = "person", device: String = "device",
                          binding: ExactText, revision: UInt64 = 10) -> JSONValue {
         let locator = JSONValue.object([
