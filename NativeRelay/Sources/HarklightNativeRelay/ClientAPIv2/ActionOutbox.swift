@@ -110,7 +110,10 @@ public actor ActionOutbox {
     private let errors: any ErrorLogging
     private let waitBeforeRetry: @Sendable (_ attempt: Int, _ retryAfter: TimeInterval?) async throws -> Void
     private let canSend: @Sendable (OutboxEntry) -> Bool
-    private var entries: [OutboxEntry]
+    private let onEntriesChanged: @Sendable ([OutboxEntry], [OutboxEntry]) -> Void
+    private var entries: [OutboxEntry] {
+        didSet { onEntriesChanged(oldValue, entries) }
+    }
     private var sendingTasks: [String: Task<Void, Never>] = [:]
     private var sendingPaused: Bool
     private var closed = false
@@ -125,6 +128,7 @@ public actor ActionOutbox {
                 outcomes: any OutboxOutcomeHandling, errors: any ErrorLogging,
                 startsPaused: Bool = false, canSend: @escaping @Sendable (OutboxEntry) -> Bool = { _ in true },
                 excludingSavedKeys: Set<UUID> = [],
+                onEntriesChanged: @escaping @Sendable ([OutboxEntry], [OutboxEntry]) -> Void = { _, _ in },
                 waitBeforeRetry: @escaping @Sendable (_ attempt: Int, _ retryAfter: TimeInterval?) async throws -> Void
                     = ActionOutbox.backoff) throws {
         self.persistence = persistence
@@ -133,6 +137,7 @@ public actor ActionOutbox {
         self.errors = errors
         self.waitBeforeRetry = waitBeforeRetry
         self.canSend = canSend
+        self.onEntriesChanged = onEntriesChanged
         sendingPaused = startsPaused
         let saved = try persistence.load()
         let admitted = saved.filter { !excludingSavedKeys.contains($0.id) }

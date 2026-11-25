@@ -1111,6 +1111,9 @@ struct LiveInboxSettings: View {
                         }
                     }
                 }
+                if !store.isReadOnly && !store.isLocalExample {
+                    AlertsSettingsSection(context: store.notificationContext)
+                }
                 if NativeRelayLifecycle.shared.featureFlags.isEnabled(.priorityLevelEditing),
                    !store.isReadOnly && !store.isLocalExample {
                     PriorityLevelsSettingsSection(store: store)
@@ -1144,6 +1147,71 @@ struct LiveInboxSettings: View {
             }
         }
         .harklightSheetSurface()
+    }
+}
+
+@MainActor
+private struct AlertsSettingsSection: View {
+    let context: ProfileContext
+    @State private var state: ClientAPIv2Connection.AlertsState?
+    @State private var startingSave = false
+    @State private var failedToStart = false
+
+    private var relay: NativeRelayLifecycle { .shared }
+
+    var body: some View {
+        Group {
+            if let state {
+                Section {
+                    Picker("Alerts", selection: Binding(get: { state.confirmed }, set: save)) {
+                        Text("Questions and urgent").tag(APIAlerts.important)
+                        Text("Everything").tag(APIAlerts.all)
+                    }
+                    .pickerStyle(.menu)
+                    .disabled(startingSave || state.isSaving || !state.canSave)
+                    .accessibilityIdentifier("settings-alerts")
+                } footer: {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Other messages arrive quietly. They still appear in your Inbox and on the badge.")
+                        if startingSave || state.isSaving {
+                            Text("Saving alerts…")
+                        } else if failedToStart || state.hasFailure {
+                            Text("Your choice wasn’t saved. The Server’s current setting is shown.")
+                        }
+                    }
+                }
+            }
+        }
+        .task(id: context) {
+            #if DEBUG
+            if ProcessInfo.processInfo.arguments.contains("--harklight-test-alerts-settings") {
+                let settings = try? APISettings(json: JSONValue.parse(Data(#"{"rev":1,"alerts":"important"}"#.utf8)))
+                state = settings?.alerts.map {
+                    .init(confirmed: $0, canSave: true, isSaving: false, hasFailure: false)
+                }
+                return
+            }
+            #endif
+            let updates = relay.priorityLevelsUpdates(for: context)
+            state = await relay.alertsState(for: context)
+            await relay.refreshAlerts(expected: context)
+            state = await relay.alertsState(for: context)
+            for await _ in updates {
+                state = await relay.alertsState(for: context)
+            }
+        }
+    }
+
+    private func save(_ choice: APIAlerts) {
+        guard choice != state?.confirmed, !startingSave else { return }
+        startingSave = true
+        failedToStart = false
+        Task {
+            do { try await relay.saveAlerts(choice, expected: context) }
+            catch { failedToStart = true }
+            state = await relay.alertsState(for: context)
+            startingSave = false
+        }
     }
 }
 

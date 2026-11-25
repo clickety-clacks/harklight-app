@@ -3,6 +3,72 @@ import Foundation
 @testable import HarklightNativeRelay
 import XCTest
 
+final class ClientAPIAlertsSettingsTests: XCTestCase {
+    func testSettingsAlertsDecodesSupportedValuesWithoutRejectingOtherSettings() throws {
+        for (field, expected) in [("", nil), (#","alerts":"important""#, APIAlerts.important),
+                                  (#","alerts":"all""#, .all), (#","alerts":"future""#, nil)] {
+            let data = Data(("{\"rev\":1,\"priority_levels\":[]" + field + "}").utf8)
+            let settings = try APISettings(json: JSONValue.parse(data))
+            XCTAssertEqual(settings.alerts, expected)
+            XCTAssertEqual(settings.priorityLevels, [])
+        }
+    }
+
+    func testAlertsWriteAndSettingsFeedUseTheSameConfirmedProjection() throws {
+        let write = ClientAPIWrites.alerts(.all, ifMatch: "\"settings-1\"")
+        XCTAssertEqual(write.target, "settings")
+        XCTAssertEqual(write.write.method, .put)
+        XCTAssertEqual(write.write.path, "/v2/settings/alerts")
+        XCTAssertEqual(write.write.ifMatch, "\"settings-1\"")
+        XCTAssertEqual(String(decoding: try XCTUnwrap(write.write.body), as: UTF8.self), #"{"alerts":"all"}"#)
+
+        let model = ServerModelV2Store(fileURL: nil)
+        let result = try APIWriteResult(json: JSONValue.parse(Data(#"{"rev":2,"settings":{"rev":2,"alerts":"all"}}"#.utf8)))
+        try model.apply(result)
+        XCTAssertEqual(model.snapshot.settings?.alerts, .all)
+        try model.apply(kind: "settings", rev: 3, data: JSONValue.parse(Data(#"{"rev":3,"alerts":"important"}"#.utf8)))
+        XCTAssertEqual(model.snapshot.settings?.alerts, .important)
+    }
+
+    func testAlertsUseTheOutboxAndKeepTheConfirmedChoiceOnRefusal() async throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+            personID: ExactText("person"), deviceID: ExactText("device"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let repository = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        let transport = PrioritySettingsTransport(featureEnabled: false)
+        let connection = try ClientAPIv2Connection(transport: transport, repository: repository,
+            context: context, directory: nil, errors: NoopErrorLog())
+        await connection.refreshSettings()
+        let unsupported = await connection.alertsState()
+        XCTAssertNil(unsupported)
+
+        let gate = AsyncGate()
+        defer { gate.release() }
+        await transport.enableAlerts(holdingWrite: gate)
+        await connection.refreshSettings()
+        let initial = await connection.alertsState()
+        XCTAssertEqual(initial?.confirmed, .important)
+        try await connection.saveAlerts(.all)
+        let saving = await connection.alertsState()
+        XCTAssertEqual(saving?.confirmed, .important)
+        XCTAssertTrue(saving?.isSaving == true)
+        gate.release()
+        await connection.outbox.flush()
+        let refused = await connection.alertsState()
+        XCTAssertEqual(refused?.confirmed, .important)
+        XCTAssertTrue(refused?.hasFailure == true)
+
+        try await connection.saveAlerts(.all)
+        await connection.outbox.flush()
+        let accepted = await connection.alertsState()
+        XCTAssertEqual(accepted?.confirmed, .all)
+        XCTAssertFalse(accepted?.hasFailure == true)
+        let writes = await transport.puts
+        XCTAssertEqual(writes.map(\.ifMatch), ["\"settings-2\"", "\"settings-2\""])
+        XCTAssertNotEqual(writes.first?.idempotencyKey, writes.last?.idempotencyKey)
+    }
+}
+
 final class ClientAPIPriorityLevelsTests: XCTestCase {
     func testStaleSaveRefreshesTheSettingsETagAndConfirmedTableWithoutReplacingDraft() async throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
@@ -157,6 +223,8 @@ private actor PrioritySettingsTransport: ClientAPITransport {
     private var featureEnabled: Bool
     private var settingsGate: AsyncGate?
     private var meGate: AsyncGate?
+    private var alerts: APIAlerts?
+    private var alertsGate: AsyncGate?
 
     init(featureEnabled: Bool = true) {
         self.featureEnabled = featureEnabled
@@ -172,6 +240,12 @@ private actor PrioritySettingsTransport: ClientAPITransport {
     func holdMe(_ gate: AsyncGate) { meGate = gate }
 
     func enablePriorityEditing() { featureEnabled = true }
+
+    func enableAlerts(holdingWrite gate: AsyncGate) {
+        alerts = .important
+        alertsGate = gate
+        revision = 2
+    }
 
     func send(_ request: APIRequest) async throws -> APIResponse {
         switch (request.method, request.path) {
@@ -196,13 +270,24 @@ private actor PrioritySettingsTransport: ClientAPITransport {
             revision = 3
             name = "My edit"
             return settings(etag: nil)
+        case (.put, "/v2/settings/alerts"):
+            puts.append(request)
+            if let alertsGate {
+                self.alertsGate = nil
+                await alertsGate.wait()
+                throw APIError(status: 400, token: .invalidField, retryable: false, requestID: "refused")
+            }
+            revision += 1
+            alerts = .all
+            return settings(etag: nil)
         default:
             return try await base.send(request)
         }
     }
 
     private var settingsObject: String {
-        #"{"rev":\#(revision),"priority_levels":[{"name":"\#(name)","lower_bound":0,"bounce_after_days":null}],"push":{"state":"unconfigured","revision":0}}"#
+        let choice = alerts.map { #","alerts":"\#($0.rawValue)""# } ?? ""
+        return #"{"rev":\#(revision),"priority_levels":[{"name":"\#(name)","lower_bound":0,"bounce_after_days":null}],"push":{"state":"unconfigured","revision":0}\#(choice)}"#
     }
 
     private func settings(etag: String?) -> APIResponse {

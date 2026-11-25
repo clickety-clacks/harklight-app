@@ -85,7 +85,7 @@ struct FeatureCatalogueView: View {
                         .accessibilityIdentifier("feature-\(feature.rawValue)-open")
                     }
                     if feature == .accountAwareNotifications {
-                        Text("Use the normal notification choice when joining. To review your device’s permission later, open Settings on this device, then Notifications, then Harklight. Receive and tap a real notification to exercise routing; this page does not send one.")
+                        Text("With Questions and urgent, questions and high-priority or urgent messages alert you. Other messages arrive quietly and still appear in your Inbox and on the badge. Choose Everything in Harklight Settings to alert for all new messages. Manage device permission in iOS Settings under Notifications, then Harklight.")
                     }
                 } header: {
                     Text(feature.title)

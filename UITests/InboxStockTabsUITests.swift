@@ -2,6 +2,46 @@ import XCTest
 
 @MainActor
 final class InboxStockTabsUITests: XCTestCase {
+    func testAlertsSettingsOnlyShowsWhenTheServerAdvertisesIt() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--harklight-test-relay-failed-choice"]
+        app.launch()
+        defer { app.terminate() }
+        let settings = app.buttons["inbox-settings"]
+        XCTAssertTrue(settings.waitForExistence(timeout: 10))
+        settings.tap()
+        XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.descendants(matching: .any)["settings-alerts"].exists)
+    }
+
+    func testAlertsSettingsOffersBothChoicesInLightAndDark() {
+        let originalAppearance = XCUIDevice.shared.appearance
+        defer { XCUIDevice.shared.appearance = originalAppearance }
+        for appearance in ["light", "dark"] {
+            XCUIDevice.shared.appearance = appearance == "dark" ? .dark : .light
+            let app = XCUIApplication()
+            app.launchArguments = ["--harklight-test-relay-failed-choice", "--harklight-test-alerts-settings"]
+            app.launch()
+            let settings = app.buttons["inbox-settings"]
+            XCTAssertTrue(settings.waitForExistence(timeout: 10))
+            settings.tap()
+            let row = app.descendants(matching: .any)["settings-alerts"].firstMatch
+            if row.waitForExistence(timeout: 5) {
+                XCTAssertTrue(app.staticTexts["Other messages arrive quietly. They still appear in your Inbox and on the badge."].exists)
+                let capture = XCTAttachment(screenshot: app.screenshot())
+                capture.name = "Alerts settings \(appearance)"
+                capture.lifetime = .keepAlways
+                add(capture)
+                row.tap()
+                XCTAssertTrue(app.buttons["Questions and urgent"].waitForExistence(timeout: 5))
+                XCTAssertTrue(app.buttons["Everything"].exists)
+            } else {
+                XCTFail("Supported Settings must expose the Alerts picker.")
+            }
+            app.terminate()
+        }
+    }
+
     override func setUpWithError() throws {
         continueAfterFailure = false
         XCUIDevice.shared.orientation = .portrait

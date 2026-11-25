@@ -57,6 +57,13 @@ public enum ClientAPIWrites {
                                body: Data(body.jsonString.utf8), ifMatch: tag))
     }
 
+    public static func alerts(_ value: APIAlerts, ifMatch: String) -> ClientAPIWrite {
+        let body = JSONValue.object([JSONMember("alerts", .string(ExactText(value.rawValue)))])
+        return ClientAPIWrite(target: "settings", operation: "alerts",
+            write: FrozenWrite(method: .put, path: "/v2/settings/alerts",
+                               body: Data(body.jsonString.utf8), ifMatch: ifMatch))
+    }
+
     /// `POST /v2/items/{item_id}/answer` for an answer the person submitted.
     /// New submissions hold the schema of their bound revision. For older
     /// saves, supply the same revision's `answer_ui` when it is held.

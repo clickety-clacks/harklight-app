@@ -1505,6 +1505,25 @@ final class NativeRelayLifecycle {
               priorityLevelsFeatureEnabled else { throw ClientConnectionError.inactive }
         try await connection.savePriorityLevels(levels)
     }
+
+    func alertsState(for expected: ProfileContext) async -> ClientAPIv2Connection.AlertsState? {
+        guard context == expected, let connection = v2Connection else { return nil }
+        let state = await connection.alertsState()
+        guard context == expected, v2Connection === connection else { return nil }
+        return state
+    }
+
+    func refreshAlerts(expected: ProfileContext) async {
+        guard context == expected, sceneIsActive else { return }
+        await v2Connection?.refreshSettings(userInitiated: true)
+    }
+
+    func saveAlerts(_ choice: APIAlerts, expected: ProfileContext) async throws {
+        guard let connection = v2Connection, context == expected, sceneIsActive else {
+            throw ClientConnectionError.inactive
+        }
+        try await connection.saveAlerts(choice)
+    }
     private var priorityLevelsFeatureEnabled: Bool {
         featureFlags.isEnabled(.priorityLevelEditing)
     }

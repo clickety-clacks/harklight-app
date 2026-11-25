@@ -35,7 +35,8 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
     private var checkingReplyItems: Set<ExactText> = []
     private var pausedReplyChecks: Set<ExactText> = []
     private var pausedReplyUploads: Set<UUID> = []
-    private var priorityLevelsETag: (value: String, revision: UInt64, generation: UInt64)?
+    private var settingsETag: (value: String, revision: UInt64, generation: UInt64)?
+    private var startingAlertsSave = false
     private var priorityLevelsEnabledFromServer = false
     private var settingsSignal: AsyncStream<Void>.Continuation?
     private var settingsReadID: UUID?
@@ -99,6 +100,9 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
             relay.connection?.recordReply(entry, disposition: .rejected(ExactText(error.token.rawValue)))
             if entry.operation == "priority_levels" {
                 await relay.connection?.rejectPriorityLevels(entry, error: error)
+            } else if entry.operation == "alerts", error.status == 412 {
+                relay.connection?.invalidateSettingsETag()
+                await relay.connection?.refreshSettings()
             }
             await relay.connection?.settleItemAction(entry, rejection: error)
             await onRejected(entry, error)
@@ -120,6 +124,11 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
                 access.state == .available &&
                     (entry.operation != "priority_levels" || relay.connection?.priorityLevelsEditingEnabled == true)
             }, excludingSavedKeys: try repository.heldPreviousProtocolOperations(context: context),
+            onEntriesChanged: { old, new in
+                if old.filter({ $0.operation == "alerts" }) != new.filter({ $0.operation == "alerts" }) {
+                    onPriorityLevelsChanged()
+                }
+            },
             waitBeforeRetry: outboxWaitBeforeRetry)
         self.sync = ChangeFeedSync(transport: transport, model: writer, errors: errors,
                                    waitBeforeRetry: waitBeforeRetry, onLiveState: { state in
@@ -203,7 +212,7 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
             let editingEnabled = available && me.features["priority_level_editing"] == true
             priorityLevelsEnabledFromServer = editingEnabled
             if !editingEnabled {
-                priorityLevelsETag = nil
+                settingsETag = nil
                 settingsReadID = nil
             }
             return (editingEnabled, wasPaused && available)
@@ -317,7 +326,7 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
             group.addTask { await self.readMeUntilRead(userInitiated: true) }
             group.addTask { await self.reconcileAcceptedRepliesWhileForeground(signals) }
             group.addTask {
-                for await _ in settings { await self.refreshPriorityLevels(userInitiated: false) }
+                for await _ in settings { await self.refreshSettings() }
             }
             group.addTask { await self.sendQueuedRepliesWhileForeground(queued) }
             group.addTask {
@@ -672,8 +681,14 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
 
     /// Caller holds the connection lock.
     private func currentPriorityLevelsETag() -> String? {
+        guard priorityLevelsEnabledFromServer, model.snapshot.settings?.priorityLevels != nil else { return nil }
+        return currentSettingsETag()
+    }
+
+    /// Caller holds the connection lock.
+    private func currentSettingsETag() -> String? {
         let position = model.settingsPosition
-        guard priorityLevelsEnabledFromServer, let tag = priorityLevelsETag,
+        guard let tag = settingsETag,
               tag.generation == position.generation, tag.revision == position.revision else { return nil }
         return tag.value
     }
@@ -683,7 +698,12 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
     }
 
     public func refreshPriorityLevels(userInitiated: Bool = false) async {
-        guard priorityLevelsEditingEnabled, !Task.isCancelled else { return }
+        guard priorityLevelsEditingEnabled else { return }
+        await refreshSettings(userInitiated: userInitiated)
+    }
+
+    public func refreshSettings(userInitiated: Bool = false) async {
+        guard !Task.isCancelled else { return }
         let readID = UUID()
         let generation = model.syncPosition.generation
         guard lock.withLock({
@@ -697,17 +717,18 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
             response = read
             try Task.checkCancellation()
             let result = try APIWriteResult(json: JSONValue.parse(read.body))
-            guard let tag = read.etag, !tag.isEmpty, let settings = result.settings,
-                  let levels = settings.priorityLevels else {
-                throw ClientAPIModelError.invalid("settings.priority_levels")
+            guard let tag = read.etag, !tag.isEmpty, let settings = result.settings else {
+                throw ClientAPIModelError.invalid("settings")
             }
             let current = try lock.withLock { () throws -> Bool in
-                guard priorityLevelsEnabledFromServer, settingsReadID == readID else { return false }
+                guard settingsReadID == readID else { return false }
                 try model.apply(result, generation: generation)
                 let position = model.settingsPosition
                 guard position.generation == generation, position.revision == settings.rev else { return false }
-                try repository.recordPriorityLevelsRead(levels, context: context)
-                priorityLevelsETag = (tag, settings.rev, generation)
+                if priorityLevelsEnabledFromServer, let levels = settings.priorityLevels {
+                    try repository.recordPriorityLevelsRead(levels, context: context)
+                }
+                settingsETag = (tag, settings.rev, generation)
                 pausedPriorityLevelsRead = false
                 return true
             }
@@ -732,6 +753,56 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
                 correlation: .request(api?.requestID ?? response?.requestID),
                 httpStatus: api?.status ?? response?.status))
         }
+    }
+
+    public struct AlertsState: Sendable {
+        public let confirmed: APIAlerts
+        public let canSave: Bool
+        public let isSaving: Bool
+        public let hasFailure: Bool
+
+        public init(confirmed: APIAlerts, canSave: Bool, isSaving: Bool, hasFailure: Bool) {
+            self.confirmed = confirmed
+            self.canSave = canSave
+            self.isSaving = isSaving
+            self.hasFailure = hasFailure
+        }
+    }
+
+    public func alertsState() async -> AlertsState? {
+        let pending = await outbox.pending.filter { $0.operation == "alerts" }
+        let refused = await outbox.failedWrites.contains { $0.operation == "alerts" }
+        return lock.withLock {
+            guard let confirmed = model.snapshot.settings?.alerts else { return nil }
+            return AlertsState(confirmed: confirmed, canSave: currentSettingsETag() != nil,
+                               isSaving: startingAlertsSave || pending.contains { $0.waitsForInternalErrorRetry != true },
+                               hasFailure: refused || pending.contains { $0.waitsForInternalErrorRetry == true })
+        }
+    }
+
+    public func saveAlerts(_ value: APIAlerts) async throws {
+        let tag = try lock.withLock {
+            guard !startingAlertsSave, model.snapshot.settings?.alerts != nil,
+                  let tag = currentSettingsETag() else {
+                throw ClientAPIModelError.invalid("settings.alerts")
+            }
+            startingAlertsSave = true
+            return tag
+        }
+        defer {
+            lock.withLock { startingAlertsSave = false }
+            onPriorityLevelsChanged()
+        }
+        if let pending = await outbox.pending.first(where: { $0.operation == "alerts" }) {
+            if pending.waitsForInternalErrorRetry == true {
+                await outbox.retryInternalErrors(id: pending.id)
+            }
+            return
+        }
+        let failures = await outbox.failedWrites.filter { $0.operation == "alerts" }
+        let write = ClientAPIWrites.alerts(value, ifMatch: tag)
+        try await outbox.submit(target: write.target, operation: write.operation, write: write.write)
+        for failure in failures { await outbox.discardFailed(failure.id) }
     }
 
     public func savePriorityLevels(_ levels: [PriorityLevel]) async throws {
@@ -775,15 +846,15 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
         }
     }
 
-    private func invalidatePriorityLevelsETag() {
+    private func invalidateSettingsETag() {
         lock.withLock {
-            priorityLevelsETag = nil
+            settingsETag = nil
             settingsReadID = nil
         }
     }
 
     private func rejectPriorityLevels(_ entry: OutboxEntry, error: APIError) async {
-        if error.status == 412 { invalidatePriorityLevelsETag() }
+        if error.status == 412 { invalidateSettingsETag() }
         do {
             if try repository.rejectPriorityLevelsSave(entry.id, reason: error.token.rawValue, context: context) {
                 await outbox.discardFailed(entry.id)
@@ -796,7 +867,7 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
     }
 
     private func confirmPriorityLevels(_ entry: OutboxEntry, settings: APISettings?) async {
-        invalidatePriorityLevelsETag()
+        invalidateSettingsETag()
         do {
             guard let levels = settings?.priorityLevels,
                   try repository.confirmPriorityLevelsSave(entry.id, levels: levels, context: context) else {
@@ -896,8 +967,8 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
 
     public func publishModel() {
         lock.withLock {
-            if priorityLevelsEnabledFromServer, priorityLevelsETag != nil, currentPriorityLevelsETag() == nil {
-                priorityLevelsETag = nil
+            if settingsETag != nil, currentSettingsETag() == nil {
+                settingsETag = nil
                 settingsSignal?.yield(())
             }
             guard model.heldCursor != nil, presentation.hasRules,
