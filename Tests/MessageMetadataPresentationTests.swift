@@ -1,6 +1,7 @@
 import AttentionDomain
 import Foundation
 import SwiftUI
+import UIKit
 import XCTest
 @testable import Harklight
 
@@ -165,22 +166,50 @@ final class MessageMetadataPresentationTests: XCTestCase {
         XCTAssertEqual(replyActions.map(\.id), [ExactText("reply")])
     }
 
-    func testVisibleLabelsIconsAccentsAndReducedMotionRule() {
-        XCTAssertEqual(String(localized: MessageTypePresentation.title(for: .fyi)), "FYI")
-        XCTAssertEqual(String(localized: MessageTypePresentation.title(for: .request)), "Request")
-        XCTAssertNotEqual(MessageTypePresentation.symbolName(for: .fyi),
-                           MessageTypePresentation.symbolName(for: .request))
+    func testMessageTypeAndKindChooseSharedIconsAndAccessibilityWords() {
+        let fixtures: [(MessageTypeValue, MessageKindValue?, MessageIconRole, [String])] = [
+            (.request, nil, .request, ["Request"]),
+            (.request, .blocker, .requestBlocker, ["Request", "Blocker"]),
+            (.request, .success, .requestSuccess, ["Request", "Success"]),
+            (.fyi, nil, .fyi, ["FYI"]),
+            (.fyi, .blocker, .fyiBlocker, ["FYI", "Blocker"]),
+            (.fyi, .success, .fyiSuccess, ["FYI", "Success"]),
+        ]
+        for (type, kind, role, words) in fixtures {
+            let metadata = MessageMetadataPresentation(declaredType: type, kind: kind)
+            let design = HarklightMessageType(declaredType: type, kind: kind, hasSeenDescriptor: false)
+            XCTAssertEqual(metadata.iconRole(for: design), role)
+            XCTAssertEqual(metadata.accessibilityLabels.map { String(localized: $0) }, words)
+        }
 
-        let blocker = MessageKindPresentation(kind: .blocker)
-        let success = MessageKindPresentation(kind: .success)
-        XCTAssertEqual(String(localized: blocker.title), "Blocker")
-        XCTAssertEqual(String(localized: success.title), "Success")
-        XCTAssertNotEqual(blocker.symbolName, success.symbolName)
-        XCTAssertNotEqual(blocker.accent, success.accent)
-        XCTAssertNil(blocker.celebratoryFlairSymbolName)
-        XCTAssertNotNil(success.celebratoryFlairSymbolName)
-        XCTAssertTrue(success.shouldAnimateFlair(reduceMotion: false))
-        XCTAssertFalse(success.shouldAnimateFlair(reduceMotion: true))
-        XCTAssertFalse(blocker.shouldAnimateFlair(reduceMotion: false))
+        let localBlocker = MessageMetadataPresentation(declaredType: .request, kind: .blocker)
+        XCTAssertEqual(localBlocker.iconRole(for: .request), .requestBlocker,
+                       "A local example may keep the request palette while using the blocker icon.")
+        XCTAssertEqual(MessageMetadataPresentation(declaredType: .fyi).iconRole(for: .request), .fyi)
+        let legacyFYI = MessageMetadataPresentation(hasSeenDescriptor: true)
+        XCTAssertEqual(legacyFYI.iconRole(for: .info), .fyi)
+        XCTAssertTrue(legacyFYI.accessibilityLabels.isEmpty)
+        let legacyBlocker = MessageMetadataPresentation(kind: .blocker, hasSeenDescriptor: true)
+        XCTAssertEqual(legacyBlocker.iconRole(for: .warning), .fyiBlocker)
+        XCTAssertEqual(legacyBlocker.accessibilityLabels.map { String(localized: $0) }, ["Blocker"])
+        XCTAssertEqual(MessageMetadataPresentation().iconRole(for: .error), .error)
+    }
+
+    func testMessageIconTokensPreserveExistingSymbolsAndPairWebIcons() {
+        let fixtures: [(MessageIconRole, String, String)] = [
+            (.request, "questionmark.circle", "circle-question-mark"),
+            (.requestBlocker, "exclamationmark.octagon", "octagon-exclamation-point"),
+            (.requestSuccess, "checkmark.circle", "circle-check"),
+            (.fyi, "info.circle", "info"),
+            (.fyiBlocker, "exclamationmark.triangle", "triangle-exclamation-point"),
+            (.fyiSuccess, "checkmark.circle", "circle-check"),
+            (.answered, "checkmark", "check"),
+            (.error, "xmark.octagon", "octagon-x"),
+        ]
+        for (role, apple, web) in fixtures {
+            XCTAssertEqual(role.token.sfSymbol, apple)
+            XCTAssertEqual(role.token.web, web)
+            XCTAssertNotNil(UIImage(systemName: role.token.sfSymbol), role.rawValue)
+        }
     }
 }

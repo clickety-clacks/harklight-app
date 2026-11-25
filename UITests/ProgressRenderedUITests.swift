@@ -2,6 +2,25 @@ import XCTest
 
 @MainActor
 final class ProgressRenderedUITests: XCTestCase {
+    func testErrorAndBlockerIconsSideBySideInBothAppearances() {
+        XCUIDevice.shared.orientation = .landscapeLeft
+        defer { XCUIDevice.shared.orientation = .portrait }
+        for appearance in ["light", "dark"] {
+            let app = XCUIApplication()
+            app.launchArguments = ["--message-icon-comparison", "--harklight-test-inbox-list-\(appearance)"]
+            app.launch()
+            let error = app.descendants(matching: .any)["icon-comparison-error"].firstMatch
+            let blocker = app.descendants(matching: .any)["icon-comparison-blocker"].firstMatch
+            XCTAssertTrue(error.waitForExistence(timeout: 5), app.debugDescription)
+            XCTAssertTrue(blocker.exists)
+            XCTAssertTrue(error.label.contains("Error opening preview"), error.label)
+            XCTAssertTrue(blocker.label.contains("Request, Blocker"), blocker.label)
+            XCTAssertLessThan(error.frame.midX, blocker.frame.midX)
+            capture("error-and-blocker-\(appearance)", app)
+            app.terminate()
+        }
+    }
+
     func testProgressSectionAndDetailInBothAppearances() {
         XCUIDevice.shared.orientation = .portrait
         for mode in ["light", "dark"] {
@@ -14,7 +33,7 @@ final class ProgressRenderedUITests: XCTestCase {
             row.tap()
             let detail = app.scrollViews["progress.detail"]
             XCTAssertTrue(detail.waitForExistence(timeout: 5), app.debugDescription)
-            XCTAssertTrue(app.staticTexts["Prepare the studio handoff"].exists)
+            XCTAssertTrue(detail.staticTexts["Prepare the studio handoff, FYI"].exists)
             XCTAssertTrue(app.staticTexts["Packaging"].exists || app.staticTexts["packaging"].exists)
             XCTAssertFalse(app.buttons["Seen"].exists)
             XCTAssertFalse(app.buttons["Reply"].exists)

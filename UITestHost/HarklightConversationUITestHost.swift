@@ -15,7 +15,8 @@ struct HarklightConversationUITestHost: App {
 
     init() {
         let arguments = ProcessInfo.processInfo.arguments
-        if arguments.contains("--progress-rendered") || arguments.contains("--harklight-test-inbox-list-column") || arguments.contains("--free-rendered") {
+        if arguments.contains("--progress-rendered") || arguments.contains("--harklight-test-inbox-list-column")
+            || arguments.contains("--free-rendered") || arguments.contains("--message-icon-comparison") {
             _prototypeFixture = State(initialValue: nil)
             _conversationFixture = State(initialValue: nil)
         } else if arguments.contains("--attention-fixture") || arguments.contains("--reset-attention-fixture") {
@@ -38,6 +39,8 @@ struct HarklightConversationUITestHost: App {
             Group {
                 if ProcessInfo.processInfo.arguments.contains("--progress-rendered") {
                     ProgressRenderedHost()
+                } else if ProcessInfo.processInfo.arguments.contains("--message-icon-comparison") {
+                    MessageIconComparisonCaptureHost()
                 } else if ProcessInfo.processInfo.arguments.contains("--free-rendered") {
                     FreeRenderedHost()
                 } else if ProcessInfo.processInfo.arguments.contains("--harklight-test-inbox-list-column") {

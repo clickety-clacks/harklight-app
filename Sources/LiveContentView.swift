@@ -677,6 +677,9 @@ struct LiveContentView: View {
                                 ProgressMessageDetail(title: request.title?.rawValue ?? "Message",
                                     sender: request.senderDisplayName?.rawValue ?? key.senderID.rawValue,
                                     bodyText: request.body?.rawValue, progress: progress,
+                                    messageType: context.messageType,
+                                    metadata: .init(declaredType: request.messageType, kind: request.messageKind,
+                                                    hasSeenDescriptor: request.informationalSeenStatus != nil),
                                     createdAt: request.createdAt,
                                     itemID: store.isLocalExample ? nil : key.messageID,
                                     seenPending: row?.isFYISeenPending == true,
@@ -838,7 +841,6 @@ struct LiveContentView: View {
 }
 
 /// Shared message identity parts for detail headings and FYI list rows.
-/// Only explicit protocol metadata is shown; missing metadata stays absent.
 struct MessageHeading: View {
     struct Detail {
         let itemID: ExactText?
@@ -850,6 +852,7 @@ struct MessageHeading: View {
     let title: String
     var createdAt: Date? = nil
     var messageType: HarklightMessageType = .request
+    var metadata = MessageMetadataPresentation()
     var inFYIList = false
     var detail: Detail? = nil
     @Environment(\.colorScheme) private var colorScheme
@@ -884,16 +887,19 @@ struct MessageHeading: View {
         }
     }
 
+    private var titleText: Text { Text(MessageMarkdown.attributed(title)) }
+
     private var titleLine: some View {
         HStack(alignment: .firstTextBaseline, spacing: inFYIList ? HarklightDesignSystem.shape(.fyiListTitleSymbolGap) : 14) {
-            Image(systemName: messageType.symbol)
+            Image(systemName: metadata.iconRole(for: messageType).token.sfSymbol)
                 .font(.system(size: inFYIList ? HarklightDesignSystem.shape(.fyiListTitleSymbolSize) : 22, weight: .medium))
                 .foregroundStyle(palette.typeColor(messageType))
                 .accessibilityHidden(true)
-            Text(MessageMarkdown.attributed(title))
+            titleText
                 .harklightType(inFYIList ? .inboxMessageTitle : .messageTitle)
                 .foregroundStyle(palette.text)
                 .fixedSize(horizontal: false, vertical: true)
+                .accessibilityLabel(metadata.accessibilityTitle(titleText))
         }
     }
 
@@ -904,6 +910,7 @@ struct MessageHeading: View {
                     titleLine
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel(metadata.accessibilityTitle(titleText))
                 .accessibilityIdentifier("request-heading")
                 .accessibilityHint("Open request details")
 
@@ -1535,8 +1542,6 @@ struct MessageIDByline<Identity: View>: View {
 private struct RequestDetailMetadata: View {
     let inboxPriority: InboxMessagePriority?
     let inboxScore: Double?
-    let messageType: MessageTypeValue?
-    let messageKind: MessageKindValue?
     let deadline: Date?
     let stake: String?
     let key: RequestKey
@@ -1554,11 +1559,6 @@ private struct RequestDetailMetadata: View {
                     .font(.caption.weight(.semibold))
                     .accessibilityLabel(Text(priorityLabel.title))
                     .accessibilityIdentifier("request-priority")
-            }
-            if messageType != nil || messageKind != nil {
-                MessageMetadataBadges(messageType: messageType,
-                                      messageKind: messageKind,
-                                      containsChildAccessibilityElements: true)
             }
             if let deadline {
                 Label("Deadline · \(deadline.formatted(date: .omitted, time: .shortened))",
@@ -2403,7 +2403,7 @@ struct LiveRequestDetail: View {
                 answer: confirmedAnswerText,
                 identifier: "request-answered",
                 accessibilityValue: "Completed",
-                symbolName: "checkmark",
+                symbolName: MessageIconRole.answered.token.sfSymbol,
                 answerIdentifier: request.isDefaultAnswered
                     ? "request-default-answer" : "request-account-answer")
         } else if showsNoCommentConfirmation {
@@ -2451,11 +2451,12 @@ struct LiveRequestDetail: View {
                 MessageHeading(sender: senderLabel, initials: senderInitials,
                     title: request.title?.rawValue ?? "Message", createdAt: request.createdAt,
                     messageType: context.messageType,
+                    metadata: MessageMetadataPresentation(declaredType: request.messageType, kind: request.messageKind,
+                                                          hasSeenDescriptor: request.informationalSeenStatus != nil),
                     detail: .init(itemID: localExample == nil && !store.isLocalExample ? request.key.messageID : nil,
                                   onOpenDetails: { requestDetailsPresented = true }))
                 RequestDetailMetadata(inboxPriority: request.inboxPriority,
                     inboxScore: request.inboxScore,
-                    messageType: request.messageType, messageKind: request.messageKind,
                     deadline: byWhenDate, stake: request.stakeText?.rawValue,
                     key: request.key, supersedesMessageIDs: request.supersedesMessageIDs,
                     secondaryTextColor: detailColors.secondary)

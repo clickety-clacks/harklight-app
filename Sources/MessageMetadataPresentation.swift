@@ -5,199 +5,46 @@ extension EnvironmentValues {
     @Entry var harklightReduceMotionOverride: Bool? = nil
 }
 
-enum MessageTypePresentation {
-    static func title(for type: MessageTypeValue) -> LocalizedStringResource {
-        switch type {
+struct MessageMetadataPresentation {
+    var declaredType: MessageTypeValue? = nil
+    var kind: MessageKindValue? = nil
+    var hasSeenDescriptor = false
+
+    var resolvedType: MessageTypeValue {
+        declaredType ?? (hasSeenDescriptor ? .fyi : .request)
+    }
+
+    func iconRole(for designType: HarklightMessageType) -> MessageIconRole {
+        switch (resolvedType, kind) {
+        case (.request, .blocker): .requestBlocker
+        case (.request, .success): .requestSuccess
+        case (.fyi, .blocker): .fyiBlocker
+        case (.fyi, .success): .fyiSuccess
+        case (.request, nil) where declaredType != nil: .request
+        case (.fyi, nil) where declaredType != nil: .fyi
+        case (_, nil): designType.iconRole
+        }
+    }
+
+    /// Match the old badges' explicit metadata. Legacy Seen controls can
+    /// determine the icon without inventing a sender-declared accessibility label.
+    var accessibilityLabels: [LocalizedStringResource] {
+        let typeLabel: LocalizedStringResource? = switch declaredType {
         case .fyi: "FYI"
         case .request: "Request"
+        case nil: nil
         }
-    }
-
-    static func symbolName(for type: MessageTypeValue) -> String {
-        switch type {
-        case .fyi: "info.circle.fill"
-        case .request: "arrowshape.turn.up.right.fill"
-        }
-    }
-}
-
-enum MessageKindAccent: Equatable {
-    case blocker
-    case success
-}
-
-struct MessageKindPresentation {
-    let kind: MessageKindValue
-
-    var title: LocalizedStringResource {
-        switch kind {
+        let kindLabel: LocalizedStringResource? = switch kind {
         case .blocker: "Blocker"
         case .success: "Success"
+        case nil: nil
         }
+        return [typeLabel, kindLabel].compactMap { $0 }
     }
 
-    var symbolName: String {
-        switch kind {
-        case .blocker: "exclamationmark.octagon.fill"
-        case .success: "checkmark.seal.fill"
-        }
-    }
-
-    var accent: MessageKindAccent {
-        switch kind {
-        case .blocker: .blocker
-        case .success: .success
-        }
-    }
-
-    var celebratoryFlairSymbolName: String? {
-        kind == .success ? "sparkles" : nil
-    }
-
-    func shouldAnimateFlair(reduceMotion: Bool) -> Bool {
-        kind == .success && !reduceMotion
-    }
-}
-
-struct MessageMetadataBadges: View {
-    let messageType: MessageTypeValue?
-    let messageKind: MessageKindValue?
-    let containsChildAccessibilityElements: Bool
-
-    init(messageType: MessageTypeValue?,
-         messageKind: MessageKindValue?,
-         containsChildAccessibilityElements: Bool = false) {
-        self.messageType = messageType
-        self.messageKind = messageKind
-        self.containsChildAccessibilityElements = containsChildAccessibilityElements
-    }
-
-    @ViewBuilder
-    var body: some View {
-        if messageType != nil || messageKind != nil {
-            if containsChildAccessibilityElements {
-                badgeStack
-                    .accessibilityElement(children: .contain)
-                    .accessibilityIdentifier("message-metadata-badges")
-            } else {
-                badgeStack
-                    .accessibilityIdentifier("message-metadata-badges")
-            }
-        }
-    }
-
-    private var badgeStack: some View {
-        HStack(alignment: .center, spacing: 6) {
-            if let messageType {
-                MessageTypeBadge(type: messageType)
-            }
-            if let messageKind {
-                MessageKindBadge(kind: messageKind)
-            }
-            Spacer(minLength: 0)
-        }
-    }
-}
-
-private enum MessageMetadataBadgeStyle {
-    static var font: Font {
-        .caption.weight(.medium)
-    }
-}
-
-private struct MessageTypeBadge: View {
-    let type: MessageTypeValue
-
-    @Environment(\.colorScheme) private var colorScheme
-
-    private var title: LocalizedStringResource {
-        MessageTypePresentation.title(for: type)
-    }
-
-    private var secondaryTextColor: Color {
-        HarklightDesignSystem.palette(for: colorScheme).secondary
-    }
-
-    var body: some View {
-        HStack(spacing: 4) {
-            Image(systemName: MessageTypePresentation.symbolName(for: type))
-                .accessibilityHidden(true)
-            Text(title)
-        }
-        .font(MessageMetadataBadgeStyle.font)
-        .foregroundStyle(secondaryTextColor)
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .background(secondaryTextColor.opacity(0.10), in: Capsule())
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(Text(title))
-        .accessibilityIdentifier("message-type-\(type.rawValue)")
-    }
-}
-
-private struct MessageKindBadge: View {
-    let kind: MessageKindValue
-
-    @Environment(\.accessibilityReduceMotion) private var systemReduceMotion
-    @Environment(\.harklightReduceMotionOverride) private var reduceMotionOverride
-    @State private var isFlairActive = false
-
-    private var reduceMotion: Bool {
-        reduceMotionOverride ?? systemReduceMotion
-    }
-
-    private var presentation: MessageKindPresentation {
-        MessageKindPresentation(kind: kind)
-    }
-
-    @Environment(\.colorScheme) private var colorScheme
-
-    private var accentColor: Color {
-        let palette = HarklightDesignSystem.palette(for: colorScheme)
-        return switch presentation.accent {
-        case .blocker: palette.amber
-        case .success: palette.teal
-        }
-    }
-
-    var body: some View {
-        HStack(spacing: 4) {
-            Image(systemName: presentation.symbolName)
-                .foregroundStyle(accentColor)
-                .accessibilityHidden(true)
-            Text(presentation.title)
-                .foregroundStyle(.hkText)
-            if let flair = presentation.celebratoryFlairSymbolName {
-                Image(systemName: flair)
-                    .foregroundStyle(accentColor)
-                    .symbolEffect(.bounce, options: .nonRepeating,
-                                  isActive: isFlairActive && presentation.shouldAnimateFlair(
-                                    reduceMotion: reduceMotion))
-                    .accessibilityHidden(true)
-            }
-        }
-        .font(MessageMetadataBadgeStyle.font)
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .background(accentColor.opacity(0.10), in: Capsule())
-        .overlay {
-            Capsule().strokeBorder(accentColor.opacity(0.45), lineWidth: 0.8)
-                .accessibilityHidden(true)
-        }
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(Text(presentation.title))
-        .accessibilityIdentifier("message-kind-\(kind.rawValue)")
-        .onAppear {
-            guard presentation.shouldAnimateFlair(reduceMotion: reduceMotion) else { return }
-            isFlairActive = true
-        }
-        .onChange(of: reduceMotion) { _, isReduced in
-            guard isReduced else { return }
-            var transaction = Transaction()
-            transaction.disablesAnimations = true
-            withTransaction(transaction) {
-                isFlairActive = false
-            }
+    func accessibilityTitle(_ title: Text) -> Text {
+        accessibilityLabels.reduce(title) { title, label in
+            Text("\(title), \(Text(label))")
         }
     }
 }

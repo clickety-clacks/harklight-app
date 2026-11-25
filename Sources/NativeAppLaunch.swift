@@ -175,6 +175,9 @@ final class NativeAppLaunch {
                 progressPercent: 100,
                 progressTerminal: arguments.contains("--harklight-test-fyi-ended-progress")
                     ? #"{"state":"expired","at_ms":1700000003000}"# : "",
+                messageKindFixture: arguments.contains("--harklight-test-fyi-message-kinds")
+                    ? (arguments.contains("--harklight-test-fyi-progress-success") ? .success : .blocker)
+                    : nil,
                 gardenSeen: arguments.contains("--harklight-test-fyi-garden-seen") ||
                     arguments.contains("--harklight-test-fyi-plain-seen"),
                 museumSeen: arguments.contains("--harklight-test-fyi-plain-seen"),
@@ -4406,18 +4409,21 @@ extension AttentionTier {
 extension NativeAppLaunch {
     static func makeFYITestStore(includeProgress: Bool = false, progressPercent: Int? = nil,
                                  progressSeen: Bool = false, progressTerminal: String = "",
+                                 messageKindFixture: MessageKindValue? = nil,
                                  gardenSeen: Bool = false, museumSeen: Bool = false,
                                  includeBulk: Bool = false, repliedFixture: Bool = false,
                                  includeBulkReplied: Bool = false,
                                  includeInboxSortRows: Bool = false) throws -> LivePresentationStore {
         // Measure the large list opening from Inbox, free of the other fixture's restored selection.
         let fixtureID = includeInboxSortRows ? "inbox-order-fixture" : (repliedFixture ? "fyi-tab-fixture" : "fyi-fixture")
-        let personID = includeBulk || includeBulkReplied || !progressTerminal.isEmpty
+        let personID = includeBulk || includeBulkReplied || !progressTerminal.isEmpty || messageKindFixture != nil
             ? ExactText(UUID().uuidString) : ExactText(fixtureID)
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("fixture.invalid"),
             personID: personID, deviceID: ExactText("fixture-device"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
         let model = ServerModelV2Store(fileURL: nil)
+        let gardenKind = messageKindFixture == nil ? "" : #""message_kind":"success","#
+        let museumKind = messageKindFixture == nil ? "" : #""message_kind":"blocker","#
         // Separate pages with opaque server and legacy-shaped identifiers. The
         // sender label in the payload does not determine the stored request key.
         var pages = [
@@ -4425,7 +4431,7 @@ extension NativeAppLaunch {
             {"rev":1,"counts":{"unresolved":1},"items":[
                 {"item_id":"legacy/fyi-garden","rev":1,"sender":"app:fixture/community",
                  "request_revision":1,"created_at_ms":1700000000000,"seen":\#(gardenSeen),
-                 "message":{"message_type":"fyi","title":"Community garden",
+                 "message":{"message_type":"fyi",\#(gardenKind)"title":"Community garden",
                             "body":"The community garden reopened after repairs."},
                  "files":[],"chat":{"started":false},"rank":{"key":"a","score":0.9,"section":"current"}}
             ]}
@@ -4434,7 +4440,7 @@ extension NativeAppLaunch {
             {"rev":2,"counts":{"unresolved":2},"items":[
                 {"item_id":"i-204","rev":2,"sender":"fixture:community",
                  "request_revision":1,"created_at_ms":1700000001000,"seen":\#(museumSeen),
-                 "message":{"message_type":"fyi","title":"Museum hours",
+                 "message":{"message_type":"fyi",\#(museumKind)"title":"Museum hours",
                             "body":"The museum is open late on Fridays. Visit the sculpture gallery before 8 p.m. and pick up a free map in the foyer. Details at https://example.org."},
                  "files":[],"chat":{"started":false},"rank":{"key":"b","score":0.5,"section":"current"}}
             ]}
@@ -4442,7 +4448,8 @@ extension NativeAppLaunch {
         ]
         if includeProgress {
             pages.append(fyiProgressTestPage(progressPercent: progressPercent, progressSeen: progressSeen,
-                                             progressTerminal: progressTerminal, revision: 3))
+                                             progressTerminal: progressTerminal,
+                                             kind: messageKindFixture, revision: 3))
         }
         if includeInboxSortRows {
             pages.append(#"""
@@ -4594,16 +4601,18 @@ extension NativeAppLaunch {
     }
 
     fileprivate static func fyiProgressTestPage(progressPercent: Int?, progressSeen: Bool,
-                                                 progressTerminal: String = "", revision: Int) -> String {
+                                                 progressTerminal: String = "", kind: MessageKindValue? = nil,
+                                                 revision: Int) -> String {
         let progress = progressPercent.map {
             #"{"percent":\#($0),"updated_at":"2026-11-24T00:00:00Z","stage":"","segments":[{"stage":"","width":\#($0)}]}"#
         } ?? #"{"percent":100}"#
         let terminal = progressTerminal.isEmpty ? "" : #","terminal":\#(progressTerminal)"#
+        let kindField = kind.map { #""message_kind":"\#($0.rawValue)","# } ?? ""
         return #"""
         {"rev":\#(revision),"counts":{"unresolved":3},"items":[
             {"item_id":"progress-fyi","rev":\#(revision),"sender":"fixture:community",
              "request_revision":\#(revision),"created_at_ms":1700000002000,"seen":\#(progressSeen),
-             "message":{"message_type":"fyi","title":"Progress with a Seen response",
+             "message":{"message_type":"fyi",\#(kindField)"title":"Progress with a Seen response",
                         "progress":\#(progress),
                         "answer_ui":{"schema":"attention-client.actions/1","actions":[
                             {"id":"seen","label":"Seen","kind":"value","value":{"acknowledgment":"seen"}}]}},
