@@ -666,6 +666,87 @@ final class HarklightTests: XCTestCase {
     }
 
     @MainActor
+    func testArchiveAndReadOnlyMessageAndChatKeepItemIDsOffTheLiveFocusConnection() async throws {
+        let person = ExactText("person")
+        let liveContext = ProfileContext(identity: ProfileIdentity(
+            trustedRelayAuthority: ExactText("live.example"), personID: person,
+            deviceID: ExactText("device")), transportMode: .relay)
+        let archiveContext = ProfileContext(identity: ProfileIdentity(
+            trustedRelayAuthority: ExactText("archive.example"), personID: person,
+            deviceID: ExactText("device")), transportMode: .relay)
+        let liveRepository = try ClientRepository(context: liveContext, persistence: MemoryPendingActionPersistence())
+        let archiveRepository = try ClientRepository(context: archiveContext, persistence: MemoryPendingActionPersistence())
+        let live = try LivePresentationStore(store: liveRepository, context: liveContext)
+        let archive = try LivePresentationStore(disconnectedStore: archiveRepository, context: archiveContext)
+        let transport = V2ScenePushTransport()
+        let connection = try ClientAPIv2Connection(transport: transport, repository: liveRepository,
+            context: liveContext, directory: nil, errors: NoopErrorLog())
+        let reporter = NativeFocusReporter()
+        let lifecycle = NativeRelayLifecycle(v2FocusReporter: reporter)
+        let attempt = UUID()
+        lifecycle.installV2Connection(connection, context: liveContext, attempt: attempt)
+        lifecycle.installV2FocusChannel(ClientAPIFocusChannel(transport: transport,
+            errors: NoopErrorLog()) { _, _ in }, attempt: attempt)
+        lifecycle.v2FocusScenePhaseChanged(.active)
+
+        func waitForScreen(_ screen: String, after count: Int = 0) async throws {
+            let deadline = ContinuousClock.now + .seconds(2)
+            while ContinuousClock.now < deadline {
+                let screens = transport.reportedFocusScreens
+                if screens.count > count, screens.last == screen { break }
+                try await Task.sleep(for: .milliseconds(5))
+            }
+            XCTAssertGreaterThan(transport.reportedFocusScreens.count, count)
+            XCTAssertEqual(transport.reportedFocusScreens.last, screen)
+        }
+
+        func select(_ selection: InboxSelection, in store: LivePresentationStore) {
+            if let focus = NativeFocusSelection.report(for: selection, isReadOnly: store.isReadOnly) {
+                reporter.selectionChanged(to: focus)
+            }
+        }
+
+        let liveItem = RequestKey(accountScope: person, senderID: ExactText("sender"), messageID: ExactText("live-item"))
+        try await waitForScreen("inbox")
+        select(.request(liveItem), in: live)
+        try await waitForScreen("message", after: 1)
+        XCTAssertEqual(transport.reportedFocus.last?.uniqueValue(named: "item_id")?.stringValue, liveItem.messageID)
+
+        let archivedItem = RequestKey(accountScope: person, senderID: ExactText("sender"),
+                                      messageID: ExactText("archived-item"))
+        let archiveStart = transport.reportedFocus.count
+        reporter.setReportsVisiblePresentation(!archive.isReadOnly)
+        XCTAssertNil(NativeFocusSelection.report(for: .request(archivedItem), isReadOnly: archive.isReadOnly))
+        select(.request(archivedItem), in: archive)
+        // Even if a Chat callback arrives as an archive is presented, the
+        // live Focus channel is paused and must never write that identifier.
+        reporter.conversationAppeared(senderID: archivedItem.senderID.rawValue,
+            messageID: archivedItem.messageID.rawValue, visibility: .noTurns)
+        reporter.setReportsVisiblePresentation(!archive.isReadOnly)
+        try await waitForScreen("not_in_front", after: archiveStart)
+        let localExample = InboxSelection.sample("local-example")
+        XCTAssertEqual(NativeFocusSelection.report(for: localExample), .inbox)
+        select(localExample, in: live)
+        reporter.setReportsVisiblePresentation(!live.isReadOnly)
+        try await waitForScreen("inbox", after: archiveStart + 1)
+        XCTAssertEqual(Array(transport.reportedFocusScreens.dropFirst(archiveStart)), ["not_in_front", "inbox"])
+
+        live.enterReadOnlyMode()
+        let readOnlyStart = transport.reportedFocus.count
+        reporter.setReportsVisiblePresentation(!live.isReadOnly)
+        XCTAssertNil(NativeFocusSelection.report(for: .request(liveItem), isReadOnly: live.isReadOnly))
+        select(.request(liveItem), in: live)
+        reporter.conversationAppeared(senderID: liveItem.senderID.rawValue,
+            messageID: liveItem.messageID.rawValue, visibility: .noTurns)
+        try await waitForScreen("not_in_front", after: readOnlyStart)
+        XCTAssertEqual(Array(transport.reportedFocusScreens.dropFirst(readOnlyStart)), ["not_in_front"])
+        XCTAssertTrue(transport.reportedFocus.dropFirst(archiveStart).allSatisfy {
+            $0.uniqueValue(named: "item_id") == nil
+        })
+        await lifecycle.deactivate()
+    }
+
+    @MainActor
     func testFYIDetailFocusUsesOnlyTheActiveLiveProfile() async throws {
         let liveIdentity = ProfileIdentity(trustedRelayAuthority: ExactText("live.example"),
             personID: ExactText("person"), deviceID: ExactText("device"))
