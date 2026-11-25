@@ -330,7 +330,7 @@ final class InboxStockTabsUITests: XCTestCase {
         XCTAssertTrue(list.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(field.waitForExistence(timeout: 5),
                       "The list has its own search field.\n\(app.debugDescription)")
-        XCTAssertTrue(list.isHittable, "The master list remains usable beside the detail.")
+        XCTAssertTrue(listVisibleBesideDetail(in: app), "The master list remains usable beside the detail.")
         XCTAssertGreaterThanOrEqual(field.frame.minX, list.frame.minX - 8)
         XCTAssertLessThanOrEqual(field.frame.maxX, list.frame.maxX + 8)
         field.tap()

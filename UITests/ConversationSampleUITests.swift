@@ -568,8 +568,19 @@ final class ConversationSampleUITests: XCTestCase {
                           "The dismissal starts with the keyboard up.")
 
             let startElement = gesture.origin == "history" ? history : composer
-            let start = startElement.coordinate(
+            var start = startElement.coordinate(
                 withNormalizedOffset: CGVector(dx: gesture.startX, dy: gesture.startY))
+            // The history can now reach the window top, under the message's
+            // navigation bar, which takes a drag that starts there. Begin just
+            // below that bar, at the top of the visible Chat content.
+            let bars = app.navigationBars.allElementsBoundByIndex.filter {
+                $0.frame.minX <= startElement.frame.midX && $0.frame.maxX >= startElement.frame.midX
+            }
+            let barBottom = bars.map(\.frame.maxY).filter { $0 > startElement.frame.minY }.max()
+            if gesture.deltaY > 0, let barBottom {
+                start = startElement.coordinate(withNormalizedOffset: CGVector(dx: gesture.startX, dy: 0))
+                    .withOffset(CGVector(dx: 0, dy: barBottom + 24 - startElement.frame.minY))
+            }
             let end = start.withOffset(CGVector(dx: gesture.deltaX, dy: gesture.deltaY))
             start.press(forDuration: 0.05, thenDragTo: end,
                         withVelocity: .fast, thenHoldForDuration: 0.1)
@@ -1511,8 +1522,9 @@ final class ConversationSampleUITests: XCTestCase {
 
 @MainActor
 private func workspaceTab(_ title: String, in app: XCUIApplication) -> XCUIElement {
-    let tabBarButton = app.tabBars.buttons[title]
-    if tabBarButton.exists { return tabBarButton }
+    // Inbox and Replied are segments of the list's own switch.
+    let segment = app.segmentedControls["inbox-mailbox-picker"].buttons[title]
+    if segment.exists { return segment }
     return app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", title)).firstMatch
 }
 
@@ -1535,8 +1547,10 @@ private func workspaceSearchField(in app: XCUIApplication) -> XCUIElement {
 
 @MainActor
 private func workspaceBackButton(in app: XCUIApplication) -> XCUIElement {
-    let toolbarBack = app.toolbars.buttons["BackButton"]
-    if toolbarBack.exists { return toolbarBack }
+    // The list and the message each have a toolbar; use a Back control that is on screen.
+    let toolbarBack = app.toolbars.buttons.matching(identifier: "BackButton")
+        .allElementsBoundByIndex.first { !$0.frame.isEmpty }
+    if let toolbarBack { return toolbarBack }
 
     let navigationBack = app.navigationBars.buttons.matching(
         NSPredicate(format: "identifier == 'BackButton' OR label == 'Back'")

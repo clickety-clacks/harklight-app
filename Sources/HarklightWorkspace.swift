@@ -1381,9 +1381,14 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     }
 
     /// The list's Inbox | Replied switch. Switching keeps each list's own
-    /// remembered detail (switchBrowsingTab).
+    /// remembered detail (switchBrowsingTab) and starts the other list
+    /// unfiltered, as switching tabs did.
     private var mailboxSelection: Binding<InboxWorkspaceTab> {
-        Binding(get: { workspaceTab }, set: { switchBrowsingTab(to: $0) })
+        Binding(get: { workspaceTab }, set: { tab in
+            guard tab != workspaceTab else { return }
+            if !search.isEmpty { search = "" }
+            switchBrowsingTab(to: tab)
+        })
     }
 
     @ViewBuilder
@@ -1422,6 +1427,10 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                         guard fyis(for: tab).contains(where: { $0.key == key && !$0.isRetracted }) else { return }
                         relatedMessageNavigationPath.append(.fyi(key))
                     }
+                    // Each list's FYIs are their own list, so switching Inbox |
+                    // Replied starts the other one fresh rather than reusing
+                    // this one's scroll position.
+                    .id(tab)
                 case let .notificationPending(serial)?:
                     if let presentation = notificationPendingPresentation(for: serial) {
                         InboxNotificationPendingDetail(
