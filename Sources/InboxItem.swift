@@ -80,6 +80,31 @@ enum InboxItem: Identifiable {
         return false
     }
 
+    func usesNormalMessageList(inInboxSearch: Bool) -> Bool {
+        guard case let .request(row) = self else { return true }
+        if row.isRepliedFYI { return true }
+        if row.fyiUsesInboxSearchForProgress { return inInboxSearch }
+        return row.progress == nil || row.fyiUsesRepliedForProgress
+    }
+
+    @MainActor
+    func belongsToMessageTab(_ tab: InboxMessageTab) -> Bool {
+        belongsToReplied == (tab == .replied)
+    }
+
+    var isSettledFYI: Bool {
+        if case let .request(row) = self { return row.isSettledFYI }
+        return false
+    }
+
+    @MainActor var hasPendingSeenAnswer: Bool {
+        let row: InboxRequestRow? = switch self {
+        case let .request(row): row
+        case let .example(_, response): response.inboxRow
+        }
+        return row?.informationalSeenStatus == .pending && row?.hasFailedResponse == false
+    }
+
     var hasProgressMarker: Bool {
         if case let .request(row) = self { return row.hasProgressMarker || row.progress != nil }
         return false
@@ -332,8 +357,9 @@ enum InboxNormalListProjection {
         for item in serverItems {
             switch item.kind {
             case .message:
-                guard let row = rowsByKey[item.key], row.progress == nil,
-                      isFree || row.belongsToReplied == (tab.messageTab == .replied),
+                guard let row = rowsByKey[item.key], InboxItem.request(row).usesNormalMessageList(inInboxSearch: tab == .inbox && !query.isEmpty),
+                      (isFree && !row.fyiUsesRepliedForProgress && !(row.isFYI && row.fyiGroupingEnabled)) ||
+                        InboxItem.request(row).belongsToMessageTab(tab.messageTab),
                       query.isEmpty || InboxItem.request(row).matchesSearch(query) else {
                     flushMessages()
                     continue
@@ -342,7 +368,8 @@ enum InboxNormalListProjection {
                 pendingMessages.append(.request(row))
             case .reply:
                 flushMessages()
-                guard rowsByKey[item.key]?.progress == nil else { continue }
+                guard rowsByKey[item.key]?.progress == nil,
+                      rowsByKey[item.key]?.fyiUsesInboxSearchForProgress != true else { continue }
                 guard let unseenCount = item.unseenCount,
                       isFree || (unseenCount == 0 ? tab == .replied : tab == .inbox),
                       matchesReplySearch(item, query: query, rowsByKey: rowsByKey) else { continue }

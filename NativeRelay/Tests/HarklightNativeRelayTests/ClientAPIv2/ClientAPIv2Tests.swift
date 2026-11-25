@@ -323,6 +323,64 @@ final class SavedV2ItemActionTests: XCTestCase {
         XCTAssertEqual(String(decoding: sent.body ?? Data(), as: UTF8.self), #"{"entry_id":"at-nine"}"#)
     }
 
+    func testRejectedSeenRemainsVisibleAfterReopen() async throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+            personID: ExactText("person"), deviceID: ExactText("device"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let persistence = MemoryPendingActionPersistence()
+        let repository = try ClientRepository(context: context, persistence: persistence)
+        let server = FakeClientAPIServer()
+        server.nextWriteFailures = [APIError(status: 404, token: .notFound, retryable: false, requestID: "refused")]
+        let connection = try ClientAPIv2Connection(transport: server, repository: repository, context: context,
+            directory: nil, errors: RecordingErrorLogV2())
+        let message = #"{"message_type":"fyi","title":"Fictional bulletin"}"#
+        let item = try APIItem(json: V2Fixture.json(V2Fixture.item("i", rev: 1, rankKey: "a", message: message)))
+        try connection.model.rebaseline(items: [item], counts: APICounts(unresolved: 1), position: 1)
+        let cached = ServerModelV2Projection.cachedState(connection.model.snapshot, identity: identity)
+        try repository.restoreCachedServerState(cached, context: context)
+        let key = ServerModelV2Projection.key(for: item.itemID, sender: item.sender, identity: identity)
+        let original = try repository.enqueueMessageOpen(key, requestRevision: 1, context: context)
+        await connection.sendSavedContentOpens()
+        await eventually("the refused operation leaves the automatic outbox") {
+            (try? repository.snapshot(context: context).pendingMessageOpens.isEmpty) == true
+        }
+
+        // Both builds 349 and 350 read this same key and record shape.
+        struct ShippedMessageOpen: Decodable {
+            let requestKey: RequestKey
+            let requestRevision: UInt64
+            let operationID: UUID
+        }
+        struct ShippedQueue: Decodable {
+            let messageOpens: [ShippedMessageOpen]?
+        }
+
+        let otherKey = ServerModelV2Projection.key(for: ExactText("other"), sender: item.sender, identity: identity)
+        let otherOpen = try repository.enqueueMessageOpen(otherKey, requestRevision: 1, context: context)
+        let bytes = try XCTUnwrap(persistence.load(identity: identity))
+        let shippedQueue = try PropertyListDecoder().decode(ShippedQueue.self, from: bytes)
+        XCTAssertEqual(shippedQueue.messageOpens?.map(\.operationID), [otherOpen.operationID],
+                       "Builds 349 and 350 should only be able to send the unrelated pending open.")
+
+        let reopened = try ClientRepository(context: context, persistence: persistence)
+        try reopened.restoreCachedServerState(cached, context: context)
+        let port = AttentionDomainPort(store: reopened)
+        let request = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first)
+        XCTAssertTrue(request.itemOpenFailed)
+        XCTAssertFalse(request.itemOpenPending)
+        let retry = try reopened.enqueueMessageOpen(key, requestRevision: 1, context: context)
+        XCTAssertNotEqual(retry.operationID, original.operationID)
+        XCTAssertTrue(try port.inspect(context: port.context, request: key).requests.first?.itemOpenFailed == true)
+
+        let revised = V2Fixture.item("i", rev: 2, rankKey: "a", message: message)
+            .replacingOccurrences(of: #""request_revision":1"#, with: #""request_revision":2"#)
+        let current = try APIItem(json: V2Fixture.json(revised))
+        try connection.model.rebaseline(items: [current], counts: APICounts(unresolved: 1), position: 2)
+        try reopened.restoreCachedServerState(
+            ServerModelV2Projection.cachedState(connection.model.snapshot, identity: identity), context: context)
+        XCTAssertTrue(try reopened.snapshot(context: context).failedMessageOpens.isEmpty)
+    }
+
     func testTerminalAnswerRefusalsCloseTheRowWithoutAFeedUpdate() async throws {
         let scenarios: [(APIErrorToken, AppLifecycleStatus, String)] = [
             (.alreadyRetracted, .cleared, "The sender retracted this message."),

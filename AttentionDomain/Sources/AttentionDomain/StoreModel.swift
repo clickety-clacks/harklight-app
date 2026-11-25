@@ -224,10 +224,9 @@ public struct Submission: Equatable, Codable, Sendable {
     }
 }
 
-/// A deliberate message-content open that is durable locally until the relay
-/// confirms the account-wide fact or explicitly rejects the operation.
-/// This is an outbox record only; settled opens are not retained as local
-/// per-device history.
+/// A deliberate message-content open identified by its request revision and
+/// operation ID. A permanent refusal leaves the outbox and stays visible
+/// until the request revision or Server state supersedes it.
 public struct PendingMessageOpen: Equatable, Codable, Identifiable, Sendable {
     public let requestKey: RequestKey
     public let requestRevision: UInt64
@@ -985,6 +984,7 @@ public struct AttentionStoreSnapshot: Sendable {
     public let pendingRelayOverlays: [UInt64: RelayEvent]
     public let inboxReferences: [RequestKey: RemoteRequestState]
     public let pendingMessageOpens: [PendingMessageOpen]
+    public let failedMessageOpens: [PendingMessageOpen]
     public let priorityLevels: PriorityLevelsStoreState
 
     public init(requests: [RequestKey: StoredRequest],
@@ -1006,6 +1006,7 @@ public struct AttentionStoreSnapshot: Sendable {
                 pendingRelayOverlays: [UInt64: RelayEvent] = [:],
                 inboxReferences: [RequestKey: RemoteRequestState] = [:],
                 pendingMessageOpens: [PendingMessageOpen] = [],
+                failedMessageOpens: [PendingMessageOpen] = [],
                 priorityLevels: PriorityLevelsStoreState = .empty) {
         self.conversationThreads = conversationThreads
         self.requests = requests
@@ -1026,6 +1027,7 @@ public struct AttentionStoreSnapshot: Sendable {
         self.pendingRelayOverlays = pendingRelayOverlays
         self.inboxReferences = inboxReferences
         self.pendingMessageOpens = pendingMessageOpens
+        self.failedMessageOpens = failedMessageOpens
         self.priorityLevels = priorityLevels
     }
 }

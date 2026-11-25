@@ -668,15 +668,17 @@ struct LiveContentView: View {
                 clearRetractedRequest: { store.clearRetracted($0) },
                 requestDetail: { key, context in
                     if let request = store.request(for: key) {
-                        if store.progressInboxEnabled, let progress = request.messageProgress {
-                            if request.isResolved || store.inboxRow(for: key)?.isRetracted == true {
+                        let row = store.inboxRow(for: key)
+                        if store.progressInboxEnabled, let progress = request.messageProgress,
+                           row?.fyiUsesRepliedForProgress != true, row?.fyiUsesInboxSearchForProgress != true {
+                            if request.isResolved || row?.isRetracted == true {
                                 ContentUnavailableView("Progress unavailable", systemImage: "checkmark.circle")
                             } else {
                                 ProgressMessageDetail(title: request.title?.rawValue ?? "Message",
                                     sender: request.senderDisplayName?.rawValue ?? key.senderID.rawValue,
                                     bodyText: request.body?.rawValue, progress: progress,
-                                    seenPending: request.informationalSeenStatus == .pending,
-                                    onSeen: store.inboxRow(for: key)?.canMarkFYISeen == true
+                                    seenPending: row?.isFYISeenPending == true,
+                                    onSeen: row?.canMarkFYISeen == true
                                         ? { store.markProgressFYISeen(key, requestRevision: request.requestRevision) }
                                         : nil)
                             }

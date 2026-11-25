@@ -263,6 +263,7 @@ public final class ClientRepository: @unchecked Sendable {
                 operations: queue.operations, cancelled: queue.cancelledOperations)
             state.drafts = queue.answerDrafts
             state.pendingMessageOpens = queue.messageOpens
+            state.failedMessageOpens = queue.failedMessageOpens
             state.priorityLevels = queue.priorityLevelsDraft?.restoredState
             state.pendingConversations = queue.conversations
             state.pendingReadPositions = queue.readPositions
@@ -283,6 +284,7 @@ public final class ClientRepository: @unchecked Sendable {
                 operations: state.intents, cancelled: state.fencedIntents)
             state.drafts = salvaged.answerDrafts.values
             state.pendingMessageOpens = salvaged.messageOpens?.values
+            state.failedMessageOpens = salvaged.failedMessageOpens?.values
             state.priorityLevels = salvaged.priorityLevelsDraft?.restoredState
             state.pendingConversations = salvaged.conversations.values.mapValues(\.actions)
             state.pendingReadPositions = salvaged.readPositions.values
@@ -353,6 +355,15 @@ public final class ClientRepository: @unchecked Sendable {
         next.inboxCandidate = nil
         next.cachedInboxCurrentKeys = cached.currentRequestKeys
         next.inboxView = cached.inboxView
+        if let failedOpens = next.failedMessageOpens, !failedOpens.isEmpty {
+            let seenKeys = Set((cached.inboxView?.entries ?? []).filter { $0.itemSeen == true }.map(\.key))
+            let remaining = failedOpens.filter { open in
+                return !seenKeys.contains(open.requestKey) &&
+                    cached.remoteStates[open.requestKey]?.isTerminal != true &&
+                    (cached.conversations[open.requestKey].map { $0.currentRevision == open.requestRevision } ?? true)
+            }
+            next.failedMessageOpens = remaining.isEmpty ? nil : remaining
+        }
         next.pendingRelayOverlays = cached.pendingRelayOverlays
         next.inboxReferences = cached.inboxReferences
         var priorityLevels = next.priorityLevels ?? .empty
@@ -852,7 +863,10 @@ public final class ClientRepository: @unchecked Sendable {
         }
 
         var operationID = UUID()
-        while pending.contains(where: { $0.operationID == operationID }) { operationID = UUID() }
+        while pending.contains(where: { $0.operationID == operationID }) ||
+            state.failedMessageOpens?.contains(where: { $0.operationID == operationID }) == true {
+            operationID = UUID()
+        }
         let operation = PendingMessageOpen(requestKey: requestKey,
                                            requestRevision: requestRevision,
                                            operationID: operationID)
@@ -862,10 +876,11 @@ public final class ClientRepository: @unchecked Sendable {
         return operation
     }
 
-    /// Retire only the exact pending operation that received durable success
-    /// or an explicit permanent rejection from the relay.
+    /// Settle the exact pending operation. A permanent refusal stays visible
+    /// for this revision but is never eligible for automatic delivery.
     @discardableResult
     public func retireMessageOpen(_ operationID: UUID,
+                                  rejected: Bool = false,
                                   context suppliedContext: ProfileContext) throws -> Bool {
         writerLock.lock()
         defer { writerLock.unlock() }
@@ -874,9 +889,15 @@ public final class ClientRepository: @unchecked Sendable {
         try validate(suppliedContext)
         guard suppliedContext.transportMode == .relay else { throw AttentionStoreError.fixtureOnlyOperation }
         let pending = state.pendingMessageOpens ?? []
-        guard pending.contains(where: { $0.operationID == operationID }) else { return false }
+        guard let settled = pending.first(where: { $0.operationID == operationID }) else { return false }
         var next = state
         next.pendingMessageOpens = pending.filter { $0.operationID != operationID }
+        if rejected {
+            let earlierFailures = (state.failedMessageOpens ?? []).filter {
+                $0.requestKey != settled.requestKey || $0.requestRevision != settled.requestRevision
+            }
+            next.failedMessageOpens = earlierFailures + [settled]
+        }
         try commit(next)
         return true
     }
@@ -3121,6 +3142,7 @@ public final class ClientRepository: @unchecked Sendable {
                                       pendingRelayOverlays: state.pendingRelayOverlays ?? [:],
                                       inboxReferences: state.inboxReferences ?? [:],
                                       pendingMessageOpens: state.pendingMessageOpens ?? [],
+                                      failedMessageOpens: state.failedMessageOpens ?? [],
                                       priorityLevels: state.priorityLevels ?? .empty)
     }
 
@@ -3222,6 +3244,7 @@ public final class ClientRepository: @unchecked Sendable {
         next.outboxOrder = []
         next.drafts = [:]
         next.pendingMessageOpens = nil
+        next.failedMessageOpens = nil
         next.pendingReadPositions = [:]
         next.pendingConversations = state.pendingConversations.compactMapValues { pending in
             // Only the v2 submission path created this separate queue.
@@ -4924,6 +4947,7 @@ private struct ClientSessionState {
     var outboxOrder: [UUID] = []
     var replayPublishedIntents: [UUID: Submission]?
     var pendingMessageOpens: [PendingMessageOpen]?
+    var failedMessageOpens: [PendingMessageOpen]?
     var priorityLevels: PriorityLevelsStoreState?
     var pendingConversations: [RequestKey: PendingConversationActions] = [:]
     var pendingReadPositions: [RequestKey: PendingConversationReadPosition] = [:]
@@ -5268,6 +5292,7 @@ private struct SalvagedPendingActions: Decodable {
     let cancelledOperations: SalvagedDictionary<UUID, RequestKey>?
     let answerDrafts: SalvagedDictionary<RequestKey, RequestDraft>
     let messageOpens: SalvagedArray<PendingMessageOpen>?
+    let failedMessageOpens: SalvagedArray<PendingMessageOpen>?
     let conversations: SalvagedDictionary<RequestKey, SalvagedConversationActions>
     let readPositions: SalvagedDictionary<RequestKey, PendingConversationReadPosition>
     let priorityLevelsDraft: PersistedPriorityLevelsDraft?
@@ -5275,14 +5300,16 @@ private struct SalvagedPendingActions: Decodable {
     let lostSections: [String]
 
     var droppedEntries: Int {
-        operations.dropped + activeOperations.dropped + (cancelledOperations?.dropped ?? 0) +
-            answerDrafts.dropped + (messageOpens?.dropped ?? 0) + conversations.dropped + readPositions.dropped +
+        let opensDropped = (messageOpens?.dropped ?? 0) + (failedMessageOpens?.dropped ?? 0)
+        return operations.dropped + activeOperations.dropped + (cancelledOperations?.dropped ?? 0) +
+            answerDrafts.dropped + opensDropped + conversations.dropped + readPositions.dropped +
             conversations.values.values.reduce(0) { $0 + $1.dropped }
     }
 
     private enum CodingKeys: String, CodingKey {
         case version, profileIdentity, operations, activeOperations, cancelledOperations,
-             answerDrafts, messageOpens, conversations, readPositions, priorityLevelsDraft, previousProtocolInput
+             answerDrafts, messageOpens, failedMessageOpens, conversations, readPositions,
+             priorityLevelsDraft, previousProtocolInput
     }
 
     init(from decoder: Decoder) throws {
@@ -5301,6 +5328,7 @@ private struct SalvagedPendingActions: Decodable {
             ? section(.cancelledOperations, SalvagedDictionary()) : nil
         answerDrafts = section(.answerDrafts, SalvagedDictionary())
         messageOpens = container.contains(.messageOpens) ? section(.messageOpens, SalvagedArray()) : nil
+        failedMessageOpens = container.contains(.failedMessageOpens) ? section(.failedMessageOpens, SalvagedArray()) : nil
         conversations = section(.conversations, SalvagedDictionary())
         readPositions = section(.readPositions, SalvagedDictionary())
         priorityLevelsDraft = container.contains(.priorityLevelsDraft)
@@ -5347,6 +5375,8 @@ private struct PersistedPendingActions: Codable {
     let cancelledOperations: [UUID: RequestKey]?
     let answerDrafts: [RequestKey: RequestDraft]
     let messageOpens: [PendingMessageOpen]?
+    // Older clients only read messageOpens and may send every entry in it.
+    let failedMessageOpens: [PendingMessageOpen]?
     let conversations: [RequestKey: PendingConversationActions]
     let readPositions: [RequestKey: PendingConversationReadPosition]
     let priorityLevelsDraft: PersistedPriorityLevelsDraft?
@@ -5368,6 +5398,7 @@ private struct PersistedPendingActions: Codable {
         let keys = Set(pending.values.map(\.requestKey))
         answerDrafts = state.drafts.filter { $0.value.hasEdits || keys.contains($0.key) }
         messageOpens = state.pendingMessageOpens
+        failedMessageOpens = state.failedMessageOpens
         conversations = state.pendingConversations
         readPositions = state.pendingReadPositions
         priorityLevelsDraft = state.priorityLevels.map(PersistedPriorityLevelsDraft.init)

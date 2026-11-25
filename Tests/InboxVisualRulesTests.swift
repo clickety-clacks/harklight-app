@@ -85,14 +85,27 @@ final class InboxVisualRulesTests: XCTestCase {
     }
 
     @MainActor
-    func testDigestUsesSeenMessagesWhenNoneAreUnseen() {
+    func testDigestIsEmptyWhenAllFYIsAreSeen() {
         var high = fyiRow("High")
         high.fyiPriority = .high
         high.fyiServerSeen = true
         var urgent = fyiRow("Urgent")
         urgent.fyiPriority = .now
         urgent.fyiServerSeen = true
-        XCTAssertEqual(FYIDigest.highlights([high, urgent]).map(\.key), [urgent.key, high.key])
+        XCTAssertTrue(FYIDigest.highlights([high, urgent]).isEmpty)
+    }
+
+    @MainActor
+    func testDigestDropsTerminalPlainFYIWithoutAnOpenedFlag() throws {
+        let store = try NativeAppLaunch.makeFYITestStore(includeProgress: true, progressPercent: 100,
+            progressTerminal: #"{"state":"expired","at_ms":1700000003000}"#)
+        let expired = try XCTUnwrap(store.inboxRows.first { $0.isProgressFYI })
+        var plain = expired
+        plain.hasProgressMarker = false
+        plain.progress = nil
+        plain.informationalSeenStatus = nil
+
+        XCTAssertTrue(FYIDigest.highlights([plain]).isEmpty)
     }
 
     @MainActor
@@ -287,7 +300,7 @@ final class InboxVisualRulesTests: XCTestCase {
                 progressPercent: percent, progressSeen: seen, progressTerminal: terminal)
             return try XCTUnwrap(store.inboxRows.first { $0.key.messageID == ExactText("progress-fyi") })
         }
-        for percent in [nil, 40, 100] {
+        for percent in [nil, 0, 40, 100] {
             let unseen = try row(percent: percent, seen: false)
             XCTAssertTrue(unseen.isUnseenFYI)
             XCTAssertEqual(unseen.fyiSeenAction, percent == 100 ? .answer : .openedFlag)
@@ -310,8 +323,16 @@ final class InboxVisualRulesTests: XCTestCase {
         let plainStore = try NativeAppLaunch.makeFYITestStore()
         let plain = try XCTUnwrap(plainStore.inboxRows.first { $0.key.messageID == ExactText("i-204") })
         plainStore.reportMessageContentOpened(try XCTUnwrap(plainStore.request(for: plain.key)))
-        XCTAssertEqual(try plainStore.fyiTestSnapshot().pendingMessageOpens.map(\.requestKey), [plain.key])
-        for percent in [nil, 40, 100] {
+        let savedOpen = try XCTUnwrap(plainStore.fyiTestSnapshot().pendingMessageOpens.first)
+        XCTAssertEqual(savedOpen.requestKey, plain.key)
+        try plainStore.refreshFromDurableStore()
+        let pendingPlain = try XCTUnwrap(plainStore.inboxRow(for: plain.key))
+        XCTAssertTrue(pendingPlain.isActiveFYI)
+        XCTAssertTrue(pendingPlain.isFYISeenPending)
+        XCTAssertNil(pendingPlain.fyiSeenAction)
+        XCTAssertTrue(plainStore.retryFYISeen(plain.key, requestRevision: plain.requestRevision))
+        XCTAssertEqual(try plainStore.fyiTestSnapshot().pendingMessageOpens.map(\.id), [savedOpen.id])
+        for percent in [nil, 0, 40, 100] {
             let store = try NativeAppLaunch.makeFYITestStore(includeProgress: true, progressPercent: percent)
             let row = try XCTUnwrap(store.inboxRows.first { $0.isProgressFYI })
             let request = try XCTUnwrap(store.request(for: row.key))
@@ -328,6 +349,8 @@ final class InboxVisualRulesTests: XCTestCase {
                 XCTAssertEqual(pending.informationalSeenStatus, .pending)
                 XCTAssertNil(pending.fyiSeenAction)
                 XCTAssertFalse(store.markProgressFYISeen(row.key, requestRevision: row.requestRevision))
+                XCTAssertTrue(store.retryFYISeen(row.key, requestRevision: row.requestRevision))
+                XCTAssertEqual(try store.fyiTestSnapshot().intents.values.map(\.operationID), [answer.operationID])
             } else {
                 XCTAssertTrue(snapshot.intents.isEmpty)
                 XCTAssertEqual(snapshot.pendingMessageOpens.map(\.requestKey), [row.key])
@@ -341,12 +364,17 @@ final class InboxVisualRulesTests: XCTestCase {
             progressPercent: 40, progressSeen: true)
         let original = try XCTUnwrap(store.inboxRows.first { $0.isProgressFYI })
         XCTAssertFalse(original.isUnseenFYI)
+        XCTAssertTrue(original.isRepliedFYI)
+        XCTAssertEqual(InboxListProjection.filteredRows([.request(original)],
+            in: .replied, search: "Progress").count, 1)
         XCTAssertFalse(store.markProgressFYISeen(original.key, requestRevision: original.requestRevision))
 
         try store.applyFYIProgressTestSnapshot(percent: 70, seen: false, revision: 6)
         let updated = try XCTUnwrap(store.inboxRow(for: original.key))
         XCTAssertTrue(updated.isUnseenFYI, "Server 0.2.8 clears Seen on a substantive Progress update")
         XCTAssertEqual(updated.fyiSeenAction, .openedFlag)
+        XCTAssertTrue(updated.isActiveFYI)
+        XCTAssertFalse(updated.isRepliedFYI)
         XCTAssertFalse(store.markProgressFYISeen(original.key, requestRevision: original.requestRevision))
 
         try store.applyFYIProgressTestSnapshot(percent: 100, seen: true, revision: 7)
@@ -357,6 +385,349 @@ final class InboxVisualRulesTests: XCTestCase {
         XCTAssertNil(store.inboxRow(for: original.key)?.fyiSeenAction, "A carried flag survives regression")
         try store.applyFYIProgressTestSnapshot(percent: 60, seen: false, revision: 10)
         XCTAssertEqual(store.inboxRow(for: original.key)?.fyiSeenAction, .openedFlag)
+    }
+
+    @MainActor
+    func testFYIProjectionReconciles135TerminalChangesAndKeepsLegacyRepliedSearch() throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("fixture.invalid"),
+            personID: ExactText("fyi-fixture"), deviceID: ExactText("device"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let model = ServerModelV2Store(fileURL: nil)
+        let repo = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        let suite = UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = try LivePresentationStore(store: repo, context: context, newMessageAreaDefaults: defaults)
+
+        let openCount = 135
+        let itemCount = 840
+        let initial = NativeAppLaunch.fyiBulkTestChanges(
+            indices: 0..<itemCount, firstRevision: 1, openCount: openCount)
+        try model.apply(initial, cursor: UInt64(itemCount))
+        try repo.restoreCachedServerState(ServerModelV2Projection.cachedState(model.snapshot, identity: identity),
+                                          context: context)
+        try store.refreshFromDurableStore()
+        let original = store.inboxRows
+        let newBefore = try XCTUnwrap(store.newMessageAreaStore).entries.count
+        let badgeBefore = InboxBadge.count(requests: original, samples: SampleLibrary(), showsLocalExamples: false)
+        XCTAssertEqual(newBefore, openCount)
+        XCTAssertEqual(badgeBefore, openCount)
+        XCTAssertEqual(original.filter(\.isActiveFYI).count, openCount)
+        XCTAssertEqual(FYIDigest.highlights(original).count, 4)
+        XCTAssertTrue(FYIOrder.priority.sorted(original.filter(\.isActiveFYI)).contains { $0.title == "Bulletin 1" })
+
+        let batch = NativeAppLaunch.fyiBulkTestChanges(
+            indices: 0..<openCount, firstRevision: itemCount + 1, openCount: 0)
+        let start = DispatchTime.now().uptimeNanoseconds
+        try model.apply(batch, cursor: UInt64(itemCount + openCount))
+        try repo.restoreCachedServerState(ServerModelV2Projection.cachedState(model.snapshot, identity: identity),
+                                          context: context)
+        try store.refreshFromDurableStore()
+        let liveRows = store.inboxRows
+        XCTAssertTrue(liveRows.filter(\.isActiveFYI).isEmpty)
+        XCTAssertTrue(FYIDigest.highlights(liveRows).isEmpty)
+        let oldBadgeCount = liveRows.filter { !$0.hasProgressMarker && !$0.belongsToReplied && !$0.isRetracted }.count
+        let badgeCount = InboxBadge.count(requests: liveRows, samples: SampleLibrary(), showsLocalExamples: false)
+        XCTAssertGreaterThan(oldBadgeCount, 0)
+        XCTAssertEqual(badgeCount, 0)
+        let newAfter = try XCTUnwrap(store.newMessageAreaStore).entries.count
+        XCTAssertEqual(newAfter, 0)
+        print("840 FYIs: badge \(badgeBefore) to \(badgeCount), New \(newBefore) to \(newAfter); previous settled badge \(oldBadgeCount)")
+        let projected = DispatchTime.now().uptimeNanoseconds
+
+        for serverItems in [nil, store.presentation.inboxViewListItems] {
+            let replied = InboxNormalListProjection.entries(rows: liveRows.map(InboxItem.request),
+                serverItems: serverItems, in: .replied, search: "")
+            XCTAssertGreaterThan(replied.count, 500)
+            let search = InboxNormalListProjection.entries(rows: liveRows.map(InboxItem.request),
+                serverItems: serverItems, in: .replied, search: "Bulletin 501")
+            XCTAssertEqual(search.count, 1, "A legacy FYI stays searchable in Replied.")
+        }
+        let searched = DispatchTime.now().uptimeNanoseconds
+        let relaunched = try LivePresentationStore(store: repo, context: context)
+        XCTAssertTrue(relaunched.inboxRows.filter(\.isActiveFYI).isEmpty)
+        print("FYI 840-item fixture: apply 135 changes and project \(Double(projected - start) / 1_000_000) ms, "
+            + "four Replied/search projections \(Double(searched - projected) / 1_000_000) ms")
+    }
+
+    @MainActor
+    func testEndedUnansweredProgressIsReachableInInboxSearch() throws {
+        let store = try NativeAppLaunch.makeFYITestStore(includeProgress: true, progressPercent: 40,
+            progressTerminal: #"{"state":"expired","at_ms":1700000003000}"#)
+        let items = store.inboxRows.map(InboxItem.request)
+        let progress = try XCTUnwrap(store.inboxRows.first { $0.isProgressFYI })
+        for list in [nil, store.presentation.inboxViewListItems] {
+            let entries = InboxNormalListProjection.entries(rows: items, serverItems: list,
+                in: .inbox, search: "Progress with a Seen response")
+            XCTAssertEqual(entries.count, 1)
+            XCTAssertTrue(InboxNormalListProjection.entries(rows: items, serverItems: list,
+                in: .inbox, search: "").allSatisfy { entry in
+                    guard case let .message(message) = entry else { return true }
+                    return !message.members.contains { $0.id == .request(progress.key) }
+                })
+        }
+        XCTAssertFalse(store.inboxRows.contains { $0.isProgressFYI && $0.isActiveFYI })
+        XCTAssertFalse(FYIDigest.highlights(store.inboxRows).contains { $0.key.messageID == ExactText("progress-fyi") })
+        store.reportMessageContentOpened(try XCTUnwrap(store.request(for: progress.key)))
+        XCTAssertTrue(try store.fyiTestSnapshot().pendingMessageOpens.isEmpty)
+    }
+
+    @MainActor
+    func testSettledPlainFYIsJoinRepliedWithoutBadgeAttention() throws {
+        let store = try NativeAppLaunch.makeFYITestStore(gardenSeen: true, museumSeen: true)
+        XCTAssertEqual(store.inboxRows.count, 2)
+        XCTAssertTrue(store.inboxRows.allSatisfy { $0.isRepliedFYI && $0.belongsToReplied })
+        XCTAssertEqual(InboxBadge.count(requests: store.inboxRows, samples: SampleLibrary(),
+                                       showsLocalExamples: false), 0)
+    }
+
+    @MainActor
+    func testFYIPlacementUsesAuthoritativeSeenAndKeepsOrdinaryAnswersUngrouped() {
+        var opened = fyiRow("Opened")
+        opened.fyiServerSeen = true
+        opened.fyiHasEnded = true
+        var answeredOtherwise = opened
+        answeredOtherwise.fyiAnsweredOtherwise = true
+        answeredOtherwise.informationalSeenStatus = .resolvedWithoutSeen
+        answeredOtherwise.hasUserAction = true
+        var pending = fyiRow("Waiting")
+        pending.informationalSeenStatus = .pending
+        var liveProgress = opened
+        liveProgress.fyiHasEnded = false
+        liveProgress.hasProgressMarker = true
+        var confirmed = fyiRow("Confirmed")
+        confirmed.declaredMessageType = nil
+        confirmed.fyiServerSeen = false
+        confirmed.informationalSeenStatus = .confirmed
+
+        XCTAssertTrue(opened.isRepliedFYI)
+        XCTAssertTrue(confirmed.isRepliedFYI)
+        XCTAssertFalse(answeredOtherwise.isRepliedFYI)
+        XCTAssertTrue(answeredOtherwise.belongsToReplied)
+        XCTAssertTrue(liveProgress.isRepliedFYI)
+        XCTAssertFalse(liveProgress.isActiveFYI)
+        liveProgress.fyiServerSeen = false
+        XCTAssertFalse(liveProgress.isRepliedFYI)
+        XCTAssertTrue(liveProgress.isActiveFYI)
+        var seenAction = opened
+        seenAction.fyiHasEnded = false
+        seenAction.informationalSeenStatus = .available
+        XCTAssertFalse(seenAction.isRepliedFYI)
+        XCTAssertTrue(seenAction.isActiveFYI)
+        XCTAssertTrue(pending.isActiveFYI)
+        XCTAssertFalse(pending.isRepliedFYI)
+        XCTAssertFalse(pending.belongsToReplied)
+        opened.fyiHasEnded = false
+        opened.fyiServerSeen = false
+        XCTAssertTrue(opened.isActiveFYI)
+    }
+
+    @MainActor
+    func testTerminalFYIsKeepOnlyEligibleSeenFlagsAndOpeningARetractionDoesNotMarkSeen() throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("fixture.invalid"),
+            personID: ExactText("terminal-fyi-fixture"), deviceID: ExactText("device"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let repo = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        let model = ServerModelV2Store(fileURL: nil)
+        let states = ["cleared", "expired", "retracted", "superseded"]
+        let cases = states.flatMap { state in
+            [false, true].flatMap { progress in
+                [false, true].map { seen in (state: state, progress: progress, seen: seen) }
+            }
+        }
+        let now = UInt64(Date().timeIntervalSince1970 * 1000)
+        let sender = ExactText("fixture:community")
+
+        func changes(terminal: Bool) -> [ServerModelV2Store.Change] {
+            cases.enumerated().map { index, item in
+                let rev = index + 1 + (terminal ? cases.count : 0)
+                let progress = item.progress ? #","progress":{"percent":0,"updated_at":"2026-11-25T00:00:00Z","stage":"","segments":[]}"# : ""
+                let outcome = terminal ? #","terminal":{"state":"\#(item.state)","at_ms":\#(now)}"# : ""
+                let body = #"""
+                    {"item_id":"terminal-\#(index)","sender":"\#(sender.rawValue)","rev":\#(rev),
+                     "request_revision":1,"seen":\#(item.seen),"message":{"message_type":"fyi",
+                     "title":"Synthetic terminal bulletin"\#(progress)},
+                     "files":[],"chat":{"started":false},"rank":{"key":"\#(index)","section":"current"}\#(outcome)}
+                    """#
+                return .init(rev: UInt64(rev), kind: "item", data: Data(body.utf8))
+            }
+        }
+
+        try model.apply(changes(terminal: false), cursor: UInt64(cases.count))
+        try repo.restoreCachedServerState(ServerModelV2Projection.cachedState(model.snapshot, identity: identity), context: context)
+        let store = try LivePresentationStore(store: repo, context: context)
+        XCTAssertEqual(store.inboxRows.filter(\.isRepliedFYI).count, 8)
+
+        try model.apply(changes(terminal: true), cursor: UInt64(cases.count * 2))
+        try repo.restoreCachedServerState(ServerModelV2Projection.cachedState(model.snapshot, identity: identity), context: context)
+        try store.refreshFromDurableStore()
+        XCTAssertEqual(store.inboxRows.filter(\.isRepliedFYI).count, 4)
+        XCTAssertTrue(store.inboxRows.filter(\.isActiveFYI).isEmpty)
+        for (index, item) in cases.enumerated() {
+            let key = RequestKey(accountScope: identity.personID, senderID: sender,
+                                 messageID: ExactText("terminal-\(index)"))
+            let row = try XCTUnwrap(store.inboxRow(for: key))
+            let keepsSeenGroup = item.seen && (item.state == "cleared" || item.state == "expired")
+            XCTAssertEqual(row.isRepliedFYI, keepsSeenGroup, "\(item)")
+            if item.state == "retracted" {
+                XCTAssertTrue(row.isRetracted)
+                store.reportMessageContentOpened(try XCTUnwrap(store.request(for: key)))
+            }
+            if item.progress && !keepsSeenGroup {
+                XCTAssertTrue(row.fyiUsesInboxSearchForProgress)
+            }
+        }
+        XCTAssertTrue(try store.fyiTestSnapshot().pendingMessageOpens.isEmpty)
+    }
+
+    @MainActor
+    func testPendingTypedAndUntypedFYIsStayInInboxUntilServerConfirmsSeen() throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("fixture.invalid"),
+            personID: ExactText("fixture-person"), deviceID: ExactText("fixture-device"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let persistence = MemoryPendingActionPersistence()
+        let repository = try ClientRepository(context: context, persistence: persistence)
+        let model = ServerModelV2Store(fileURL: nil)
+        let initialItems = NativeAppLaunch.fyiBulkTestChanges(indices: 0..<2, firstRevision: 1, openCount: 2)
+        try model.apply(initialItems, cursor: 2)
+        let cached = ServerModelV2Projection.cachedState(model.snapshot, identity: identity)
+        try repository.restoreCachedServerState(cached, context: context)
+        let store = try LivePresentationStore(store: repository, context: context)
+        XCTAssertEqual(store.inboxRows.count, 2)
+        XCTAssertEqual(store.inboxRows.compactMap(\.declaredMessageType), [.fyi])
+        for row in store.inboxRows {
+            XCTAssertTrue(store.markFYISeen(row.key, requestRevision: row.requestRevision))
+        }
+
+        let reopened = try ClientRepository(context: context, persistence: persistence)
+        try reopened.restoreCachedServerState(cached, context: context)
+        let relaunched = try LivePresentationStore(store: reopened, context: context)
+
+        func checkRouting(confirmed: Bool, stage: String) {
+            let rows = relaunched.inboxRows
+            XCTAssertEqual(rows.count, 2)
+            let items = rows.map(InboxItem.request)
+            let references = rows.map { row in
+                InboxViewListItem(kind: .message, key: row.key,
+                    freeSection: InboxFreeSection(state: confirmed ? .history : .active, group: .common))
+            }
+            for row in rows {
+                XCTAssertEqual(row.isActiveFYI, !confirmed, stage)
+                XCTAssertEqual(row.isFYISeenPending, !confirmed, stage)
+                XCTAssertEqual(row.isRepliedFYI, confirmed, stage)
+                XCTAssertEqual(row.isBundledFYI(in: .replied), confirmed, stage)
+            }
+            for (serverItems, version) in [(nil, nil), (references, nil), (references, 1)] {
+                for query in ["", "Bulletin"] {
+                    let entries = InboxNormalListProjection.entries(rows: items,
+                        serverItems: serverItems, freeOrderVersion: version, in: .replied, search: query)
+                    XCTAssertEqual(entries.count, confirmed ? 2 : 0,
+                                   "\(stage), order \(String(describing: version)), query \(query)")
+                }
+                let inbox = InboxNormalListProjection.entries(rows: items,
+                    serverItems: serverItems, freeOrderVersion: version, in: .inbox, search: "Bulletin")
+                XCTAssertEqual(inbox.count, confirmed ? 0 : 2, stage)
+            }
+        }
+
+        checkRouting(confirmed: false, stage: "Offline relaunch")
+        let saved = try relaunched.fyiTestSnapshot().intents
+        XCTAssertEqual(saved.count, 2)
+        for intent in saved.values {
+            try reopened.recordAcceptedOperation(intent.intentID, operationID: intent.operationID,
+                terminalSequence: 3, context: context)
+        }
+        try relaunched.refreshFromDurableStore()
+        checkRouting(confirmed: false, stage: "Accepted, terminal still pending")
+
+        let terminalItems = NativeAppLaunch.fyiBulkTestChanges(indices: 0..<2, firstRevision: 3,
+                                                               openCount: 0, allSeen: true)
+        try model.apply(terminalItems, cursor: 4)
+        try reopened.restoreCachedServerState(
+            ServerModelV2Projection.cachedState(model.snapshot, identity: identity), context: context)
+        try relaunched.refreshFromDurableStore()
+        checkRouting(confirmed: true, stage: "Confirmed by the server")
+    }
+
+    @MainActor
+    func testSeenFYISearchStaysOnRepliedWithFreeOrder() {
+        var row = fyiRow("Stored Seen bulletin")
+        row.informationalSeenStatus = .confirmed
+        let items = [InboxItem.request(row)]
+        let references = [InboxViewListItem(kind: .message, key: row.key,
+            freeSection: InboxFreeSection(state: .history, group: .common))]
+        XCTAssertTrue(InboxNormalListProjection.entries(rows: items, serverItems: references,
+            freeOrderVersion: 1, in: .inbox, search: "Stored Seen").isEmpty)
+        XCTAssertEqual(InboxNormalListProjection.entries(rows: items, serverItems: references,
+            freeOrderVersion: 1, in: .replied, search: "Stored Seen").count, 1)
+    }
+
+    @MainActor
+    func testLargeSeenFYIGroupRemainsSearchableAndDoesNotCountAsUnseen() {
+        var seen = (0..<900).map { index in
+            var row = fyiRow("Seen bulletin \(index)")
+            row.informationalSeenStatus = .confirmed
+            row.fyiServerSeen = false
+            return row
+        }
+        let inbox = (0..<100).map { fyiRow("New bulletin \($0)") }
+        let start = DispatchTime.now().uptimeNanoseconds
+        let rows = seen + inbox
+        XCTAssertEqual(FYIOrder.priority.sorted(rows.filter(\.isRepliedFYI)).count, 900)
+        XCTAssertEqual(rows.filter(\.isActiveFYI).count, 100)
+        XCTAssertEqual(FYIDigest.highlights(rows).count, 4)
+        XCTAssertEqual(InboxBadge.count(requests: rows, samples: SampleLibrary(), showsLocalExamples: false), 100)
+        XCTAssertEqual(InboxListProjection.filteredRows(rows.map(InboxItem.request),
+            in: .replied, search: "Seen bulletin 899").count, 1)
+        let destination = InboxNotificationDestination(route: NativeInboxNavigation(serial: 1, request: seen[0].key),
+            rows: rows.map(InboxItem.request), usesFreeOrder: true)
+        XCTAssertEqual(destination.workspaceTab, .replied)
+        seen[0].informationalSeenStatus = .available
+        XCTAssertTrue(seen[0].isActiveFYI)
+        XCTAssertFalse(seen[0].isRepliedFYI)
+        print("FYI 900 Seen + 100 Inbox: sort, search, digest, badge and move \(Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000) ms")
+    }
+
+    @MainActor
+    func testConfirmedProgressFYIRemainsReachableFromReplied() throws {
+        let store = try NativeAppLaunch.makeFYITestStore(includeProgress: true, progressPercent: 100,
+            progressTerminal: #"{"state":"answered","at_ms":1700000003000,"answer":{"kind":"seen"}}"#)
+        let rows = store.inboxRows
+        let progress = try XCTUnwrap(rows.first { $0.isProgressFYI })
+        XCTAssertFalse(progress.isActiveFYI)
+        XCTAssertFalse(progress.fyiUsesInboxSearchForProgress)
+        let entries = InboxNormalListProjection.entries(rows: rows.map(InboxItem.request),
+            serverItems: store.presentation.inboxViewListItems, in: .replied, search: "Progress")
+        XCTAssertEqual(entries.count, 1)
+    }
+
+    @MainActor
+    func testDefinitivelyFailedSeenCanBeMarkedAgain() throws {
+        let store = try NativeAppLaunch.makeFYITestStore(includeProgress: true, progressPercent: 100)
+        let row = try XCTUnwrap(store.inboxRows.first { $0.isProgressFYI })
+        XCTAssertTrue(store.markProgressFYISeen(row.key, requestRevision: row.requestRevision))
+        let original = try XCTUnwrap(store.fyiTestSnapshot().intents.values.first)
+        try store.rejectFYITestAnswer(original)
+
+        let failed = try XCTUnwrap(store.inboxRow(for: row.key))
+        XCTAssertTrue(failed.hasFailedResponse)
+        XCTAssertEqual(failed.fyiSeenAction, .answer)
+        XCTAssertTrue(store.markProgressFYISeen(row.key, requestRevision: row.requestRevision))
+        let pending = try XCTUnwrap(store.inboxRow(for: row.key))
+        XCTAssertTrue(pending.isFYISeenPending)
+        XCTAssertNotEqual(store.request(for: row.key)?.intentReceipt?.opID, original.operationID)
+    }
+
+    @MainActor
+    func testDigestStopsShowingSummaryAsSoonAsAHighlightLeaves() async {
+        let garden = fyiRow("Garden")
+        let museum = fyiRow("Museum")
+        let digest = FYIDigest()
+        let scope = FYIDigest.Scope.inbox(nil)
+        await digest.refresh(.init(highlights: FYIDigest.highlights([garden, museum])),
+                             using: { _, _ in "Garden and museum highlights." })
+        XCTAssertNotNil(digest.summary(for: scope, visibleKeys: [garden.key, museum.key]))
+        XCTAssertNil(digest.summary(for: scope, visibleKeys: [museum.key]))
     }
 
     func testEqualFYIPriorityUsesPostedOrder() {

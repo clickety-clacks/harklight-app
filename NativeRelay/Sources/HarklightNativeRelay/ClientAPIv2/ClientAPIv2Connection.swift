@@ -1015,7 +1015,7 @@ extension ClientAPIv2Connection {
         do {
             switch entry.operation {
             case "mark_seen":
-                _ = try repository.retireMessageOpen(entry.id, context: context)
+                _ = try repository.retireMessageOpen(entry.id, rejected: rejection != nil, context: context)
             case "read_position":
                 try repository.settleV2ReadPosition(entry.id, accepted: rejection == nil, context: context)
             case "answer":

@@ -165,8 +165,17 @@ final class NativeAppLaunch {
                 state = .live(seeded)
                 isIsolatedRelayTestSeed = true
             } else if fyiSeed, let seeded = try? Self.makeFYITestStore(
-                includeProgress: arguments.contains("--harklight-test-fyi-finished-progress"),
-                progressPercent: 100) {
+                includeProgress: arguments.contains("--harklight-test-fyi-finished-progress") ||
+                    arguments.contains("--harklight-test-fyi-ended-progress"),
+                progressPercent: 100,
+                progressTerminal: arguments.contains("--harklight-test-fyi-ended-progress")
+                    ? #"{"state":"expired","at_ms":1700000003000}"# : "",
+                gardenSeen: arguments.contains("--harklight-test-fyi-garden-seen") ||
+                    arguments.contains("--harklight-test-fyi-plain-seen"),
+                museumSeen: arguments.contains("--harklight-test-fyi-plain-seen"),
+                includeBulk: arguments.contains("--harklight-test-fyi-bulk"),
+                repliedFixture: arguments.contains("--harklight-test-fyi-tab-switch"),
+                includeBulkReplied: arguments.contains("--harklight-test-fyi-bulk-replied")) {
                 state = .live(seeded)
                 isIsolatedRelayTestSeed = true
             } else {
@@ -1282,6 +1291,21 @@ private struct NoReplyRoutingState: Sendable {
     let requestRevision: UInt64
     let isNoReply: Bool
     let route: NativeDiagnosticNoReplyRoute?
+}
+
+private extension PresentedRequest {
+    var isFYIRequest: Bool {
+        messageType == .fyi || (messageType == nil && informationalSeenStatus != nil)
+    }
+
+    var isSettledFYIRequest: Bool {
+        guard isFYIRequest else { return false }
+        if isResolved || informationalSeenStatus == .confirmed || informationalSeenStatus == .resolvedWithoutSeen {
+            return true
+        }
+        return fyiInboxEntry?.itemSeen == true && informationalSeenStatus != .pending &&
+            (messageProgress != nil || informationalSeenStatus == nil)
+    }
 }
 
 private struct PreparedNoReplyRoutingChange: Sendable {
@@ -2432,7 +2456,8 @@ final class LivePresentationStore {
     var inboxRows: [InboxRequestRow] {
         let skippedMessageRequestTags = completedSkippedMessageRequestTags
         return presentation.requests
-            .filter { $0.lifecycleStatus != .superseded }
+            .filter { $0.lifecycleStatus != .superseded ||
+                (!isReadOnly && $0.messageProgress != nil && $0.isFYIRequest) }
             .filter { request in
                 guard isRetracted(request) else { return true }
                 return !Self.isRetractionExpired(
@@ -2482,7 +2507,7 @@ final class LivePresentationStore {
     ) -> [NewMessageAreaMessage] {
         requests.filter { !progressInboxEnabled || $0.messageProgress == nil }.map {
             NewMessageAreaMessage(key: $0.key, acceptanceOrder: $0.acceptanceOrder,
-                                  isResolved: $0.isResolved,
+                                  isResolved: $0.isResolved || $0.isSettledFYIRequest,
                                   hasSubmittedAnswer: $0.intentReceipt != nil)
         }
     }
@@ -2529,7 +2554,7 @@ final class LivePresentationStore {
     }
 
     func inboxRow(for key: RequestKey) -> InboxRequestRow? {
-        guard let request = presentation.requests.first(where: { $0.key == key }) else { return nil }
+        guard let request = request(for: key) else { return nil }
         return makeInboxRow(for: request, skippedMessageRequestTags: completedSkippedMessageRequestTags)
     }
 
@@ -2637,6 +2662,18 @@ final class LivePresentationStore {
             orderingReason: request.inboxReason?.rawValue,
             defaultAnswerStatus: request.defaultAnswerStatusText)
 
+        if row.isFYI {
+            row.fyiGroupingEnabled = !isReadOnly
+            row.fyiIsSuperseded = request.lifecycleStatus == .superseded
+            row.fyiAnsweredOtherwise = (request.lifecycleStatus == .answered || request.lifecycleStatus == .noComment) &&
+                request.informationalSeenStatus != .confirmed
+            row.fyiHasEnded = retracted || request.isResolved ||
+                request.informationalSeenStatus == .resolvedWithoutSeen
+            row.fyiUsesRepliedForProgress = !isReadOnly && progress != nil &&
+                !retracted && serverReportedFinalResponse && row.belongsToReplied
+            row.fyiUsesInboxSearchForProgress = !isReadOnly && row.hasProgressMarker &&
+                row.fyiHasEnded && !row.belongsToReplied
+        }
         if row.isFYI, let item = request.fyiInboxEntry {
             row.fyiPostedAt = item.itemCreatedAtMilliseconds.map {
                 Date(timeIntervalSince1970: Double($0) / 1_000)
@@ -2652,6 +2689,18 @@ final class LivePresentationStore {
             row.fyiProgressIsFinished = !retracted && !request.isResolved &&
                 request.messageProgress?.snapshot?.percent == 100
             row.canAnswerProgressFYISeen = canAnswerSeen
+        }
+        if row.isFYI, !isReadOnly {
+            let usesOpenedFlag = request.informationalSeenStatus == nil ||
+                (row.isProgressFYI && !row.fyiProgressIsFinished)
+            row.fyiOpenedFlagPending = usesOpenedFlag && request.itemOpenPending
+            row.fyiOpenedFlagFailed = usesOpenedFlag && request.itemOpenFailed && row.isActiveFYI
+            let answerIsRetryable: Bool = switch submissionPhases[request.key]?.phase {
+            case .sending, .confirmed: request.intentReceipt != nil
+            default: false
+            }
+            row.canRetryFYISeen = canSendToCurrentServer && row.isActiveFYI && row.isFYISeenPending &&
+                (row.fyiOpenedFlagPending || answerIsRetryable)
         }
         return row
     }
@@ -2790,6 +2839,7 @@ final class LivePresentationStore {
     /// operation is stored before any best-effort relay send; a reconnect will
     /// retry it with the same message identity and revision.
     func reportMessageContentOpened(_ request: PresentedRequest) {
+        if request.isFYIRequest, request.isSettledFYIRequest || isRetracted(request.key) { return }
         // Opening Progress with an explicit Seen response leaves acknowledgement
         // to the Seen controls. Plain FYIs retain their ordinary open behavior.
         if request.messageProgress != nil, !request.isResolved,
@@ -2799,17 +2849,50 @@ final class LivePresentationStore {
 
     @discardableResult
     func markProgressFYISeen(_ key: RequestKey, requestRevision: UInt64) -> Bool {
-        guard let row = inboxRow(for: key), row.isProgressFYI,
-              row.requestRevision == requestRevision, let action = row.fyiSeenAction else { return false }
+        guard inboxRow(for: key)?.isProgressFYI == true else { return false }
+        return markFYISeen(key, requestRevision: requestRevision)
+    }
+
+    @discardableResult
+    func markFYISeen(_ key: RequestKey, requestRevision: UInt64) -> Bool {
+        guard let request = request(for: key), let row = inboxRow(for: key), row.isFYI,
+              row.requestRevision == requestRevision, let action = row.fyiSeenAction else {
+            actionErrorRequest = key
+            actionError = "This FYI changed. Review its latest status before marking it Seen."
+            return false
+        }
         switch action {
         case .openedFlag:
-            guard let request = request(for: key), request.requestRevision == requestRevision else { return false }
-            return enqueueOpenedFlag(request)
+            if enqueueOpenedFlag(request) {
+                clearActionError()
+                return true
+            }
+            actionErrorRequest = key
+            actionError = "Seen could not be saved. Try again."
+            return false
         case .answer:
             // An explicit Seen tap must not submit an unrelated buffered draft.
             return submitAnswerFromUser(key, answerDraftOverride: RequestDraft(inputs: [:]),
                 explicitCompatibilityAction: ExactText("seen"), requestRevision: requestRevision)
         }
+    }
+
+    @discardableResult
+    func retryFYISeen(_ key: RequestKey, requestRevision: UInt64) -> Bool {
+        guard let row = inboxRow(for: key), row.requestRevision == requestRevision,
+              row.canRetryFYISeen else { return false }
+        if row.fyiOpenedFlagPending {
+            // The outbox already holds this opened flag and its original operation ID.
+            Task { await NativeRelayLifecycle.shared.sendPendingMessageOpens(expected: profileContext) }
+            return true
+        }
+        guard let receipt = request(for: key)?.intentReceipt else { return false }
+        if case .accepted = receipt.localState {
+            retryPendingDelivery()
+        } else {
+            sendAnswerOperationForUserTap(receipt.intentID, request: key)
+        }
+        return true
     }
 
     @discardableResult
@@ -2831,7 +2914,7 @@ final class LivePresentationStore {
                                 receiptState: .unknown)
             return false
         }
-        Task { await NativeRelayLifecycle.shared.sendPendingMessageOpens() }
+        Task { await NativeRelayLifecycle.shared.sendPendingMessageOpens(expected: profileContext) }
         return true
     }
 
@@ -4353,9 +4436,15 @@ extension AttentionTier {
 #if DEBUG
 extension NativeAppLaunch {
     static func makeFYITestStore(includeProgress: Bool = false, progressPercent: Int? = nil,
-                                 progressSeen: Bool = false, progressTerminal: String = "") throws -> LivePresentationStore {
+                                 progressSeen: Bool = false, progressTerminal: String = "",
+                                 gardenSeen: Bool = false, museumSeen: Bool = false,
+                                 includeBulk: Bool = false, repliedFixture: Bool = false,
+                                 includeBulkReplied: Bool = false) throws -> LivePresentationStore {
+        // Measure the large list opening from Inbox, free of the other fixture's restored selection.
+        let personID = includeBulk || includeBulkReplied || !progressTerminal.isEmpty
+            ? ExactText(UUID().uuidString) : ExactText(repliedFixture ? "fyi-tab-fixture" : "fyi-fixture")
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("fixture.invalid"),
-            personID: ExactText("fyi-fixture"), deviceID: ExactText("fixture-device"))
+            personID: personID, deviceID: ExactText("fixture-device"))
         let context = ProfileContext(identity: identity, transportMode: .relay)
         let model = ServerModelV2Store(fileURL: nil)
         // Separate pages with opaque server and legacy-shaped identifiers. The
@@ -4364,7 +4453,7 @@ extension NativeAppLaunch {
             #"""
             {"rev":1,"counts":{"unresolved":1},"items":[
                 {"item_id":"legacy/fyi-garden","rev":1,"sender":"app:fixture/community",
-                 "request_revision":1,"created_at_ms":1700000000000,"seen":false,
+                 "request_revision":1,"created_at_ms":1700000000000,"seen":\#(gardenSeen),
                  "message":{"message_type":"fyi","title":"Community garden",
                             "body":"The community garden reopened after repairs."},
                  "files":[],"chat":{"started":false},"rank":{"key":"a","score":0.9,"section":"current"}}
@@ -4373,7 +4462,7 @@ extension NativeAppLaunch {
             #"""
             {"rev":2,"counts":{"unresolved":2},"items":[
                 {"item_id":"i-204","rev":2,"sender":"fixture:community",
-                 "request_revision":1,"created_at_ms":1700000001000,"seen":false,
+                 "request_revision":1,"created_at_ms":1700000001000,"seen":\#(museumSeen),
                  "message":{"message_type":"fyi","title":"Museum hours",
                             "body":"The museum is open late on Fridays. Visit the sculpture gallery before 8 p.m. and pick up a free map in the foyer. Details at https://example.org."},
                  "files":[],"chat":{"started":false},"rank":{"key":"b","score":0.5,"section":"current"}}
@@ -4393,10 +4482,43 @@ extension NativeAppLaunch {
         try model.apply([ServerModelV2Store.Change(rev: 5, kind: "item_removed",
             data: Data(#"{"item_id":"gone"}"#.utf8))], cursor: 5)
         try model.apply(olderPage)
+        if includeBulkReplied {
+            let active = fyiBulkTestChanges(indices: 0..<135, firstRevision: 6, openCount: 135)
+            let seen = fyiBulkTestChanges(indices: 135..<1035, firstRevision: 141, openCount: 0, allSeen: true)
+            try model.apply(active + seen, cursor: 1040)
+        } else if includeBulk {
+            try model.apply(fyiBulkTestChanges(indices: 0..<840, firstRevision: 6, openCount: 135), cursor: 845)
+        }
         let cached = ServerModelV2Projection.cachedState(model.snapshot, identity: identity)
         let repo = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
         try repo.restoreCachedServerState(cached, context: context)
         return try LivePresentationStore(store: repo, context: context)
+    }
+
+    static func fyiBulkTestChanges(indices: Range<Int>, firstRevision: Int,
+                                   openCount: Int, allSeen: Bool = false) -> [ServerModelV2Store.Change] {
+        func item(_ index: Int, revision: Int, ended: Bool) -> String {
+            let type = index.isMultiple(of: 2) ? #""message_type":"fyi","# : ""
+            let terminal: String
+            if !ended { terminal = "" }
+            else if !allSeen && index.isMultiple(of: 7) { terminal = #","terminal":{"state":"superseded","at_ms":1700000003000}"# }
+            else if !allSeen && index.isMultiple(of: 11) { terminal = #","terminal":{"state":"retracted","at_ms":1700000003000}"# }
+            else if !allSeen && index.isMultiple(of: 13) { terminal = #","terminal":{"state":"expired","at_ms":1700000003000}"# }
+            else { terminal = #","terminal":{"state":"answered","at_ms":1700000003000,"answer":{"kind":"seen"}}"# }
+            return #"""
+            {"item_id":"fyi-\#(index)","rev":\#(revision),"sender":"fixture:community",
+             "request_revision":1,"created_at_ms":\#(1700000003000 + index),"seen":false,"message":{\#(type)"title":"Bulletin \#(index)",
+             "answer_ui":{"schema":"attention-client.actions/1","actions":[
+                 {"id":"seen","label":"Seen","kind":"value","value":{"acknowledgment":"seen"}}]}},
+             "files":[],"chat":{"started":false},"rank":{"key":"\#(index)","section":"current"}\#(terminal)}
+            """#
+        }
+
+        return indices.enumerated().map { offset, index in
+            let revision = firstRevision + offset
+            return ServerModelV2Store.Change(rev: UInt64(revision), kind: "item",
+                data: Data(item(index, revision: revision, ended: index >= openCount).utf8))
+        }
     }
 
     fileprivate static func fyiProgressTestPage(progressPercent: Int?, progressSeen: Bool,
@@ -4422,6 +4544,12 @@ extension NativeAppLaunch {
 extension LivePresentationStore {
     func fyiTestSnapshot() throws -> AttentionStoreSnapshot {
         try attentionStore.snapshot(context: profileContext)
+    }
+
+    func rejectFYITestAnswer(_ answer: Submission) throws {
+        try attentionStore.recordAnswerNotDelivered(
+            answer.intentID, operationID: answer.operationID, context: profileContext)
+        try refreshFromDurableStore()
     }
 
     func applyFYIProgressTestSnapshot(percent: Int?, seen: Bool, revision: Int) throws {
