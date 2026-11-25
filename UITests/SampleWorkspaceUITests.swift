@@ -231,6 +231,74 @@ final class SampleWorkspaceUITests: XCTestCase {
         XCTAssertEqual(sort.label, "Sort: Posted")
     }
 
+    func testMessageIDPillCopiesOrdinaryDetailInLightAndDark() {
+        let originalAppearance = XCUIDevice.shared.appearance
+        defer { XCUIDevice.shared.appearance = originalAppearance }
+        for name in ["light", "dark", "larger text"] {
+            XCUIDevice.shared.appearance = name == "dark" ? .dark : .light
+            let app = XCUIApplication()
+            app.launchArguments = ["--harklight-test-relay-failed-choice"]
+            if name == "larger text" {
+                app.launchArguments += ["-UIPreferredContentSizeCategoryName",
+                                        "UICTContentSizeCategoryAccessibilityXL"]
+            }
+            app.launch()
+            let row = app.descendants(matching: .any)["request-row-review-01"]
+            XCTAssertTrue(row.waitForExistence(timeout: 10), app.debugDescription)
+            XCTAssertFalse(app.buttons["copy-message-id"].exists)
+            row.tap()
+            let pill = app.buttons["copy-message-id"]
+            guard pill.waitForExistence(timeout: 5) else {
+                XCTFail("The ordinary message detail must offer Copy message ID.")
+                app.terminate()
+                continue
+            }
+            XCTAssertEqual(pill.label, "Copy message ID")
+            XCTAssertEqual(pill.value as? String, "review-01")
+            XCTAssertGreaterThan(pill.frame.minY, app.buttons["request-heading"].frame.minY)
+            capture("Message ID ordinary detail \(name)", app)
+            pill.tap()
+            XCTAssertEqual(pill.value as? String, "Copied")
+            XCTAssertFalse(app.navigationBars["Request details"].exists)
+            if name == "light" {
+                showList(app)
+                let search = workspaceSearchField(in: app)
+                XCTAssertTrue(search.waitForExistence(timeout: 5), app.debugDescription)
+                search.tap()
+                search.press(forDuration: 1)
+                let paste = app.menuItems["Paste"]
+                if paste.waitForExistence(timeout: 5) {
+                    paste.tap()
+                    XCTAssertEqual(search.value as? String, "review-01")
+                } else {
+                    XCTFail("The copy must be available to paste into Inbox search.")
+                }
+            }
+            app.terminate()
+        }
+    }
+
+    func testFYIDetailShowsTheServerItemIDAndCopiesIt() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--harklight-test-fyi-list"]
+        app.launch()
+        defer { app.terminate() }
+        openFYIListIfNeeded(app)
+        let list = app.collectionViews["fyi-list"]
+        XCTAssertFalse(list.buttons["copy-message-id"].exists)
+        list.staticTexts["Museum hours"].tap()
+        let pill = app.buttons["copy-message-id"]
+        guard pill.waitForExistence(timeout: 5) else {
+            return XCTFail("The FYI detail must offer Copy message ID.")
+        }
+        XCTAssertEqual(pill.label, "Copy message ID")
+        XCTAssertEqual(pill.value as? String, "i-204")
+        capture("FYI detail with Server item ID", app)
+        pill.tap()
+        XCTAssertEqual(pill.value as? String, "Copied")
+        XCTAssertFalse(app.navigationBars["Request details"].exists)
+    }
+
     func testFYIDigestOpensListInNavigationAndSortChangesOrder() {
         if UIDevice.current.userInterfaceIdiom == .pad { XCUIDevice.shared.orientation = .landscapeLeft }
         let app = XCUIApplication()
