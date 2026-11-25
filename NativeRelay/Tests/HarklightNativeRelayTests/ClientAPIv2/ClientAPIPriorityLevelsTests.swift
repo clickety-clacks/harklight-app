@@ -3,6 +3,14 @@ import Foundation
 @testable import HarklightNativeRelay
 import XCTest
 
+private func waitForSettings(_ condition: () async throws -> Bool) async throws {
+    let deadline = ContinuousClock.now + .seconds(3)
+    while try await !condition() {
+        guard ContinuousClock.now < deadline else { throw URLError(.timedOut) }
+        try await Task.sleep(for: .milliseconds(5))
+    }
+}
+
 final class ClientAPIAlertsSettingsTests: XCTestCase {
     func testSettingsAlertsDecodesSupportedValuesWithoutRejectingOtherSettings() throws {
         for (field, expected) in [("", nil), (#","alerts":"important""#, APIAlerts.important),
@@ -53,13 +61,16 @@ final class ClientAPIAlertsSettingsTests: XCTestCase {
         XCTAssertEqual(saving?.confirmed, .important)
         XCTAssertTrue(saving?.isSaving == true)
         gate.release()
-        await connection.outbox.flush()
+        try await waitForSettings { await connection.alertsState()?.hasFailure == true }
         let refused = await connection.alertsState()
         XCTAssertEqual(refused?.confirmed, .important)
         XCTAssertTrue(refused?.hasFailure == true)
 
         try await connection.saveAlerts(.all)
-        await connection.outbox.flush()
+        try await waitForSettings {
+            guard let state = await connection.alertsState() else { return false }
+            return state.confirmed == .all && !state.isSaving
+        }
         let accepted = await connection.alertsState()
         XCTAssertEqual(accepted?.confirmed, .all)
         XCTAssertFalse(accepted?.hasFailure == true)
@@ -89,7 +100,7 @@ final class ClientAPIPriorityLevelsTests: XCTestCase {
         try repository.savePriorityLevelsDraft(draft, context: context)
         let table = try XCTUnwrap(PriorityLevelsTableValidation.levels(from: draft))
         try await connection.savePriorityLevels(table)
-        try await waitFor {
+        try await waitForSettings {
             let state = try repository.snapshot(context: context).priorityLevels
             return state.failureReason == "precondition_failed" && state.pendingSave == nil &&
                 state.confirmedLevels?.first?.name.rawValue == "Updated elsewhere" && connection.priorityLevelsCanSave
@@ -101,7 +112,7 @@ final class ClientAPIPriorityLevelsTests: XCTestCase {
         XCTAssertEqual(stalePuts.first?.ifMatch, "\"settings-1\"")
 
         try await connection.savePriorityLevels(table)
-        try await waitFor {
+        try await waitForSettings {
             let state = try repository.snapshot(context: context).priorityLevels
             return state.pendingSave == nil && state.confirmedLevels == table && connection.priorityLevelsCanSave
         }
@@ -122,14 +133,14 @@ final class ClientAPIPriorityLevelsTests: XCTestCase {
         let run = Task { await connection.runForeground() }
         let gate = AsyncGate()
         defer { gate.release(); run.cancel() }
-        try await waitFor { connection.model.heldCursor != nil && transport.base.openFeedCount == 1 }
+        try await waitForSettings { connection.model.heldCursor != nil && transport.base.openFeedCount == 1 }
         try await connection.refreshMe()
         await connection.refreshPriorityLevels()
         XCTAssertTrue(connection.priorityLevelsCanSave)
         let initial = connection.model.settingsPosition
 
         await transport.advanceSettings(holdingRead: gate)
-        try await waitFor { await transport.settingsReads == 2 }
+        try await waitForSettings { await transport.settingsReads == 2 }
         XCTAssertFalse(connection.priorityLevelsCanSave)
         let changed = connection.model.settingsPosition
         XCTAssertEqual(changed.generation, initial.generation)
@@ -145,7 +156,7 @@ final class ClientAPIPriorityLevelsTests: XCTestCase {
         let beforeRefresh = await transport.puts
         XCTAssertTrue(beforeRefresh.isEmpty)
         gate.release()
-        try await waitFor { connection.priorityLevelsCanSave }
+        try await waitForSettings { connection.priorityLevelsCanSave }
     }
 
     func testDisabledFeatureKeepsPersistedPriorityWriteAndDraftWithoutSending() async throws {
@@ -179,7 +190,7 @@ final class ClientAPIPriorityLevelsTests: XCTestCase {
         await transport.holdMe(meGate)
         let run = Task { await connection.runForeground() }
         defer { meGate.release(); run.cancel() }
-        try await waitFor { transport.base.openFeedCount == 1 }
+        try await waitForSettings { transport.base.openFeedCount == 1 }
         await connection.outbox.flush()
         let beforeMe = await transport.puts
         XCTAssertTrue(beforeMe.isEmpty, "A saved true flag cannot authorize a replay before /me.")
@@ -198,20 +209,13 @@ final class ClientAPIPriorityLevelsTests: XCTestCase {
 
         await transport.enablePriorityEditing()
         _ = try await connection.refreshMe()
-        try await waitFor { await transport.puts.count == 1 }
+        try await waitForSettings { await transport.puts.count == 1 }
         let reenabled = await transport.puts
         XCTAssertEqual(reenabled.first?.idempotencyKey, pending.operationID)
         XCTAssertEqual(reenabled.first?.ifMatch, pending.ifMatch)
         XCTAssertEqual(reenabled.first?.body, write.write.body)
     }
 
-    private func waitFor(_ condition: () async throws -> Bool) async throws {
-        let deadline = ContinuousClock.now + .seconds(3)
-        while try await !condition() {
-            guard ContinuousClock.now < deadline else { throw URLError(.timedOut) }
-            try await Task.sleep(for: .milliseconds(5))
-        }
-    }
 }
 
 private actor PrioritySettingsTransport: ClientAPITransport {
