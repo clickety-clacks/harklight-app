@@ -677,6 +677,8 @@ struct LiveContentView: View {
                                 ProgressMessageDetail(title: request.title?.rawValue ?? "Message",
                                     sender: request.senderDisplayName?.rawValue ?? key.senderID.rawValue,
                                     bodyText: request.body?.rawValue, progress: progress,
+                                    createdAt: request.createdAt,
+                                    itemID: store.isLocalExample ? nil : key.messageID,
                                     seenPending: row?.isFYISeenPending == true,
                                     onSeen: row?.canMarkFYISeen == true
                                         ? { store.markProgressFYISeen(key, requestRevision: request.requestRevision) }
@@ -821,15 +823,21 @@ struct LiveContentView: View {
     }
 }
 
-/// Shared message identity header for ordinary live and local-example details.
+/// Shared message identity parts for detail headings and FYI list rows.
 /// Only explicit protocol metadata is shown; missing metadata stays absent.
 struct MessageHeading: View {
+    struct Detail {
+        let itemID: ExactText?
+        let onOpenDetails: () -> Void
+    }
+
     let sender: String?
     let initials: String
     let title: String
     var createdAt: Date? = nil
     var messageType: HarklightMessageType = .request
     var inFYIList = false
+    var detail: Detail? = nil
     @Environment(\.colorScheme) private var colorScheme
 
     private var palette: HarklightDesignSource.Appearance {
@@ -842,43 +850,71 @@ struct MessageHeading: View {
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: inFYIList ? 6 : 16) {
-            HStack(spacing: inFYIList ? 8 : 10) {
-                if !initials.isEmpty {
-                    let badgeSize = HarklightDesignSystem.shape(inFYIList ? .rowInitials : .messageInitials)
-                    Text(initials)
-                        .font(inFYIList ? .system(size: 10.5, weight: .medium) : .caption)
-                        .foregroundStyle(palette.label)
-                        .frame(width: badgeSize, height: badgeSize)
-                        .background(palette.field, in: Circle())
-                        .overlay(Circle().strokeBorder(palette.line, lineWidth: 1))
-                        .accessibilityHidden(inFYIList)
-                }
-                if let senderLine {
-                    Text(verbatim: senderLine)
-                        .harklightType(inFYIList ? .rowByline : .messageSender)
-                        .foregroundStyle(palette.secondary)
-                }
-                Spacer(minLength: 0)
-                if inFYIList, let createdAt {
-                    Text(InboxFriendlyDate.detailLabel(for: createdAt))
-                        .harklightType(.rowTime)
-                        .foregroundStyle(palette.label)
-                }
-            }
-            HStack(alignment: .firstTextBaseline, spacing: inFYIList ? 8 : 14) {
-                Image(systemName: messageType.symbol)
-                    .font(.system(size: inFYIList ? 17 : 22, weight: .medium))
-                    .foregroundStyle(palette.typeColor(messageType))
+    private var bylineIdentity: some View {
+        HStack(spacing: inFYIList ? 8 : 10) {
+            if !initials.isEmpty {
+                let badgeSize = HarklightDesignSystem.shape(inFYIList ? .rowInitials : .messageInitials)
+                Text(initials)
+                    .font(inFYIList ? .system(size: 10.5, weight: .medium) : .caption)
+                    .foregroundStyle(palette.label)
+                    .frame(width: badgeSize, height: badgeSize)
+                    .background(palette.field, in: Circle())
+                    .overlay(Circle().strokeBorder(palette.line, lineWidth: 1))
                     .accessibilityHidden(true)
-                Text(MessageMarkdown.attributed(title))
-                    .harklightType(inFYIList ? .inboxMessageTitle : .messageTitle)
-                    .foregroundStyle(palette.text)
-                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if let senderLine {
+                Text(verbatim: senderLine)
+                    .harklightType(inFYIList ? .rowByline : .messageSender)
+                    .foregroundStyle(palette.secondary)
             }
         }
-        .accessibilityElement(children: .combine)
+    }
+
+    private var titleLine: some View {
+        HStack(alignment: .firstTextBaseline, spacing: inFYIList ? 8 : 14) {
+            Image(systemName: messageType.symbol)
+                .font(.system(size: inFYIList ? 17 : 22, weight: .medium))
+                .foregroundStyle(palette.typeColor(messageType))
+                .accessibilityHidden(true)
+            Text(MessageMarkdown.attributed(title))
+                .harklightType(inFYIList ? .inboxMessageTitle : .messageTitle)
+                .foregroundStyle(palette.text)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    var body: some View {
+        if let detail {
+            VStack(alignment: .leading, spacing: 4) {
+                Button(action: detail.onOpenDetails) {
+                    titleLine
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("request-heading")
+                .accessibilityHint("Open request details")
+
+                if let itemID = detail.itemID {
+                    MessageIDByline(identity: bylineIdentity, itemID: itemID)
+                        .id(itemID)
+                } else {
+                    bylineIdentity
+                }
+            }
+        } else {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 8) {
+                    bylineIdentity
+                    Spacer(minLength: 0)
+                    if let createdAt {
+                        Text(InboxFriendlyDate.detailLabel(for: createdAt))
+                            .harklightType(.rowTime)
+                            .foregroundStyle(palette.label)
+                    }
+                }
+                titleLine
+            }
+            .accessibilityElement(children: .combine)
+        }
     }
 }
 
@@ -1331,27 +1367,60 @@ private struct ReplacedByMessagesSection: View {
     }
 }
 
-private struct RequestDetailHeading: View {
-    let sender: String
-    let initials: String
-    let title: String
-    let createdAt: Date?
-    let messageType: HarklightMessageType
-    let onOpenDetails: () -> Void
+struct MessageIDByline<Identity: View>: View {
+    let identity: Identity
+    let itemID: ExactText
+    @State private var confirmation: UUID?
 
     var body: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 8) {
+                identity.fixedSize(horizontal: true, vertical: false)
+                pill.fixedSize(horizontal: true, vertical: false)
+            }
+            VStack(alignment: .leading, spacing: 0) {
+                identity
+                pill
+            }
+        }
+        .task(id: confirmation) {
+            guard confirmation != nil else { return }
+            do {
+                try await Task.sleep(for: .seconds(2))
+            } catch {
+                return
+            }
+            confirmation = nil
+        }
+    }
+
+    private var pill: some View {
         Button {
-            onOpenDetails()
+            UIPasteboard.general.string = itemID.rawValue
+            confirmation = UUID()
+            AccessibilityNotification.Announcement(String(localized: "Copied")).post()
         } label: {
-            MessageHeading(sender: sender,
-                           initials: initials,
-                           title: title,
-                           createdAt: createdAt,
-                           messageType: messageType)
+            pillLabel
+                .padding(.horizontal, HarklightDesignSystem.shape(.messageIDPillHorizontalPadding))
+                .padding(.vertical, HarklightDesignSystem.shape(.messageIDPillVerticalPadding))
+                .background(.quaternary, in: RoundedRectangle(
+                    cornerRadius: HarklightDesignSystem.shape(.messageIDPillRadius), style: .circular))
+            .frame(minHeight: 44)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityIdentifier("request-heading")
-        .accessibilityHint("Open request details")
+        .accessibilityLabel("Copy message ID")
+        .accessibilityValue(confirmation == nil ? Text(verbatim: itemID.rawValue) : Text("Copied"))
+        .accessibilityIdentifier("copy-message-id")
+    }
+
+    private var pillLabel: some View {
+        ZStack {
+            Text(verbatim: itemID.rawValue).opacity(confirmation == nil ? 1 : 0)
+            if confirmation != nil { Text("Copied") }
+        }
+        .harklightType(.messageIDPill)
+        .foregroundStyle(.secondary)
     }
 }
 
@@ -2271,10 +2340,11 @@ struct LiveRequestDetail: View {
                                focusedReplyActionID = nil
                            }) {
             VStack(alignment: .leading, spacing: 12) {
-                RequestDetailHeading(sender: senderLabel, initials: senderInitials,
+                MessageHeading(sender: senderLabel, initials: senderInitials,
                     title: request.title?.rawValue ?? "Message", createdAt: request.createdAt,
                     messageType: context.messageType,
-                    onOpenDetails: { requestDetailsPresented = true })
+                    detail: .init(itemID: localExample == nil && !store.isLocalExample ? request.key.messageID : nil,
+                                  onOpenDetails: { requestDetailsPresented = true }))
                 RequestDetailMetadata(inboxPriority: request.inboxPriority,
                     inboxScore: request.inboxScore,
                     messageType: request.messageType, messageKind: request.messageKind,

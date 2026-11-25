@@ -231,6 +231,74 @@ final class SampleWorkspaceUITests: XCTestCase {
         XCTAssertEqual(sort.label, "Sort: Posted")
     }
 
+    func testMessageIDPillCopiesOrdinaryDetailInLightAndDark() {
+        let originalAppearance = XCUIDevice.shared.appearance
+        defer { XCUIDevice.shared.appearance = originalAppearance }
+        for name in ["light", "dark", "larger text"] {
+            XCUIDevice.shared.appearance = name == "dark" ? .dark : .light
+            let app = XCUIApplication()
+            app.launchArguments = ["--harklight-test-relay-failed-choice"]
+            if name == "larger text" {
+                app.launchArguments += ["-UIPreferredContentSizeCategoryName",
+                                        "UICTContentSizeCategoryAccessibilityXL"]
+            }
+            app.launch()
+            let row = app.descendants(matching: .any)["request-row-review-01"]
+            XCTAssertTrue(row.waitForExistence(timeout: 10), app.debugDescription)
+            XCTAssertFalse(app.buttons["copy-message-id"].exists)
+            row.tap()
+            let pill = app.buttons["copy-message-id"]
+            guard pill.waitForExistence(timeout: 5) else {
+                XCTFail("The ordinary message detail must offer Copy message ID.")
+                app.terminate()
+                continue
+            }
+            XCTAssertEqual(pill.label, "Copy message ID")
+            XCTAssertEqual(pill.value as? String, "review-01")
+            XCTAssertGreaterThan(pill.frame.minY, app.buttons["request-heading"].frame.minY)
+            capture("Message ID ordinary detail \(name)", app)
+            pill.tap()
+            XCTAssertEqual(pill.value as? String, "Copied")
+            XCTAssertFalse(app.navigationBars["Request details"].exists)
+            if name == "light" {
+                showList(app)
+                let search = workspaceSearchField(in: app)
+                XCTAssertTrue(search.waitForExistence(timeout: 5), app.debugDescription)
+                search.tap()
+                search.press(forDuration: 1)
+                let paste = app.menuItems["Paste"]
+                if paste.waitForExistence(timeout: 5) {
+                    paste.tap()
+                    XCTAssertEqual(search.value as? String, "review-01")
+                } else {
+                    XCTFail("The copy must be available to paste into Inbox search.")
+                }
+            }
+            app.terminate()
+        }
+    }
+
+    func testFYIDetailShowsTheServerItemIDAndCopiesIt() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--harklight-test-fyi-list"]
+        app.launch()
+        defer { app.terminate() }
+        openFYIListIfNeeded(app)
+        let list = app.collectionViews["fyi-list"]
+        XCTAssertFalse(list.buttons["copy-message-id"].exists)
+        list.staticTexts["Museum hours"].tap()
+        let pill = app.buttons["copy-message-id"]
+        guard pill.waitForExistence(timeout: 5) else {
+            return XCTFail("The FYI detail must offer Copy message ID.")
+        }
+        XCTAssertEqual(pill.label, "Copy message ID")
+        XCTAssertEqual(pill.value as? String, "i-204")
+        capture("FYI detail with Server item ID", app)
+        pill.tap()
+        XCTAssertEqual(pill.value as? String, "Copied")
+        XCTAssertFalse(app.navigationBars["Request details"].exists)
+    }
+
     func testFYIDigestOpensListInNavigationAndSortChangesOrder() {
         if UIDevice.current.userInterfaceIdiom == .pad { XCUIDevice.shared.orientation = .landscapeLeft }
         let app = XCUIApplication()
@@ -322,6 +390,13 @@ final class SampleWorkspaceUITests: XCTestCase {
         row.tap()
         let seen = app.buttons["request-seen-action"]
         XCTAssertTrue(seen.waitForExistence(timeout: 5))
+        let pill = app.buttons["copy-message-id"]
+        XCTAssertTrue(pill.waitForExistence(timeout: 5))
+        XCTAssertEqual(pill.label, "Copy message ID")
+        XCTAssertEqual(pill.value as? String, "progress-fyi")
+        pill.tap()
+        XCTAssertEqual(pill.value as? String, "Copied")
+        XCTAssertTrue(seen.exists, "Copying the ID leaves Seen available.")
         seen.tap()
         XCTAssertTrue(app.staticTexts["Seen pending confirmation"].waitForExistence(timeout: 5))
         XCTAssertFalse(seen.exists)
@@ -334,6 +409,41 @@ final class SampleWorkspaceUITests: XCTestCase {
         capture("Progress FYI Seen pending in list", app)
         row.swipeLeft()
         XCTAssertFalse(app.buttons["Seen"].exists)
+    }
+
+    func testProgressItemIDFromInboxAndNotificationNavigation() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--harklight-test-fyi-list", "--harklight-test-fyi-finished-progress",
+                               "--harklight-test-notification-navigation",
+                               "--harklight-test-notification-item=progress-fyi"]
+        app.launch()
+        defer { app.terminate() }
+
+        let row = app.descendants(matching: .any)["progress-row-progress-fyi"]
+        let backFromRestoredFYIs = app.navigationBars["FYIs"].buttons["BackButton"]
+        if !row.exists && backFromRestoredFYIs.isHittable {
+            backFromRestoredFYIs.tap()
+        }
+        XCTAssertTrue(row.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertFalse(app.buttons["copy-message-id"].exists)
+        row.tap()
+        let detail = app.scrollViews["progress.detail"]
+        XCTAssertTrue(detail.waitForExistence(timeout: 5))
+        let pill = detail.buttons["copy-message-id"]
+        XCTAssertTrue(pill.waitForExistence(timeout: 5))
+        XCTAssertEqual(pill.value as? String, "progress-fyi")
+
+        app.terminate()
+        app.launch()
+        let notification = app.buttons["harklight-test-notification"]
+        if !notification.exists && backFromRestoredFYIs.isHittable {
+            backFromRestoredFYIs.tap()
+        }
+        XCTAssertTrue(notification.waitForExistence(timeout: 5), app.debugDescription)
+        notification.tap()
+        XCTAssertTrue(pill.waitForExistence(timeout: 5))
+        XCTAssertEqual(pill.label, "Copy message ID")
+        XCTAssertEqual(pill.value as? String, "progress-fyi")
     }
 
     func testConfirmedFYILeavesTheRestoredListAndLastSeenLeavesAnEmptyState() {
