@@ -277,7 +277,7 @@ struct InboxNotificationDestination: Equatable {
 
     init(route: NativeInboxNavigation, rows: [InboxItem], usesFreeOrder: Bool = false) {
         guard let key = route.request else {
-            selection = .notificationPending(route.serial)
+            selection = route.isPending ? .notificationPending(route.serial) : nil
             selectedTab = .inbox
             workspaceTab = .inbox
             return
@@ -1035,7 +1035,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     }
     private func notificationPendingPresentation(for serial: UInt64) -> InboxNotificationPendingPresentation? {
         guard let route = activeNotificationNavigation, route.serial == serial,
-              route.request == nil, visibleNotificationNavigation != nil else { return nil }
+              route.isPending, visibleNotificationNavigation != nil else { return nil }
         let statusMessage = visibleWarnings.first {
             InboxNotificationPendingPresentation.isNotificationStatusMessage($0)
         }
@@ -1043,7 +1043,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                                                     statusMessage: statusMessage)
     }
     private var notificationPendingListPresentation: InboxNotificationPendingPresentation? {
-        guard let route = visibleNotificationNavigation, route.request == nil else { return nil }
+        guard let route = visibleNotificationNavigation, route.isPending else { return nil }
         return notificationPendingPresentation(for: route.serial)
     }
     private var exposesNotificationTestAction: Bool {
@@ -1782,14 +1782,14 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             .onChange(of: workspaceTab) { _, newTab in
                 selectedTab = newTab.messageTab
                 guard newTab != .inbox,
-                      let route = activeNotificationNavigation, route.request == nil,
+                      let route = activeNotificationNavigation, route.isPending,
                       case let .notificationPending(serial)? = selection,
                       serial == route.serial else { return }
                 dismissPendingNotification()
             }
             .onChange(of: search) { _, newSearch in
                 guard !newSearch.isEmpty,
-                      let route = activeNotificationNavigation, route.request == nil,
+                      let route = activeNotificationNavigation, route.isPending,
                       case let .notificationPending(serial)? = selection,
                       serial == route.serial else { return }
                 dismissPendingNotification()
@@ -2588,7 +2588,7 @@ struct InboxList: View {
                     .foregroundStyle(.hkSecondary)
                     .accessibilityIdentifier("inbox-warning-message")
             }
-            if tab == .inbox, let route = notificationNavigation, route.request == nil {
+            if tab == .inbox, let route = notificationNavigation, route.isPending {
                 let rowState = notificationPendingPresentation.flatMap {
                     $0.serial == route.serial ? $0.listRowState : nil
                 } ?? .invalid

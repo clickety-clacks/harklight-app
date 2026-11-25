@@ -1195,15 +1195,24 @@ final class NativeRelayLifecycle {
     }
 
     func v2LocatorForPush(_ payload: JSONValue) async -> NativeNotificationLocator? {
+        await v2DestinationForPush(payload)?.locator
+    }
+
+    func v2DestinationForPush(_ payload: JSONValue) async -> NativePushDestination? {
         guard let connection = v2Connection, let context,
               await allowsV2PushRouting(connection),
-              let hint = connection.matchPush(payload) else { return nil }
-        _ = try? await connection.catchUp(forPushRevision: hint.revision)
-        guard v2Connection === connection, connection.matchPush(payload) == hint,
-              let item = connection.model.snapshot.items[hint.itemID] else { return nil }
-        let request = ServerModelV2Projection.key(for: hint.itemID, sender: item.sender, identity: context.identity)
-        return NativeNotificationLocator(v2Request: request, bindingID: hint.bindingID,
-            deviceID: hint.deviceID, serverID: hint.serverID.rawValue, target: hint.target)
+              let match = connection.matchPush(payload) else { return nil }
+        _ = try? await connection.catchUp(forPushRevision: match.revision)
+        guard v2Connection === connection, connection.matchPush(payload) == match else { return nil }
+        switch match {
+        case .syncOnly:
+            return .inbox
+        case let .located(hint):
+            guard let item = connection.model.snapshot.items[hint.itemID] else { return nil }
+            let request = ServerModelV2Projection.key(for: hint.itemID, sender: item.sender, identity: context.identity)
+            return .item(NativeNotificationLocator(v2Request: request, bindingID: hint.bindingID,
+                deviceID: hint.deviceID, serverID: hint.serverID.rawValue, target: hint.target))
+        }
     }
 
     private func allowsV2PushRouting(_ connection: ClientAPIv2Connection) async -> Bool {

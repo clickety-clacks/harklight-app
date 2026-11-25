@@ -105,6 +105,16 @@ public struct ClientAPIPush: Sendable {
     }
 }
 
+public enum ClientAPIPushMatch: Equatable, Sendable {
+    case syncOnly(serverID: ExactText)
+    case located(ClientAPIPushHint)
+
+    public var revision: Rev? {
+        guard case let .located(locator) = self else { return nil }
+        return locator.revision
+    }
+}
+
 /// A push already matched to the saved v2 authority. Its revision is a hint.
 public struct ClientAPIPushHint: Equatable, Sendable {
     public let serverID: ExactText
