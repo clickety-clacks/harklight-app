@@ -235,8 +235,8 @@ public actor ClientAPIFocusChannel {
         await deliver(show)
     }
 
-    /// Stops renewing, for sign-out or when the connection is torn down.
-    public func stop() {
+    /// Stops queued writes and renewal without interrupting a write already in flight.
+    public func pauseReporting() {
         pausedForInternalError = nil
         latest = nil
         waiting = nil
@@ -244,6 +244,11 @@ public actor ClientAPIFocusChannel {
         renewal = nil
         retryTimer?.cancel()
         retryTimer = nil
+    }
+
+    /// Stops reporting when the connection is torn down.
+    public func stop() {
+        pauseReporting()
         drainTask?.cancel()
         let abandoned = waiters
         waiters = []

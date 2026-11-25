@@ -39,12 +39,39 @@ private actor FocusReportCollector {
 
 @MainActor
 final class NativeFocusReporterTests: XCTestCase {
+    func testVisibleFocusMapsPerTabFYIListsAndTheirDetailPaths() {
+        let key = RequestKey(accountScope: ExactText("account"), senderID: ExactText("sender"),
+                             messageID: ExactText("item"))
+        let message = FocusReport.message(senderID: "sender", messageID: "item")
+        let reporter = NativeFocusReporter()
+
+        XCTAssertEqual(NativeFocusSelection.report(for: nil), .inbox)
+        XCTAssertEqual(NativeFocusSelection.report(for: .fyis), .fyi)
+        XCTAssertEqual(NativeFocusSelection.report(for: .fyis, path: [.fyi(key)]), message)
+        XCTAssertEqual(NativeFocusSelection.report(for: .request(key)), message)
+        XCTAssertNil(NativeFocusSelection.report(for: .fyis, path: [.fyi(key)], isReadOnly: true))
+        XCTAssertNil(NativeFocusSelection.report(for: nil, isReadOnly: true))
+
+        reporter.selectionChanged(to: message)
+        reporter.conversationAppeared(senderID: "sender", messageID: "item", visibility: .noTurns)
+        reporter.selectionChanged(to: message)
+        XCTAssertEqual(reporter.currentFocus, .chat(senderID: "sender", messageID: "item",
+                                                    visibility: .noTurns))
+        // Restoring another tab's detail, then receiving the old chat's dismissal.
+        let other = FocusReport.message(senderID: "sender", messageID: "other")
+        reporter.selectionChanged(to: other)
+        reporter.conversationDismissed(senderID: "sender", messageID: "item")
+        XCTAssertEqual(reporter.currentFocus, other)
+        reporter.selectionChanged(to: .fyi)
+        XCTAssertEqual(reporter.currentFocus, .fyi)
+    }
+
     func testFocusTimingAndBackgroundTransitions() async throws {
         let reporter = NativeFocusReporter()
         let collector = FocusReportCollector()
         let transportID = UUID()
         reporter.installReportHandler(for: transportID) { report in
-            await collector.append(report)
+            if let report { await collector.append(report) }
         }
         reporter.scenePhaseChanged(.active)
         reporter.relaySessionBecameReady(transportID)

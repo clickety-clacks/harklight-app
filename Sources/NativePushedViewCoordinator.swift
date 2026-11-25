@@ -225,7 +225,7 @@ final class NativePushedViewCoordinator {
             guard let self, !Task.isCancelled, self.sceneIsActive else { return }
             self.applyTask = nil
             self.pendingShow = nil
-            self.passivePair = pair
+            if pendingShow.frame.unavailable == nil { self.passivePair = pair }
             await applyHandler(pendingShow.frame)
         }
     }

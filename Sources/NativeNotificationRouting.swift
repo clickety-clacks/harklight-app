@@ -46,12 +46,15 @@ struct NativeInboxNavigation: Equatable {
     let request: RequestKey?
     var opensChat = false
     var chatTargetFallsBackToMessage = false
+    var isPushed = false
+    var showsMessageOnly = false
 
     static func == (lhs: Self, rhs: Self) -> Bool {
         // Consuming the one-shot chat presentation must not replay workspace
         // selection or its existing Seen/unread-related presentation effects.
         lhs.serial == rhs.serial && lhs.request == rhs.request &&
-            lhs.chatTargetFallsBackToMessage == rhs.chatTargetFallsBackToMessage
+            lhs.chatTargetFallsBackToMessage == rhs.chatTargetFallsBackToMessage &&
+            lhs.isPushed == rhs.isPushed && lhs.showsMessageOnly == rhs.showsMessageOnly
     }
 }
 
@@ -67,6 +70,7 @@ struct NativeMessageDeepLink: Equatable {
     let senderID: String
     let messageID: String
     var opensChat = false
+    var isPushed = false
 
     static func recognizes(_ url: URL) -> Bool {
         guard let scheme = url.scheme, let host = url.host else { return false }
@@ -94,10 +98,11 @@ struct NativeMessageDeepLink: Equatable {
     }
 
     init(senderID: String, messageID: String,
-         opensChat: Bool) {
+         opensChat: Bool, isPushed: Bool = false) {
         self.senderID = senderID
         self.messageID = messageID
         self.opensChat = opensChat
+        self.isPushed = isPushed
     }
 }
 

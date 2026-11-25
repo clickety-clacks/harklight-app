@@ -1082,6 +1082,10 @@ final class NativeRelayLifecycle {
         v2FocusReporter.installReportHandler(for: attempt) { report in
             // The channel may return the last drained reply, so this sender
             // does not treat a reply as acknowledgement of an individual write.
+            guard let report else {
+                await focus.pauseReporting()
+                return
+            }
             if report.screen == .signedOut {
                 _ = await focus.report(report)
             } else {
@@ -1104,19 +1108,22 @@ final class NativeRelayLifecycle {
         // The item lookup is an independent request; a slow read must not
         // block a focus PUT or consumption of the change feed.
         v2ShowLookup = Task { [weak self] in
-            let notFound: Bool
+            let unavailable: ViewShowFrame.Unavailable
             do {
-                notFound = try await connection.resolveShowItem(itemID: ExactText(show.itemID)) == nil
+                let item = try await connection.resolveShowItem(itemID: ExactText(show.itemID))
+                unavailable = item == nil ? .notSent : .notHere
+            } catch let error as APIError where error.token == .forbidden || error.status == 404 {
+                unavailable = .notSent
             } catch {
-                notFound = (error as? APIError)?.status == 404
+                unavailable = .notHere
             }
             guard let self, !Task.isCancelled, self.activeTransportAttemptID == attempt,
                   self.pendingV2Show?.show.showID == show.showID else { return }
             if connection.model.snapshot.items[ExactText(show.itemID)] != nil {
                 self.deliverV2ShowIfHydrated(attempt: attempt)
             } else {
-                if notFound { self.pendingV2Show = nil }
-                self.v2ShowCoordinator.receiveV2(.clientAPIUnavailable(show, notFound: notFound),
+                if unavailable == .notSent { self.pendingV2Show = nil }
+                self.v2ShowCoordinator.receiveV2(.clientAPIUnavailable(show, reason: unavailable),
                     elapsedSinceReceipt: max(0, Date().timeIntervalSince(receivedAt)))
             }
         }
@@ -1126,7 +1133,12 @@ final class NativeRelayLifecycle {
         guard activeTransportAttemptID == attempt, let pending = pendingV2Show,
               let item = v2Connection?.model.snapshot.items[ExactText(pending.show.itemID)] else { return }
         pendingV2Show = nil
-        v2ShowCoordinator.receiveV2(.clientAPI(pending.show, senderID: item.sender.rawValue),
+        let frame: ViewShowFrame = if item.terminal?.state == "retracted" {
+            .clientAPIUnavailable(pending.show, reason: .retracted)
+        } else {
+            .clientAPI(pending.show, senderID: item.sender.rawValue)
+        }
+        v2ShowCoordinator.receiveV2(frame,
             elapsedSinceReceipt: max(0, Date().timeIntervalSince(pending.receivedAt)))
     }
 

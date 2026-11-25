@@ -2,6 +2,7 @@ import Foundation
 import XCTest
 @testable import Harklight
 import AttentionDomain
+import HarklightNativeRelay
 import SwiftUI
 
 final class InboxVisualRulesTests: XCTestCase {
@@ -316,6 +317,40 @@ final class InboxVisualRulesTests: XCTestCase {
             terminal: #"{"state":"expired","at_ms":1700000003000}"#)
         XCTAssertFalse(closed.isUnseenFYI)
         XCTAssertNil(closed.fyiSeenAction)
+    }
+
+    @MainActor
+    func testPushedPlainFYIDoesNotQueueAnOpenUntilThePersonInteracts() async throws {
+        let store = try NativeAppLaunch.makeFYITestStore()
+        let row = try XCTUnwrap(store.inboxRows.first { $0.key.messageID == ExactText("i-204") })
+        let request = try XCTUnwrap(store.request(for: row.key))
+        let pushes = NativePushedViewCoordinator.shared
+        pushes.accountConnectionWillBeRemoved()
+        defer {
+            pushes.scenePhaseChanged(.background)
+            pushes.setApplyHandler(nil)
+            pushes.accountConnectionWillBeRemoved()
+        }
+        let applied = expectation(description: "Show presentation opened")
+        pushes.setApplyHandler { _ in
+            store.reportMessageContentOpened(request)
+            applied.fulfill()
+        }
+        pushes.scenePhaseChanged(.active)
+        let show = ClientAPIShow(showID: "show-fyi", deviceID: "device",
+                                 itemID: row.key.messageID.rawValue, target: .message, heldMilliseconds: 0)
+        pushes.receiveV2(.clientAPI(show, senderID: row.key.senderID.rawValue), elapsedSinceReceipt: 0)
+        await fulfillment(of: [applied], timeout: 2)
+        XCTAssertTrue(pushes.isPassive(row.key))
+        let afterShow = try store.fyiTestSnapshot()
+        XCTAssertTrue(afterShow.pendingMessageOpens.isEmpty)
+        XCTAssertTrue(afterShow.intents.isEmpty)
+
+        XCTAssertTrue(pushes.contentWasTouched(row.key) {
+            store.reportMessageContentOpened(request)
+        })
+        XCTAssertEqual(try store.fyiTestSnapshot().pendingMessageOpens.map(\.requestKey), [row.key])
+        XCTAssertTrue(try store.fyiTestSnapshot().intents.isEmpty)
     }
 
     @MainActor

@@ -87,6 +87,7 @@ final class NativeAppLaunch {
     let notificationRouter: NativeNotificationRouter
     private(set) var notificationNavigation: NativeInboxNavigation?
     private(set) var notificationNavigationMessage: String?
+    private(set) var pushedViewUnavailableMessage: String?
     @ObservationIgnored private var notificationSynchronized = false
     @ObservationIgnored private var handledNotificationSerial: UInt64?
     @ObservationIgnored private var pendingMessageDeepLink: NativeMessageDeepLink?
@@ -546,19 +547,34 @@ final class NativeAppLaunch {
     }
 
     func applyPushedView(_ show: ViewShowFrame) async {
+        guard case let .live(presentation) = state, !presentation.isReadOnly, !presentation.isLocalExample,
+              selectedArchivedPresentation == nil, !isShowingDisconnectedArchive,
+              NativeRelayLifecycle.shared.isActive(for: presentation.notificationContext) else { return }
         notificationRouter.consumed()
+        pushedViewUnavailableMessage = nil
         if let unavailable = show.unavailable {
             pendingMessageDeepLink = nil
-            notificationNavigationMessage = unavailable == .notSent
-                ? "This message was never sent to this Harklight inbox."
-                : "This message hasn't arrived yet."
+            switch unavailable {
+            case .notSent: pushedViewUnavailableMessage = "This message is no longer available in this inbox."
+            case .notHere: pushedViewUnavailableMessage = "This message hasn't arrived yet."
+            case .retracted: pushedViewUnavailableMessage = "The sender retracted this message."
+            }
             return
         }
         let deepLink = NativeMessageDeepLink(
             senderID: show.senderID,
             messageID: show.messageID,
-            opensChat: show.target == .chat)
+            opensChat: show.target == .chat, isPushed: true)
+        if presentation.isRetracted(messageKey(for: deepLink, in: presentation)) {
+            pendingMessageDeepLink = nil
+            pushedViewUnavailableMessage = "The sender retracted this message."
+            return
+        }
         await receiveMessageDeepLink(deepLink)
+    }
+
+    func dismissPushedViewUnavailableMessage() {
+        pushedViewUnavailableMessage = nil
     }
 
     func userOpenedMessage() {
@@ -592,7 +608,9 @@ final class NativeAppLaunch {
         }
         notificationNavigation = NativeInboxNavigation(serial: serial, request: key,
                                                         opensChat: opensChat,
-                                                        chatTargetFallsBackToMessage: chatTargetFallsBackToMessage)
+                                                        chatTargetFallsBackToMessage: chatTargetFallsBackToMessage,
+                                                        isPushed: deepLink.isPushed,
+                                                        showsMessageOnly: deepLink.isPushed && !deepLink.opensChat)
         if presentation.request(for: key) != nil {
             presentation.selectRequest(key)
         } else {
@@ -1233,8 +1251,10 @@ final class NativeAppLaunch {
 
     func notificationChatRouteWasOpened(serial: UInt64) {
         guard let route = notificationNavigation, route.serial == serial, route.opensChat,
-              let request = route.request else { return }
-        notificationNavigation = NativeInboxNavigation(serial: route.serial, request: request)
+              route.request != nil else { return }
+        var consumed = route
+        consumed.opensChat = false
+        notificationNavigation = consumed
     }
 
     func handleNotification() async {
@@ -2845,6 +2865,9 @@ final class LivePresentationStore {
     /// operation is stored before any best-effort relay send; a reconnect will
     /// retry it with the same message identity and revision.
     func reportMessageContentOpened(_ request: PresentedRequest) {
+        // Selection and content appearance can follow a Show. Only an explicit
+        // interaction may lift its passive state before recording an open.
+        guard !NativePushedViewCoordinator.shared.isPassive(request.key) else { return }
         if request.isFYIRequest, request.isSettledFYIRequest || isRetracted(request.key) { return }
         // Opening Progress with an explicit Seen response leaves acknowledgement
         // to the Seen controls. Plain FYIs retain their ordinary open behavior.

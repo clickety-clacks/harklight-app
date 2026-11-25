@@ -78,6 +78,9 @@ private final class V2ScenePushTransport: ClientAPITransport, @unchecked Sendabl
             body = #"{"rev":1,"settings":{"rev":1,"priority_levels":[],"push":{"state":"ready","revision":1,"environment":"sandbox","binding_id":"00000000-0000-0000-0000-000000000001"}}}"#
         case "/v2/items/later":
             throw URLError(.networkConnectionLost)
+        case "/v2/items/other-account":
+            lock.withLock { showReads += 1 }
+            throw APIError(status: 404, token: .notFound, retryable: false, requestID: nil)
         case "/v2/items/newest":
             lock.withLock { showReads += 1 }
             if let holdShowLookup { for await _ in holdShowLookup {} }
@@ -533,6 +536,47 @@ final class HarklightTests: XCTestCase {
     }
 
     @MainActor
+    func testV2ShowRejectsAnotherDeviceAndReportsUnavailableItemsWithoutOpeningThem() async throws {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                                       personID: ExactText("person"), deviceID: ExactText("device"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let repo = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        let transport = V2ScenePushTransport()
+        let connection = try ClientAPIv2Connection(transport: transport, repository: repo,
+            context: context, directory: nil, errors: NoopErrorLog())
+        let coordinator = NativePushedViewCoordinator()
+        let lifecycle = NativeRelayLifecycle(v2ShowCoordinator: coordinator)
+        let attempt = UUID()
+        lifecycle.installV2Connection(connection, context: context, attempt: attempt)
+        var shows: [ViewShowFrame] = []
+        coordinator.setApplyHandler { shows.append($0) }
+        coordinator.scenePhaseChanged(.active)
+
+        lifecycle.receiveV2Show(ClientAPIShow(showID: "misaddressed", deviceID: "other-device",
+            itemID: "other-account", target: .message, heldMilliseconds: 0), receivedAt: Date(), attempt: attempt)
+        lifecycle.receiveV2Show(ClientAPIShow(showID: "unknown", deviceID: "device",
+            itemID: "other-account", target: .message, heldMilliseconds: 0), receivedAt: Date(), attempt: attempt)
+        let deadline = ContinuousClock.now + .seconds(2)
+        while shows.isEmpty, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(5)) }
+        XCTAssertEqual(transport.showLookupCount, 1)
+        XCTAssertEqual(shows.map(\.unavailable), [.notSent])
+        XCTAssertNil(coordinator.passivePair)
+
+        let retracted = Data(#"{"item_id":"gone","rev":1,"sender":"sender","request_revision":1,"message":{"title":"Gone"},"files":[],"seen":false,"rank":{"key":"a","section":"current"},"chat":{"available":false,"started":false},"terminal":{"state":"retracted","at_ms":1,"by_this_person":false}}"#.utf8)
+        try connection.model.apply([.init(rev: 1, kind: "item", data: retracted)], cursor: 1)
+        lifecycle.receiveV2Show(ClientAPIShow(showID: "retracted", deviceID: "device",
+            itemID: "gone", target: .chat, heldMilliseconds: 0), receivedAt: Date(), attempt: attempt)
+        let retractionDeadline = ContinuousClock.now + .seconds(2)
+        while shows.count < 2, ContinuousClock.now < retractionDeadline {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertEqual(shows.last?.unavailable, .retracted)
+        XCTAssertNil(coordinator.passivePair)
+        XCTAssertEqual(connection.model.snapshot.items[ExactText("gone")]?.seen, false)
+        await lifecycle.deactivate()
+    }
+
+    @MainActor
     func testV2FocusReportsBackgroundReadinessAndSceneTransitions() async throws {
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
                                        personID: ExactText("person"), deviceID: ExactText("device"))
@@ -618,15 +662,25 @@ final class HarklightTests: XCTestCase {
         XCTAssertEqual(liveFocus, item)
         await expectFocus(liveFocus)
 
-        let archiveFocus = NativeFocusSelection.fyiDetailReport(for: key, in: archive, relay: lifecycle)
-        XCTAssertEqual(archiveFocus, .inbox)
-        await expectFocus(archiveFocus)
-        XCTAssertEqual(NativeFocusSelection.fyiDetailReport(for: key, in: obsoleteLive, relay: lifecycle), .inbox)
+        XCTAssertFalse(NativeFocusSelection.canReportFYIItem(in: archive, relay: lifecycle))
+        XCTAssertFalse(NativeFocusSelection.canReportFYIItem(in: obsoleteLive, relay: lifecycle))
 
-        // The ordinary detail still reports its item; archive suppression is limited to FYIs.
-        await expectFocus(NativeFocusSelection.report(for: .request(key)))
+        let countBeforeArchive = transport.reportedFocus.count
+        reporter.setReportsVisiblePresentation(false)
+        reporter.selectionChanged(to: .fyi)
+        lifecycle.v2FocusScenePhaseChanged(.background)
+        lifecycle.v2FocusScenePhaseChanged(.active)
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(transport.reportedFocus.count, countBeforeArchive)
+
+        reporter.setReportsVisiblePresentation(true)
+        let deadline = ContinuousClock.now + .seconds(2)
+        while transport.reportedFocus.count == countBeforeArchive, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertEqual(transport.reportedFocusScreens.last, "fyi")
         live.enterReadOnlyMode()
-        XCTAssertEqual(NativeFocusSelection.fyiDetailReport(for: key, in: live, relay: lifecycle), .inbox)
+        XCTAssertFalse(NativeFocusSelection.canReportFYIItem(in: live, relay: lifecycle))
 
         await lifecycle.deactivate()
     }
