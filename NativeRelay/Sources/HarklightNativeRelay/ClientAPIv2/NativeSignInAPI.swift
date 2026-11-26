@@ -39,7 +39,7 @@ public struct NativeSignInAPI: Sendable {
     }
 
     public struct Result: Decodable, Sendable {
-        enum OldDevice: String, Decodable, Sendable {
+        public enum OldDevice: String, Decodable, Sendable {
             case attached
             case removed
             case unknown
@@ -49,7 +49,7 @@ public struct NativeSignInAPI: Sendable {
         public let deviceID: String
         let duplicate: Bool
         public let method: NativeSignInMethod?
-        let oldDevice: OldDevice?
+        public let oldDevice: OldDevice?
 
         enum CodingKeys: String, CodingKey {
             case personID = "person_id"

@@ -76,6 +76,15 @@ struct NativeEnrollmentRecord: Codable, Equatable {
         return origin.url
     }
 
+    func sameRecipient(personID: String, deviceID: String) -> Bool {
+        NativeAuthorityBinding.samePerson(self.personID, personID) && ExactText(self.deviceID) == ExactText(deviceID)
+    }
+
+    func matchesRecoveryOrigin(_ origin: URL) -> Bool {
+        if case let .active(knownOrigin, _) = sessionMigration { return knownOrigin == origin }
+        return origin.host?.lowercased() == host.lowercased() && origin.port == nil
+    }
+
     func removalArchiveRecord() -> Self {
         Self(host: host, enrollmentPort: enrollmentPort, relayPort: relayPort,
              trustedRootDER: trustedRootDER, identityLabel: identityLabel,
@@ -101,6 +110,7 @@ struct NativePendingSignIn: Codable {
     let origin: URL
     let transaction: NativeSignInAPI.Transaction
     let rememberMethod: Bool
+    let allowsLegacyRecovery: Bool
     var redemption: NativeSessionRedemption?
 }
 
@@ -134,7 +144,7 @@ struct NativeEnrollmentStore {
     }
 
     func retainSignedInSession(origin: URL, proof: NativeSessionProof, result: NativeSignInAPI.Result,
-                               label: String) throws -> NativeEnrollmentRecord {
+                               label: String, attachedLegacy: NativeEnrollmentRecord?) throws -> NativeEnrollmentRecord {
         guard let host = origin.host, !result.personID.isEmpty, !result.deviceID.isEmpty else {
             throw NativeEnrollmentError.invalidIdentity
         }
@@ -145,6 +155,11 @@ struct NativeEnrollmentStore {
             trustedRootDER: Data(), identityLabel: "", deviceLabel: label, deviceID: result.deviceID,
             approvalCode: "", statusSecret: "", expiresAt: nil, statusExpiresAt: nil, personID: result.personID,
             localProfileAuthority: origin.absoluteString)
+        if let old = attachedLegacy, result.oldDevice == .attached,
+           old.sameRecipient(personID: result.personID, deviceID: result.deviceID) {
+            record = old
+            record.v2Revoked = nil
+        }
         record.sessionMigration = .active(origin: origin, proof: proof)
         try save(record)
         return record
@@ -196,6 +211,14 @@ struct NativeEnrollmentStore {
     /// upgrade from a fresh install before it writes any release-note marker.
     func hasSavedInstallationState() throws -> Bool {
         try load() != nil
+    }
+
+    func lateProof(for record: NativeEnrollmentRecord, message: Data) throws -> NativeSessionRedemption.OldProof {
+        guard let namespace = guidedIdentityNamespace(for: record.identityLabel) else {
+            throw NativeEnrollmentError.invalidIdentity
+        }
+        return try NativeInstallationIdentityStore(namespace: namespace)
+            .lateSignInProof(deviceID: record.deviceID, message: message)
     }
 
     func material(from record: NativeEnrollmentRecord) throws -> NativeInstallationMaterial {

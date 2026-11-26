@@ -1075,12 +1075,12 @@ final class NativeAppLaunch {
         }
     }
 
-    func beginSharedSignIn(origin: URL, rememberMethod: Bool) async throws -> NativePendingSignIn {
+    func beginSharedSignIn(origin: URL, rememberMethod: Bool, allowsLegacyRecovery: Bool) async throws -> NativePendingSignIn {
         let transport = try HTTPSClientAPITransport(origin: origin)
         defer { transport.close() }
         let transaction = try await NativeSignInAPI(transport: transport).begin()
         let pending = NativePendingSignIn(origin: origin, transaction: transaction,
-                                          rememberMethod: rememberMethod, redemption: nil)
+                                          rememberMethod: rememberMethod, allowsLegacyRecovery: allowsLegacyRecovery, redemption: nil)
         try enrollment.savePendingSignIn(pending)
         return pending
     }
@@ -1094,21 +1094,32 @@ final class NativeAppLaunch {
             try await api.verifyOwnerCode(code, transaction: pending.transaction.reference)
         }
         let label = UIDevice.current.name
+        let legacy = pending.allowsLegacyRecovery ? try recoveryRecord(origin: pending.origin) : nil
         if pending.redemption == nil {
+            let proof = try NativeSessionProof()
+            let oldProof = legacy.flatMap { record in
+                try? enrollment.lateProof(for: record, message: proof.signInMessage(reference: pending.transaction.reference))
+            }
             pending.redemption = try NativeSessionRedemption(credential: .transaction(
                 reference: pending.transaction.reference, verifier: pending.transaction.verifier),
-                label: label, proof: NativeSessionProof())
+                label: label, proof: proof, oldProof: oldProof)
             try enrollment.savePendingSignIn(pending)
         }
         guard let redemption = pending.redemption else { throw NativeEnrollmentError.invalidIdentity }
         let result = try await api.redeem(redemption)
         let record = try enrollment.retainSignedInSession(origin: pending.origin, proof: redemption.proof,
-                                                           result: result, label: label)
+                                                           result: result, label: label, attachedLegacy: legacy)
         if pending.rememberMethod, let method = result.method {
             UserDefaults.standard.set(method.rawValue, forKey: Self.methodPreferenceKey(pending.origin))
         }
         try enrollment.clearPendingSignIn()
         try await connectSignedInSession(record)
+    }
+
+    private func recoveryRecord(origin: URL) throws -> NativeEnrollmentRecord? {
+        let current = try enrollment.load()
+        let candidates = [current].compactMap { $0 } + archivedAccountDepartures.map(\.record)
+        return candidates.first { !$0.identityLabel.isEmpty && $0.matchesRecoveryOrigin(origin) }
     }
 
     func retrySharedSignIn(origin: URL) async throws -> Bool {

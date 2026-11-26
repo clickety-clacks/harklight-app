@@ -448,7 +448,8 @@ struct NativeSharedSignInView: View {
     }
 
     private func signIn(_ method: NativeSignInMethod, origin: URL) async throws {
-        let pending = try await launch.beginSharedSignIn(origin: origin, rememberMethod: rememberMethod)
+        let pending = try await launch.beginSharedSignIn(origin: origin, rememberMethod: rememberMethod,
+                                                        allowsLegacyRecovery: methods.contains(.ownerCode))
         if method == .ownerCode {
             try await launch.finishSharedSignIn(pending, code: code.trimmingCharacters(in: .whitespacesAndNewlines))
             return
