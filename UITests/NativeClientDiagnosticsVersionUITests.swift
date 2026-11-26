@@ -9,8 +9,8 @@ final class NativeClientDiagnosticsVersionUITests: XCTestCase {
         let server = app.textFields["Server"]
         XCTAssertTrue(server.waitForExistence(timeout: 5), app.debugDescription)
         server.tap()
-        let value = try XCTUnwrap(server.value as? String)
-        server.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: value.count) + "invalid")
+        let serverText = try XCTUnwrap(server.value as? String)
+        server.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: serverText.count) + "invalid")
         app.buttons["Continue"].tap()
 
         XCTAssertTrue(app.staticTexts["Sign-in couldn’t be completed. Try again."].waitForExistence(timeout: 5),
