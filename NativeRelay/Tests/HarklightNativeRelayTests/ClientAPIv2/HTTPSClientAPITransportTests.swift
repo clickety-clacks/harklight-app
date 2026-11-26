@@ -46,6 +46,10 @@ private actor SignInFixture: ClientAPITransport {
     func send(_ request: APIRequest) async throws -> APIResponse {
         requests.append(request)
         switch request.path {
+        case "/v2/me":
+            return APIResponse(status: 200, requestID: nil, body: Data(
+                #"{"server":{"id":"server-1"},"principal":{"person_id":"person-1","device_id":"device-1"},"auth_migration":true}"#.utf8
+            ))
         case "/v2/auth/methods":
             return APIResponse(status: 200, requestID: nil, body: Data(#"{"methods":["owner_code"]}"#.utf8))
         case "/v2/auth/transactions":
@@ -321,6 +325,20 @@ final class HTTPSClientAPITransportTests: XCTestCase {
         XCTAssertEqual(sent[3].query, ["device_id": "old-device"])
         XCTAssertEqual(try JSONDecoder().decode([String: String].self, from: XCTUnwrap(sent[1].body)),
                        ["signature": "frozen-signature"])
+    }
+
+    func testMigrationRequiresTheSameServerPersonAndDeviceBeforeReadingTheFeed() async throws {
+        let api = NativeSignInAPI(transport: SignInFixture())
+        let legacy = try await api.migrationPrincipal()
+        let principal = try XCTUnwrap(legacy)
+        XCTAssertEqual(principal.deviceID, ExactText("device-1"))
+        try await api.verifyMigrationPrincipal(principal)
+        let other = APIPushPrincipal(serverID: ExactText("server-1"), personID: ExactText("person-1"),
+                                     deviceID: ExactText("other-device"))
+        do {
+            try await api.verifyMigrationPrincipal(other)
+            XCTFail("A different device cannot activate the migration")
+        } catch NativeSignInAPI.MigrationError.wrongPrincipal {}
     }
 
     private func decodeBase64URL(_ string: String) throws -> Data {

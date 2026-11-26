@@ -109,6 +109,29 @@ struct NativeSignInAPI: Sendable {
         }
     }
 
+    enum MigrationError: Error {
+        case wrongPrincipal
+    }
+
+    func migrationPrincipal() async throws -> APIPushPrincipal? {
+        let me = try await readMe()
+        guard me.body.uniqueValue(named: "auth_migration") == .bool(true) else { return nil }
+        guard let principal = me.pushPrincipal, principal.deviceID != nil else {
+            throw MigrationError.wrongPrincipal
+        }
+        return principal
+    }
+
+    func verifyMigrationPrincipal(_ expected: APIPushPrincipal) async throws {
+        let me = try await readMe()
+        guard me.pushPrincipal == expected else { throw MigrationError.wrongPrincipal }
+    }
+
+    private func readMe() async throws -> APIMe {
+        let response = try await transport.send(.get("/v2/me"))
+        return try APIMe(json: JSONValue.parse(response.body))
+    }
+
     func migrationGrant() async throws -> MigrationGrant {
         let response = try await transport.send(APIRequest(method: .post, path: "/v2/auth/migration-grants"))
         return try JSONDecoder().decode(MigrationGrant.self, from: response.body)
