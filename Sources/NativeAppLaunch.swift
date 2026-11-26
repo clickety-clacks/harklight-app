@@ -779,7 +779,7 @@ final class NativeAppLaunch {
 
     /// Opens the signed-in account’s local store and connects it to the Client API v2 projection.
     func activate(_ installation: NativeInstallationMaterial) async throws {
-        try await activate(context: installation.context) {
+        try await activate(context: installation.context, legacyMaterial: installation) {
             if case let .active(origin, proof) = self.activeEnrollmentRecord?.sessionMigration {
                 return try HTTPSClientAPITransport(origin: origin, bearer: proof.bearer)
             }
@@ -789,7 +789,8 @@ final class NativeAppLaunch {
         }
     }
 
-    private func activate(context: ProfileContext, makeTransport: () throws -> HTTPSClientAPITransport) async throws {
+    private func activate(context: ProfileContext, legacyMaterial: NativeInstallationMaterial? = nil,
+                          makeTransport: () throws -> HTTPSClientAPITransport) async throws {
         guard context.transportMode == .relay else {
             throw AttentionStoreError.fixtureOnlyOperation
         }
@@ -805,7 +806,19 @@ final class NativeAppLaunch {
         closeV2ErrorLog()
         if let record = activeEnrollmentRecord,
            case let .activating(origin, proof, signature) = record.sessionMigration {
-            try await finishSessionMigration(record, origin: origin, proof: proof, signature: signature)
+            try await Self.resumeInterruptedActivation(
+                activate: { try await self.finishSessionMigration(record, origin: origin, proof: proof, signature: signature) },
+                replace: {
+                    guard let legacyMaterial,
+                          let replacement = try await self.startSessionMigration(record, material: legacyMaterial,
+                                                                                generation: generation) else { return false }
+                    try await self.continueSessionMigration(replacement, material: legacyMaterial, generation: generation)
+                    return true
+                },
+                legacyStillAuthorized: {
+                    guard let legacyMaterial else { return false }
+                    return (try? await self.legacyMigrationPrincipal(legacyMaterial)) != nil
+                })
             guard activationGeneration == generation else { return }
         }
         let (store, fileStorage) = try await Task.detached(priority: .userInitiated) {
@@ -1282,6 +1295,31 @@ final class NativeAppLaunch {
             }
             try await continueSessionMigration(replaced, material: material, generation: generation)
         }
+    }
+
+    static func resumeInterruptedActivation(activate: () async throws -> Void,
+                                            replace: () async throws -> Bool,
+                                            legacyStillAuthorized: () async -> Bool) async throws {
+        do { try await activate() }
+        catch let error as APIError where error.status == 401 {
+            guard try await replace() else { throw error }
+        } catch where Task.isCancelled { throw CancellationError() }
+        catch {
+            guard await legacyStillAuthorized() else { throw error }
+        }
+    }
+
+    private func legacyMigrationPrincipal(_ material: NativeInstallationMaterial) async throws -> APIPushPrincipal? {
+        let transport = try HTTPSClientAPITransport(baseURL: material.deviceURL,
+            clientIdentity: TrustedKeychainIdentity(material.keychainIdentity), trustedRootDER: material.trustedRootDER)
+        defer { transport.close() }
+        let principal = try await NativeSignInAPI(transport: transport).migrationPrincipal()
+        guard let principal else { return nil }
+        guard principal.personID == material.context.identity.personID,
+              principal.deviceID == material.context.identity.deviceID else {
+            throw NativeEnrollmentError.wrongApprovedDevice
+        }
+        return principal
     }
 
     private func startSessionMigration(_ record: NativeEnrollmentRecord, material: NativeInstallationMaterial,
