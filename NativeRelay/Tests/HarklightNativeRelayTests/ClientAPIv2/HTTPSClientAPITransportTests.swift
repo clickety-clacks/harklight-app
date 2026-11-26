@@ -463,8 +463,10 @@ final class HTTPSClientAPITransportTests: XCTestCase {
                                  body: body, idempotencyKey: key)
         XCTAssertNil(api.urlRequest(for: request).value(forHTTPHeaderField: "Harklight-Queued-Retry"))
         request.queuedRetry = true
+        request.sharedMessages = true
         let retry = api.urlRequest(for: request)
         XCTAssertEqual(retry.value(forHTTPHeaderField: "Harklight-Queued-Retry"), "true")
+        XCTAssertEqual(retry.value(forHTTPHeaderField: "Harklight-Features"), "shared_messages")
         XCTAssertEqual(retry.value(forHTTPHeaderField: "Idempotency-Key"), key.uuidString.lowercased())
         XCTAssertEqual(retry.httpBody, body)
         XCTAssertEqual(retry.httpMethod, "POST")
