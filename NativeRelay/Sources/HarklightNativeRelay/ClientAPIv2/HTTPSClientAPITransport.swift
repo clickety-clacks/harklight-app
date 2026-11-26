@@ -1,12 +1,12 @@
 import Foundation
 import Security
 
-/// The r2 client API over HTTPS (HTTP/2 where the server offers it) with the
-/// enrolled device certificate. One URLSession carries every request and the
-/// feed; requests run in parallel and none waits on another.
+/// One HTTPS session carries the v2 requests and change feed for a device.
 public final class HTTPSClientAPITransport: ClientAPITransport, @unchecked Sendable {
     private let baseURL: URL
     private let session: URLSession
+    private let bearer: String?
+    public var usesDeviceSession: Bool { bearer != nil }
     private let feedIdleInterval: Duration
 
     /// `baseURL` is the device listener, for example `https://host:port`.
@@ -17,21 +17,40 @@ public final class HTTPSClientAPITransport: ClientAPITransport, @unchecked Senda
         guard let root = SecCertificateCreateWithData(nil, trustedRootDER as CFData) else {
             throw ClientConnectionError.invalidTrustAnchor
         }
+        self.init(baseURL: baseURL, configuration: Self.deviceConfiguration(),
+                  delegate: DeviceCertificateDelegate(host: host, identity: clientIdentity.value, root: root))
+    }
+
+    /// The web HTTPS origin uses system trust and no browser credentials.
+    public convenience init(origin: URL, bearer: String? = nil) throws {
+        guard let components = URLComponents(url: origin, resolvingAgainstBaseURL: false),
+              components.scheme == "https", let host = components.host, !host.isEmpty,
+              components.user == nil, components.password == nil,
+              components.query == nil, components.fragment == nil,
+              components.path.isEmpty || components.path == "/" else {
+            throw ClientConnectionError.invalidEndpoint
+        }
+        self.init(baseURL: origin, configuration: Self.deviceConfiguration(),
+                  delegate: NoRedirectDelegate(), bearer: bearer)
+    }
+
+    private static func deviceConfiguration() -> URLSessionConfiguration {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.tlsMinimumSupportedProtocolVersion = .TLSv12
+        configuration.httpShouldSetCookies = false
         configuration.httpCookieStorage = nil
         configuration.urlCredentialStorage = nil
         configuration.urlCache = nil
         configuration.timeoutIntervalForRequest = 60
         configuration.timeoutIntervalForResource = .infinity
-        self.init(baseURL: baseURL, configuration: configuration,
-                  delegate: DeviceCertificateDelegate(host: host, identity: clientIdentity.value, root: root))
+        return configuration
     }
 
     /// Tests supply a configuration with a stub protocol and no delegate.
     init(baseURL: URL, configuration: URLSessionConfiguration, delegate: (any URLSessionDelegate)?,
-         feedIdleInterval: Duration = .seconds(60)) {
+         feedIdleInterval: Duration = .seconds(60), bearer: String? = nil) {
         self.baseURL = baseURL
+        self.bearer = bearer
         self.feedIdleInterval = feedIdleInterval
         session = URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
     }
@@ -82,6 +101,8 @@ public final class HTTPSClientAPITransport: ClientAPITransport, @unchecked Senda
         var urlRequest = URLRequest(url: components.url!)
         urlRequest.httpMethod = request.method.rawValue
         urlRequest.httpBody = request.body
+        urlRequest.httpShouldHandleCookies = false
+        if let bearer { urlRequest.setValue("Bearer \(bearer)", forHTTPHeaderField: "Authorization") }
         urlRequest.setValue(request.accept ?? accept, forHTTPHeaderField: "Accept")
         if let contentType = request.contentType { urlRequest.setValue(contentType, forHTTPHeaderField: "Content-Type") }
         if let disposition = request.contentDisposition {
@@ -94,6 +115,9 @@ public final class HTTPSClientAPITransport: ClientAPITransport, @unchecked Senda
         }
         if let key = request.idempotencyKey {
             urlRequest.setValue(key.uuidString.lowercased(), forHTTPHeaderField: "Idempotency-Key")
+        }
+        if request.queuedRetry, bearer != nil {
+            urlRequest.setValue("true", forHTTPHeaderField: "Harklight-Queued-Retry")
         }
         if let ifMatch = request.ifMatch { urlRequest.setValue(ifMatch, forHTTPHeaderField: "If-Match") }
         if request.sharedMessages { urlRequest.setValue("shared_messages", forHTTPHeaderField: "Harklight-Features") }
@@ -272,6 +296,15 @@ struct SSELineSplitter {
         }
         buffer.append(byte)
         return nil
+    }
+}
+
+private final class NoRedirectDelegate: NSObject, URLSessionTaskDelegate {
+    func urlSession(_ session: URLSession, task: URLSessionTask,
+                    willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest,
+                    completionHandler: @escaping (URLRequest?) -> Void) {
+        completionHandler(nil)
     }
 }
 

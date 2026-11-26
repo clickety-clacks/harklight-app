@@ -771,6 +771,14 @@ final class NativeRelayLifecycle {
             .appendingPathComponent(digest, isDirectory: true)
     }
 
+    static func transferOutbox(from source: ProfileIdentity, to destination: ProfileIdentity,
+                               legacyReceiptCutoff: Date?) throws {
+        guard source != destination else { return }
+        let original = FileOutboxPersistence(url: try v2Directory(for: source).appendingPathComponent("outbox-v2.json"))
+        let next = FileOutboxPersistence(url: try v2Directory(for: destination).appendingPathComponent("outbox-v2.json"))
+        try original.transferPending(to: next, legacyReceiptCutoff: legacyReceiptCutoff)
+    }
+
     static func clearV2Storage(for record: NativeEnrollmentRecord) throws {
         guard let person = record.personID else { throw NativeEnrollmentError.invalidIdentity }
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText(record.profileAuthority),
@@ -786,10 +794,16 @@ final class NativeRelayLifecycle {
 
 
     func activate(store: ClientRepository, context: ProfileContext, deviceURL: URL,
-                  clientIdentity: SecIdentity, trustedRootDER: Data,
+                  clientIdentity: SecIdentity, trustedRootDER: Data, legacyReceiptCutoff: Date?,
                   diagnostics: NativeClientDiagnosticJournal? = nil) throws {
         let transport = try HTTPSClientAPITransport(baseURL: deviceURL,
             clientIdentity: TrustedKeychainIdentity(clientIdentity), trustedRootDER: trustedRootDER)
+        try activate(store: store, context: context, transport: transport,
+                     legacyReceiptCutoff: legacyReceiptCutoff, diagnostics: diagnostics)
+    }
+
+    func activate(store: ClientRepository, context: ProfileContext, transport: HTTPSClientAPITransport,
+                  legacyReceiptCutoff: Date? = nil, diagnostics: NativeClientDiagnosticJournal? = nil) throws {
         let retainedFiles = try ConversationFileStorage(identity: context.identity)
         let attempt = UUID()
         let access = ClientAPIAccess(transport: transport) { [weak self] _ in
@@ -815,6 +829,7 @@ final class NativeRelayLifecycle {
         }
         let connection = try ClientAPIv2Connection(transport: access, repository: store, context: context,
             directory: Self.v2Directory(for: context.identity), errors: errorLog, foregroundOnlyWrites: true,
+            legacyReceiptCutoff: legacyReceiptCutoff, usesDeviceSessions: transport.usesDeviceSession,
             retainedUploadURL: { try retainedFiles.verifiedUploadURL(for: $0) },
             onLiveState: { [weak self] state in
                 guard state == .live else { return }
@@ -1207,6 +1222,8 @@ final class NativeRelayLifecycle {
         }
         await task.value
     }
+
+    var migrationCursor: Rev? { v2Connection?.model.heldCursor }
 
     func isPreparingV2SignOut(for expected: ProfileContext) -> Bool {
         context == expected && v2DepartureTask != nil

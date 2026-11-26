@@ -54,6 +54,8 @@ final class NativeAppLaunch {
     @ObservationIgnored private var stagedRevokedText: [ExactText] = []
     private(set) var foregroundConnectProgress: NativeForegroundConnectProgress?
     private(set) var foregroundConnectDiagnostic: NativeForegroundConnectDiagnostic?
+    @ObservationIgnored private var migratingSession = false
+    @ObservationIgnored private var signingOutSession = false
     private(set) var activeEnrollmentRecord: NativeEnrollmentRecord?
     private(set) var disconnectedAccount: NativeAccountDeparture?
     private(set) var disconnectedArchive: LivePresentationStore?
@@ -356,6 +358,13 @@ final class NativeAppLaunch {
             await NativeRelayLifecycle.shared.deactivate()
             return
         }
+        if let record = try? enrollment.load(), case .active = record.sessionMigration {
+            do { try await connectSignedInSession(record) }
+            catch {
+                diagnostics.record(area: .connection, phase: .approvedConnection, transition: .failed, error: error)
+            }
+            return
+        }
         await guidedJoin.restore()
     }
 
@@ -364,6 +373,10 @@ final class NativeAppLaunch {
               let record = try? enrollment.load(), record.isApproved,
               !isDisconnectBusy(for: NativeAccountDeparture(
                 record: record, replacement: nil, removed: false)) else { return }
+        if case .active = record.sessionMigration {
+            await signOutSession(record)
+            return
+        }
         disconnectMessage = nil
         do {
             try guidedJoin.prepareStandaloneRemoval(record)
@@ -745,6 +758,33 @@ final class NativeAppLaunch {
         return Set(saved + (archive.stagedRevokedText ?? [])).sorted { $0.rawValue < $1.rawValue }
     }
 
+    func signedOutQueueText() throws -> [ExactText] {
+        var values: [ExactText] = []
+        for archive in try guidedJoinStore.archivedDepartures() where archive.removed && archive.v2SignOut == true {
+            values.append(contentsOf: try recoveredUnsentText(for: archive))
+            let (_, context) = try reopenArchivedStore(for: archive.record)
+            let directory = try NativeRelayLifecycle.v2Directory(for: context.identity)
+            let outbox = FileOutboxPersistence(url: directory.appendingPathComponent("outbox-v2.json"))
+            values.append(contentsOf: try outbox.load().compactMap(Self.signedOutWriteText))
+        }
+        var seen = Set<ExactText>()
+        return values.filter { seen.insert($0).inserted }
+    }
+
+    static func signedOutWriteText(_ entry: OutboxEntry) -> ExactText? {
+        guard entry.failure?.token != "accepted_reconcile" else { return nil }
+        let fields = entry.write.body.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        if entry.operation == "reply", let text = fields?["text"] as? String, !text.isEmpty {
+            return ExactText(text)
+        }
+        if entry.operation == "answer" {
+            if let comment = fields?["comment"] as? String, !comment.isEmpty { return ExactText(comment) }
+            return ExactText("Unsent answer")
+        }
+        if entry.operation == "reply" { return ExactText("Unsent reply") }
+        return nil
+    }
+
     private var disconnectedStore: LivePresentationStore? {
         if case let .disconnected(presentation) = state { return presentation }
         return nil
@@ -766,7 +806,19 @@ final class NativeAppLaunch {
 
     /// Opens the signed-in account’s local store and connects it to the Client API v2 projection.
     func activate(_ installation: NativeInstallationMaterial) async throws {
-        guard installation.context.transportMode == .relay else {
+        try await activate(context: installation.context, legacyMaterial: installation) {
+            if case let .active(origin, proof) = self.activeEnrollmentRecord?.sessionMigration {
+                return try HTTPSClientAPITransport(origin: origin, bearer: proof.bearer)
+            }
+            return try HTTPSClientAPITransport(baseURL: installation.deviceURL,
+                clientIdentity: TrustedKeychainIdentity(installation.keychainIdentity),
+                trustedRootDER: installation.trustedRootDER)
+        }
+    }
+
+    private func activate(context: ProfileContext, legacyMaterial: NativeInstallationMaterial? = nil,
+                          makeTransport: () throws -> HTTPSClientAPITransport) async throws {
+        guard context.transportMode == .relay else {
             throw AttentionStoreError.fixtureOnlyOperation
         }
         let generation = UUID()
@@ -779,7 +831,23 @@ final class NativeAppLaunch {
         await NativeRelayLifecycle.shared.deactivate()
         guard activationGeneration == generation else { return }
         closeV2ErrorLog()
-        let context = installation.context
+        if let record = activeEnrollmentRecord,
+           case let .activating(origin, proof, signature) = record.sessionMigration {
+            try await Self.resumeInterruptedActivation(
+                activate: { try await self.finishSessionMigration(record, origin: origin, proof: proof, signature: signature) },
+                replace: {
+                    guard let legacyMaterial,
+                          let replacement = try await self.startSessionMigration(record, material: legacyMaterial,
+                                                                                generation: generation) else { return false }
+                    try await self.continueSessionMigration(replacement, material: legacyMaterial, generation: generation)
+                    return true
+                },
+                legacyStillAuthorized: {
+                    guard let legacyMaterial else { return false }
+                    return (try? await self.legacyMigrationPrincipal(legacyMaterial)) != nil
+                })
+            guard activationGeneration == generation else { return }
+        }
         let (store, fileStorage) = try await Task.detached(priority: .userInitiated) {
             let persistence = try FilePendingActionPersistence.applicationSupport()
             let fileStorage = try ConversationFileStorage(identity: context.identity)
@@ -802,12 +870,9 @@ final class NativeAppLaunch {
         NativeRelayLifecycle.shared.errorLog = errorLog
         observeV2Connection(NativeRelayLifecycle.shared)
         do {
-            try NativeRelayLifecycle.shared.activate(store: store,
-                                                      context: installation.context,
-                                                      deviceURL: installation.deviceURL,
-                                                      clientIdentity: installation.keychainIdentity,
-                                                      trustedRootDER: installation.trustedRootDER,
-                                                      diagnostics: diagnostics)
+            try NativeRelayLifecycle.shared.activate(store: store, context: context,
+                transport: makeTransport(), legacyReceiptCutoff: activeEnrollmentRecord?.receiptCutoffBeforeOpeningOutbox(),
+                diagnostics: diagnostics)
         } catch {
             if activationGeneration != generation { return }
             diagnostics.record(area: .connection, phase: .approvedConnection, transition: .failed,
@@ -922,7 +987,8 @@ final class NativeAppLaunch {
         observeV2Connection(lifecycle)
         try lifecycle.activate(store: presentation.attentionStore, context: context,
                                      deviceURL: installation.deviceURL, clientIdentity: installation.keychainIdentity,
-                                     trustedRootDER: installation.trustedRootDER)
+                                     trustedRootDER: installation.trustedRootDER,
+                                     legacyReceiptCutoff: record.receiptCutoffBeforeOpeningOutbox())
         if let access = lifecycle.v2AccountAccess {
             applyV2AccountAccess(access, for: context)
         }
@@ -1056,6 +1122,320 @@ final class NativeAppLaunch {
         }
     }
 
+    var hasDeviceSession: Bool {
+        if case .active = activeEnrollmentRecord?.sessionMigration { return true }
+        return false
+    }
+
+    func signedInDevices() async throws -> [NativeSignInAPI.Device] {
+        let transport = try sessionTransport()
+        defer { transport.close() }
+        return try await NativeSignInAPI(transport: transport).devices()
+    }
+
+    func removeSignedInDevice(_ id: String) async throws {
+        let transport = try sessionTransport()
+        defer { transport.close() }
+        try await NativeSignInAPI(transport: transport).removeDevice(id)
+    }
+
+    private func sessionTransport() throws -> HTTPSClientAPITransport {
+        guard case let .active(origin, proof) = activeEnrollmentRecord?.sessionMigration else {
+            throw NativeEnrollmentError.invalidIdentity
+        }
+        return try HTTPSClientAPITransport(origin: origin, bearer: proof.bearer)
+    }
+
+    private func signOutSession(_ record: NativeEnrollmentRecord) async {
+        guard !signingOutSession, case let .live(presentation) = state else { return }
+        signingOutSession = true
+        defer { signingOutSession = false }
+        disconnectMessage = nil
+        do {
+            let transport = try sessionTransport()
+            defer { transport.close() }
+            await NativeRelayLifecycle.shared.prepareV2SignOut(for: record)
+            do { try await NativeSignInAPI(transport: transport).signOut() }
+            catch let error as APIError where error.status == 401 {}
+            guard activeEnrollmentRecord?.sameNotificationProfile(as: record) == true else { return }
+            let recovery = presentation.prepareRevokedTextRecovery()
+            try enrollment.markV2Revoked(record)
+            try guidedJoinStore.archiveRevokedInstallation(record, stagedText: recovery.staged, clearActive: true, v2SignOut: true)
+            await NativeRelayLifecycle.shared.deactivate()
+            presentation.enterReadOnlyMode()
+            activeEnrollmentRecord = nil
+            activationGeneration = UUID()
+            refreshArchivedAccounts()
+            state = .enrollmentRequired
+        } catch {
+            if (try? enrollment.load()?.v2Revoked) != true {
+                try? await connectSignedInSession(record)
+            }
+            disconnectMessage = "Sign-out could not be confirmed. Try again."
+        }
+    }
+
+    func beginSharedSignIn(origin: URL, rememberMethod: Bool, allowsLegacyRecovery: Bool) async throws -> NativePendingSignIn {
+        let transport = try HTTPSClientAPITransport(origin: origin)
+        defer { transport.close() }
+        let transaction = try await NativeSignInAPI(transport: transport).begin()
+        let pending = NativePendingSignIn(origin: origin, transaction: transaction,
+                                          rememberMethod: rememberMethod, allowsLegacyRecovery: allowsLegacyRecovery, redemption: nil)
+        try enrollment.savePendingSignIn(pending)
+        return pending
+    }
+
+    func finishSharedSignIn(_ expected: NativePendingSignIn, code: String? = nil) async throws {
+        guard var pending = try enrollment.pendingSignIn(), pending.origin == expected.origin,
+              pending.transaction.reference == expected.transaction.reference,
+              pending.transaction.verifier == expected.transaction.verifier else {
+            throw NativeJoinError.superseded
+        }
+        let transport = try HTTPSClientAPITransport(origin: pending.origin)
+        defer { transport.close() }
+        let api = NativeSignInAPI(transport: transport)
+        if let code {
+            try await api.verifyOwnerCode(code, transaction: pending.transaction.reference)
+        }
+        let label = UIDevice.current.name
+        let legacy = pending.allowsLegacyRecovery ? try recoveryRecord(origin: pending.origin) : nil
+        if pending.redemption == nil {
+            let proof = try NativeSessionProof()
+            let oldProof = legacy.flatMap { record in
+                try? enrollment.lateProof(for: record, message: proof.signInMessage(reference: pending.transaction.reference))
+            }
+            pending.redemption = try NativeSessionRedemption(credential: .transaction(
+                reference: pending.transaction.reference, verifier: pending.transaction.verifier),
+                label: label, proof: proof, oldProof: oldProof)
+            try enrollment.savePendingSignIn(pending)
+        }
+        guard let redemption = pending.redemption else { throw NativeEnrollmentError.invalidIdentity }
+        let result = try await api.redeem(redemption)
+        if result.oldDevice != .attached {
+            try await restoreAuthorizedOutboxes(origin: pending.origin, result: result, proof: redemption.proof,
+                                                  provedDeviceID: legacy?.deviceID)
+        }
+        let record = try enrollment.retainSignedInSession(origin: pending.origin, proof: redemption.proof,
+                                                           result: result, label: label, attachedLegacy: legacy)
+        if let prior = archivedAccountDepartures.last(where: { $0.record.signedInOrigin == pending.origin }),
+           !NativeAuthorityBinding.samePerson(prior.record.personID, result.personID) {
+            UserDefaults.standard.removeObject(forKey: Self.methodPreferenceKey(pending.origin))
+        }
+        if pending.rememberMethod, let method = result.method {
+            UserDefaults.standard.set(method.rawValue, forKey: Self.methodPreferenceKey(pending.origin))
+        }
+        try enrollment.clearPendingSignIn()
+        try await connectSignedInSession(record)
+    }
+
+    private func restoreAuthorizedOutboxes(origin: URL, result: NativeSignInAPI.Result,
+                                           proof: NativeSessionProof, provedDeviceID: String?) async throws {
+        let candidates = archivedAccountDepartures.filter {
+            $0.record.v2Revoked == true && $0.v2SignOut != true &&
+                NativeAuthorityBinding.samePerson($0.record.personID, result.personID)
+        }
+        guard !candidates.isEmpty else { return }
+        let transport = try HTTPSClientAPITransport(origin: origin, bearer: proof.bearer)
+        defer { transport.close() }
+        let api = NativeSignInAPI(transport: transport)
+        let destination = ProfileIdentity(trustedRelayAuthority: ExactText(origin.absoluteString),
+                                           personID: ExactText(result.personID), deviceID: ExactText(result.deviceID))
+        for candidate in candidates {
+            let record = candidate.record
+            let authorized: Bool
+            if let savedOrigin = record.signedInOrigin {
+                authorized = savedOrigin == origin
+            } else if result.oldDevice == .removed, provedDeviceID == record.deviceID {
+                authorized = true
+            } else {
+                authorized = try await api.isKnown(deviceID: record.deviceID)
+            }
+            guard authorized else { continue }
+            let source = ProfileIdentity(trustedRelayAuthority: ExactText(record.profileAuthority),
+                                          personID: ExactText(result.personID), deviceID: ExactText(record.deviceID))
+            try NativeRelayLifecycle.transferOutbox(from: source, to: destination,
+                                                    legacyReceiptCutoff: record.signedInOrigin == nil
+                                                        ? Date().addingTimeInterval(-30 * 24 * 60 * 60) : nil)
+        }
+    }
+
+    private func recoveryRecord(origin: URL) throws -> NativeEnrollmentRecord? {
+        let current = try enrollment.load()
+        let candidates = [current].compactMap { $0 } + archivedAccountDepartures.map(\.record)
+        return candidates.first { !$0.identityLabel.isEmpty && $0.matchesRecoveryOrigin(origin) }
+    }
+
+    func retrySharedSignIn(origin: URL) async throws -> Bool {
+        guard let pending = try enrollment.pendingSignIn(), pending.origin == origin,
+              pending.redemption != nil else { return false }
+        do {
+            try await finishSharedSignIn(pending)
+            return true
+        } catch let error as APIError where error.status == 401 {
+            try enrollment.clearPendingSignIn()
+            return false
+        }
+    }
+
+    static func methodPreferenceKey(_ origin: URL) -> String {
+        "harklight-last-sign-in-method:" + origin.absoluteString
+    }
+
+    func connectSignedInSession(_ record: NativeEnrollmentRecord) async throws {
+        guard let personID = record.personID,
+              case let .active(origin, proof) = record.sessionMigration else {
+            throw NativeEnrollmentError.invalidIdentity
+        }
+        let context = ProfileContext(identity: ProfileIdentity(
+            trustedRelayAuthority: ExactText(record.profileAuthority), personID: ExactText(personID),
+            deviceID: ExactText(record.deviceID)), transportMode: .relay)
+        activeEnrollmentRecord = record
+        try await activate(context: context) {
+            try HTTPSClientAPITransport(origin: origin, bearer: proof.bearer)
+        }
+    }
+
+    private func migrateSessionIfAvailable() async throws {
+        guard !migratingSession, let record = try enrollment.load(), record.isApproved,
+              record.sameNotificationProfile(as: activeEnrollmentRecord ?? record),
+              activeEnrollmentRecord != nil else { return }
+        if case .active = record.sessionMigration { return }
+        migratingSession = true
+        defer { migratingSession = false }
+        let generation = activationGeneration
+        let material = try enrollment.material(from: record)
+        var current = record
+
+        if current.sessionMigration == nil {
+            guard let started = try await startSessionMigration(current, material: material, generation: generation) else {
+                return
+            }
+            current = started
+        }
+        do {
+            try await continueSessionMigration(current, material: material, generation: generation)
+        } catch let error as APIError where error.status == 401 {
+            // Replacement is available only while the original mTLS device is still authorized.
+            guard let latest = try enrollment.load(),
+                  latest.sameNotificationProfile(as: record),
+                  let replaced = try await startSessionMigration(latest, material: material, generation: generation) else {
+                throw error
+            }
+            try await continueSessionMigration(replaced, material: material, generation: generation)
+        }
+    }
+
+    static func resumeInterruptedActivation(activate: () async throws -> Void,
+                                            replace: () async throws -> Bool,
+                                            legacyStillAuthorized: () async -> Bool) async throws {
+        do { try await activate() }
+        catch let error as APIError where error.status == 401 {
+            guard try await replace() else { throw error }
+        } catch where Task.isCancelled { throw CancellationError() }
+        catch {
+            guard await legacyStillAuthorized() else { throw error }
+        }
+    }
+
+    private func legacyMigrationPrincipal(_ material: NativeInstallationMaterial) async throws -> APIPushPrincipal? {
+        let transport = try HTTPSClientAPITransport(baseURL: material.deviceURL,
+            clientIdentity: TrustedKeychainIdentity(material.keychainIdentity), trustedRootDER: material.trustedRootDER)
+        defer { transport.close() }
+        let principal = try await NativeSignInAPI(transport: transport).migrationPrincipal()
+        guard let principal else { return nil }
+        guard principal.personID == material.context.identity.personID,
+              principal.deviceID == material.context.identity.deviceID else {
+            throw NativeEnrollmentError.wrongApprovedDevice
+        }
+        return principal
+    }
+
+    private func startSessionMigration(_ record: NativeEnrollmentRecord, material: NativeInstallationMaterial,
+                                       generation: UUID) async throws -> NativeEnrollmentRecord? {
+        let legacy = try HTTPSClientAPITransport(baseURL: material.deviceURL,
+            clientIdentity: TrustedKeychainIdentity(material.keychainIdentity), trustedRootDER: material.trustedRootDER)
+        defer { legacy.close() }
+        let api = NativeSignInAPI(transport: legacy)
+        guard let principal = try await api.migrationPrincipal() else { return nil }
+        guard principal.personID == material.context.identity.personID,
+              principal.deviceID == material.context.identity.deviceID else {
+            throw NativeEnrollmentError.wrongApprovedDevice
+        }
+        let grant = try await api.migrationGrant()
+        let pending = try NativeSessionRedemption(credential: .migration(token: grant.token),
+            label: record.deviceLabel ?? UIDevice.current.name, proof: NativeSessionProof())
+        return try persistMigration(.redeeming(origin: grant.origin, pending: pending, principal: principal),
+                                    for: record, generation: generation)
+    }
+
+    private func continueSessionMigration(_ record: NativeEnrollmentRecord, material: NativeInstallationMaterial,
+                                          generation: UUID) async throws {
+        var current = record
+        let lifecycle = NativeRelayLifecycle.shared
+        if case let .redeeming(origin, pending, principal) = current.sessionMigration {
+            let transport = try HTTPSClientAPITransport(origin: origin)
+            defer { transport.close() }
+            let result = try await NativeSignInAPI(transport: transport).redeem(pending)
+            guard NativeAuthorityBinding.samePerson(result.personID, current.personID),
+                  ExactText(result.deviceID) == ExactText(current.deviceID) else {
+                throw NativeEnrollmentError.wrongApprovedDevice
+            }
+            current = try persistMigration(.keyAttached(origin: origin, pending: pending, principal: principal),
+                                           for: current, generation: generation)
+        }
+        if case let .keyAttached(origin, pending, principal) = current.sessionMigration {
+            let proof = pending.proof
+            let transport = try HTTPSClientAPITransport(origin: origin, bearer: proof.bearer)
+            defer { transport.close() }
+            try await NativeSignInAPI(transport: transport).verifyMigrationPrincipal(principal)
+            try await readPendingMigrationFeed(transport, cursor: lifecycle.migrationCursor)
+            let signature = try proof.activationSignature()
+            current = try persistMigration(.activating(origin: origin, proof: proof, signature: signature),
+                                           for: current, generation: generation)
+        }
+        if case let .activating(origin, proof, signature) = current.sessionMigration {
+            guard activationGeneration == generation else { return }
+            await lifecycle.deactivate()
+            guard activationGeneration == generation else { return }
+            try await finishSessionMigration(current, origin: origin, proof: proof, signature: signature)
+            guard activationGeneration == generation else { return }
+            try await activate(material)
+        }
+    }
+
+    private func readPendingMigrationFeed(_ transport: HTTPSClientAPITransport, cursor: Rev?) async throws {
+        if let cursor {
+            do {
+                _ = try await transport.changeBatch(after: cursor)
+                return
+            } catch let error as APIError where error.status == 410 {
+                // Recover a baseline without publishing into the live legacy model.
+            }
+        }
+        let writer = ServerModelSyncWriter(store: ServerModelV2Store(fileURL: nil),
+                                           transport: transport, errors: NoopErrorLog())
+        let baseline = try await writer.rebaseline()
+        _ = try await transport.changeBatch(after: baseline)
+    }
+
+    private func finishSessionMigration(_ record: NativeEnrollmentRecord, origin: URL,
+                                        proof: NativeSessionProof, signature: String) async throws {
+        let generation = activationGeneration
+        let transport = try HTTPSClientAPITransport(origin: origin, bearer: proof.bearer)
+        defer { transport.close() }
+        try await NativeSignInAPI(transport: transport).completeMigration(signature: signature)
+        _ = try persistMigration(.active(origin: origin, proof: proof), for: record, generation: generation)
+    }
+
+    private func persistMigration(_ phase: NativeSessionMigration, for record: NativeEnrollmentRecord,
+                                  generation: UUID) throws -> NativeEnrollmentRecord {
+        guard activationGeneration == generation else { throw NativeJoinError.superseded }
+        try enrollment.saveSessionMigration(phase, for: record)
+        guard let saved = try enrollment.load() else { throw NativeEnrollmentError.invalidIdentity }
+        activeEnrollmentRecord = saved
+        return saved
+    }
+
     func refreshLive() async {
 #if DEBUG
         if isIsolatedRelayTestSeed { return }
@@ -1070,6 +1450,10 @@ final class NativeAppLaunch {
         presentation.applyRefreshResult(result)
         notificationSynchronized = result.relayConfirmed && result.confirmedContext == presentation.notificationContext
         await resolveMessageDeepLink(synchronized: notificationSynchronized)
+        do { try await migrateSessionIfAvailable() }
+        catch {
+            diagnostics.record(area: .connection, phase: .approvedConnection, transition: .failed, error: error)
+        }
     }
 
     private func resolveMessageDeepLink(synchronized: Bool) async {

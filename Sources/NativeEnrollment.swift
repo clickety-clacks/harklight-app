@@ -23,6 +23,13 @@ struct NativeEnrollmentSettings {
     }
 }
 
+enum NativeSessionMigration: Codable, Equatable {
+    case redeeming(origin: URL, pending: NativeSessionRedemption, principal: APIPushPrincipal)
+    case keyAttached(origin: URL, pending: NativeSessionRedemption, principal: APIPushPrincipal)
+    case activating(origin: URL, proof: NativeSessionProof, signature: String)
+    case active(origin: URL, proof: NativeSessionProof)
+}
+
 struct NativeEnrollmentRecord: Codable, Equatable {
     var host: String
     var enrollmentPort: Int
@@ -47,6 +54,9 @@ struct NativeEnrollmentRecord: Codable, Equatable {
     /// endpoint migration; those records use their enrollment host.
     var localProfileAuthority: String? = nil
     var notificationProfileGeneration: UUID? = nil
+    var sessionMigration: NativeSessionMigration? = nil
+    var legacyReceiptCutoff: Date? = nil
+    var signedInOrigin: URL? = nil
 
     var isApproved: Bool { personID != nil }
     /// The invitation's person label, when it supplied one. Earlier builds saved
@@ -68,13 +78,27 @@ struct NativeEnrollmentRecord: Codable, Equatable {
         return origin.url
     }
 
+    func receiptCutoffBeforeOpeningOutbox(now: Date = Date()) -> Date? {
+        if case .active = sessionMigration { return legacyReceiptCutoff }
+        return now.addingTimeInterval(-30 * 24 * 60 * 60)
+    }
+
+    func sameRecipient(personID: String, deviceID: String) -> Bool {
+        NativeAuthorityBinding.samePerson(self.personID, personID) && ExactText(self.deviceID) == ExactText(deviceID)
+    }
+
+    func matchesRecoveryOrigin(_ origin: URL) -> Bool {
+        if let signedInOrigin { return signedInOrigin == origin }
+        return origin.scheme == "https" && origin.host?.lowercased() == host.lowercased()
+    }
+
     func removalArchiveRecord() -> Self {
         Self(host: host, enrollmentPort: enrollmentPort, relayPort: relayPort,
              trustedRootDER: trustedRootDER, identityLabel: identityLabel,
              deviceLabel: deviceLabel, deviceID: deviceID, approvalCode: "", statusSecret: "",
              expiresAt: nil, statusExpiresAt: nil, personID: personID, v2Revoked: v2Revoked,
              serverDisplayName: serverDisplayName, accountDisplayName: accountDisplayName,
-             localProfileAuthority: localProfileAuthority)
+             localProfileAuthority: localProfileAuthority, signedInOrigin: signedInOrigin)
     }
 }
 
@@ -89,13 +113,64 @@ enum NativeAuthorityBinding {
     }
 }
 
+struct NativePendingSignIn: Codable {
+    let origin: URL
+    let transaction: NativeSignInAPI.Transaction
+    let rememberMethod: Bool
+    let allowsLegacyRecovery: Bool
+    var redemption: NativeSessionRedemption?
+}
+
 struct NativeEnrollmentStore {
     private let service: String
     private static let account = "current-installation"
+    private static let pendingSignInAccount = "pending-session-sign-in"
     private static let v2APNsAccount = "client-api-v2-apns-token"
 
     init(service: String = "co.clicketyclacks.Harklight.native-enrollment") {
         self.service = service
+    }
+
+    func pendingSignIn() throws -> NativePendingSignIn? {
+        try loadData(account: Self.pendingSignInAccount).map {
+            try JSONDecoder().decode(NativePendingSignIn.self, from: $0)
+        }
+    }
+
+    func savePendingSignIn(_ pending: NativePendingSignIn) throws {
+        try saveData(JSONEncoder().encode(pending), account: Self.pendingSignInAccount)
+    }
+
+    func clearPendingSignIn() throws {
+        let status = SecItemDelete([kSecClass as String: kSecClassGenericPassword,
+                                   kSecAttrService as String: service,
+                                   kSecAttrAccount as String: Self.pendingSignInAccount] as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else {
+            throw NativeEnrollmentError.identityStorage
+        }
+    }
+
+    func retainSignedInSession(origin: URL, proof: NativeSessionProof, result: NativeSignInAPI.Result,
+                               label: String, attachedLegacy: NativeEnrollmentRecord?) throws -> NativeEnrollmentRecord {
+        guard let host = origin.host, !result.personID.isEmpty, !result.deviceID.isEmpty else {
+            throw NativeEnrollmentError.invalidIdentity
+        }
+        let current = try load()
+        guard current == nil || current?.v2Revoked == true else { throw NativeJoinError.existingAccount }
+        let port = origin.port ?? 443
+        var record = NativeEnrollmentRecord(host: host, enrollmentPort: port, relayPort: port,
+            trustedRootDER: Data(), identityLabel: "", deviceLabel: label, deviceID: result.deviceID,
+            approvalCode: "", statusSecret: "", expiresAt: nil, statusExpiresAt: nil, personID: result.personID,
+            localProfileAuthority: origin.absoluteString)
+        if let old = attachedLegacy, result.oldDevice == .attached,
+           old.sameRecipient(personID: result.personID, deviceID: result.deviceID) {
+            record = old
+            record.v2Revoked = nil
+        }
+        record.signedInOrigin = origin
+        record.sessionMigration = .active(origin: origin, proof: proof)
+        try save(record)
+        return record
     }
 
     func load() throws -> NativeEnrollmentRecord? {
@@ -144,6 +219,19 @@ struct NativeEnrollmentStore {
     /// upgrade from a fresh install before it writes any release-note marker.
     func hasSavedInstallationState() throws -> Bool {
         try load() != nil
+    }
+
+    func lateProof(for record: NativeEnrollmentRecord, message: Data) throws -> NativeSessionRedemption.OldProof {
+        if let namespace = guidedIdentityNamespace(for: record.identityLabel) {
+            return try NativeInstallationIdentityStore(namespace: namespace)
+                .lateSignInProof(deviceID: record.deviceID, message: message)
+        }
+        var key: SecKey?
+        if let retained = identity(label: record.identityLabel) {
+            _ = SecIdentityCopyPrivateKey(retained, &key)
+        }
+        guard let key else { throw NativeEnrollmentError.invalidIdentity }
+        return try NativeInstallationIdentityStore.lateSignInProof(key: key, deviceID: record.deviceID, message: message)
     }
 
     func material(from record: NativeEnrollmentRecord) throws -> NativeInstallationMaterial {
@@ -235,6 +323,24 @@ struct NativeEnrollmentStore {
         }
         record.foregroundRelayConfirmed = true
         try save(record)
+    }
+
+    func saveSessionMigration(_ migration: NativeSessionMigration?, for expected: NativeEnrollmentRecord) throws {
+        guard var current = try load(), current.isApproved, current.v2Revoked != true,
+              current.host == expected.host, current.trustedRootDER == expected.trustedRootDER,
+              current.deviceID == expected.deviceID, current.profileAuthority == expected.profileAuthority,
+              NativeAuthorityBinding.samePerson(current.personID, expected.personID),
+              current.sessionMigration == expected.sessionMigration else {
+            throw NativeJoinError.superseded
+        }
+        if case let .active(origin, _) = migration {
+            current.signedInOrigin = origin
+            if current.legacyReceiptCutoff == nil {
+                current.legacyReceiptCutoff = Date().addingTimeInterval(-30 * 24 * 60 * 60)
+            }
+        }
+        current.sessionMigration = migration
+        try save(current)
     }
 
     func clearAfterConfirmedRemoval(of expected: NativeEnrollmentRecord) throws {

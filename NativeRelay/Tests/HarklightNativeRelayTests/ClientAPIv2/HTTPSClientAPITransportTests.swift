@@ -1,4 +1,5 @@
 import AttentionDomain
+import CryptoKit
 import Foundation
 @testable import HarklightNativeRelay
 import XCTest
@@ -39,8 +40,57 @@ private final class StubURLProtocol: URLProtocol, @unchecked Sendable {
     override func stopLoading() {}
 }
 
+private actor SignInFixture: ClientAPITransport {
+    private(set) var requests: [APIRequest] = []
+
+    func send(_ request: APIRequest) async throws -> APIResponse {
+        requests.append(request)
+        switch request.path {
+        case "/v2/items/fixture/reply":
+            return APIResponse(status: 202, requestID: nil,
+                body: Data(#"{"code":"accepted_reconcile"}"#.utf8), replayed: true)
+        case "/v2/me":
+            return APIResponse(status: 200, requestID: nil, body: Data(
+                #"{"server":{"id":"server-1"},"principal":{"person_id":"person-1","device_id":"device-1"},"features":{"auth_migration":true}}"#.utf8
+            ))
+        case "/v2/auth/methods":
+            return APIResponse(status: 200, requestID: nil, body: Data(#"{"methods":["owner_code"]}"#.utf8))
+        case "/v2/auth/transactions":
+            return APIResponse(status: 200, requestID: nil, body: Data(#"{"transaction":"fixture-transaction"}"#.utf8))
+        case "/sign-in/code":
+            return APIResponse(status: 204, requestID: nil, body: Data())
+        case "/v2/auth/migration-grants":
+            return APIResponse(status: 200, requestID: nil, body: Data(
+                #"{"origin":"https://server.example","token":"fixture-grant"}"#.utf8
+            ))
+        case "/v2/auth/migration-complete", "/v2/auth/sign-out", "/v2/devices/old-device":
+            return APIResponse(status: 204, requestID: nil, body: Data())
+        case "/v2/devices":
+            return APIResponse(status: 200, requestID: nil, body: Data(
+                #"{"devices":[{"device_id":"old-device","label":"iPhone","signed_in_at":null,"current":false}]}"#.utf8
+            ))
+        case "/v2/devices/known":
+            return APIResponse(status: 200, requestID: nil, body: Data(#"{"known":true}"#.utf8))
+        case "/v2/auth/sign-in":
+            return APIResponse(status: 200, requestID: nil, body: Data(
+                #"{"person_id":"person-1","device_id":"device-1","duplicate":false,"method":"owner_code"}"#.utf8
+            ))
+        default:
+            throw URLError(.unsupportedURL)
+        }
+    }
+
+    nonisolated func changeFeed(after: Rev) -> AsyncThrowingStream<FeedEvent, any Error> {
+        AsyncThrowingStream { $0.finish(throwing: URLError(.unsupportedURL)) }
+    }
+
+    func changeBatch(after: Rev) async throws -> FeedBatch {
+        throw URLError(.unsupportedURL)
+    }
+}
+
 final class HTTPSClientAPITransportTests: XCTestCase {
-    private func transport(feedIdleInterval: Duration = .seconds(60),
+    private func transport(feedIdleInterval: Duration = .seconds(60), bearer: String? = nil,
                            _ handler: @escaping (URLRequest) -> StubURLProtocol.Reply) -> HTTPSClientAPITransport {
         StubURLProtocol.lock.withLock {
             StubURLProtocol.handler = handler
@@ -49,7 +99,7 @@ final class HTTPSClientAPITransportTests: XCTestCase {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [StubURLProtocol.self]
         return HTTPSClientAPITransport(baseURL: URL(string: "https://server.example:8443")!,
-                                       configuration: configuration, delegate: nil, feedIdleInterval: feedIdleInterval)
+                                       configuration: configuration, delegate: nil, feedIdleInterval: feedIdleInterval, bearer: bearer)
     }
 
     func testSharedRequestsAndBothFeedTransportsCarryTheirScope() async throws {
@@ -131,6 +181,353 @@ final class HTTPSClientAPITransportTests: XCTestCase {
         XCTAssertEqual(response.requestID, "req-7")
         XCTAssertTrue(response.replayed)
         XCTAssertEqual(response.rev, 42)
+    }
+
+    func testBearerCutoverPreservesFrozenWriteAndFeedCursor() async throws {
+        let key = UUID(uuidString: "00000000-0000-4000-8000-000000000001")!
+        let body = Data(#"{"request_rev":12,"comment":null}"#.utf8)
+        let request = APIRequest(method: .post, path: "/v2/items/item%2F1/answer",
+                                 body: body, idempotencyKey: key)
+        let legacy = transport { _ in .init(status: 204, chunks: []) }
+        _ = try await legacy.send(request)
+        let original = try XCTUnwrap(StubURLProtocol.lock.withLock { StubURLProtocol.seen.first })
+
+        let session = transport(bearer: "fixture-bearer") { request in
+            if request.value(forHTTPHeaderField: "Accept") == "text/event-stream" {
+                return .init(status: 200, headers: ["Content-Type": "text/event-stream"],
+                             chunks: [Data("event: heartbeat\ndata: {}\n\n".utf8)])
+            }
+            return .init(status: 204, headers: ["Idempotent-Replayed": "true"], chunks: [])
+        }
+        let reply = try await session.send(request)
+        XCTAssertTrue(reply.replayed)
+        for try await _ in session.changeFeed(after: 12) {}
+        let sent = StubURLProtocol.lock.withLock { StubURLProtocol.seen }
+        XCTAssertEqual(sent.count, 2)
+        let write = try XCTUnwrap(sent.first)
+        let feed = try XCTUnwrap(sent.last)
+        XCTAssertEqual(write.url?.path, original.url?.path)
+        XCTAssertEqual(write.httpMethod, original.httpMethod)
+        XCTAssertEqual(legacy.urlRequest(for: request).httpBody, body)
+        XCTAssertEqual(session.urlRequest(for: request).httpBody, body)
+        XCTAssertEqual(write.value(forHTTPHeaderField: "Idempotency-Key"),
+                       original.value(forHTTPHeaderField: "Idempotency-Key"))
+        XCTAssertEqual(write.value(forHTTPHeaderField: "Authorization"), "Bearer fixture-bearer")
+        XCTAssertEqual(feed.value(forHTTPHeaderField: "Authorization"), "Bearer fixture-bearer")
+        XCTAssertEqual(feed.value(forHTTPHeaderField: "Last-Event-ID"), "12")
+        XCTAssertNil(write.value(forHTTPHeaderField: "Cookie"))
+        XCTAssertNil(feed.value(forHTTPHeaderField: "Cookie"))
+    }
+
+    func testSignInProofUsesSPKIAndSignsTheExactTransactionAndSessionHash() throws {
+        let pending = try NativeSessionProof()
+        let encoded = try pending.signIn(reference: "fixture-transaction")
+        let expectedHash = SHA256.hash(data: Data(pending.bearer.utf8))
+            .map { String(format: "%02x", $0) }.joined()
+        XCTAssertEqual(encoded.sessionHash, expectedHash)
+        XCTAssertEqual(pending.bearer.count, 43)
+        let publicDER = try decodeBase64URL(encoded.publicKey)
+        let key = try P256.Signing.PublicKey(derRepresentation: publicDER)
+        let signature = try P256.Signing.ECDSASignature(derRepresentation: decodeBase64URL(encoded.signature))
+        XCTAssertTrue(key.isValidSignature(signature, for: Data(
+            "harklight-v2:sign-in\nfixture-transaction\n\(expectedHash)".utf8
+        )))
+        let restored = try JSONDecoder().decode(NativeSessionProof.self, from: JSONEncoder().encode(pending))
+        let activation = try P256.Signing.ECDSASignature(
+            derRepresentation: decodeBase64URL(restored.activationSignature())
+        )
+        XCTAssertEqual(restored.bearer, pending.bearer)
+        XCTAssertTrue(key.isValidSignature(activation, for: Data(
+            "harklight-v2:migration-complete\n\(expectedHash)".utf8
+        )))
+    }
+
+    func testLostRedemptionResponseRetriesThePersistedBody() throws {
+        let proof = try NativeSessionProof()
+        let pending = try NativeSessionRedemption(credential: .migration(token: "fixture-grant"),
+                                                  label: "iPhone", proof: proof)
+        let bytes = try JSONEncoder().encode(pending)
+        let restored = try JSONDecoder().decode(NativeSessionRedemption.self, from: bytes)
+        XCTAssertEqual(restored.request, pending.request)
+        XCTAssertEqual(restored.proof.bearer, proof.bearer)
+        let body = try XCTUnwrap(restored.request.body)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: String])
+        XCTAssertEqual(Set(json.keys), ["token", "label", "public_key", "session_hash", "signature"])
+        XCTAssertEqual(json["token"], "fixture-grant")
+        XCTAssertEqual(restored.request.path, "/v2/auth/sign-in")
+        XCTAssertEqual(restored.request.method, .post)
+    }
+
+    func testOwnerCodeUsesTheCommittedTransactionWithoutSendingVerifierUntilRedemption() async throws {
+        let api = SignInFixture()
+        let signIn = NativeSignInAPI(transport: api)
+        let methods = try await signIn.methods()
+        XCTAssertEqual(methods, [.ownerCode])
+        let transaction = try await signIn.begin()
+        try await signIn.verifyOwnerCode("fixture-code", transaction: transaction.reference)
+        let pending = try NativeSessionRedemption(
+            credential: .transaction(reference: transaction.reference, verifier: transaction.verifier),
+            label: "iPhone", proof: NativeSessionProof()
+        )
+        let result = try await signIn.redeem(pending)
+        XCTAssertEqual(result.method, .ownerCode)
+        XCTAssertEqual(result.personID, "person-1")
+        XCTAssertEqual(result.deviceID, "device-1")
+        let sent = await api.requests
+        XCTAssertEqual(sent.map(\.path), ["/v2/auth/methods", "/v2/auth/transactions", "/sign-in/code", "/v2/auth/sign-in"])
+        let bodies = try sent.dropFirst().map { request in
+            try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.body)) as? [String: String])
+        }
+        XCTAssertEqual(bodies[0], ["verifier_hash": NativeSessionProof.commitment(transaction.verifier)])
+        XCTAssertEqual(bodies[1], ["code": "fixture-code", "transaction": "fixture-transaction"])
+        XCTAssertEqual(bodies[2]["verifier"], transaction.verifier)
+        XCTAssertEqual(bodies[2]["transaction"], "fixture-transaction")
+    }
+
+    func testSheetCallbackMustCarryOnlyThePendingReference() throws {
+        let transaction = NativeSignInAPI.Transaction(reference: "test+ref", verifier: "secret")
+        let origin = try XCTUnwrap(URL(string: "https://server.example:8443"))
+        let url = try XCTUnwrap(transaction.sheetURL(origin: origin, method: .apple))
+        let components = try XCTUnwrap(URLComponents(url: url, resolvingAgainstBaseURL: false))
+        XCTAssertEqual(components.host, "server.example")
+        XCTAssertEqual(components.port, 8443)
+        XCTAssertEqual(components.path, "/sign-in")
+        XCTAssertEqual(Set(components.queryItems ?? []), [
+            URLQueryItem(name: "return", value: "app"),
+            URLQueryItem(name: "transaction", value: "test+ref"),
+            URLQueryItem(name: "method", value: "apple")
+        ])
+        XCTAssertTrue(transaction.matchesCallback(try XCTUnwrap(URL(string: "harklight://sign-in?transaction=test%2Bref"))))
+        for rejected in [
+            "harklight://sign-in?transaction=other",
+            "harklight://sign-in?transaction=test%2Bref&transaction=other",
+            "harklight://sign-in?transaction=test%2Bref&token=unexpected",
+            "https://sign-in?transaction=test%2Bref",
+            "harklight://join?transaction=test%2Bref"
+        ] {
+            XCTAssertFalse(transaction.matchesCallback(try XCTUnwrap(URL(string: rejected))))
+        }
+    }
+
+    func testMigrationAndDeviceManagementUseTheSpecifiedRoutes() async throws {
+        let fixture = SignInFixture()
+        let api = NativeSignInAPI(transport: fixture)
+        let grant = try await api.migrationGrant()
+        XCTAssertEqual(grant.origin.absoluteString, "https://server.example")
+        XCTAssertEqual(grant.token, "fixture-grant")
+        try await api.completeMigration(signature: "frozen-signature")
+        let devices = try await api.devices()
+        XCTAssertEqual(devices.first?.id, "old-device")
+        XCTAssertNil(devices.first?.signedInAt)
+        let known = try await api.isKnown(deviceID: "old-device")
+        XCTAssertTrue(known)
+        try await api.removeDevice("old-device")
+        try await api.signOut()
+        let sent = await fixture.requests
+        XCTAssertEqual(sent.map(\.method), [.post, .post, .get, .get, .delete, .post])
+        XCTAssertEqual(sent[3].query, ["device_id": "old-device"])
+        XCTAssertEqual(try JSONDecoder().decode([String: String].self, from: XCTUnwrap(sent[1].body)),
+                       ["signature": "frozen-signature"])
+    }
+
+    func testMigrationStaysUnavailableWithoutTheMeFeature() async throws {
+        let api = transport { _ in
+            .init(status: 200, chunks: [Data(
+                #"{"server":{"id":"server-1"},"principal":{"person_id":"person-1","device_id":"device-1"}}"#.utf8
+            )])
+        }
+        let principal = try await NativeSignInAPI(transport: api).migrationPrincipal()
+        XCTAssertNil(principal)
+    }
+
+    func testMigrationRequiresTheSameServerPersonAndDeviceBeforeReadingTheFeed() async throws {
+        let api = NativeSignInAPI(transport: SignInFixture())
+        let legacy = try await api.migrationPrincipal()
+        let principal = try XCTUnwrap(legacy)
+        XCTAssertEqual(principal.deviceID, ExactText("device-1"))
+        try await api.verifyMigrationPrincipal(principal)
+        let other = APIPushPrincipal(serverID: ExactText("server-1"), personID: ExactText("person-1"),
+                                     deviceID: ExactText("other-device"))
+        do {
+            try await api.verifyMigrationPrincipal(other)
+            XCTFail("A different device cannot activate the migration")
+        } catch NativeSignInAPI.MigrationError.wrongPrincipal {}
+    }
+
+    func testAcceptedReconcileReceiptPreventsAnyResend() async throws {
+        let fixture = SignInFixture()
+        let persistence = MemoryOutboxPersistence()
+        let outbox = try ActionOutbox(persistence: persistence, transport: fixture,
+                                     outcomes: RecordingOutcomes(), errors: NoopErrorLog(), startsPaused: true)
+        let write = FrozenWrite(method: .post, path: "/v2/items/fixture/reply", body: Data("{}".utf8))
+        let entry = try await outbox.submit(target: "item:fixture", operation: "reply", write: write)
+        await outbox.resumeSending()
+        await outbox.flush()
+        XCTAssertEqual(try persistence.load().first?.failure?.token, "accepted_reconcile")
+        _ = try await outbox.submit(target: entry.target, operation: entry.operation,
+                                    write: write, idempotencyKey: entry.id)
+        await outbox.flush()
+        let sent = await fixture.requests
+        XCTAssertEqual(sent.count, 1)
+        XCTAssertEqual(sent.first?.idempotencyKey, entry.id)
+    }
+
+    func testLegacyReconnectHoldsAnAttemptThatAgedWhileTheConnectionWasOpen() async throws {
+        let fixture = SignInFixture()
+        let persistence = MemoryOutboxPersistence()
+        let firstCutoff = Date(timeIntervalSince1970: 10)
+        let created = Date(timeIntervalSince1970: 11)
+        let reconnectCutoff = Date(timeIntervalSince1970: 12)
+        let write = FrozenWrite(method: .post, path: "/v2/items/fixture/replies", body: Data("{}".utf8))
+        let entry = OutboxEntry(idempotencyKey: UUID(), target: "item:fixture", operation: "reply", write: write,
+                                createdAt: created, outcomeUnknown: false, attempts: 1)
+        try persistence.save([entry])
+        let old = try ActionOutbox(persistence: persistence, transport: fixture, outcomes: RecordingOutcomes(),
+            errors: NoopErrorLog(), startsPaused: true, legacyReceiptCutoff: firstCutoff)
+        let initiallyPending = await old.pending
+        XCTAssertEqual(initiallyPending.map(\.id), [entry.id])
+        await old.close()
+        let reconnected = try ActionOutbox(persistence: persistence, transport: fixture, outcomes: RecordingOutcomes(),
+            errors: NoopErrorLog(), startsPaused: true, legacyReceiptCutoff: reconnectCutoff)
+        await reconnected.resumeSending()
+        await reconnected.flush()
+        XCTAssertEqual(try persistence.load().first?.failure?.token, "outcome_uncertain")
+        let sent = await fixture.requests
+        XCTAssertTrue(sent.isEmpty)
+    }
+
+    func testInterruptedLegacySendWithoutAnUnknownFlagIsHeld() async throws {
+        let fixture = SignInFixture()
+        let persistence = MemoryOutboxPersistence()
+        let entry = OutboxEntry(idempotencyKey: UUID(), target: "item:fixture", operation: "reply",
+            write: FrozenWrite(method: .post, path: "/v2/items/fixture/replies", body: Data("{}".utf8)),
+            createdAt: Date(timeIntervalSince1970: 1), outcomeUnknown: false, attempts: 1)
+        try persistence.save([entry])
+        let outbox = try ActionOutbox(persistence: persistence, transport: fixture, outcomes: RecordingOutcomes(),
+            errors: NoopErrorLog(), legacyReceiptCutoff: Date(timeIntervalSince1970: 2))
+        await outbox.flush()
+        XCTAssertEqual(try persistence.load().first?.failure?.token, "outcome_uncertain")
+        let sent = await fixture.requests
+        XCTAssertTrue(sent.isEmpty)
+    }
+
+    func testOldAmbiguousLegacyIntentRequiresReadReconciliation() async throws {
+        let fixture = SignInFixture()
+        let persistence = MemoryOutboxPersistence()
+        let entry = OutboxEntry(idempotencyKey: UUID(), target: "item:fixture", operation: "answer",
+            write: FrozenWrite(method: .post, path: "/v2/items/fixture/answer", body: Data("{}".utf8)),
+            createdAt: Date(timeIntervalSince1970: 1), outcomeUnknown: true, attempts: 1)
+        try persistence.save([entry])
+        let outbox = try ActionOutbox(persistence: persistence, transport: fixture, outcomes: RecordingOutcomes(),
+            errors: NoopErrorLog(), legacyReceiptCutoff: Date(timeIntervalSince1970: 2))
+        await outbox.flush()
+        let held = try XCTUnwrap(persistence.load().first)
+        XCTAssertEqual(held.id, entry.id)
+        XCTAssertEqual(held.write, entry.write)
+        XCTAssertEqual(held.failure?.token, "outcome_uncertain")
+        _ = try await outbox.submit(target: entry.target, operation: entry.operation,
+                                    write: entry.write, idempotencyKey: entry.id)
+        await outbox.flush()
+        let sent = await fixture.requests
+        XCTAssertTrue(sent.isEmpty)
+    }
+
+    func testCarryingAuthorizedOutboxKeepsFrozenBodyKeyAndUncertainHold() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let source = FileOutboxPersistence(url: directory.appendingPathComponent("previous"))
+        let destination = FileOutboxPersistence(url: directory.appendingPathComponent("current"))
+        let first = OutboxEntry(idempotencyKey: UUID(), target: "item:one", operation: "answer",
+            write: FrozenWrite(method: .post, path: "/v2/items/one/answer", body: Data(#"{"request_revision":1}"#.utf8)),
+            createdAt: Date(timeIntervalSince1970: 1), outcomeUnknown: true, attempts: 1)
+        let second = OutboxEntry(idempotencyKey: UUID(), target: "item:two", operation: "answer",
+            write: FrozenWrite(method: .post, path: "/v2/items/two/answer", body: Data(#"{"request_revision":2}"#.utf8)),
+            createdAt: Date(timeIntervalSince1970: 1), outcomeUnknown: false, attempts: 0)
+        try source.save([first, second])
+        try source.transferPending(to: destination, legacyReceiptCutoff: Date(timeIntervalSince1970: 2))
+        XCTAssertTrue(try source.load().isEmpty)
+        let received = try destination.load()
+        XCTAssertEqual(received.map(\.id), [first.id, second.id])
+        XCTAssertEqual(received.map(\.write), [first.write, second.write])
+        XCTAssertEqual(received.map { $0.failure?.token }, ["outcome_uncertain", nil])
+        try source.save([first, second])
+        try source.transferPending(to: destination, legacyReceiptCutoff: Date(timeIntervalSince1970: 2))
+        XCTAssertEqual(try destination.load(), received)
+    }
+
+    func testQueuedReplyRetryHeaderLeavesFrozenRequestUntouched() throws {
+        let api = transport(bearer: "fixture-bearer") { _ in .init(status: 204, chunks: []) }
+        let body = Data(#"{"text":"fixture","file_ids":["upload-1"]}"#.utf8)
+        let key = UUID()
+        var request = APIRequest(method: .post, path: "/v2/items/fixture/replies",
+                                 body: body, idempotencyKey: key)
+        XCTAssertNil(api.urlRequest(for: request).value(forHTTPHeaderField: "Harklight-Queued-Retry"))
+        request.queuedRetry = true
+        request.sharedMessages = true
+        let retry = api.urlRequest(for: request)
+        XCTAssertEqual(retry.value(forHTTPHeaderField: "Harklight-Queued-Retry"), "true")
+        XCTAssertEqual(retry.value(forHTTPHeaderField: "Harklight-Features"), "shared_messages")
+        XCTAssertEqual(retry.value(forHTTPHeaderField: "Idempotency-Key"), key.uuidString.lowercased())
+        XCTAssertEqual(retry.httpBody, body)
+        XCTAssertEqual(retry.httpMethod, "POST")
+        XCTAssertEqual(retry.url?.path, request.path)
+    }
+
+    func testRestoredReconciliationReadsHeldWritesWithoutResending() async throws {
+        let persistence = MemoryOutboxPersistence()
+        let fixture = SignInFixture()
+        let entries = ["outcome_uncertain", "accepted_reconcile"].map { token in
+            var entry = OutboxEntry(idempotencyKey: UUID(), target: "item:fixture", operation: "reply",
+                write: FrozenWrite(method: .post, path: "/v2/items/fixture/replies", body: Data("{}".utf8)),
+                createdAt: Date(timeIntervalSince1970: 1), outcomeUnknown: true, attempts: 1)
+            entry.failure = OutboxFailure(status: token == "accepted_reconcile" ? 202 : 0, token: token)
+            return entry
+        }
+        try persistence.save(entries)
+        let outbox = try ActionOutbox(persistence: persistence, transport: fixture, outcomes: RecordingOutcomes(),
+            errors: NoopErrorLog(), onReconcile: { _ in
+                (try? await fixture.send(.get("/v2/me"))) != nil
+            })
+        await outbox.resumeReconciliation()
+        await outbox.resumeReconciliation()
+        await outbox.flush()
+        let sent = await fixture.requests
+        XCTAssertEqual(sent.map(\.method), [.get, .get])
+        XCTAssertEqual(sent.map(\.path), ["/v2/me", "/v2/me"])
+        XCTAssertEqual(try persistence.load().map(\.failure?.token), ["outcome_uncertain", "accepted_reconcile"])
+    }
+
+    func testRefusedQueuedReplyCanReplaceOnlyItsFileHandles() async throws {
+        let fixture = SignInFixture()
+        let persistence = MemoryOutboxPersistence()
+        let path = "/v2/items/fixture/replies"
+        let original = FrozenWrite(method: .post, path: path, body: Data(#"{"text":"saved","file_ids":["old"]}"#.utf8))
+        var entry = OutboxEntry(idempotencyKey: UUID(), target: "item:fixture", operation: "reply", write: original,
+            createdAt: Date(timeIntervalSince1970: 1), outcomeUnknown: false, attempts: 1)
+        entry.failure = OutboxFailure(status: 400, token: "invalid_field", field: "file_ids")
+        try persistence.save([entry])
+        let outbox = try ActionOutbox(persistence: persistence, transport: fixture,
+                                     outcomes: RecordingOutcomes(), errors: NoopErrorLog(), startsPaused: true)
+        let changedText = FrozenWrite(method: .post, path: path, body: Data(#"{"text":"edited","file_ids":["new"]}"#.utf8))
+        do {
+            try await outbox.replaceRejectedReplyFiles(entry.id, with: changedText)
+            XCTFail("Changing reply text is a different intent")
+        } catch let error as URLError where error.code == .badServerResponse {}
+        XCTAssertEqual(try persistence.load().first, entry)
+        let refreshed = FrozenWrite(method: .post, path: path, body: Data(#"{"text":"saved","file_ids":["new"]}"#.utf8))
+        try await outbox.replaceRejectedReplyFiles(entry.id, with: refreshed)
+        let pending = try XCTUnwrap(persistence.load().first)
+        XCTAssertEqual(pending.id, entry.id)
+        XCTAssertEqual(pending.write, refreshed)
+        XCTAssertTrue(pending.request.queuedRetry)
+        XCTAssertNil(pending.failure)
+    }
+
+    private func decodeBase64URL(_ string: String) throws -> Data {
+        XCTAssertFalse(string.contains("="))
+        let base64 = string.replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        return try XCTUnwrap(Data(base64Encoded: base64 + String(repeating: "=", count: (4 - base64.count % 4) % 4)))
     }
 
     func testARefusalBecomesAnAPIErrorWithTokenRequestIdAndRetryAfter() async throws {

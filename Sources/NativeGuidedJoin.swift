@@ -375,13 +375,14 @@ final class NativeGuidedJoinStore {
 
     @discardableResult
     func archiveRevokedInstallation(_ record: NativeEnrollmentRecord, stagedText: [ExactText],
-                                    clearActive: Bool = false) throws -> NativeAccountDeparture {
+                                    clearActive: Bool = false, v2SignOut: Bool? = nil) throws -> NativeAccountDeparture {
         guard let current = try enrollment.load(), current.v2Revoked == true,
               current.sameNotificationProfile(as: record) else { throw NativeJoinError.superseded }
         var archive = NativeAccountDeparture(record: current.removalArchiveRecord(), replacement: nil, removed: true)
         let previous = try archivedDepartures().first { $0.archiveID == archive.archiveID }?.stagedRevokedText ?? []
         let retained = Set(previous + stagedText).sorted { $0.rawValue < $1.rawValue }
         archive.stagedRevokedText = retained.isEmpty ? nil : retained
+        archive.v2SignOut = v2SignOut
         try savePriorDeparture(archive)
         guard clearActive else { return archive }
         if let attempt = try loadAttempt(), attempt.deviceID == record.deviceID {

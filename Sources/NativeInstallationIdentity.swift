@@ -36,6 +36,30 @@ struct NativeInstallationIdentityStore {
         try load(creatingIfMissing: false)
     }
 
+    func lateSignInProof(deviceID: String, message: Data) throws -> NativeSessionRedemption.OldProof {
+        try Self.lateSignInProof(key: retainedPrivateKey(creatingIfMissing: false), deviceID: deviceID, message: message)
+    }
+
+    static func lateSignInProof(key: SecKey, deviceID: String, message: Data) throws -> NativeSessionRedemption.OldProof {
+        guard let publicKey = SecKeyCopyPublicKey(key),
+              let publicDER = SecKeyCopyExternalRepresentation(publicKey, nil) as Data?,
+              let signature = SecKeyCreateSignature(key, .rsaSignatureMessagePKCS1v15SHA256,
+                                                    message as CFData, nil) as Data? else {
+            throw NativeEnrollmentError.invalidIdentity
+        }
+        let spki = Self.rsaSubjectPublicKeyInfo(publicDER)
+        guard NativeSessionProof.commitmentBytes(spki) == deviceID else {
+            throw NativeEnrollmentError.invalidIdentity
+        }
+        return .init(deviceID: deviceID, publicKey: NativeSessionProof.base64URL(spki),
+                     signature: NativeSessionProof.base64URL(signature))
+    }
+
+    private static func rsaSubjectPublicKeyInfo(_ publicKeyDER: Data) -> Data {
+        let algorithm = DER.sequence(DER.oid([0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 1, 1, 1]), DER.null)
+        return DER.sequence(algorithm, DER.bitString(publicKeyDER))
+    }
+
     func retire() throws {
         let certificate: [String: Any] = [
             kSecClass as String: kSecClassCertificate,
@@ -204,7 +228,6 @@ struct NativeInstallationIdentityStore {
                                       notAfter: Date) throws -> Data {
         // RSA/SHA-256 and clientAuth match the server's device-certificate path.
         // SecCertificateCreateWithData parses DER; it does not issue a certificate.
-        let rsa = DER.sequence(DER.oid([0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 1, 1, 1]), DER.null)
         let signature = DER.sequence(DER.oid([0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 1, 1, 11]), DER.null)
         let name = DER.sequence(DER.value(0x31, DER.sequence(
             DER.oid([0x55, 4, 3]), DER.value(0x0c, Data("Harklight device".utf8)))))
@@ -216,7 +239,7 @@ struct NativeInstallationIdentityStore {
         let now = Date()
         let validity = DER.sequence(DER.time(now.addingTimeInterval(-300)),
                                     DER.time(notAfter))
-        let spki = DER.sequence(rsa, DER.bitString(publicKeyDER))
+        let spki = rsaSubjectPublicKeyInfo(publicKeyDER)
         let constraints = DER.sequence(DER.oid([0x55, 0x1d, 0x13]), DER.value(1, Data([0xff])),
                                        DER.value(4, DER.sequence()))
         let usage = DER.sequence(DER.oid([0x55, 0x1d, 0x0f]), DER.value(1, Data([0xff])),

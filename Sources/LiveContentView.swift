@@ -975,6 +975,7 @@ struct LiveInboxSettings: View {
     @State private var alertsSaveFailed = false
     @State private var showsFeatures = false
     @State private var confirmingDisconnect = false
+    @State private var showingDevices = false
 
     private var record: NativeEnrollmentRecord? {
         if store.isReadOnly { return archiveDeparture?.record ?? launch?.disconnectedAccount?.record }
@@ -1140,13 +1141,19 @@ struct LiveInboxSettings: View {
                                     .font(.footnote)
                             }
                         }
-                        Button("Disconnect this phone…", role: .destructive) {
+                        if let launch, launch.hasDeviceSession {
+                            Button("Devices") { showingDevices = true }
+                                .sheet(isPresented: $showingDevices) {
+                                    NativeSignedInDevicesView(launch: launch)
+                                }
+                        }
+                        Button(launch?.hasDeviceSession == true ? "Sign out…" : "Disconnect this phone…", role: .destructive) {
                             confirmingDisconnect = true
                         }
                         .foregroundStyle(.hkCoral)
-                        .confirmationDialog("Disconnect this phone?", isPresented: $confirmingDisconnect,
+                        .confirmationDialog(launch?.hasDeviceSession == true ? "Sign out?" : "Disconnect this phone?", isPresented: $confirmingDisconnect,
                                             titleVisibility: .visible) {
-                            Button("Disconnect this phone", role: .destructive) {
+                            Button(launch?.hasDeviceSession == true ? "Sign out" : "Disconnect this phone", role: .destructive) {
                                 Task { await launch?.disconnectCurrentAccount() }
                             }
                             Button("Cancel", role: .cancel) {}
@@ -4396,5 +4403,59 @@ struct LiveLifecycleTitle {
         case .expired: label = "Expired"
         case .superseded: label = "Superseded"
         }
+    }
+}
+
+@MainActor
+private struct NativeSignedInDevicesView: View {
+    let launch: NativeAppLaunch
+    @Environment(\.dismiss) private var dismiss
+    @State private var devices: [NativeSignInAPI.Device] = []
+    @State private var failed = false
+    @State private var pendingRemoval: NativeSignInAPI.Device?
+
+    var body: some View {
+        NavigationStack {
+            List {
+                ForEach(devices) { device in
+                    HStack {
+                        Text(device.label)
+                        Spacer()
+                        if device.current {
+                            Text("This device").foregroundStyle(.secondary)
+                        } else {
+                            Button("Remove", role: .destructive) { pendingRemoval = device }
+                                .buttonStyle(.borderless)
+                        }
+                    }
+                }
+                if failed { Button("Couldn’t load devices. Retry") { Task { await reload() } } }
+            }
+            .navigationTitle("Devices")
+            .toolbar { Button("Done") { dismiss() } }
+            .task { await reload() }
+            .alert("Remove device?", isPresented: Binding(
+                get: { pendingRemoval != nil }, set: { if !$0 { pendingRemoval = nil } }),
+                presenting: pendingRemoval) { device in
+                    Button("Remove", role: .destructive) {
+                        Task { await remove(device) }
+                    }
+                    Button("Cancel", role: .cancel) {}
+                } message: { device in Text(device.label) }
+        }
+    }
+
+    private func remove(_ device: NativeSignInAPI.Device) async {
+        do {
+            try await launch.removeSignedInDevice(device.id)
+            await reload()
+        } catch { failed = true }
+    }
+
+    private func reload() async {
+        do {
+            devices = try await launch.signedInDevices()
+            failed = false
+        } catch { failed = true }
     }
 }

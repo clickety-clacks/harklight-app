@@ -26,7 +26,7 @@ public struct OutboxEntry: Codable, Equatable, Sendable, Identifiable {
     public let target: String
     /// The Error Log operation name, for example `mark_seen` or `answer`.
     public let operation: String
-    public let write: FrozenWrite
+    public internal(set) var write: FrozenWrite
     public let createdAt: Date
     /// True once a send ended without a known outcome; the resend uses the
     /// same key, so the server applies it at most once.
@@ -47,6 +47,12 @@ public struct OutboxEntry: Codable, Equatable, Sendable, Identifiable {
 
     public var id: UUID { idempotencyKey }
 
+    var reconciliationReadCompleted: Bool? = nil
+
+    var requiresReconciliation: Bool {
+        failure?.token == "accepted_reconcile" || failure?.token == "outcome_uncertain"
+    }
+
     /// Seen and read-position reports are independently monotonic facts. A
     /// slow reply must not hold either report for the same item.
     var sendingLane: String {
@@ -62,14 +68,17 @@ public struct OutboxEntry: Codable, Equatable, Sendable, Identifiable {
     }
 
     var request: APIRequest {
-        APIRequest(method: write.method, path: write.path, body: write.body, contentType: write.contentType,
-                   idempotencyKey: idempotencyKey, ifMatch: write.ifMatch)
+        var request = APIRequest(method: write.method, path: write.path, body: write.body,
+                                 contentType: write.contentType, idempotencyKey: idempotencyKey, ifMatch: write.ifMatch)
+        request.queuedRetry = operation == "reply" && attempts > 0
+        return request
     }
 }
 
 public struct OutboxFailure: Codable, Equatable, Sendable {
     public let status: Int
     public let token: String
+    var field: String? = nil
 }
 
 public protocol OutboxPersisting: Sendable {
@@ -104,6 +113,8 @@ private struct ProtectedWriteOutcome: OutboxOutcomeHandling {
 /// Actions (design section 4) over the r2 API: the durable outbox. Writes
 /// never wait for, or depend on, Sync or the change feed.
 public actor ActionOutbox {
+    private var reconciling: Set<UUID> = []
+    private let onReconcile: @Sendable (OutboxEntry) async -> Bool
     private let persistence: any OutboxPersisting
     private let transport: any ClientAPITransport
     private let outcomes: any OutboxOutcomeHandling
@@ -127,11 +138,13 @@ public actor ActionOutbox {
     public init(persistence: any OutboxPersisting, transport: any ClientAPITransport,
                 outcomes: any OutboxOutcomeHandling, errors: any ErrorLogging,
                 startsPaused: Bool = false, canSend: @escaping @Sendable (OutboxEntry) -> Bool = { _ in true },
-                excludingSavedKeys: Set<UUID> = [],
+                excludingSavedKeys: Set<UUID> = [], legacyReceiptCutoff: Date? = nil,
+                onReconcile: @escaping @Sendable (OutboxEntry) async -> Bool = { _ in false },
                 onEntriesChanged: @escaping @Sendable ([OutboxEntry], [OutboxEntry]) -> Void = { _, _ in },
                 waitBeforeRetry: @escaping @Sendable (_ attempt: Int, _ retryAfter: TimeInterval?) async throws -> Void
                     = ActionOutbox.backoff) throws {
         self.persistence = persistence
+        self.onReconcile = onReconcile
         self.transport = transport
         self.outcomes = outcomes
         self.errors = errors
@@ -140,8 +153,14 @@ public actor ActionOutbox {
         self.onEntriesChanged = onEntriesChanged
         sendingPaused = startsPaused
         let saved = try persistence.load()
-        let admitted = saved.filter { !excludingSavedKeys.contains($0.id) }
-        if admitted.count != saved.count { try persistence.save(admitted) }
+        var admitted = saved.filter { !excludingSavedKeys.contains($0.id) }
+        if let legacyReceiptCutoff {
+            for index in admitted.indices where admitted[index].failure == nil &&
+                (admitted[index].outcomeUnknown || admitted[index].attempts > 0) && admitted[index].createdAt <= legacyReceiptCutoff {
+                admitted[index].failure = OutboxFailure(status: 0, token: "outcome_uncertain")
+            }
+        }
+        if admitted != saved { try persistence.save(admitted) }
         entries = admitted
     }
 
@@ -173,6 +192,39 @@ public actor ActionOutbox {
         errors.resolve(concern: .actions, operation: operation, resolvedBy: resolvedBy)
     }
 
+    func replaceRejectedReplyFiles(_ key: UUID, with write: FrozenWrite) throws {
+        guard !closed, let index = entries.firstIndex(where: { $0.id == key }) else { throw CancellationError() }
+        let entry = entries[index]
+        guard entry.operation == "reply", entry.failure?.status == 400,
+              entry.failure?.token == APIErrorToken.invalidField.rawValue, entry.failure?.field == "file_ids",
+              write.method == entry.write.method, write.path == entry.write.path,
+              write.contentType == entry.write.contentType, write.ifMatch == entry.write.ifMatch,
+              let old = Self.replyBody(entry.write), let replacement = Self.replyBody(write),
+              old.text.utf8.elementsEqual(replacement.text.utf8), old.files != replacement.files,
+              old.files.count == replacement.files.count else {
+            throw URLError(.badServerResponse)
+        }
+        var next = entries
+        next[index].write = write
+        next[index].failure = nil
+        next[index].outsideContractFailures = nil
+        try persistence.save(next)
+        entries = next
+        startSending(entry.sendingLane)
+    }
+
+    static func replyBody(_ write: FrozenWrite) -> (text: String, files: [String])? {
+        struct Reply: Decodable {
+            let text: String
+            let file_ids: [String]
+        }
+        guard let body = write.body,
+              let fields = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+              Set(fields.keys) == ["text", "file_ids"],
+              let reply = try? JSONDecoder().decode(Reply.self, from: body) else { return nil }
+        return (reply.text, reply.file_ids)
+    }
+
     /// Records the intent durably, minting its key once, and sends it. If the
     /// record cannot be saved, nothing is sent and the error is thrown.
     @discardableResult
@@ -188,7 +240,7 @@ public actor ActionOutbox {
             // Handing a pending write over again queues it once. Handing over
             // a refused one is the person's Retry: the server stores only
             // successes, so the same key is evaluated again.
-            guard retryRefused, existing.failure != nil || existing.waitsForInternalErrorRetry == true
+            guard !existing.requiresReconciliation, retryRefused, existing.failure != nil || existing.waitsForInternalErrorRetry == true
             else { return existing }
             var next = entries
             guard let index = next.firstIndex(where: { $0.id == existing.id }) else { return existing }
@@ -240,6 +292,25 @@ public actor ActionOutbox {
     func wake(operation: String) {
         for target in Set(pending.filter { $0.operation == operation }.map(\.sendingLane)) {
             startSending(target)
+        }
+    }
+
+    public func resumeReconciliation() async {
+        for entry in entries where entry.requiresReconciliation && entry.reconciliationReadCompleted != true {
+            guard !Task.isCancelled, !closed else { return }
+            await reconcile(entry)
+        }
+    }
+
+    private func reconcile(_ entry: OutboxEntry) async {
+        guard reconciling.insert(entry.id).inserted else { return }
+        defer { reconciling.remove(entry.id) }
+        let token = entry.failure?.token ?? "accepted_reconcile"
+        errors.report(ErrorLogReport(concern: .actions, connectionRole: .request, operation: entry.operation,
+            phase: "reconcile", reason: .app(token), initiator: .unknown, retryable: false,
+            correlation: .request(nil, operationID: entry.id)))
+        if await onReconcile(entry) {
+            update(entry.id) { $0.reconciliationReadCompleted = true }
         }
     }
 
@@ -317,6 +388,12 @@ public actor ActionOutbox {
         do {
             let generation = outcomes.modelGeneration
             let response = try await transport.send(entry.request)
+            if response.status == 202, response.replayed,
+               (try? JSONDecoder().decode([String: String].self, from: response.body))?["code"] == "accepted_reconcile" {
+                update(entry.id) { $0.failure = OutboxFailure(status: 202, token: "accepted_reconcile") }
+                await reconcile(entry)
+                return (true, .success(response))
+            }
             await outcomes.accepted(entry, response: response, generation: generation)
             remove(entry.idempotencyKey)
             resolveIfNoFailedWrite(entry.operation)
@@ -348,7 +425,7 @@ public actor ActionOutbox {
             // sees always has its record, and a Retry handed over at once
             // finds the write already failed.
             update(entry.idempotencyKey) {
-                $0.failure = OutboxFailure(status: error.status, token: error.token.rawValue)
+                $0.failure = OutboxFailure(status: error.status, token: error.token.rawValue, field: error.field)
             }
             report(entry, phase: "send", error: error, initiator: .unknown, retryable: false)
             await outcomes.rejected(entry, error: error)
@@ -442,6 +519,25 @@ public final class FileOutboxPersistence: OutboxPersisting, @unchecked Sendable 
         lock.lock(); defer { lock.unlock() }
         guard FileManager.default.fileExists(atPath: url.path) else { return [] }
         return try JSONDecoder().decode([OutboxEntry].self, from: Data(contentsOf: url))
+    }
+
+    /// Transfer the exact frozen intents after the caller proves saved-queue ownership.
+    public func transferPending(to destination: FileOutboxPersistence, legacyReceiptCutoff: Date?) throws {
+        let source = try load()
+        var target = try destination.load()
+        var carried = source.filter { $0.failure == nil || $0.requiresReconciliation }
+        guard !carried.isEmpty else { return }
+        if let legacyReceiptCutoff {
+            for index in carried.indices where carried[index].failure == nil &&
+                (carried[index].outcomeUnknown || carried[index].attempts > 0) && carried[index].createdAt <= legacyReceiptCutoff {
+                carried[index].failure = OutboxFailure(status: 0, token: "outcome_uncertain")
+            }
+        }
+        let targetKeys = Set(target.map(\.id))
+        target.append(contentsOf: carried.filter { !targetKeys.contains($0.id) })
+        try destination.save(target)
+        let moved = Set(carried.map(\.id))
+        try save(source.filter { !moved.contains($0.id) })
     }
 
     public func save(_ entries: [OutboxEntry]) throws {

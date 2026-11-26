@@ -9,7 +9,6 @@ struct HarklightApp: App {
     @Environment(\.scenePhase) private var scenePhase
     @State private var launch: NativeAppLaunch
     @State private var samples = SampleLibrary()
-    @State private var showsRevokedText = false
     @State private var releaseNotes: ReleaseNotesPresentation
 
     private var diagnosticsFixtureLaunch: NativeAppLaunch? {
@@ -114,12 +113,12 @@ struct HarklightApp: App {
                 if showsTierReference {
                     InboxTierReferenceScreen()
                 } else if case .reenrolmentRequired = launch.state {
-                    v2ReenrolmentView
+                    NativeSharedSignInView(launch: launch)
                 } else if let archive = launch.selectedArchivedPresentation,
                    let departure = launch.selectedArchivedAccount {
                     LiveContentView(store: archive, samples: samples, launch: launch,
                                     archiveDeparture: departure)
-                } else if launch.guidedJoin.isShowing {
+                } else if launch.guidedJoin.isShowing, launch.activeEnrollmentRecord != nil {
                     NativeEnrollmentView(launch: launch)
                 } else if launch.canOpenDisconnectedArchive && launch.isShowingDisconnectedArchive,
                           let archive = launch.disconnectedArchive {
@@ -131,9 +130,9 @@ struct HarklightApp: App {
                 } else {
                     switch launch.state {
                     case .enrollmentRequired:
-                        NativeEnrollmentView(launch: launch)
+                        NativeSharedSignInView(launch: launch)
                     case .reenrolmentRequired:
-                        v2ReenrolmentView
+                        NativeSharedSignInView(launch: launch)
                     case let .fixture(store):
                         if let presentation = store.presentationStore {
                             LiveContentView(store: presentation, samples: samples,
@@ -170,7 +169,10 @@ struct HarklightApp: App {
             .onChange(of: launch.notificationRouter.pendingV2Tap) { _, payload in
                 if payload != nil { Task { await launch.handleNotification() } }
             }
-            .onOpenURL { url in Task { await launch.receiveInvitation(url) } }
+            .onOpenURL { url in
+                guard NativeMessageDeepLink.recognizes(url) else { return }
+                Task { await launch.receiveInvitation(url) }
+            }
             .task(id: scenePhase) {
                 NativeRelayLifecycle.shared.v2FocusScenePhaseChanged(scenePhase)
                 NativeRelayLifecycle.shared.sceneActivityChanged(isActive: scenePhase == .active)
@@ -199,23 +201,7 @@ struct HarklightApp: App {
         }
     }
 
-    private var v2ReenrolmentView: some View {
-        ContentUnavailableView {
-            Label("This device was revoked", systemImage: "xmark.shield")
-        } description: {
-            Text(launch.enrollmentMessage ?? "Use a new server invitation to enrol this device again.")
-        } actions: {
-            if !launch.revokedRecoveryText.isEmpty {
-                Button("View unsent text") { showsRevokedText = true }
-            }
-            Button("Enrol again") { launch.beginV2Reenrolment() }
-        }
-        .sheet(isPresented: $showsRevokedText) {
-            NavigationStack {
-                PreviousDeviceUnsentTextView { launch.revokedRecoveryText }
-            }
-        }
-    }
+
 }
 
 private struct AcceptanceReduceMotionOverride: ViewModifier {

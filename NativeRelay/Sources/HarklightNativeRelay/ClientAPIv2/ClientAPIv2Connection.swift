@@ -49,8 +49,11 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
 
     /// `directory` holds the model, outbox and last `/v2/me` for this
     /// account; nil keeps everything in memory (tests and previews).
+    private let usesDeviceSessions: Bool
+
     public init(transport: any ClientAPITransport, repository: ClientRepository, context: ProfileContext,
                 directory: URL?, errors: any ErrorLogging, foregroundOnlyWrites: Bool = false,
+                legacyReceiptCutoff: Date? = nil, usesDeviceSessions: Bool = false,
                 waitBeforeRetry: @escaping @Sendable (Int) async throws -> Void = ChangeFeedSync.backoff,
                 outboxWaitBeforeRetry: @escaping @Sendable (Int, TimeInterval?) async throws -> Void = ActionOutbox.backoff,
                 meWaitBeforeRetry: @escaping @Sendable (Int) async throws -> Void = ChangeFeedSync.backoff,
@@ -81,6 +84,7 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
         self.files = files
         self.replyUploads = try retainedUploadURL.map { try QueuedReplyUploads(directory: directory, files: files, source: $0) }
         self.foregroundOnlyWrites = foregroundOnlyWrites
+        self.usesDeviceSessions = usesDeviceSessions
         self.repository = repository
         self.context = context
         self.errors = errors
@@ -127,6 +131,9 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
                     relay.connection?.canSendInCurrentScope == true &&
                     (entry.operation != "priority_levels" || relay.connection?.priorityLevelsEditingEnabled == true)
             }, excludingSavedKeys: try repository.heldPreviousProtocolOperations(context: context),
+            legacyReceiptCutoff: legacyReceiptCutoff, onReconcile: { entry in
+                await relay.connection?.reconcileHeldWrite(entry) ?? false
+            },
             onEntriesChanged: { old, new in
                 if old.filter({ $0.operation == "alerts" }) != new.filter({ $0.operation == "alerts" }) {
                     onPriorityLevelsChanged()
@@ -340,6 +347,7 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
         queuedContinuation.yield(())
         await outbox.resumeSending()
         await withTaskGroup(of: Void.self) { group in
+            group.addTask { await self.outbox.resumeReconciliation() }
             group.addTask { await self.reconcileAcceptedRepliesWhileForeground(signals) }
             group.addTask {
                 for await _ in settings { await self.refreshSettings() }
@@ -427,6 +435,23 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
     public func catchUp(forPush payload: JSONValue) async throws -> Bool {
         guard let hint = matchPush(payload) else { return false }
         return try await catchUp(forPushRevision: hint.revision)
+    }
+
+    private func reconcileHeldWrite(_ entry: OutboxEntry) async -> Bool {
+        do {
+            try await sync.catchUp(userInitiated: false)
+            if entry.operation == "reply", let itemID = entry.resourceID {
+                try await modelWriter.loadEntries(of: ExactText(itemID))
+                publishModel()
+            }
+            return true
+        } catch {
+            errors.report(ErrorLogReport(concern: .snapshot, connectionRole: .request,
+                operation: entry.operation, phase: "reconcile", reason: .api(error),
+                initiator: .forFailure(error), retryable: true,
+                correlation: .request(nil, operationID: entry.id)))
+            return false
+        }
     }
 
     private func missingAcceptedReplyItems() -> Set<ExactText> {
@@ -690,6 +715,22 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
             let pending = await outbox.pending
             let failed = await outbox.failedWrites
             if let saved = (pending + failed).first(where: { $0.id == operation }) {
+                if retryRefused, usesDeviceSessions, let replyUploads,
+                   saved.failure?.status == 400,
+                   saved.failure?.token == APIErrorToken.invalidField.rawValue,
+                   saved.failure?.field == "file_ids", let frozen = ActionOutbox.replyBody(saved.write) {
+                    let stillQueued: @Sendable () throws -> Bool = { [repository, context] in
+                        try repository.queuedChatMessages(context: context).contains { $0.operationID == operation }
+                    }
+                    try await replyUploads.replaceRejectedHandles(operation, handles: frozen.files)
+                    let refreshed = try await replyUploads.prepare(message, operation: operation,
+                        cap: presentation.uploadCap, stillQueued: stillQueued)
+                    guard try await replyUploads.handOff(operation, stillQueued: stillQueued) else { return }
+                    let replacement = ClientAPIWrites.reply(itemID: message.binding.request.messageID,
+                                                          text: ExactText(frozen.text), fileIDs: refreshed)
+                    try await outbox.replaceRejectedReplyFiles(operation, with: replacement.write)
+                    return
+                }
                 try await outbox.submit(target: saved.target, operation: saved.operation, write: saved.write,
                                         idempotencyKey: operation, retryRefused: retryRefused)
                 return
