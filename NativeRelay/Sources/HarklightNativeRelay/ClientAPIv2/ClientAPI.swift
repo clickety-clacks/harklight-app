@@ -146,6 +146,8 @@ public struct APIError: Error, Equatable, Sendable {
                   requestID: requestID ?? bodyRequestID, retryAfter: retryAfter)
     }
 
+    var isSharedCapabilityRefusal: Bool { status == 400 && token == .unsupported }
+
     /// A definitive refusal: the same request will never succeed. A paused
     /// account is not one: the request is kept until the pause ends.
     /// A 4xx without a contract body (for example from something in front

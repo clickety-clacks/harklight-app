@@ -146,7 +146,11 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
                                            relay.connection?.signalQueuedReplies()
                                        }
                                        onLiveState(state)
-                                   }, onShow: onShow)
+                                   }, onShow: onShow, onSharedCapabilityRefusal: {
+                                       guard let connection = relay.connection,
+                                             connection.model.snapshot.sharedServerID != nil else { return false }
+                                       return (try? await connection.renegotiateSharedScope()) == true
+                                   })
         relay.connection = self
         access.restorePause(from: model, savedMePaused: savedMe?.accountState == "paused", errors: errors)
     }
@@ -353,15 +357,21 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
 
     /// Push or background refresh: applies every batch from the cursor.
     public func catchUp(userInitiated: Bool = false) async throws {
+        let wasShared = model.snapshot.sharedServerID != nil
         do {
             try await sync.catchUp(userInitiated: userInitiated)
-        } catch let error as APIError where error.status == 400 && error.token == .unsupported &&
-            model.snapshot.sharedServerID != nil {
-            _ = try await refreshMe(userInitiated: userInitiated)
-            guard model.snapshot.sharedServerID == nil else { throw error }
+        } catch let error as APIError where wasShared && error.isSharedCapabilityRefusal {
+            guard try await renegotiateSharedScope(userInitiated: userInitiated) else { throw error }
             try await sync.catchUp(userInitiated: userInitiated)
         }
         if !foregroundOnlyWrites { sendSavedWrites() }
+    }
+
+    private func renegotiateSharedScope(userInitiated: Bool = false) async throws -> Bool {
+        if model.snapshot.sharedServerID != nil {
+            _ = try await refreshMe(userInitiated: userInitiated)
+        }
+        return model.snapshot.sharedServerID == nil
     }
 
     /// Catches up from the saved cursor. A locator revision can skip
