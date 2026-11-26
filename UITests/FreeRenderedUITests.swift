@@ -151,10 +151,15 @@ final class FreeRenderedUITests: XCTestCase {
     }
 
     private func returnToInbox(_ app: XCUIApplication) {
-        if app.scrollViews["message-card-scroll"].exists {
-            let back = app.navigationBars.buttons.firstMatch
-            XCTAssertTrue(back.isHittable, app.debugDescription)
-            back.tap()
+        if !listVisibleBesideDetail(in: app) {
+            let back = workspaceBackButton(in: app)
+            if back.exists && back.isHittable {
+                back.tap()
+            } else {
+                let sidebar = app.buttons["Show Sidebar"]
+                XCTAssertTrue(sidebar.isHittable, app.debugDescription)
+                sidebar.tap()
+            }
         }
         XCTAssertTrue(app.collectionViews.firstMatch.waitForExistence(timeout: 5), app.debugDescription)
     }
