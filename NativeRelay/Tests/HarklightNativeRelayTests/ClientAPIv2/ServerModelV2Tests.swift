@@ -65,7 +65,7 @@ final class ServerModelV2Tests: XCTestCase {
         XCTAssertTrue(try restored.configureSharedMessages(serverID: nil))
         XCTAssertNil(restored.heldCursor)
         XCTAssertNil(restored.snapshot.sharedContinuation)
-        XCTAssertEqual(restored.snapshot.orderedItems.map(.itemID), [ExactText("ordinary")])
+        XCTAssertEqual(restored.snapshot.orderedItems.map { $0.itemID }, [ExactText("ordinary")])
         XCTAssertThrowsError(try restored.apply([], cursor: 17, generation: stale))
     }
 
