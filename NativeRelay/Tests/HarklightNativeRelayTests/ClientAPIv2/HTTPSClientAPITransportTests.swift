@@ -40,6 +40,36 @@ private final class StubURLProtocol: URLProtocol, @unchecked Sendable {
     override func stopLoading() {}
 }
 
+private actor SignInFixture: ClientAPITransport {
+    private(set) var requests: [APIRequest] = []
+
+    func send(_ request: APIRequest) async throws -> APIResponse {
+        requests.append(request)
+        switch request.path {
+        case "/v2/auth/methods":
+            return APIResponse(status: 200, requestID: nil, body: Data(#"{"methods":["owner_code"]}"#.utf8))
+        case "/v2/auth/transactions":
+            return APIResponse(status: 200, requestID: nil, body: Data(#"{"transaction":"fixture-transaction"}"#.utf8))
+        case "/sign-in/code":
+            return APIResponse(status: 204, requestID: nil, body: Data())
+        case "/v2/auth/sign-in":
+            return APIResponse(status: 200, requestID: nil, body: Data(
+                #"{"person_id":"person-1","device_id":"device-1","duplicate":false,"method":"owner_code"}"#.utf8
+            ))
+        default:
+            throw URLError(.unsupportedURL)
+        }
+    }
+
+    nonisolated func changeFeed(after: Rev) -> AsyncThrowingStream<FeedEvent, any Error> {
+        AsyncThrowingStream { $0.finish(throwing: URLError(.unsupportedURL)) }
+    }
+
+    func changeBatch(after: Rev) async throws -> FeedBatch {
+        throw URLError(.unsupportedURL)
+    }
+}
+
 final class HTTPSClientAPITransportTests: XCTestCase {
     private func transport(feedIdleInterval: Duration = .seconds(60), bearer: String? = nil,
                            _ handler: @escaping (URLRequest) -> StubURLProtocol.Reply) -> HTTPSClientAPITransport {
@@ -159,7 +189,8 @@ final class HTTPSClientAPITransportTests: XCTestCase {
         let feed = try XCTUnwrap(sent.last)
         XCTAssertEqual(write.url?.path, original.url?.path)
         XCTAssertEqual(write.httpMethod, original.httpMethod)
-        XCTAssertEqual(write.httpBody, original.httpBody)
+        XCTAssertEqual(legacy.urlRequest(for: request).httpBody, body)
+        XCTAssertEqual(session.urlRequest(for: request).httpBody, body)
         XCTAssertEqual(write.value(forHTTPHeaderField: "Idempotency-Key"),
                        original.value(forHTTPHeaderField: "Idempotency-Key"))
         XCTAssertEqual(write.value(forHTTPHeaderField: "Authorization"), "Bearer fixture-bearer")
@@ -209,20 +240,7 @@ final class HTTPSClientAPITransportTests: XCTestCase {
     }
 
     func testOwnerCodeUsesTheCommittedTransactionWithoutSendingVerifierUntilRedemption() async throws {
-        let api = transport { request in
-            switch request.url?.path {
-            case "/v2/auth/methods":
-                return .init(status: 200, chunks: [Data(#"{"methods":["owner_code"]}"#.utf8)])
-            case "/v2/auth/transactions":
-                return .init(status: 200, chunks: [Data(#"{"transaction":"fixture-transaction"}"#.utf8)])
-            case "/sign-in/code":
-                return .init(status: 204, chunks: [])
-            default:
-                return .init(status: 200, chunks: [Data(
-                    #"{"person_id":"person-1","device_id":"device-1","duplicate":false,"method":"owner_code"}"#.utf8
-                )])
-            }
-        }
+        let api = SignInFixture()
         let signIn = NativeSignInAPI(transport: api)
         let methods = try await signIn.methods()
         XCTAssertEqual(methods, [.ownerCode])
@@ -236,9 +254,10 @@ final class HTTPSClientAPITransportTests: XCTestCase {
         XCTAssertEqual(result.method, .ownerCode)
         XCTAssertEqual(result.personID, "person-1")
         XCTAssertEqual(result.deviceID, "device-1")
-        let sent = StubURLProtocol.lock.withLock { StubURLProtocol.seen }
+        let sent = await api.requests
+        XCTAssertEqual(sent.map(\.path), ["/v2/auth/methods", "/v2/auth/transactions", "/sign-in/code", "/v2/auth/sign-in"])
         let bodies = try sent.dropFirst().map { request in
-            try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: String])
+            try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.body)) as? [String: String])
         }
         XCTAssertEqual(bodies[0], ["verifier_hash": NativeSessionProof.commitment(transaction.verifier)])
         XCTAssertEqual(bodies[1], ["code": "fixture-code", "transaction": "fixture-transaction"])
