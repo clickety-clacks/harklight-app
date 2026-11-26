@@ -287,8 +287,10 @@ struct InboxNotificationDestination: Equatable {
 
         let selection = InboxSelection.request(key)
         let item = rows.first(where: { $0.id == selection })
-        let isRepliedFYI: Bool = if case let .request(row)? = item { row.isRepliedFYI } else { false }
-        let isReplied = isRepliedFYI || (!usesFreeOrder && item?.belongsToReplied == true)
+        let usesRepliedRegardlessOfOrder: Bool = if case let .request(row)? = item {
+            row.isRepliedFYI || row.isSharedAnswerSettled
+        } else { false }
+        let isReplied = usesRepliedRegardlessOfOrder || (!usesFreeOrder && item?.belongsToReplied == true)
         let messageTab: InboxMessageTab = isReplied ? .replied : .inbox
         self.selection = selection
         selectedTab = messageTab
@@ -683,6 +685,9 @@ struct InboxRequestRow: Identifiable {
     var hasMessageLoadWarning = false
     var isRetracted = false
     var chatUnread: Bool? = nil
+    var sharedUnreadChatCount: Int? = nil
+    var isSharedAnswerSettled = false
+    var sharedRequestCanAnswer: Bool?
     var initials: String = ""
     var emphasis: InboxRowEmphasis = .standard
     var messageType: HarklightMessageType? = nil
@@ -703,6 +708,7 @@ struct InboxRequestRow: Identifiable {
     var serverPostedAt: Date? = nil
     var postedAt: Date? { serverPostedAt ?? createdAt }
     var fyiServerSeen: Bool? = nil
+    var usesSharedSeenFlag = false
     var fyiHasEnded = false
     var fyiOpenedFlagPending = false
     var fyiOpenedFlagFailed = false
@@ -764,6 +770,7 @@ struct InboxRequestRow: Identifiable {
 
     var fyiSeenAction: FYISeenAction? {
         guard !fyiHasEnded, isUnseenFYI, !isFYISeenPending else { return nil }
+        if usesSharedSeenFlag { return canReportFYISeen ? .openedFlag : nil }
         if isProgressFYI {
             if fyiProgressIsFinished { return canAnswerProgressFYISeen ? .answer : nil }
             return canReportFYISeen ? .openedFlag : nil
@@ -815,6 +822,7 @@ struct InboxRequestRow: Identifiable {
     }
 
     var belongsToReplied: Bool {
+        if isSharedAnswerSettled { return true }
         if isRepliedFYI { return true }
         if fyiGroupingEnabled && isActiveFYI { return false }
         // A failed delivery returns a response-marked row to Inbox, even if its

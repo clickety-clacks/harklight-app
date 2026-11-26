@@ -34,6 +34,23 @@ final class NativeNotificationRoutingTests: XCTestCase {
         XCTAssertEqual(router.intent?.locator?.target, "chat")
     }
 
+    func testSharedPeerReplyUsesTheExistingChatNotificationDestination() throws {
+        let defaults = try isolatedDefaults()
+        defer { defaults.removePersistentDomain(forName: defaultsSuiteName) }
+        let router = NativeNotificationRouter(defaults: defaults)
+        let locator = notificationLocator(target: "chat")
+        let payload = try JSONValue.parse(Data(#"{"aps":{"alert":{"title":"Dana","body":"Thursday works."}}}"#.utf8))
+
+        XCTAssertTrue(router.receiveForegroundNotification(
+            payload, locator: locator, title: "Dana", body: "Thursday works."))
+        let indicator = try XCTUnwrap(router.foregroundChatIndicator)
+        XCTAssertEqual(indicator.title, "Dana")
+        XCTAssertEqual(indicator.request, locator.request)
+        XCTAssertEqual(router.consumeForegroundChatIndicator(id: indicator.id)?.payload, payload)
+        router.receive(locator: locator)
+        XCTAssertEqual(router.intent?.locator, locator)
+    }
+
     func testMatchingVisibleChatSuppressesIndicatorAndAnotherChatDoesNot() throws {
         let defaults = try isolatedDefaults()
         defer { defaults.removePersistentDomain(forName: defaultsSuiteName) }

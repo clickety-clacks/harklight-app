@@ -1881,8 +1881,9 @@ final class LivePresentationStore {
     }
 
     private func listChatUnread(_ key: RequestKey) -> Bool? {
-        guard let thread = conversation(for: key),
-              thread.turns.contains(where: { turn in
+        guard let thread = conversation(for: key) else { return nil }
+        if thread.sharedUnreadReplies != nil { return thread.hasUnreadAgentReply }
+        guard thread.turns.contains(where: { turn in
                   switch turn.kind {
                   case .none, .some(.discussion), .some(.reply):
                       return true // Older chat turns have no kind.
@@ -1896,7 +1897,7 @@ final class LivePresentationStore {
     // The saved read position is visible immediately, while the client sends it to the server.
     func markConversationRead(_ key: RequestKey) {
         guard !isReadOnly,
-              let latest = conversationThreads[key]?.latestAgentReply else { return }
+              let latest = conversationThreads[key]?.latestIncomingReply else { return }
         markConversationRead(key, through: latest.id)
     }
 
@@ -1905,7 +1906,7 @@ final class LivePresentationStore {
     func markConversationRead(_ key: RequestKey, through turnID: ExactText) {
         guard !isReadOnly,
               conversationThreads[key]?.turns.contains(where: {
-                  $0.id == turnID && $0.kind == .reply && $0.author != .person
+                  $0.id == turnID && $0.isIncomingReply
               }) == true else { return }
         let readKey = ConversationReadKey(request: key, turnID: turnID)
         guard pendingConversationReadUpdates.insert(readKey).inserted else { return }
@@ -2395,6 +2396,9 @@ final class LivePresentationStore {
                               skippedMessageRequestTags: Set<String>) -> InboxRequestRow? {
         let retracted = isRetracted(request)
         if retracted, clearedRetractions.contains(request.key) { return nil }
+        let thread = conversation(for: request.key)
+        let sharedAnswerSettled = thread?.shared != nil &&
+            (thread?.terminal == .answered || thread?.terminal == .noComment)
         let hasKnownDeliveryFailure = failedResponseWarning(for: request) != nil
         let hasDeliveryWarning = hasKnownDeliveryFailure || request.staleAnswerRevision != nil
         let hasMessageLoadWarning = requestTag(for: request.key)
@@ -2416,7 +2420,8 @@ final class LivePresentationStore {
         if hasAcceptedSenderRevision { statusParts.append("Updated") }
         if request.inboxStateIsCurrent {
             let lifecycle = retracted ? retractionLabel(for: request) :
-                request.defaultAnswerStatusText ??
+                thread?.sharedAnswerStatusText ??
+                    request.defaultAnswerStatusText ??
                     String(localized: LiveLifecycleTitle(request.lifecycleStatus).label)
             if request.lifecycleStatus != .open || retracted || request.defaultAnswerStatusText != nil ||
                 hasAcceptedSenderRevision {
@@ -2479,6 +2484,9 @@ final class LivePresentationStore {
             hasMessageLoadWarning: hasMessageLoadWarning,
             isRetracted: retracted,
             chatUnread: listChatUnread(request.key),
+            sharedUnreadChatCount: thread?.unreadSharedChatCount,
+            isSharedAnswerSettled: sharedAnswerSettled,
+            sharedRequestCanAnswer: thread?.shared?.answerPolicy == nil ? nil : thread?.shared?.canAnswer,
             submissionProgress: submissionProgress[request.key].map { progress in
                 InboxRowSubmissionProgress(
                     state: progress.state == .awaiting ? .awaiting : .notSent(detail: progress.detail))
@@ -2495,6 +2503,7 @@ final class LivePresentationStore {
             defaultAnswerStatus: request.defaultAnswerStatusText)
 
         if row.isFYI {
+            row.usesSharedSeenFlag = thread?.shared.map { $0.answerPolicy == nil } == true
             row.fyiGroupingEnabled = !isReadOnly
             row.fyiIsSuperseded = request.lifecycleStatus == .superseded
             row.fyiAnsweredOtherwise = (request.lifecycleStatus == .answered || request.lifecycleStatus == .noComment) &&
@@ -2515,7 +2524,7 @@ final class LivePresentationStore {
             row.fyiPriority = item.priority
             row.fyiPriorityScore = item.score
             row.canReportFYISeen = item.itemSeen != nil && canSendToCurrentServer &&
-                (request.informationalSeenStatus == nil ||
+                (row.usesSharedSeenFlag || request.informationalSeenStatus == nil ||
                     (row.isProgressFYI && request.lifecycleStatus == .open && request.intentReceipt == nil))
         }
         if row.isProgressFYI {
@@ -2524,7 +2533,7 @@ final class LivePresentationStore {
             row.canAnswerProgressFYISeen = canAnswerSeen
         }
         if row.isFYI, !isReadOnly {
-            let usesOpenedFlag = request.informationalSeenStatus == nil ||
+            let usesOpenedFlag = row.usesSharedSeenFlag || request.informationalSeenStatus == nil ||
                 (row.isProgressFYI && !row.fyiProgressIsFinished)
             row.fyiOpenedFlagPending = usesOpenedFlag && request.itemOpenPending
             row.fyiOpenedFlagFailed = usesOpenedFlag && request.itemOpenFailed && row.isActiveFYI
@@ -2557,8 +2566,12 @@ final class LivePresentationStore {
         return "Retracted · " + date.formatted(date: .abbreviated, time: .shortened)
     }
 
+    func canSubmitAnswer(for key: RequestKey) -> Bool {
+        conversation(for: key)?.shared?.canAnswer != false
+    }
+
     private func canNoComment(_ request: PresentedRequest, isRetracted: Bool) -> Bool {
-        guard canSendToCurrentServer, !isRetracted,
+        guard canSendToCurrentServer, !isRetracted, canSubmitAnswer(for: request.key),
               request.lifecycleStatus == .open, request.intentReceipt == nil,
               request.informationalSeenStatus == nil else { return false }
         // No comment is its own wire answer and does not depend on the
@@ -2816,7 +2829,7 @@ final class LivePresentationStore {
     }
 
     func canRetryUnconfirmedAnswer(for key: RequestKey) -> Bool {
-        guard canSendToCurrentServer,
+        guard canSendToCurrentServer, canSubmitAnswer(for: key),
               let request = request(for: key),
               let receipt = request.intentReceipt,
               [.terminalUnconfirmed, .notDelivered, .unsupported].contains(receipt.localState),
@@ -2839,7 +2852,7 @@ final class LivePresentationStore {
     @discardableResult
     func retrySubmissionFromUser(_ key: RequestKey) -> Bool {
         if retryUnconfirmedAnswerFromUser(key) { return true }
-        guard canSendToCurrentServer, !isRetracted(key),
+        guard canSendToCurrentServer, !isRetracted(key), canSubmitAnswer(for: key),
               case .failed(retryable: true, _)? = submissionPhases[key]?.phase,
               let saved = savedSubmission(for: key),
               !sendingAnswerIntentIDs.contains(saved.intentID) else { return false }
@@ -2904,7 +2917,7 @@ final class LivePresentationStore {
     }
 
     func canRetryFailedResponse(for key: RequestKey) -> Bool {
-        guard permitsDelivery, canSendToCurrentServer,
+        guard permitsDelivery, canSendToCurrentServer, canSubmitAnswer(for: key),
               let request = request(for: key),
               let warning = failedResponseWarning(for: key, revision: request.requestRevision),
               warning.canRetry,
@@ -3133,7 +3146,7 @@ final class LivePresentationStore {
         let revision = inspected.requestRevision
         let bufferKey = DraftBufferKey(request: key, revision: revision)
         let answerDraft = answerDraftOverride ?? pendingDrafts[bufferKey] ?? inspected.draft
-        guard !isRetracted(key), inspected.lifecycleStatus == .open,
+        guard !isRetracted(key), canSubmitAnswer(for: key), inspected.lifecycleStatus == .open,
               inspected.intentReceipt == nil,
               let selector = inspected.selector else {
             throw LiveReplyError.notOpen
@@ -3189,6 +3202,10 @@ final class LivePresentationStore {
         guard permitsDelivery, !isReadOnly else { return false }
         let selectedNoComment: Bool
         guard let request = try? inspectedRequest(key, revision: requestRevision) else { return false }
+        if explicitCompatibilityAction == ExactText("seen"), request.informationalSeenStatus == .available,
+           let shared = conversation(for: key)?.shared, shared.answerPolicy == nil {
+            return markFYISeen(key, requestRevision: request.requestRevision)
+        }
         if explicitCompatibilityAction == ExactText("seen"), request.messageProgress != nil {
             return markProgressFYISeen(key, requestRevision: request.requestRevision)
         }
@@ -3280,6 +3297,7 @@ final class LivePresentationStore {
     func submitNoCommentFromUser(_ key: RequestKey,
                                  requestRevision: UInt64? = nil,
                                  selectionIsLocal: Bool = false) -> Bool {
+        guard canSubmitAnswer(for: key) else { return false }
         releaseDefinitiveFailureBeforeChange(key)
         guard validateUserAction(for: key) else { return false }
         let revision: UInt64?
@@ -3355,7 +3373,7 @@ final class LivePresentationStore {
     }
 
     private func canSubmitNoComment(_ request: PresentedRequest) -> Bool {
-        request.informationalSeenStatus == nil
+        request.informationalSeenStatus == nil && canSubmitAnswer(for: request.key)
     }
 
     func retryPendingDelivery() {

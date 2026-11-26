@@ -43,6 +43,34 @@ struct SeenActionPresentation: Equatable {
     }
 }
 
+enum SharedAnswerPresentation {
+    struct Row: Identifiable {
+        let id: ExactText
+        let name: String
+        let answer: String
+    }
+
+    static func rows(in shared: APISharedItem) -> [Row] {
+        shared.answers.compactMap { entry in
+            guard let answer = entry.terminal.answer else { return nil }
+            let speaker = entry.terminal.speaker
+            let name = shared.members.first { $0.person.id == entry.personID }?.person.displayName
+                ?? speaker?.displayName
+            guard let name else { return nil }
+            let summary: String = switch answer.kind {
+            case "no_comment": String(localized: "No comment")
+            case "choice": answer.label?.rawValue ?? String(localized: "Answered")
+            case "reply": answer.text?.rawValue ?? String(localized: "Answered")
+            case "default":
+                answer.text?.rawValue ?? answer.value?.jsonString ?? String(localized: "Answered by default")
+            case "result": answer.value?.jsonString ?? String(localized: "Answered")
+            default: String(localized: "Answered")
+            }
+            return Row(id: entry.personID, name: name.rawValue, answer: summary)
+        }
+    }
+}
+
 enum AnswerConfirmationText {
     static func formatted(accountAnswerOutcome: AccountAnswerOutcome?,
                          submittedAnswer: RequestDraft?,
@@ -1668,6 +1696,8 @@ struct LiveRequestDetail: View {
         let isRetracted: Bool
         let retractionLabel: String
         let conversationIndicator: Bool?
+        let shared: APISharedItem?
+        let sharedAnswerStatusText: String?
     }
 
     let request: PresentedRequest
@@ -1819,6 +1849,8 @@ struct LiveRequestDetail: View {
               !store.isReadOnly, !store.isRetracted(request.key),
               request.lifecycleStatus == .open,
               request.intentReceipt == nil else { return false }
+        if request.informationalSeenStatus == nil,
+           store.conversation(for: request.key)?.shared?.canAnswer == false { return false }
         switch request.projection {
         case .sender:
             return true
@@ -1852,7 +1884,9 @@ struct LiveRequestDetail: View {
             hasAcceptedUpdate: thread?.acceptedUpdates.isEmpty == false,
             isRetracted: thread?.isRetracted == true || retractionOutcome != nil,
             retractionLabel: label,
-            conversationIndicator: thread.map { $0.hasUnreadAgentReply })
+            conversationIndicator: thread.map { $0.hasUnreadAgentReply },
+            shared: thread?.shared,
+            sharedAnswerStatusText: thread?.sharedAnswerStatusText)
     }
 
     private var localReplySession: ReplyEditorDraftSession? {
@@ -2326,7 +2360,7 @@ struct LiveRequestDetail: View {
     /// a new one. A lost send stays locked apart from its Retry.
     var unlocksAfterDefinitiveFailure: Bool {
         guard localExample == nil, !context.isSupersedesTarget, !store.isReadOnly,
-              !store.isRetracted(request.key),
+              !store.isRetracted(request.key), store.canSubmitAnswer(for: request.key),
               request.lifecycleStatus == .open || request.lifecycleStatus == .pending,
               case .failed(_, editable: true)? = submissionPhase?.phase,
               submissionPhase?.kind != .seen else { return false }
@@ -2414,6 +2448,7 @@ struct LiveRequestDetail: View {
     private var lifecycleStatusText: String? {
         guard request.inboxStateIsCurrent else { return nil }
         if storePresentationSnapshot.isRetracted { return storePresentationSnapshot.retractionLabel }
+        if let answerStatus = storePresentationSnapshot.sharedAnswerStatusText { return answerStatus }
         // Pending is shown by the control that is sending, not as a line.
         if isSupersedesReadOnly || (request.lifecycleStatus != .open &&
             request.lifecycleStatus != .answered && request.lifecycleStatus != .pending &&
@@ -2455,6 +2490,41 @@ struct LiveRequestDetail: View {
                     deadline: byWhenDate, stake: request.stakeText?.rawValue,
                     key: request.key, supersedesMessageIDs: request.supersedesMessageIDs,
                     secondaryTextColor: detailColors.secondary)
+                if let shared = storePresentationSnapshot.shared, !shared.members.isEmpty {
+                    DisclosureGroup("People and Seen") {
+                        VStack(alignment: .leading, spacing: 8) {
+                            ForEach(shared.members, id: \.person.id) { member in
+                                let seen = member.seenRevision == request.requestRevision
+                                LabeledContent {
+                                    Text(seen ? "Seen" : "Unseen")
+                                        .foregroundStyle(detailColors.secondary)
+                                } label: {
+                                    Text(verbatim: member.person.displayName.rawValue)
+                                }
+                            }
+                        }
+                        .font(.subheadline)
+                    }
+                    .accessibilityIdentifier("request-shared-members")
+                }
+                if let shared = storePresentationSnapshot.shared {
+                    let answers = SharedAnswerPresentation.rows(in: shared)
+                    if !answers.isEmpty {
+                        DisclosureGroup("Answers") {
+                            VStack(alignment: .leading, spacing: 8) {
+                                ForEach(answers) { answer in
+                                    LabeledContent {
+                                        Text(verbatim: answer.answer).textSelection(.enabled)
+                                    } label: {
+                                        Text(verbatim: answer.name)
+                                    }
+                                }
+                            }
+                            .font(.subheadline)
+                        }
+                        .accessibilityIdentifier("request-shared-answers")
+                    }
+                }
                 if !request.supersededByMessageKeys.isEmpty {
                     ReplacedByMessagesSection(
                         replacementKeys: request.supersededByMessageKeys,
@@ -4302,6 +4372,14 @@ private struct FailedResponseDialog: View {
         .frame(minWidth: 280, minHeight: 260)
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
+    }
+}
+
+extension ConversationThread {
+    var sharedAnswerStatusText: String? {
+        guard shared != nil, let answerSpeaker else { return nil }
+        let name = answerSpeaker.displayName.rawValue
+        return String(localized: "Answered by \(name)")
     }
 }
 

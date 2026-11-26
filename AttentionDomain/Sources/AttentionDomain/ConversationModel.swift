@@ -91,6 +91,7 @@ public struct ConversationTurn: Equatable, Codable, Identifiable, Sendable {
     public let id: ExactText
     public let binding: ConversationBinding
     public let author: ConversationAuthor
+    public let speaker: APISpeaker?
     public let sessionHandle: ExactText
     public let text: ExactText
     public let inReplyTo: ExactText?
@@ -107,16 +108,28 @@ public struct ConversationTurn: Equatable, Codable, Identifiable, Sendable {
     /// Nil preserves the behavior of entries from older Servers.
     public var deliveryAcks: Bool?
 
+    /// Older Servers and saved person turns omit the speaker.
+    public var isOwnTurn: Bool {
+        author == .person && (speaker.map { $0.id == binding.request.accountScope } ?? true)
+    }
+
+    public var isIncomingReply: Bool {
+        (kind == .reply && author != .person) ||
+            (kind == .discussion && author == .person && !isOwnTurn)
+    }
+
     public enum Kind: String, Codable, Sendable { case discussion, reply, revision, result, terminal }
 
     public init(id: ExactText, binding: ConversationBinding, author: ConversationAuthor,
                 sessionHandle: ExactText, text: ExactText, inReplyTo: ExactText? = nil,
                 operationID: UUID? = nil, files: [ConversationFile] = [],
                 contentRedacted: Bool? = nil, kind: Kind? = nil, resultStatus: ExactText? = nil,
-                conversationSequence: UInt64? = nil, deliveryAcks: Bool? = nil) {
+                conversationSequence: UInt64? = nil, deliveryAcks: Bool? = nil,
+                speaker: APISpeaker? = nil) {
         self.id = id
         self.binding = binding
         self.author = author
+        self.speaker = speaker
         self.sessionHandle = sessionHandle
         self.text = text
         self.inReplyTo = inReplyTo
@@ -469,6 +482,10 @@ public struct ConversationThread: Equatable, Codable, Sendable {
     /// only on threads from the v2 projection, so the current protocol keeps
     /// today's rules. Optional so existing saved state stays readable.
     public var chatNeverCloses: Bool?
+    public var shared: APISharedItem?
+    public var answerSpeaker: APISpeaker?
+    public var sharedUnreadReplies: Int?
+    public var sharedReadThroughConversationSequence: UInt64?
     /// Current Server/account feature from the existing /v2/me lifecycle.
     public var handoffCaptions: Bool?
     /// Client API v2 (product ruling APP-07): each sent chat message is its
@@ -498,9 +515,26 @@ public struct ConversationThread: Equatable, Codable, Sendable {
     public var latestAgentReply: ConversationTurn? {
         turns.last { $0.kind == .reply && $0.author != .person }
     }
-    /// An agent reply arrived after Chat last showed this request's replies.
+    public var latestIncomingReply: ConversationTurn? {
+        turns.last(where: \.isIncomingReply)
+    }
+
+    public var unreadSharedChatCount: Int? {
+        guard let sharedUnreadReplies else { return nil }
+        let serverPosition = sharedReadThroughConversationSequence ?? 0
+        let localPosition = accountReadThroughConversationSequence ?? 0
+        guard localPosition > serverPosition else { return sharedUnreadReplies }
+        let newlyRead = turns.count {
+            guard $0.isIncomingReply, let position = $0.conversationSequence else { return false }
+            return position > serverPosition && position <= localPosition
+        }
+        return max(0, sharedUnreadReplies - newlyRead)
+    }
+
+    /// An incoming reply arrived after Chat last showed this request's replies.
     public var hasUnreadAgentReply: Bool {
-        guard let latest = latestAgentReply else { return false }
+        if let unreadSharedChatCount { return unreadSharedChatCount > 0 }
+        guard let latest = latestIncomingReply else { return false }
         if let accountReadThroughConversationSequence,
            let latestSequence = latest.conversationSequence {
             return latestSequence > accountReadThroughConversationSequence
@@ -513,6 +547,7 @@ public struct ConversationThread: Equatable, Codable, Sendable {
     /// Answering the request ends its answer flow, not its separate Chat.
     public var allowsDiscussion: Bool {
         if hasNoConversation == true { return false }
+        if let shared { return shared.chatWritable && !isRetracted }
         if chatNeverCloses == true { return true }
         guard !isRetracted else { return false }
         guard let terminal else { return true }
@@ -523,6 +558,7 @@ public struct ConversationThread: Equatable, Codable, Sendable {
     /// and discussion is allowed; under the v2 chat rules, always.
     public var isComposerOpen: Bool {
         guard hasNoConversation != true else { return false }
+        if shared != nil { return allowsDiscussion }
         return chatNeverCloses == true || (terminal == nil && allowsDiscussion)
     }
 

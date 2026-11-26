@@ -671,7 +671,10 @@ public final class ClientRepository: @unchecked Sendable {
         if let activeID = state.intentByRequest[request.key] {
             throw AttentionStoreError.competingIntent(activeID)
         }
-        guard state.remoteStates[request.key]?.isTerminal != true else { throw AttentionStoreError.requestClosed }
+        guard state.remoteStates[request.key]?.isTerminal != true,
+              state.conversation?.threads[request.key]?.shared?.canAnswer != false else {
+            throw AttentionStoreError.requestClosed
+        }
         let operationID = UUID()
         let operation = relayAnswerOperation(request: request, answer: answer, operationID: operationID,
                                              requestRevision: selector.requestRevision)
@@ -750,7 +753,10 @@ public final class ClientRepository: @unchecked Sendable {
         if let activeID = state.intentByRequest[request.key] {
             throw AttentionStoreError.competingIntent(activeID)
         }
-        guard state.remoteStates[request.key]?.isTerminal != true else { throw AttentionStoreError.requestClosed }
+        guard state.remoteStates[request.key]?.isTerminal != true,
+              state.conversation?.threads[request.key]?.shared?.canAnswer != false else {
+            throw AttentionStoreError.requestClosed
+        }
         let operationID = UUID()
         let operation = JSONValue.object([
             JSONMember("type", .string(ExactText("answer_no_comment"))),
@@ -919,7 +925,8 @@ public final class ClientRepository: @unchecked Sendable {
         // The saved request already binds the intended revision and exact bytes.
         // The server decides whether it can still apply. A request with a known
         // final state is already unavailable.
-        guard state.remoteStates[submission.requestKey]?.isTerminal != true else {
+        guard state.remoteStates[submission.requestKey]?.isTerminal != true,
+              state.conversation?.threads[submission.requestKey]?.shared?.canAnswer != false else {
             throw AttentionStoreError.requestClosed
         }
         switch submission.disposition {
@@ -2804,10 +2811,10 @@ public final class ClientRepository: @unchecked Sendable {
         let turn: ConversationTurn?
         if let requestedTurnID {
             turn = thread.turns.first {
-                $0.id == requestedTurnID && $0.kind == .reply && $0.author != .person
+                $0.id == requestedTurnID && $0.isIncomingReply
             }
         } else {
-            turn = thread.latestAgentReply
+            turn = thread.latestIncomingReply
         }
         guard let turn else {
             return ConversationReadUpdate(pendingPosition: nil, thread: thread,
@@ -2943,7 +2950,7 @@ public final class ClientRepository: @unchecked Sendable {
         var next = state
         guard var conversation = next.conversation, var thread = conversation.threads[binding.request],
               let draft = thread.drafts[binding.revision] else { throw ConversationError.missingRequest }
-        guard thread.chatNeverCloses == true else { throw ConversationError.closed }
+        guard thread.chatNeverCloses == true, thread.shared?.chatWritable != false else { throw ConversationError.closed }
         guard !draft.text.rawValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !draft.files.isEmpty else {
             throw ConversationError.emptyDraft
         }
@@ -3612,7 +3619,7 @@ public final class ClientRepository: @unchecked Sendable {
             operationID: turn.operationID,
             files: try turn.files.map { try externalizingConversationFiles(in: $0, using: references, allowInlinePersistence: allowInlinePersistence) },
             contentRedacted: turn.contentRedacted, kind: turn.kind, resultStatus: turn.resultStatus,
-            conversationSequence: turn.conversationSequence, deliveryAcks: turn.deliveryAcks)
+            conversationSequence: turn.conversationSequence, deliveryAcks: turn.deliveryAcks, speaker: turn.speaker)
     }
 
     private static func externalizingConversationFiles(in draft: ConversationDraft,

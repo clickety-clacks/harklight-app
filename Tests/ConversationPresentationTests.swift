@@ -10,6 +10,172 @@ import HarklightNativeRelay
 
 @MainActor
 final class ConversationPresentationTests: XCTestCase {
+    func testSharedChatIdentifiesPeopleByIDAndCountsOnlyIncomingTurns() throws {
+        var model = ServerModelV2()
+        try model.putForTesting(sharedItem())
+        for (position, speaker) in [(1, "reader"), (2, "other"), (3, nil), (4, "reader")] as [(Int, String?)] {
+            let attribution = speaker.map {
+                #","shared_entry_id":"shared-\#(position)","speaker":{"kind":"person","id":"\#($0)","display_name":"Dana","handle":null}"#
+            } ?? ""
+            let json = #"{"entry_id":"entry-\#(position)","item_id":"local","rev":\#(position + 40),"position":\#(position),"kind":"reply","author":"person","request_revision":2,"text":"Checking","files":[]\#(attribution)}"#
+            try model.putForTesting(APIEntry(json: JSONValue.parse(Data(json.utf8))))
+        }
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+            personID: ExactText("reader"), deviceID: ExactText("device"))
+        let restored = try JSONDecoder().decode(ServerModelV2.self, from: JSONEncoder().encode(model))
+        var thread = try XCTUnwrap(ServerModelV2Projection.cachedState(restored, identity: identity)
+            .conversations.values.first)
+        XCTAssertEqual(thread.turns.map(\.isOwnTurn), [true, false, true, true])
+        XCTAssertEqual(thread.latestIncomingReply?.id, ExactText("entry-2"))
+        XCTAssertTrue(thread.hasUnreadAgentReply)
+        thread.accountReadThroughConversationSequence = 2
+        XCTAssertFalse(thread.hasUnreadAgentReply)
+        XCTAssertNil(thread.latestAgentReply)
+        XCTAssertFalse(thread.isComposerOpen)
+        XCTAssertEqual(thread.shared?.members.map(\.seenRevision), [2, nil, 1])
+        XCTAssertEqual(thread.answerSpeaker?.displayName, ExactText("Dana"))
+        XCTAssertEqual(thread.sharedAnswerStatusText, "Answered by Dana")
+        XCTAssertEqual(thread.shared?.canAnswer, false)
+    }
+
+    func testSharedSettlementMovesBothRecipientsToRepliedEvenInFreeOrder() throws {
+        for (person, answered) in [("other", true), ("reader", false)] {
+            let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                personID: ExactText(person), deviceID: ExactText("device"))
+            let context = ProfileContext(identity: identity, transportMode: .relay)
+            let repository = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+            var model = ServerModelV2()
+            let item = try sharedItem(answeredByViewer: answered)
+            XCTAssertEqual(item.terminal?.byThisPerson, answered)
+            model.putForTesting(item)
+            try repository.restoreCachedServerState(
+                ServerModelV2Projection.cachedState(model, identity: identity), context: context)
+            let store = try LivePresentationStore(store: repository, context: context)
+            let key = ServerModelV2Projection.key(for: item.itemID, sender: item.sender, identity: identity)
+            let row = try XCTUnwrap(store.inboxRow(for: key))
+            XCTAssertTrue(row.belongsToReplied)
+            XCTAssertTrue(row.status.contains("Answered by Dana"))
+            XCTAssertTrue(InboxNormalListProjection.entries(rows: [.request(row)],
+                serverItems: store.presentation.inboxViewListItems, freeOrderVersion: 1,
+                in: .inbox, search: "").isEmpty)
+            XCTAssertEqual(InboxNormalListProjection.entries(rows: [.request(row)],
+                serverItems: store.presentation.inboxViewListItems, freeOrderVersion: 1,
+                in: .replied, search: "").count, 1)
+        }
+    }
+
+    func testEveryoneAnswerShowsPeerOutcomeWhileMyAnswerIsStillOpen() throws {
+        let answers = #"[{"person_id":"other","terminal":{"state":"answered","at_ms":300,"answer":{"kind":"choice","id":"yes","label":"Yes"},"by_this_person":false,"answer_id":"answer","speaker":{"kind":"person","id":"other","display_name":"Dana"}}}]"#
+        let item = try sharedItem(policy: #"{"kind":"everyone"}"#, canAnswer: true,
+                                  settled: false, answers: answers)
+        let (store, _, key) = try sharedStore(item)
+        let request = try XCTUnwrap(store.request(for: key))
+        let shared = try XCTUnwrap(store.conversation(for: key)?.shared)
+        let answersForDisplay = SharedAnswerPresentation.rows(in: shared)
+        XCTAssertEqual(answersForDisplay.map(\.name), ["Dana"])
+        XCTAssertEqual(answersForDisplay.map(\.answer), ["Yes"])
+        XCTAssertEqual(request.lifecycleStatus, .open)
+        XCTAssertTrue(shared.canAnswer)
+        XCTAssertFalse(try XCTUnwrap(store.inboxRow(for: key)).belongsToReplied)
+    }
+
+    func testNamedNonDeciderHasNoQuickActionAndCannotQueueAnAnswer() throws {
+        let item = try sharedItem(policy: #"{"kind":"named","people":["other"]}"#, settled: false)
+        let (store, repository, key) = try sharedStore(item)
+        let request = try XCTUnwrap(store.request(for: key))
+        let selector = try repository.selector(for: key, context: store.notificationContext)
+        XCTAssertFalse(try XCTUnwrap(store.inboxRow(for: key)).canNoComment)
+        XCTAssertFalse(store.submitNoCommentFromUser(key, requestRevision: request.requestRevision))
+        XCTAssertThrowsError(try store.submit(key, explicitCompatibilityAction: ExactText("yes"),
+                                              requestRevision: request.requestRevision))
+        XCTAssertThrowsError(try repository.submitNoComment(intentID: UUID(), selector: selector,
+                                                             context: store.notificationContext)) {
+            XCTAssertEqual($0 as? AttentionStoreError, .requestClosed)
+        }
+        XCTAssertTrue(try repository.inboxOperationInventory(context: store.notificationContext).isEmpty)
+    }
+
+    private func sharedStore(_ item: APIItem) throws -> (LivePresentationStore, ClientRepository, RequestKey) {
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+            personID: ExactText("reader"), deviceID: ExactText("device"))
+        let context = ProfileContext(identity: identity, transportMode: .relay)
+        let repository = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        var model = ServerModelV2()
+        model.putForTesting(item)
+        try repository.restoreCachedServerState(ServerModelV2Projection.cachedState(model, identity: identity),
+                                                context: context)
+        let key = ServerModelV2Projection.key(for: item.itemID, sender: item.sender, identity: identity)
+        return (try LivePresentationStore(store: repository, context: context), repository, key)
+    }
+
+    func testSharedFYILegacySeenActionFollowsTheOpenedFlagLifecycle() throws {
+        let message = #"{"title":"Launch","message_type":"fyi","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"seen","label":"Seen","kind":"value","value":{"acknowledgment":"seen"}}]}}"#
+        let item = try sharedItem(policy: "null", settled: false, message: message)
+        let (store, repository, key) = try sharedStore(item)
+        let context = store.notificationContext
+        func row() throws -> InboxRequestRow { try XCTUnwrap(store.inboxRow(for: key)) }
+
+        XCTAssertEqual(try row().fyiSeenAction, .openedFlag)
+        XCTAssertTrue(try row().isActiveFYI)
+        XCTAssertTrue(store.markFYISeen(key, requestRevision: item.requestRevision))
+        try store.refreshFromDurableStore()
+        XCTAssertTrue(try row().fyiOpenedFlagPending)
+        XCTAssertEqual(try row().informationalSeenStatus, .pending)
+        XCTAssertNil(try row().fyiSeenAction)
+        let opened = try XCTUnwrap(repository.snapshot(context: context).pendingMessageOpens.first)
+        XCTAssertTrue(try repository.retireMessageOpen(opened.operationID, rejected: true, context: context))
+        try store.refreshFromDurableStore()
+        XCTAssertTrue(try row().fyiOpenedFlagFailed)
+        XCTAssertEqual(try row().fyiSeenAction, .openedFlag)
+
+        var model = ServerModelV2()
+        model.putForTesting(try sharedItem(policy: "null", settled: false, message: message, seen: true))
+        try repository.restoreCachedServerState(
+            ServerModelV2Projection.cachedState(model, identity: context.identity), context: context)
+        try store.refreshFromDurableStore()
+        let confirmed = try row()
+        XCTAssertEqual(confirmed.informationalSeenStatus, .confirmed)
+        XCTAssertFalse(confirmed.isUnseenFYI)
+        XCTAssertTrue(confirmed.isRepliedFYI)
+        XCTAssertFalse(confirmed.isActiveFYI)
+        XCTAssertFalse(confirmed.fyiOpenedFlagFailed)
+        XCTAssertNil(confirmed.fyiSeenAction)
+        XCTAssertTrue(try repository.inboxOperationInventory(context: context).isEmpty)
+    }
+
+    func testSharedFYIDecodesNullPolicyAndLegacyItemHasNoRoster() throws {
+        let shared = try sharedItem(policy: "null")
+        XCTAssertNil(shared.shared?.answerPolicy)
+        let legacy = try sharedItem(includeShared: false)
+        XCTAssertNil(legacy.shared)
+        XCTAssertNil(legacy.terminal?.speaker)
+    }
+
+    private func sharedItem(policy: String = #"{"kind":"first"}"#, includeShared: Bool = true,
+                            answeredByViewer: Bool = false, canAnswer: Bool = false,
+                            settled: Bool = true, answers: String = "[]",
+                            message: String = #"{"title":"Launch"}"#, seen: Bool = false) throws -> APIItem {
+        let shared = includeShared ? #"""
+        ,"shared":{"shared_id":"shared","chat_writable":false,"can_answer":\#(canAnswer),"answer_policy":\#(policy),
+          "members":[
+            {"person":{"kind":"person","id":"other","display_name":"Dana"},"seen_revision":2,"seen_at_ms":290},
+            {"person":{"kind":"person","id":"reader","display_name":"Dana"},"seen_revision":null,"seen_at_ms":null},
+            {"person":{"kind":"person","id":"earlier","display_name":"Sam"},"seen_revision":1,"seen_at_ms":200}
+          ],"answers":\#(answers)}
+        """# : ""
+        let terminal = !settled || (includeShared && policy == "null") ? "" : #"""
+        ,"terminal":{"state":"answered","at_ms":300,"answer":{"kind":"choice","id":"yes","label":"Yes"},
+          "by_this_person":\#(answeredByViewer)\#(includeShared ? #","answer_id":"answer","speaker":{"kind":"person","id":"other","display_name":"Dana"}"# : "")}
+        """#
+        let json = #"""
+        {"item_id":"local","rev":40,"sender":"Studio","request_revision":2,
+          "message":\#(message),"files":[],"seen":\#(seen),
+          "chat":{"available":true,"started":true,"read_position":"entry-1","unread_replies":1,"reply_group":"earlier_chat_replies"},
+          "rank":{"key":"a","section":"\#(settled ? "resolved" : "current")","group":"common"}\#(terminal)\#(shared)}
+        """#
+        return try APIItem(json: JSONValue.parse(Data(json.utf8)))
+    }
+
     func testCachedServedTurnKeepsCaptionUntilSameRevisionContractRefresh() throws {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: url) }

@@ -90,7 +90,7 @@ enum InboxItem: Identifiable {
 
     func usesNormalMessageList(inInboxSearch: Bool) -> Bool {
         guard case let .request(row) = self else { return true }
-        if row.isRepliedFYI { return true }
+        if row.isRepliedFYI || row.isSharedAnswerSettled { return true }
         if row.fyiUsesInboxSearchForProgress { return inInboxSearch }
         return row.progress == nil || row.fyiUsesRepliedForProgress
     }
@@ -375,7 +375,8 @@ enum InboxNormalListProjection {
             switch item.kind {
             case .message:
                 guard let row = rowsByKey[item.key], InboxItem.request(row).usesNormalMessageList(inInboxSearch: tab == .inbox && !query.isEmpty),
-                      (isFree && !row.fyiUsesRepliedForProgress && !(row.isFYI && row.fyiGroupingEnabled)) ||
+                      (isFree && !row.isSharedAnswerSettled && !row.fyiUsesRepliedForProgress &&
+                        !(row.isFYI && row.fyiGroupingEnabled)) ||
                         InboxItem.request(row).belongsToMessageTab(tab.messageTab),
                       query.isEmpty || InboxItem.request(row).matchesSearch(query) else {
                     flushMessages()
