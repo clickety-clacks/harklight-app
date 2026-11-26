@@ -136,6 +136,8 @@ struct MessageCardSurface<Content: View>: View {
                     }
                 }
             }
+            .uiDiagnostics("message-card-navigation",
+                           "previous=\(context.hasPrevious) next=\(context.hasNext)")
             .accessibilityAction(named: "Previous message") { if context.hasPrevious { context.move(-1) } }
             .accessibilityAction(named: "Next message") { if context.hasNext { context.move(1) } }
         }

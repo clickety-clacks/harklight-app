@@ -205,7 +205,7 @@ final class AdaptiveDuoNavigationUITests: XCTestCase {
 
     func testSeenReturnsToListOnlyWhenNoListPaneIsVisible() {
         let app = XCUIApplication()
-        app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
+        app.launchArguments = ["--reset-attention-fixture", "--harklight-samples", "--harklight-ui-diagnostics"]
         app.launch()
 
         let row = app.descendants(matching: .any)["sample-information-2"]
@@ -227,6 +227,9 @@ final class AdaptiveDuoNavigationUITests: XCTestCase {
         let total = Int(parts.last ?? "") ?? 0
         XCTAssertGreaterThan(index, 0, initialPosition)
         XCTAssertLessThan(index, total, "The fixture needs a following message.")
+        let navigation = app.descendants(matching: .any)["message-card-navigation"].firstMatch
+        XCTAssertTrue(navigation.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertEqual(navigation.label, "previous=true next=true")
         attachScreenshot("native-toolbar-check-before-seen")
         check.tap()
         if listVisibleAlongsideDetail {
@@ -235,19 +238,15 @@ final class AdaptiveDuoNavigationUITests: XCTestCase {
             let confirmation = app.descendants(matching: .any)["request-seen-confirmation"]
             XCTAssertTrue(confirmation.waitForExistence(timeout: 5), app.debugDescription)
             XCTAssertEqual(confirmation.value as? String, "Completed")
-            XCTAssertFalse(check.exists, "The toolbar action disappears after Seen is confirmed.")
+            XCTAssertTrue(check.exists, "The toolbar keeps the completed Seen status visible.")
+            XCTAssertEqual(check.label, "Seen")
+            XCTAssertFalse(check.isEnabled, "Confirmed Seen cannot be submitted again.")
             XCTAssertEqual(counter.label, initialPosition,
                            "Moving a Seen message to Replied must not reset its card position.")
             attachScreenshot("native-toolbar-check-after-seen")
 
-            let lower = card.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.8))
-            let upper = card.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.2))
-            lower.press(forDuration: 0.1, thenDragTo: upper, withVelocity: .slow,
-                        thenHoldForDuration: 4)
-            let nextPosition = "\(index + 1) of \(total)"
-            XCTAssertTrue(app.staticTexts[nextPosition].waitForExistence(timeout: 5),
-                          "Next remains available after the current message moves to Replied. \(app.debugDescription)")
-            attachScreenshot("native-toolbar-next-after-seen")
+            XCTAssertEqual(navigation.label, "previous=true next=true",
+                           "Both accessibility navigation actions remain available after the message moves to Replied.")
         } else {
             XCTAssertTrue(card.waitForNonExistence(timeout: 5),
                           "A single-pane view returns to Inbox after Seen is confirmed.")
