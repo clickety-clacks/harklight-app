@@ -34,6 +34,12 @@ private final class WithMe: ClientAPITransport, @unchecked Sendable {
         return APIResponse(status: 200, requestID: "req-me", body: Data(me.utf8))
     }
     func changeFeed(after: Rev) -> AsyncThrowingStream<FeedEvent, any Error> { server.changeFeed(after: after) }
+    func changeFeed(after: Rev, continuation: String) -> AsyncThrowingStream<FeedEvent, any Error> {
+        if refuseShared {
+            return AsyncThrowingStream { $0.finish(throwing: Self.sharedUnavailable) }
+        }
+        return server.changeFeed(after: after)
+    }
     func changeBatch(after: Rev) async throws -> FeedBatch { try await server.changeBatch(after: after) }
     func changeBatch(after: Rev, continuation: String) async throws -> FeedBatch {
         if refuseShared { throw Self.sharedUnavailable }
@@ -170,6 +176,36 @@ final class ClientAPIv2ConnectionTests: XCTestCase {
         XCTAssertNil(v2.model.snapshot.sharedContinuation)
         XCTAssertEqual(try itemIDs(repository), ["ordinary"])
         XCTAssertEqual(v2.model.heldCursor, server.head)
+    }
+
+    func testForegroundReconnectRebaselinesWhenSharedOptInIsWithdrawn() async throws {
+        let server = FakeClientAPIServer()
+        let ordinary = V2Fixture.item("ordinary", rev: 1, rankKey: "a")
+        server.commit("item", ordinary)
+        server.inboxItems = [ordinary]
+        let repository = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        let sharedMe = #"{"account":{"state":"active"},"server":{"id":"server"},"principal":{"person_id":"person-A","organization_ids":["org"]},"features":{"shared_messages":true}}"#
+        let transport = WithMe(server, me: sharedMe)
+        let v2 = try connection(transport, repository)
+        _ = try v2.model.configureSharedMessages(serverID: ExactText("server"))
+        try v2.model.rebaseline(items: [], counts: APICounts(unresolved: 0),
+                                position: 1, continuation: ExactText("old-token"))
+        let run = Task { await v2.runForeground() }
+        defer { run.cancel() }
+        await soon("the shared feed opens") { v2.sync.feedStatus.openingCount == 1 }
+        XCTAssertNotNil(v2.model.snapshot.sharedContinuation)
+
+        transport.me = me
+        transport.refuseShared = true
+        server.failFeeds(URLError(.networkConnectionLost))
+
+        await soon("the feed reopens in legacy scope") { v2.sync.feedStatus.openingCount == 2 }
+        XCTAssertNil(v2.model.snapshot.sharedServerID)
+        XCTAssertNil(v2.model.snapshot.sharedContinuation)
+        XCTAssertEqual(try itemIDs(repository), ["ordinary"])
+        XCTAssertEqual(server.received.filter { $0.path == "/v2/inbox" }.map(\.sharedMessages), [false])
+        server.commit("item", V2Fixture.item("later", rev: 2, rankKey: "b"))
+        await soon("the legacy feed applies live changes") { (try? self.itemIDs(repository)) == ["ordinary", "later"] }
     }
 
     func testARelaunchShowsTheSavedModelUnderTheSavedRulesBeforeAnyRequest() async throws {
