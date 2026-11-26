@@ -422,6 +422,32 @@ final class HTTPSClientAPITransportTests: XCTestCase {
         XCTAssertEqual(retry.url?.path, request.path)
     }
 
+    func testRefusedQueuedReplyCanReplaceOnlyItsFileHandles() async throws {
+        let fixture = SignInFixture()
+        let persistence = MemoryOutboxPersistence()
+        let path = "/v2/items/fixture/replies"
+        let original = FrozenWrite(method: .post, path: path, body: Data(#"{"text":"saved","file_ids":["old"]}"#.utf8))
+        var entry = OutboxEntry(idempotencyKey: UUID(), target: "item:fixture", operation: "reply", write: original,
+            createdAt: Date(timeIntervalSince1970: 1), outcomeUnknown: false, attempts: 1)
+        entry.failure = OutboxFailure(status: 400, token: "invalid_field", field: "file_ids")
+        try persistence.save([entry])
+        let outbox = try ActionOutbox(persistence: persistence, transport: fixture,
+                                     outcomes: RecordingOutcomes(), errors: NoopErrorLog(), startsPaused: true)
+        let changedText = FrozenWrite(method: .post, path: path, body: Data(#"{"text":"edited","file_ids":["new"]}"#.utf8))
+        do {
+            try await outbox.replaceRejectedReplyFiles(entry.id, with: changedText)
+            XCTFail("Changing reply text is a different intent")
+        } catch let error as URLError where error.code == .badServerResponse {}
+        XCTAssertEqual(try persistence.load().first, entry)
+        let refreshed = FrozenWrite(method: .post, path: path, body: Data(#"{"text":"saved","file_ids":["new"]}"#.utf8))
+        try await outbox.replaceRejectedReplyFiles(entry.id, with: refreshed)
+        let pending = try XCTUnwrap(persistence.load().first)
+        XCTAssertEqual(pending.id, entry.id)
+        XCTAssertEqual(pending.write, refreshed)
+        XCTAssertTrue(pending.request.queuedRetry)
+        XCTAssertNil(pending.failure)
+    }
+
     private func decodeBase64URL(_ string: String) throws -> Data {
         XCTAssertFalse(string.contains("="))
         let base64 = string.replacingOccurrences(of: "-", with: "+")
