@@ -502,6 +502,11 @@ private final class ReconnectingFeedTransport: ClientAPITransport, @unchecked Se
     var heldBatchStarted: Bool { lock.withLock { startedHeldBatch } }
 
     func send(_ request: APIRequest) async throws -> APIResponse {
+        if request.method == .get, request.path == "/v2/me" {
+            // These tests inject feed and batch failures after discovery.
+            return APIResponse(status: 200, requestID: "me",
+                body: Data(#"{"account":{"state":"active"},"features":{}}"#.utf8))
+        }
         if request.method == .put, request.path == "/v2/items/refused/seen" {
             throw APIError(status: 422, token: .invalidField, retryable: false, requestID: "refused")
         }
