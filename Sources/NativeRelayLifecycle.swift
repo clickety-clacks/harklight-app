@@ -1213,6 +1213,8 @@ final class NativeRelayLifecycle {
         await task.value
     }
 
+    var migrationCursor: Rev? { v2Connection?.model.heldCursor }
+
     func isPreparingV2SignOut(for expected: ProfileContext) -> Bool {
         context == expected && v2DepartureTask != nil
     }

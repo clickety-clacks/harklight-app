@@ -9,7 +9,7 @@ public enum NativeSignInMethod: String, Codable, Sendable, CaseIterable {
     case passkey
 }
 
-struct NativeSignInAPI: Sendable {
+public struct NativeSignInAPI: Sendable {
     struct Transaction: Codable, Sendable {
         let reference: String
         let verifier: String
@@ -38,15 +38,15 @@ struct NativeSignInAPI: Sendable {
         }
     }
 
-    struct Result: Decodable, Sendable {
+    public struct Result: Decodable, Sendable {
         enum OldDevice: String, Decodable, Sendable {
             case attached
             case removed
             case unknown
         }
 
-        let personID: String
-        let deviceID: String
+        public let personID: String
+        public let deviceID: String
         let duplicate: Bool
         let method: NativeSignInMethod?
         let oldDevice: OldDevice?
@@ -60,6 +60,8 @@ struct NativeSignInAPI: Sendable {
     }
 
     let transport: any ClientAPITransport
+
+    public init(transport: any ClientAPITransport) { self.transport = transport }
 
     func methods() async throws -> [NativeSignInMethod] {
         struct Response: Decodable {
@@ -86,14 +88,14 @@ struct NativeSignInAPI: Sendable {
         _ = try await post("/sign-in/code", ["transaction": transaction, "code": code])
     }
 
-    func redeem(_ pending: NativeSessionRedemption) async throws -> Result {
+    public func redeem(_ pending: NativeSessionRedemption) async throws -> Result {
         let response = try await transport.send(pending.request)
         return try JSONDecoder().decode(Result.self, from: response.body)
     }
 
-    struct MigrationGrant: Decodable, Sendable {
-        let origin: URL
-        let token: String
+    public struct MigrationGrant: Decodable, Sendable {
+        public let origin: URL
+        public let token: String
     }
 
     struct Device: Decodable, Identifiable, Sendable {
@@ -113,7 +115,7 @@ struct NativeSignInAPI: Sendable {
         case wrongPrincipal
     }
 
-    func migrationPrincipal() async throws -> APIPushPrincipal? {
+    public func migrationPrincipal() async throws -> APIPushPrincipal? {
         let me = try await readMe()
         guard me.body.uniqueValue(named: "auth_migration") == .bool(true) else { return nil }
         guard let principal = me.pushPrincipal, principal.deviceID != nil else {
@@ -122,7 +124,7 @@ struct NativeSignInAPI: Sendable {
         return principal
     }
 
-    func verifyMigrationPrincipal(_ expected: APIPushPrincipal) async throws {
+    public func verifyMigrationPrincipal(_ expected: APIPushPrincipal) async throws {
         let me = try await readMe()
         guard me.pushPrincipal == expected else { throw MigrationError.wrongPrincipal }
     }
@@ -132,12 +134,12 @@ struct NativeSignInAPI: Sendable {
         return try APIMe(json: JSONValue.parse(response.body))
     }
 
-    func migrationGrant() async throws -> MigrationGrant {
+    public func migrationGrant() async throws -> MigrationGrant {
         let response = try await transport.send(APIRequest(method: .post, path: "/v2/auth/migration-grants"))
         return try JSONDecoder().decode(MigrationGrant.self, from: response.body)
     }
 
-    func completeMigration(signature: String) async throws {
+    public func completeMigration(signature: String) async throws {
         _ = try await post("/v2/auth/migration-complete", ["signature": signature])
     }
 

@@ -529,16 +529,19 @@ final class BuildLegacyA1StoreUpgradeTests: XCTestCase {
         let pending = try NativeSessionRedemption(credential: .migration(token: "fixture-grant"),
                                                   label: "iPhone", proof: NativeSessionProof())
         let origin = try XCTUnwrap(URL(string: "https://relay.example.test"))
-        try enrollment.saveSessionMigration(.redeeming(origin: origin, pending: pending), for: record)
+        let principal = APIPushPrincipal(serverID: ExactText("fixture-server"),
+            personID: ExactText(try XCTUnwrap(record.personID)), deviceID: ExactText(record.deviceID))
+        try enrollment.saveSessionMigration(.redeeming(origin: origin, pending: pending, principal: principal), for: record)
         let resumed = try XCTUnwrap(enrollment.load())
         XCTAssertEqual(resumed.profileAuthority, record.profileAuthority)
         XCTAssertEqual(resumed.personID, record.personID)
         XCTAssertEqual(resumed.deviceID, record.deviceID)
         XCTAssertEqual(resumed.v2PushRegistration, record.v2PushRegistration)
-        guard case let .redeeming(savedOrigin, savedPending) = resumed.sessionMigration else {
+        guard case let .redeeming(savedOrigin, savedPending, savedPrincipal) = resumed.sessionMigration else {
             return XCTFail("Expected the Keychain to retain the pending migration")
         }
         XCTAssertEqual(savedOrigin, origin)
+        XCTAssertEqual(savedPrincipal, principal)
         XCTAssertEqual(savedPending.request, pending.request)
         XCTAssertEqual(savedPending.proof.bearer, pending.proof.bearer)
         let material = try enrollment.material(from: record)

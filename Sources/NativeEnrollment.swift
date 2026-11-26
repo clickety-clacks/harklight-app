@@ -24,8 +24,8 @@ struct NativeEnrollmentSettings {
 }
 
 enum NativeSessionMigration: Codable, Equatable {
-    case redeeming(origin: URL, pending: NativeSessionRedemption)
-    case keyAttached(origin: URL, pending: NativeSessionRedemption)
+    case redeeming(origin: URL, pending: NativeSessionRedemption, principal: APIPushPrincipal)
+    case keyAttached(origin: URL, pending: NativeSessionRedemption, principal: APIPushPrincipal)
     case activating(origin: URL, proof: NativeSessionProof, signature: String)
     case active(origin: URL, proof: NativeSessionProof)
 }

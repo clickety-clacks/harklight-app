@@ -54,6 +54,7 @@ final class NativeAppLaunch {
     @ObservationIgnored private var stagedRevokedText: [ExactText] = []
     private(set) var foregroundConnectProgress: NativeForegroundConnectProgress?
     private(set) var foregroundConnectDiagnostic: NativeForegroundConnectDiagnostic?
+    @ObservationIgnored private var migratingSession = false
     private(set) var activeEnrollmentRecord: NativeEnrollmentRecord?
     private(set) var disconnectedAccount: NativeAccountDeparture?
     private(set) var disconnectedArchive: LivePresentationStore?
@@ -779,6 +780,11 @@ final class NativeAppLaunch {
         await NativeRelayLifecycle.shared.deactivate()
         guard activationGeneration == generation else { return }
         closeV2ErrorLog()
+        if let record = activeEnrollmentRecord,
+           case let .activating(origin, proof, signature) = record.sessionMigration {
+            try await finishSessionMigration(record, origin: origin, proof: proof, signature: signature)
+            guard activationGeneration == generation else { return }
+        }
         let context = installation.context
         let (store, fileStorage) = try await Task.detached(priority: .userInitiated) {
             let persistence = try FilePendingActionPersistence.applicationSupport()
@@ -1060,6 +1066,98 @@ final class NativeAppLaunch {
         }
     }
 
+    private func migrateSessionIfAvailable() async throws {
+        guard !migratingSession, let record = try enrollment.load(), record.isApproved,
+              record.sameNotificationProfile(as: activeEnrollmentRecord ?? record),
+              activeEnrollmentRecord != nil else { return }
+        if case .active = record.sessionMigration { return }
+        migratingSession = true
+        defer { migratingSession = false }
+        let generation = activationGeneration
+        let lifecycle = NativeRelayLifecycle.shared
+        let material = try enrollment.material(from: record)
+        var current = record
+
+        if current.sessionMigration == nil {
+            let legacy = try HTTPSClientAPITransport(baseURL: material.deviceURL,
+                clientIdentity: TrustedKeychainIdentity(material.keychainIdentity), trustedRootDER: material.trustedRootDER)
+            defer { legacy.close() }
+            let api = NativeSignInAPI(transport: legacy)
+            guard let principal = try await api.migrationPrincipal() else { return }
+            guard principal.personID == material.context.identity.personID,
+                  principal.deviceID == material.context.identity.deviceID else {
+                throw NativeEnrollmentError.wrongApprovedDevice
+            }
+            let grant = try await api.migrationGrant()
+            let pending = try NativeSessionRedemption(credential: .migration(token: grant.token),
+                label: record.deviceLabel ?? UIDevice.current.name, proof: NativeSessionProof())
+            current = try persistMigration(.redeeming(origin: grant.origin, pending: pending, principal: principal),
+                                           for: current, generation: generation)
+        }
+        if case let .redeeming(origin, pending, principal) = current.sessionMigration {
+            let transport = try HTTPSClientAPITransport(origin: origin)
+            defer { transport.close() }
+            let result = try await NativeSignInAPI(transport: transport).redeem(pending)
+            guard NativeAuthorityBinding.samePerson(result.personID, current.personID),
+                  ExactText(result.deviceID) == ExactText(current.deviceID) else {
+                throw NativeEnrollmentError.wrongApprovedDevice
+            }
+            current = try persistMigration(.keyAttached(origin: origin, pending: pending, principal: principal),
+                                           for: current, generation: generation)
+        }
+        if case let .keyAttached(origin, pending, principal) = current.sessionMigration {
+            let proof = pending.proof
+            let transport = try HTTPSClientAPITransport(origin: origin, bearer: proof.bearer)
+            defer { transport.close() }
+            try await NativeSignInAPI(transport: transport).verifyMigrationPrincipal(principal)
+            try await readPendingMigrationFeed(transport, cursor: lifecycle.migrationCursor)
+            let signature = try proof.activationSignature()
+            current = try persistMigration(.activating(origin: origin, proof: proof, signature: signature),
+                                           for: current, generation: generation)
+        }
+        if case let .activating(origin, proof, signature) = current.sessionMigration {
+            guard activationGeneration == generation else { return }
+            await lifecycle.deactivate()
+            guard activationGeneration == generation else { return }
+            try await finishSessionMigration(current, origin: origin, proof: proof, signature: signature)
+            guard activationGeneration == generation else { return }
+            try await activate(material)
+        }
+    }
+
+    private func readPendingMigrationFeed(_ transport: HTTPSClientAPITransport, cursor: Rev?) async throws {
+        if let cursor {
+            do {
+                _ = try await transport.changeBatch(after: cursor)
+                return
+            } catch let error as APIError where error.status == 410 {
+                // Recover a baseline without publishing into the live legacy model.
+            }
+        }
+        let writer = ServerModelSyncWriter(store: ServerModelV2Store(fileURL: nil),
+                                           transport: transport, errors: NoopErrorLog())
+        let baseline = try await writer.rebaseline()
+        _ = try await transport.changeBatch(after: baseline)
+    }
+
+    private func finishSessionMigration(_ record: NativeEnrollmentRecord, origin: URL,
+                                        proof: NativeSessionProof, signature: String) async throws {
+        let generation = activationGeneration
+        let transport = try HTTPSClientAPITransport(origin: origin, bearer: proof.bearer)
+        defer { transport.close() }
+        try await NativeSignInAPI(transport: transport).completeMigration(signature: signature)
+        _ = try persistMigration(.active(origin: origin, proof: proof), for: record, generation: generation)
+    }
+
+    private func persistMigration(_ phase: NativeSessionMigration, for record: NativeEnrollmentRecord,
+                                  generation: UUID) throws -> NativeEnrollmentRecord {
+        guard activationGeneration == generation else { throw NativeJoinError.superseded }
+        try enrollment.saveSessionMigration(phase, for: record)
+        guard let saved = try enrollment.load() else { throw NativeEnrollmentError.invalidIdentity }
+        activeEnrollmentRecord = saved
+        return saved
+    }
+
     func refreshLive() async {
 #if DEBUG
         if isIsolatedRelayTestSeed { return }
@@ -1074,6 +1172,10 @@ final class NativeAppLaunch {
         presentation.applyRefreshResult(result)
         notificationSynchronized = result.relayConfirmed && result.confirmedContext == presentation.notificationContext
         await resolveMessageDeepLink(synchronized: notificationSynchronized)
+        do { try await migrateSessionIfAvailable() }
+        catch {
+            diagnostics.record(area: .connection, phase: .approvedConnection, transition: .failed, error: error)
+        }
     }
 
     private func resolveMessageDeepLink(synchronized: Bool) async {
