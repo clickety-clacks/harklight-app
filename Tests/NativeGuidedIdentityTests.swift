@@ -5,6 +5,36 @@ import XCTest
 @testable import Harklight
 
 final class NativeGuidedIdentityTests: XCTestCase {
+    func testLateSignInProofUsesTheLegacyDeviceKeyAfterCertificateDeletion() throws {
+        let namespace = "Harklight.late-sign-in-test." + UUID().uuidString
+        let store = NativeInstallationIdentityStore(namespace: namespace)
+        defer { removeTestIdentity(namespace) }
+        let legacy = try store.loadOrCreate()
+        let certificate = try XCTUnwrap(SecCertificateCreateWithData(nil, legacy.certificateDER as CFData))
+        let publicKey = try XCTUnwrap(SecCertificateCopyKey(certificate))
+        let deletion = SecItemDelete([
+            kSecClass as String: kSecClassCertificate,
+            kSecAttrLabel as String: legacy.label
+        ] as CFDictionary)
+        XCTAssertEqual(deletion, errSecSuccess)
+        let proof = try NativeSessionProof()
+        let message = proof.signInMessage(reference: "fixture-transaction")
+        let legacyProof = try store.lateSignInProof(deviceID: legacy.deviceID, message: message)
+        let body = try JSONEncoder().encode(legacyProof)
+        let fields = try JSONDecoder().decode([String: String].self, from: body)
+        func decode(_ key: String) throws -> Data {
+            let value = try XCTUnwrap(fields[key])
+            let base64 = value.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+            return try XCTUnwrap(Data(base64Encoded: base64 + String(repeating: "=", count: (4 - base64.count % 4) % 4)))
+        }
+        XCTAssertEqual(fields["device_id"], legacy.deviceID)
+        XCTAssertEqual(NativeSessionProof.commitmentBytes(try decode("public_key")), legacy.deviceID)
+        let signature = try decode("signature")
+        XCTAssertTrue(SecKeyVerifySignature(publicKey, .rsaSignatureMessagePKCS1v15SHA256,
+                                           message as CFData, signature as CFData, nil))
+        XCTAssertThrowsError(try store.lateSignInProof(deviceID: "another-device", message: message))
+    }
+
     func testJoinCreatesACertificateForThePrivateKeyRetainedOnThisDevice() throws {
         let namespace = "Harklight.guided-identity-test." + UUID().uuidString
         defer { removeTestIdentity(namespace) }
