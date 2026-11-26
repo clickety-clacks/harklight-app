@@ -2486,6 +2486,7 @@ final class LivePresentationStore {
             chatUnread: listChatUnread(request.key),
             sharedUnreadChatCount: thread?.unreadSharedChatCount,
             isSharedAnswerSettled: sharedAnswerSettled,
+            sharedRequestCanAnswer: thread?.shared?.answerPolicy == nil ? nil : thread?.shared?.canAnswer,
             submissionProgress: submissionProgress[request.key].map { progress in
                 InboxRowSubmissionProgress(
                     state: progress.state == .awaiting ? .awaiting : .notSent(detail: progress.detail))

@@ -59,6 +59,16 @@ final class InboxBadgeCountTests: XCTestCase {
                                         showsLocalExamples: false), 0)
     }
 
+    func testSharedRequestNeedsAnswerEligibilityOrUnreadChatToCount() {
+        var recipient = row("shared-non-decider")
+        recipient.sharedRequestCanAnswer = false
+        XCTAssertEqual(InboxBadge.count(requests: [recipient], samples: SampleLibrary(),
+                                        showsLocalExamples: false), 0)
+        recipient.sharedUnreadChatCount = 1
+        XCTAssertEqual(InboxBadge.count(requests: [recipient], samples: SampleLibrary(),
+                                        showsLocalExamples: false), 1)
+    }
+
     func testFailedDeliveryReturnsAnActedRowToTheCount() {
         let failed = row("refused", status: "Answer not delivered",
                          hasUserAction: true, hasFailedResponse: true)

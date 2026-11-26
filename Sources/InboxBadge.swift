@@ -14,7 +14,10 @@ enum InboxBadge {
             : requests.map(InboxItem.request)
         return items.count { item in
             guard !item.isRetracted else { return false }
-            if case let .request(row) = item, (row.sharedUnreadChatCount ?? 0) > 0 { return true }
+            if case let .request(row) = item {
+                if (row.sharedUnreadChatCount ?? 0) > 0 { return true }
+                if row.sharedRequestCanAnswer == false { return false }
+            }
             return !item.hasProgressMarker && !item.belongsToReplied &&
                 !item.isSettledFYI && !item.hasPendingSeenAnswer
         }

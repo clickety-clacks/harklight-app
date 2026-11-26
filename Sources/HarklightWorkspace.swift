@@ -687,6 +687,7 @@ struct InboxRequestRow: Identifiable {
     var chatUnread: Bool? = nil
     var sharedUnreadChatCount: Int? = nil
     var isSharedAnswerSettled = false
+    var sharedRequestCanAnswer: Bool?
     var initials: String = ""
     var emphasis: InboxRowEmphasis = .standard
     var messageType: HarklightMessageType? = nil
