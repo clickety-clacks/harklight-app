@@ -789,17 +789,25 @@ final class HarklightUITests: XCTestCase {
     }
 
     private func assertInboxWarningDoesNotCoverDetail(in app: XCUIApplication,
-                                                        file: StaticString = #filePath, line: UInt = #line) {
-        let warning = app.staticTexts["inbox-warning-message"].firstMatch
-        if listVisibleBesideDetail(in: app), warning.exists {
+                                                       file: StaticString = #filePath, line: UInt = #line) {
+        let warnings = app.staticTexts.matching(identifier: "inbox-warning-message")
+        if listVisibleBesideDetail(in: app) {
             let heading = app.buttons["request-heading"]
             XCTAssertTrue(heading.exists, "The request stays open beside the Inbox.",
                           file: file, line: line)
-            XCTAssertLessThanOrEqual(warning.frame.maxX, heading.frame.minX,
-                                     "The warning stays in the Inbox column beside the detail.",
-                                     file: file, line: line)
+            let detailLeadingEdge = heading.frame.minX
+            let warningInDetail = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                warnings.allElementsBoundByIndex.contains { warning in
+                    let frame = warning.frame
+                    return !frame.isEmpty && frame.maxX > detailLeadingEdge
+                }
+            }, object: nil)
+            warningInDetail.isInverted = true
+            XCTAssertEqual(XCTWaiter.wait(for: [warningInDetail], timeout: 1), .completed,
+                           "Every warning must stay in the Inbox column beside the detail.",
+                           file: file, line: line)
         } else {
-            XCTAssertFalse(warning.waitForExistence(timeout: 1),
+            XCTAssertFalse(warnings.firstMatch.waitForExistence(timeout: 1),
                            "A detail-only screen must not show an Inbox warning over its toolbar.",
                            file: file, line: line)
         }
