@@ -192,6 +192,22 @@ final class HTTPSClientAPITransportTests: XCTestCase {
         )))
     }
 
+    func testLostRedemptionResponseRetriesThePersistedBody() throws {
+        let proof = try NativeSessionProof()
+        let pending = try NativeSessionRedemption(credential: .migration(token: "fixture-grant"),
+                                                  label: "iPhone", proof: proof)
+        let bytes = try JSONEncoder().encode(pending)
+        let restored = try JSONDecoder().decode(NativeSessionRedemption.self, from: bytes)
+        XCTAssertEqual(restored.request, pending.request)
+        XCTAssertEqual(restored.proof.bearer, proof.bearer)
+        let body = try XCTUnwrap(restored.request.body)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: String])
+        XCTAssertEqual(Set(json.keys), ["token", "label", "public_key", "session_hash", "signature"])
+        XCTAssertEqual(json["token"], "fixture-grant")
+        XCTAssertEqual(restored.request.path, "/v2/auth/sign-in")
+        XCTAssertEqual(restored.request.method, .post)
+    }
+
     private func decodeBase64URL(_ string: String) throws -> Data {
         XCTAssertFalse(string.contains("="))
         let base64 = string.replacingOccurrences(of: "-", with: "+")

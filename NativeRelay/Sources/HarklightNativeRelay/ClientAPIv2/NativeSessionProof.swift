@@ -61,3 +61,38 @@ struct NativeSessionProof: Codable, Sendable {
             .replacingOccurrences(of: "=", with: "")
     }
 }
+
+/// Persist the encoded request and proof together before sending redemption.
+struct NativeSessionRedemption: Codable, Sendable {
+    enum Credential {
+        case transaction(reference: String, verifier: String)
+        case migration(token: String)
+    }
+
+    let proof: NativeSessionProof
+    private let body: Data
+
+    init(credential: Credential, label: String, proof: NativeSessionProof) throws {
+        self.proof = proof
+        var fields = ["label": label]
+        let reference: String
+        switch credential {
+        case let .transaction(transaction, verifier):
+            reference = transaction
+            fields["transaction"] = transaction
+            fields["verifier"] = verifier
+        case let .migration(token):
+            reference = token
+            fields["token"] = token
+        }
+        let signature = try proof.signIn(reference: reference)
+        fields["public_key"] = signature.publicKey
+        fields["session_hash"] = signature.sessionHash
+        fields["signature"] = signature.signature
+        body = try JSONEncoder().encode(fields)
+    }
+
+    var request: APIRequest {
+        APIRequest(method: .post, path: "/v2/auth/sign-in", body: body)
+    }
+}
