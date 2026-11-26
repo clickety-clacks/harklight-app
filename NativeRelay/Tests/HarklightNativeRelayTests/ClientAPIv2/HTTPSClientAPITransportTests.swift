@@ -208,6 +208,44 @@ final class HTTPSClientAPITransportTests: XCTestCase {
         XCTAssertEqual(restored.request.method, .post)
     }
 
+    func testOwnerCodeUsesTheCommittedTransactionWithoutSendingVerifierUntilRedemption() async throws {
+        let api = transport { request in
+            switch request.url?.path {
+            case "/v2/auth/methods":
+                return .init(status: 200, chunks: [Data(#"{"methods":["owner_code"]}"#.utf8)])
+            case "/v2/auth/transactions":
+                return .init(status: 200, chunks: [Data(#"{"transaction":"fixture-transaction"}"#.utf8)])
+            case "/sign-in/code":
+                return .init(status: 204, chunks: [])
+            default:
+                return .init(status: 200, chunks: [Data(
+                    #"{"person_id":"person-1","device_id":"device-1","duplicate":false,"method":"owner_code"}"#.utf8
+                )])
+            }
+        }
+        let signIn = NativeSignInAPI(transport: api)
+        let methods = try await signIn.methods()
+        XCTAssertEqual(methods, [.ownerCode])
+        let transaction = try await signIn.begin()
+        try await signIn.verifyOwnerCode("fixture-code", transaction: transaction.reference)
+        let pending = try NativeSessionRedemption(
+            credential: .transaction(reference: transaction.reference, verifier: transaction.verifier),
+            label: "iPhone", proof: NativeSessionProof()
+        )
+        let result = try await signIn.redeem(pending)
+        XCTAssertEqual(result.method, .ownerCode)
+        XCTAssertEqual(result.personID, "person-1")
+        XCTAssertEqual(result.deviceID, "device-1")
+        let sent = StubURLProtocol.lock.withLock { StubURLProtocol.seen }
+        let bodies = try sent.dropFirst().map { request in
+            try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: String])
+        }
+        XCTAssertEqual(bodies[0], ["verifier_hash": NativeSessionProof.commitment(transaction.verifier)])
+        XCTAssertEqual(bodies[1], ["code": "fixture-code", "transaction": "fixture-transaction"])
+        XCTAssertEqual(bodies[2]["verifier"], transaction.verifier)
+        XCTAssertEqual(bodies[2]["transaction"], "fixture-transaction")
+    }
+
     private func decodeBase64URL(_ string: String) throws -> Data {
         XCTAssertFalse(string.contains("="))
         let base64 = string.replacingOccurrences(of: "-", with: "+")

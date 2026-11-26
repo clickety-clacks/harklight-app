@@ -1,0 +1,73 @@
+import Foundation
+
+public enum NativeSignInMethod: String, Codable, Sendable, CaseIterable {
+    case google
+    case apple
+    case emailCode = "email_code"
+    case ownerCode = "owner_code"
+    case passkey
+}
+
+struct NativeSignInAPI: Sendable {
+    struct Transaction: Codable, Sendable {
+        let reference: String
+        let verifier: String
+    }
+
+    struct Result: Decodable, Sendable {
+        enum OldDevice: String, Decodable, Sendable {
+            case attached
+            case removed
+            case unknown
+        }
+
+        let personID: String
+        let deviceID: String
+        let duplicate: Bool
+        let method: NativeSignInMethod?
+        let oldDevice: OldDevice?
+
+        enum CodingKeys: String, CodingKey {
+            case personID = "person_id"
+            case deviceID = "device_id"
+            case duplicate, method
+            case oldDevice = "old_device"
+        }
+    }
+
+    let transport: any ClientAPITransport
+
+    func methods() async throws -> [NativeSignInMethod] {
+        struct Response: Decodable {
+            let methods: [String]
+        }
+        let response = try await transport.send(.get("/v2/auth/methods"))
+        return try JSONDecoder().decode(Response.self, from: response.body).methods
+            .compactMap(NativeSignInMethod.init(rawValue:))
+    }
+
+    func begin() async throws -> Transaction {
+        struct Response: Decodable {
+            let transaction: String
+        }
+        let verifier = try NativeSessionProof.randomSecret()
+        let response = try await post("/v2/auth/transactions", [
+            "verifier_hash": NativeSessionProof.commitment(verifier)
+        ])
+        let reference = try JSONDecoder().decode(Response.self, from: response.body).transaction
+        return Transaction(reference: reference, verifier: verifier)
+    }
+
+    func verifyOwnerCode(_ code: String, transaction: String) async throws {
+        _ = try await post("/sign-in/code", ["transaction": transaction, "code": code])
+    }
+
+    func redeem(_ pending: NativeSessionRedemption) async throws -> Result {
+        let response = try await transport.send(pending.request)
+        return try JSONDecoder().decode(Result.self, from: response.body)
+    }
+
+    private func post(_ path: String, _ fields: [String: String]) async throws -> APIResponse {
+        try await transport.send(APIRequest(method: .post, path: path, body: JSONEncoder().encode(fields)))
+    }
+}
