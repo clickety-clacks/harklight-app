@@ -4411,7 +4411,7 @@ private struct NativeSignedInDevicesView: View {
     let launch: NativeAppLaunch
     @Environment(\.dismiss) private var dismiss
     @State private var devices: [NativeSignInAPI.Device] = []
-    @State private var error = false
+    @State private var failed = false
     @State private var pendingRemoval: NativeSignInAPI.Device?
 
     var body: some View {
@@ -4429,7 +4429,7 @@ private struct NativeSignedInDevicesView: View {
                         }
                     }
                 }
-                if error { Button("Couldn’t load devices. Retry") { Task { await reload() } } }
+                if failed { Button("Couldn’t load devices. Retry") { Task { await reload() } } }
             }
             .navigationTitle("Devices")
             .toolbar { Button("Done") { dismiss() } }
@@ -4438,22 +4438,24 @@ private struct NativeSignedInDevicesView: View {
                 get: { pendingRemoval != nil }, set: { if !$0 { pendingRemoval = nil } }),
                 presenting: pendingRemoval) { device in
                     Button("Remove", role: .destructive) {
-                        Task {
-                            do {
-                                try await launch.removeSignedInDevice(device.id)
-                                await reload()
-                            } catch { error = true }
-                        }
+                        Task { await remove(device) }
                     }
                     Button("Cancel", role: .cancel) {}
                 } message: { device in Text(device.label) }
         }
     }
 
+    private func remove(_ device: NativeSignInAPI.Device) async {
+        do {
+            try await launch.removeSignedInDevice(device.id)
+            await reload()
+        } catch { failed = true }
+    }
+
     private func reload() async {
         do {
             devices = try await launch.signedInDevices()
-            error = false
-        } catch { error = true }
+            failed = false
+        } catch { failed = true }
     }
 }
