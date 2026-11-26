@@ -383,6 +383,29 @@ final class HTTPSClientAPITransportTests: XCTestCase {
         XCTAssertTrue(sent.isEmpty)
     }
 
+    func testCarryingAuthorizedOutboxKeepsFrozenBodyKeyAndUncertainHold() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let source = FileOutboxPersistence(url: directory.appendingPathComponent("previous"))
+        let destination = FileOutboxPersistence(url: directory.appendingPathComponent("current"))
+        let first = OutboxEntry(idempotencyKey: UUID(), target: "item:one", operation: "answer",
+            write: FrozenWrite(method: .post, path: "/v2/items/one/answer", body: Data(#"{"request_revision":1}"#.utf8)),
+            createdAt: Date(timeIntervalSince1970: 1), outcomeUnknown: true, attempts: 1)
+        let second = OutboxEntry(idempotencyKey: UUID(), target: "item:two", operation: "answer",
+            write: FrozenWrite(method: .post, path: "/v2/items/two/answer", body: Data(#"{"request_revision":2}"#.utf8)),
+            createdAt: Date(timeIntervalSince1970: 1), outcomeUnknown: false, attempts: 0)
+        try source.save([first, second])
+        try source.transferPending(to: destination, legacyReceiptCutoff: Date(timeIntervalSince1970: 2))
+        XCTAssertTrue(try source.load().isEmpty)
+        let received = try destination.load()
+        XCTAssertEqual(received.map(\.id), [first.id, second.id])
+        XCTAssertEqual(received.map(\.write), [first.write, second.write])
+        XCTAssertEqual(received.map { $0.failure?.token }, ["outcome_uncertain", nil])
+        try source.save([first, second])
+        try source.transferPending(to: destination, legacyReceiptCutoff: Date(timeIntervalSince1970: 2))
+        XCTAssertEqual(try destination.load(), received)
+    }
+
     private func decodeBase64URL(_ string: String) throws -> Data {
         XCTAssertFalse(string.contains("="))
         let base64 = string.replacingOccurrences(of: "-", with: "+")
