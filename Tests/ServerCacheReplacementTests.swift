@@ -515,6 +515,15 @@ final class Build356StoreUpgradeTests: XCTestCase {
 // the same simulator. Ordinary unit runs do not make or reuse enrollment state.
 @MainActor
 final class BuildLegacyA1StoreUpgradeTests: XCTestCase {
+    func testOverlapProtectsAgedLegacyWritesBeforeActivation() throws {
+        let record = NativeEnrollmentRecord(host: "relay.example.test", enrollmentPort: 443, relayPort: 8443,
+            trustedRootDER: Data(), identityLabel: "fixture", deviceID: "fixture-device",
+            approvalCode: "", statusSecret: "", expiresAt: nil, statusExpiresAt: nil, personID: "fixture-person")
+        let current = Date(timeIntervalSince1970: 90 * 24 * 60 * 60)
+        XCTAssertEqual(record.receiptCutoffBeforeOpeningOutbox(now: current),
+                       Date(timeIntervalSince1970: 60 * 24 * 60 * 60))
+    }
+
     func testOpensLegacyAccountInboxDraftsAndOutbox() throws {
         let directory = try FileManager.default.url(for: .documentDirectory, in: .userDomainMask,
             appropriateFor: nil, create: false).appendingPathComponent("BuildLegacyA1Fixture", isDirectory: true)

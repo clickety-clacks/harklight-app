@@ -372,6 +372,21 @@ final class HTTPSClientAPITransportTests: XCTestCase {
         XCTAssertEqual(sent.first?.idempotencyKey, entry.id)
     }
 
+    func testInterruptedLegacySendWithoutAnUnknownFlagIsHeld() async throws {
+        let fixture = SignInFixture()
+        let persistence = MemoryOutboxPersistence()
+        let entry = OutboxEntry(idempotencyKey: UUID(), target: "item:fixture", operation: "reply",
+            write: FrozenWrite(method: .post, path: "/v2/items/fixture/replies", body: Data("{}".utf8)),
+            createdAt: Date(timeIntervalSince1970: 1), outcomeUnknown: false, attempts: 1)
+        try persistence.save([entry])
+        let outbox = try ActionOutbox(persistence: persistence, transport: fixture, outcomes: RecordingOutcomes(),
+            errors: NoopErrorLog(), legacyReceiptCutoff: Date(timeIntervalSince1970: 2))
+        await outbox.flush()
+        XCTAssertEqual(try persistence.load().first?.failure?.token, "outcome_uncertain")
+        let sent = await fixture.requests
+        XCTAssertTrue(sent.isEmpty)
+    }
+
     func testOldAmbiguousLegacyIntentRequiresReadReconciliation() async throws {
         let fixture = SignInFixture()
         let persistence = MemoryOutboxPersistence()
