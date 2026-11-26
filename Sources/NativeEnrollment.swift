@@ -89,7 +89,7 @@ struct NativeEnrollmentRecord: Codable, Equatable {
 
     func matchesRecoveryOrigin(_ origin: URL) -> Bool {
         if let signedInOrigin { return signedInOrigin == origin }
-        return origin.host?.lowercased() == host.lowercased() && origin.port == nil
+        return origin.scheme == "https" && origin.host?.lowercased() == host.lowercased()
     }
 
     func removalArchiveRecord() -> Self {
@@ -222,11 +222,16 @@ struct NativeEnrollmentStore {
     }
 
     func lateProof(for record: NativeEnrollmentRecord, message: Data) throws -> NativeSessionRedemption.OldProof {
-        guard let namespace = guidedIdentityNamespace(for: record.identityLabel) else {
-            throw NativeEnrollmentError.invalidIdentity
+        if let namespace = guidedIdentityNamespace(for: record.identityLabel) {
+            return try NativeInstallationIdentityStore(namespace: namespace)
+                .lateSignInProof(deviceID: record.deviceID, message: message)
         }
-        return try NativeInstallationIdentityStore(namespace: namespace)
-            .lateSignInProof(deviceID: record.deviceID, message: message)
+        var key: SecKey?
+        if let retained = identity(label: record.identityLabel) {
+            _ = SecIdentityCopyPrivateKey(retained, &key)
+        }
+        guard let key else { throw NativeEnrollmentError.invalidIdentity }
+        return try NativeInstallationIdentityStore.lateSignInProof(key: key, deviceID: record.deviceID, message: message)
     }
 
     func material(from record: NativeEnrollmentRecord) throws -> NativeInstallationMaterial {

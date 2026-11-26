@@ -37,7 +37,10 @@ struct NativeInstallationIdentityStore {
     }
 
     func lateSignInProof(deviceID: String, message: Data) throws -> NativeSessionRedemption.OldProof {
-        let key = try retainedPrivateKey(creatingIfMissing: false)
+        try Self.lateSignInProof(key: retainedPrivateKey(creatingIfMissing: false), deviceID: deviceID, message: message)
+    }
+
+    static func lateSignInProof(key: SecKey, deviceID: String, message: Data) throws -> NativeSessionRedemption.OldProof {
         guard let publicKey = SecKeyCopyPublicKey(key),
               let publicDER = SecKeyCopyExternalRepresentation(publicKey, nil) as Data?,
               let signature = SecKeyCreateSignature(key, .rsaSignatureMessagePKCS1v15SHA256,

@@ -371,7 +371,6 @@ struct NativeSharedSignInView: View {
     @State private var code = ""
     @State private var rememberMethod = false
     @State private var rememberedMethod: NativeSignInMethod?
-    @State private var showingSavedMessages = false
     @State private var busy = false
     @State private var message: String?
     @State private var sheet = NativeSignInSheet()
@@ -418,8 +417,6 @@ struct NativeSharedSignInView: View {
                     }
                     .font(.footnote)
                 }
-                Button("View saved messages") { showingSavedMessages = true }
-                    .font(.footnote)
                 if let message {
                     Text(message).font(.footnote)
                     ShareLink(item: launch.diagnostics.shareText) {
@@ -431,22 +428,6 @@ struct NativeSharedSignInView: View {
             .frame(maxWidth: 430)
             .padding(24)
             .frame(maxWidth: .infinity)
-        }
-        .sheet(isPresented: $showingSavedMessages) {
-            NavigationStack {
-                List {
-                    let saved = launch.availableDisconnectedAccounts
-                    if saved.isEmpty { Text("No saved messages.") }
-                    ForEach(saved, id: \.archiveID) { archive in
-                        Button(archive.record.savedAccountName ?? "Saved account") {
-                            showingSavedMessages = false
-                            launch.showArchivedAccount(archive)
-                        }
-                    }
-                }
-                .navigationTitle("Saved messages")
-                .toolbar { Button("Done") { showingSavedMessages = false } }
-            }
         }
         .disabled(busy)
         .onChange(of: server) {
