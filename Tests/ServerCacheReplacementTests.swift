@@ -515,6 +515,24 @@ final class Build356StoreUpgradeTests: XCTestCase {
 // the same simulator. Ordinary unit runs do not make or reuse enrollment state.
 @MainActor
 final class BuildLegacyA1StoreUpgradeTests: XCTestCase {
+    func testRestoringActivatingPhaseReplacesRejectedPendingBearer() async throws {
+        var replacementCount = 0
+        try await NativeAppLaunch.resumeInterruptedActivation(
+            activate: {
+                throw APIError(status: 401, token: .unauthorized, retryable: false, requestID: nil)
+            },
+            replace: { replacementCount += 1; return true },
+            legacyStillAuthorized: { false })
+        XCTAssertEqual(replacementCount, 1)
+    }
+
+    func testTransientActivationFailureCanStillOpenAuthorizedLegacyInbox() async throws {
+        try await NativeAppLaunch.resumeInterruptedActivation(
+            activate: { throw URLError(.timedOut) },
+            replace: { XCTFail("Transient failure must retry the saved proof"); return false },
+            legacyStillAuthorized: { true })
+    }
+
     func testCertificateOnlyRecoveryIncludesSameHostOnTrustedAlternatePort() throws {
         let record = NativeEnrollmentRecord(host: "relay.example.test", enrollmentPort: 443, relayPort: 8443,
             trustedRootDER: Data(), identityLabel: "fixture", deviceID: "fixture-device",
