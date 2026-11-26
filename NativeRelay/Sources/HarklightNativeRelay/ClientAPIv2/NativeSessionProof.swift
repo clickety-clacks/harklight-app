@@ -37,15 +37,23 @@ public struct NativeSessionProof: Codable, Equatable, Sendable {
     }
 
     static func commitment(_ secret: String) -> String {
-        SHA256.hash(data: Data(secret.utf8)).map { String(format: "%02x", $0) }.joined()
+        commitmentBytes(Data(secret.utf8))
+    }
+
+    public static func commitmentBytes(_ bytes: Data) -> String {
+        SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
     }
 
     func signIn(reference: String) throws -> SignInFields {
         let key = try P256.Signing.PrivateKey(rawRepresentation: privateKeyBytes)
         let hash = Self.commitment(bearer)
-        let signature = try key.signature(for: Data("harklight-v2:sign-in\n\(reference)\n\(hash)".utf8))
+        let signature = try key.signature(for: signInMessage(reference: reference))
         return SignInFields(publicKey: Self.base64URL(key.publicKey.derRepresentation),
                             sessionHash: hash, signature: Self.base64URL(signature.derRepresentation))
+    }
+
+    public func signInMessage(reference: String) -> Data {
+        Data("harklight-v2:sign-in\n\(reference)\n\(Self.commitment(bearer))".utf8)
     }
 
     public func activationSignature() throws -> String {
@@ -54,7 +62,7 @@ public struct NativeSessionProof: Codable, Equatable, Sendable {
         return Self.base64URL(signature.derRepresentation)
     }
 
-    private static func base64URL(_ bytes: Data) -> String {
+    public static func base64URL(_ bytes: Data) -> String {
         bytes.base64EncodedString()
             .replacingOccurrences(of: "+", with: "-")
             .replacingOccurrences(of: "/", with: "_")
@@ -69,26 +77,59 @@ public struct NativeSessionRedemption: Codable, Equatable, Sendable {
         case migration(token: String)
     }
 
+    public struct OldProof: Encodable, Sendable {
+        let deviceID: String
+        let publicKey: String
+        let signature: String
+
+        public init(deviceID: String, publicKey: String, signature: String) {
+            self.deviceID = deviceID
+            self.publicKey = publicKey
+            self.signature = signature
+        }
+
+        enum CodingKeys: String, CodingKey {
+            case deviceID = "device_id"
+            case publicKey = "public_key"
+            case signature
+        }
+    }
+
+    private struct Fields: Encodable {
+        let label: String
+        var transaction: String?
+        var verifier: String?
+        var token: String?
+        let publicKey: String
+        let sessionHash: String
+        let signature: String
+        let oldProof: OldProof?
+
+        enum CodingKeys: String, CodingKey {
+            case label, transaction, verifier, token, signature
+            case publicKey = "public_key"
+            case sessionHash = "session_hash"
+            case oldProof = "old_proof"
+        }
+    }
+
     public let proof: NativeSessionProof
     private let body: Data
 
-    public init(credential: Credential, label: String, proof: NativeSessionProof) throws {
+    public init(credential: Credential, label: String, proof: NativeSessionProof, oldProof: OldProof? = nil) throws {
         self.proof = proof
-        var fields = ["label": label]
-        let reference: String
+        let fields: Fields
         switch credential {
         case let .transaction(transaction, verifier):
-            reference = transaction
-            fields["transaction"] = transaction
-            fields["verifier"] = verifier
+            let signature = try proof.signIn(reference: transaction)
+            fields = Fields(label: label, transaction: transaction, verifier: verifier,
+                publicKey: signature.publicKey, sessionHash: signature.sessionHash,
+                signature: signature.signature, oldProof: oldProof)
         case let .migration(token):
-            reference = token
-            fields["token"] = token
+            let signature = try proof.signIn(reference: token)
+            fields = Fields(label: label, token: token, publicKey: signature.publicKey,
+                sessionHash: signature.sessionHash, signature: signature.signature, oldProof: nil)
         }
-        let signature = try proof.signIn(reference: reference)
-        fields["public_key"] = signature.publicKey
-        fields["session_hash"] = signature.sessionHash
-        fields["signature"] = signature.signature
         body = try JSONEncoder().encode(fields)
     }
 
