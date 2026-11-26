@@ -89,10 +89,10 @@ final class ConversationPresentationTests: XCTestCase {
         XCTAssertThrowsError(try store.submit(key, explicitCompatibilityAction: ExactText("yes"),
                                               requestRevision: request.requestRevision))
         XCTAssertThrowsError(try repository.submitNoComment(intentID: UUID(), selector: selector,
-                                                             context: store.profileContext)) {
+                                                             context: store.notificationContext)) {
             XCTAssertEqual($0 as? AttentionStoreError, .requestClosed)
         }
-        XCTAssertTrue(try repository.inboxOperationInventory(context: store.profileContext).isEmpty)
+        XCTAssertTrue(try repository.inboxOperationInventory(context: store.notificationContext).isEmpty)
     }
 
     private func sharedStore(_ item: APIItem) throws -> (LivePresentationStore, ClientRepository, RequestKey) {

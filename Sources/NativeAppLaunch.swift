@@ -3299,8 +3299,9 @@ final class LivePresentationStore {
     func submitNoCommentFromUser(_ key: RequestKey,
                                  requestRevision: UInt64? = nil,
                                  selectionIsLocal: Bool = false) -> Bool {
+        guard canSubmitAnswer(for: key) else { return false }
         releaseDefinitiveFailureBeforeChange(key)
-        guard canSubmitAnswer(for: key), validateUserAction(for: key) else { return false }
+        guard validateUserAction(for: key) else { return false }
         let revision: UInt64?
         if !selectionIsLocal {
             guard let request = try? inspectedRequest(key, revision: requestRevision),
