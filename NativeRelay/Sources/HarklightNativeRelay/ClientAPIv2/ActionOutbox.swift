@@ -47,6 +47,8 @@ public struct OutboxEntry: Codable, Equatable, Sendable, Identifiable {
 
     public var id: UUID { idempotencyKey }
 
+    var reconciliationReadCompleted: Bool? = nil
+
     var requiresReconciliation: Bool {
         failure?.token == "accepted_reconcile" || failure?.token == "outcome_uncertain"
     }
@@ -111,7 +113,8 @@ private struct ProtectedWriteOutcome: OutboxOutcomeHandling {
 /// Actions (design section 4) over the r2 API: the durable outbox. Writes
 /// never wait for, or depend on, Sync or the change feed.
 public actor ActionOutbox {
-    private let onReconcile: @Sendable (OutboxEntry) async -> Void
+    private var reconciling: Set<UUID> = []
+    private let onReconcile: @Sendable (OutboxEntry) async -> Bool
     private let persistence: any OutboxPersisting
     private let transport: any ClientAPITransport
     private let outcomes: any OutboxOutcomeHandling
@@ -136,7 +139,7 @@ public actor ActionOutbox {
                 outcomes: any OutboxOutcomeHandling, errors: any ErrorLogging,
                 startsPaused: Bool = false, canSend: @escaping @Sendable (OutboxEntry) -> Bool = { _ in true },
                 excludingSavedKeys: Set<UUID> = [], legacyReceiptCutoff: Date? = nil,
-                onReconcile: @escaping @Sendable (OutboxEntry) async -> Void = { _ in },
+                onReconcile: @escaping @Sendable (OutboxEntry) async -> Bool = { _ in false },
                 onEntriesChanged: @escaping @Sendable ([OutboxEntry], [OutboxEntry]) -> Void = { _, _ in },
                 waitBeforeRetry: @escaping @Sendable (_ attempt: Int, _ retryAfter: TimeInterval?) async throws -> Void
                     = ActionOutbox.backoff) throws {
@@ -292,6 +295,25 @@ public actor ActionOutbox {
         }
     }
 
+    public func resumeReconciliation() async {
+        for entry in entries where entry.requiresReconciliation && entry.reconciliationReadCompleted != true {
+            guard !Task.isCancelled, !closed else { return }
+            await reconcile(entry)
+        }
+    }
+
+    private func reconcile(_ entry: OutboxEntry) async {
+        guard reconciling.insert(entry.id).inserted else { return }
+        defer { reconciling.remove(entry.id) }
+        let token = entry.failure?.token ?? "accepted_reconcile"
+        errors.report(ErrorLogReport(concern: .actions, connectionRole: .request, operation: entry.operation,
+            phase: "reconcile", reason: .app(token), initiator: .unknown, retryable: false,
+            correlation: .request(nil, operationID: entry.id)))
+        if await onReconcile(entry) {
+            update(entry.id) { $0.reconciliationReadCompleted = true }
+        }
+    }
+
     public func resumeSending() {
         guard !closed else { return }
         sendingPaused = false
@@ -369,7 +391,7 @@ public actor ActionOutbox {
             if response.status == 202, response.replayed,
                (try? JSONDecoder().decode([String: String].self, from: response.body))?["code"] == "accepted_reconcile" {
                 update(entry.id) { $0.failure = OutboxFailure(status: 202, token: "accepted_reconcile") }
-                await onReconcile(entry)
+                await reconcile(entry)
                 return (true, .success(response))
             }
             await outcomes.accepted(entry, response: response, generation: generation)

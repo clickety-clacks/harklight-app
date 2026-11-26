@@ -132,7 +132,7 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
                     (entry.operation != "priority_levels" || relay.connection?.priorityLevelsEditingEnabled == true)
             }, excludingSavedKeys: try repository.heldPreviousProtocolOperations(context: context),
             legacyReceiptCutoff: legacyReceiptCutoff, onReconcile: { entry in
-                await relay.connection?.reconcileAcceptedWrite(entry)
+                await relay.connection?.reconcileHeldWrite(entry) ?? false
             },
             onEntriesChanged: { old, new in
                 if old.filter({ $0.operation == "alerts" }) != new.filter({ $0.operation == "alerts" }) {
@@ -347,6 +347,7 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
         queuedContinuation.yield(())
         await outbox.resumeSending()
         await withTaskGroup(of: Void.self) { group in
+            group.addTask { await self.outbox.resumeReconciliation() }
             group.addTask { await self.reconcileAcceptedRepliesWhileForeground(signals) }
             group.addTask {
                 for await _ in settings { await self.refreshSettings() }
@@ -436,18 +437,20 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
         return try await catchUp(forPushRevision: hint.revision)
     }
 
-    private func reconcileAcceptedWrite(_ entry: OutboxEntry) async {
+    private func reconcileHeldWrite(_ entry: OutboxEntry) async -> Bool {
         do {
             try await sync.catchUp(userInitiated: false)
             if entry.operation == "reply", let itemID = entry.resourceID {
                 try await modelWriter.loadEntries(of: ExactText(itemID))
                 publishModel()
             }
+            return true
         } catch {
             errors.report(ErrorLogReport(concern: .snapshot, connectionRole: .request,
                 operation: entry.operation, phase: "reconcile", reason: .api(error),
                 initiator: .forFailure(error), retryable: true,
                 correlation: .request(nil, operationID: entry.id)))
+            return false
         }
     }
 
