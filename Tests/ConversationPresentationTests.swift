@@ -38,6 +38,32 @@ final class ConversationPresentationTests: XCTestCase {
         XCTAssertEqual(thread.shared?.canAnswer, false)
     }
 
+    func testSharedSettlementMovesBothRecipientsToRepliedEvenInFreeOrder() throws {
+        for (person, answered) in [("other", true), ("reader", false)] {
+            let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+                personID: ExactText(person), deviceID: ExactText("device"))
+            let context = ProfileContext(identity: identity, transportMode: .relay)
+            let repository = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+            var model = ServerModelV2()
+            let item = try sharedItem(answeredByViewer: answered)
+            XCTAssertEqual(item.terminal?.byThisPerson, answered)
+            model.putForTesting(item)
+            try repository.restoreCachedServerState(
+                ServerModelV2Projection.cachedState(model, identity: identity), context: context)
+            let store = try LivePresentationStore(store: repository, context: context)
+            let key = ServerModelV2Projection.key(for: item.itemID, sender: item.sender, identity: identity)
+            let row = try XCTUnwrap(store.inboxRow(for: key))
+            XCTAssertTrue(row.belongsToReplied)
+            XCTAssertTrue(row.status.contains("Answered by Dana"))
+            XCTAssertTrue(InboxNormalListProjection.entries(rows: [.request(row)],
+                serverItems: store.presentation.inboxViewListItems, freeOrderVersion: 1,
+                in: .inbox, search: "").isEmpty)
+            XCTAssertEqual(InboxNormalListProjection.entries(rows: [.request(row)],
+                serverItems: store.presentation.inboxViewListItems, freeOrderVersion: 1,
+                in: .replied, search: "").count, 1)
+        }
+    }
+
     func testSharedFYIDecodesNullPolicyAndLegacyItemHasNoRoster() throws {
         let shared = try sharedItem(policy: "null")
         XCTAssertNil(shared.shared?.answerPolicy)
@@ -46,7 +72,8 @@ final class ConversationPresentationTests: XCTestCase {
         XCTAssertNil(legacy.terminal?.speaker)
     }
 
-    private func sharedItem(policy: String = #"{"kind":"first"}"#, includeShared: Bool = true) throws -> APIItem {
+    private func sharedItem(policy: String = #"{"kind":"first"}"#, includeShared: Bool = true,
+                            answeredByViewer: Bool = false) throws -> APIItem {
         let shared = includeShared ? #"""
         ,"shared":{"shared_id":"shared","chat_writable":false,"can_answer":false,"answer_policy":\#(policy),
           "members":[
@@ -57,13 +84,13 @@ final class ConversationPresentationTests: XCTestCase {
         """# : ""
         let terminal = includeShared && policy == "null" ? "" : #"""
         ,"terminal":{"state":"answered","at_ms":300,"answer":{"kind":"choice","id":"yes","label":"Yes"},
-          "by_this_person":false\#(includeShared ? #","answer_id":"answer","speaker":{"kind":"person","id":"other","display_name":"Dana"}"# : "")}
+          "by_this_person":\#(answeredByViewer)\#(includeShared ? #","answer_id":"answer","speaker":{"kind":"person","id":"other","display_name":"Dana"}"# : "")}
         """#
         let json = #"""
         {"item_id":"local","rev":40,"sender":"Studio","request_revision":2,
           "message":{"title":"Launch"},"files":[],"seen":false,
           "chat":{"available":true,"started":true,"read_position":"entry-1","unread_replies":1,"reply_group":"earlier_chat_replies"},
-          "rank":{"key":"a","section":"resolved"}\#(terminal)\#(shared)}
+          "rank":{"key":"a","section":"resolved","group":"common"}\#(terminal)\#(shared)}
         """#
         return try APIItem(json: JSONValue.parse(Data(json.utf8)))
     }

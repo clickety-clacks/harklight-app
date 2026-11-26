@@ -215,7 +215,8 @@ public enum ServerModelV2Projection {
         let readPosition = item.chat.readPosition.flatMap { read in
             model.orderedEntries(of: item.itemID).first { $0.entryID == read }?.position
         } ?? 0
-        let unread = item.chat.unreadReplies ?? originReplies.filter { $0.position > readPosition }.count
+        let originUnread = originReplies.count { $0.position > readPosition }
+        let unread = (item.shared == nil ? item.chat.unreadReplies : nil) ?? originUnread
         let open = unread > 0 ? (originReplies.first { $0.position > readPosition } ?? quote) : quote
         let replyGroup: InboxFreeSection.Group = item.chat.replyGroup == "earlier_chat_replies_unknown"
             ? .earlierChatRepliesUnknown : .earlierChatReplies

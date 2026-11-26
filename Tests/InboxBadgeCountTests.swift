@@ -45,11 +45,15 @@ final class InboxBadgeCountTests: XCTestCase {
                                         showsLocalExamples: true), 2)
     }
 
-    func testSharedChatAddsUnreadTurnsAfterRequestIsAnswered() {
+    func testSharedItemCountsOnceForUnreadChatOrRequestAttention() {
         var settled = row("shared", status: "Answered by Dana", hasUserAction: true)
         settled.sharedUnreadChatCount = 2
-        XCTAssertEqual(InboxBadge.count(requests: [settled], samples: SampleLibrary(),
+        var open = row("open-shared")
+        open.sharedUnreadChatCount = 2
+        XCTAssertEqual(InboxBadge.count(requests: [open, settled], samples: SampleLibrary(),
                                         showsLocalExamples: false), 2)
+        XCTAssertEqual(InboxBadge.count(requests: [settled], samples: SampleLibrary(),
+                                        showsLocalExamples: false), 1)
         settled.sharedUnreadChatCount = 0
         XCTAssertEqual(InboxBadge.count(requests: [settled], samples: SampleLibrary(),
                                         showsLocalExamples: false), 0)

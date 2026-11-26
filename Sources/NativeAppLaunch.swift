@@ -2396,6 +2396,9 @@ final class LivePresentationStore {
                               skippedMessageRequestTags: Set<String>) -> InboxRequestRow? {
         let retracted = isRetracted(request)
         if retracted, clearedRetractions.contains(request.key) { return nil }
+        let thread = conversation(for: request.key)
+        let sharedAnswerSettled = thread?.shared != nil &&
+            (thread?.terminal == .answered || thread?.terminal == .noComment)
         let hasKnownDeliveryFailure = failedResponseWarning(for: request) != nil
         let hasDeliveryWarning = hasKnownDeliveryFailure || request.staleAnswerRevision != nil
         let hasMessageLoadWarning = requestTag(for: request.key)
@@ -2417,7 +2420,7 @@ final class LivePresentationStore {
         if hasAcceptedSenderRevision { statusParts.append("Updated") }
         if request.inboxStateIsCurrent {
             let lifecycle = retracted ? retractionLabel(for: request) :
-                conversation(for: request.key)?.sharedAnswerStatusText ??
+                thread?.sharedAnswerStatusText ??
                     request.defaultAnswerStatusText ??
                     String(localized: LiveLifecycleTitle(request.lifecycleStatus).label)
             if request.lifecycleStatus != .open || retracted || request.defaultAnswerStatusText != nil ||
@@ -2481,7 +2484,8 @@ final class LivePresentationStore {
             hasMessageLoadWarning: hasMessageLoadWarning,
             isRetracted: retracted,
             chatUnread: listChatUnread(request.key),
-            sharedUnreadChatCount: conversation(for: request.key)?.unreadSharedChatCount,
+            sharedUnreadChatCount: thread?.unreadSharedChatCount,
+            isSharedAnswerSettled: sharedAnswerSettled,
             submissionProgress: submissionProgress[request.key].map { progress in
                 InboxRowSubmissionProgress(
                     state: progress.state == .awaiting ? .awaiting : .notSent(detail: progress.detail))
