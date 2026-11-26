@@ -153,7 +153,7 @@ public actor ActionOutbox {
         var admitted = saved.filter { !excludingSavedKeys.contains($0.id) }
         if let legacyReceiptCutoff {
             for index in admitted.indices where admitted[index].failure == nil &&
-                admitted[index].outcomeUnknown && admitted[index].createdAt <= legacyReceiptCutoff {
+                (admitted[index].outcomeUnknown || admitted[index].attempts > 0) && admitted[index].createdAt <= legacyReceiptCutoff {
                 admitted[index].failure = OutboxFailure(status: 0, token: "outcome_uncertain")
             }
         }
@@ -507,7 +507,7 @@ public final class FileOutboxPersistence: OutboxPersisting, @unchecked Sendable 
         guard !carried.isEmpty else { return }
         if let legacyReceiptCutoff {
             for index in carried.indices where carried[index].failure == nil &&
-                carried[index].outcomeUnknown && carried[index].createdAt <= legacyReceiptCutoff {
+                (carried[index].outcomeUnknown || carried[index].attempts > 0) && carried[index].createdAt <= legacyReceiptCutoff {
                 carried[index].failure = OutboxFailure(status: 0, token: "outcome_uncertain")
             }
         }

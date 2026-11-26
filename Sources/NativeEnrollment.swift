@@ -78,6 +78,11 @@ struct NativeEnrollmentRecord: Codable, Equatable {
         return origin.url
     }
 
+    func receiptCutoffBeforeOpeningOutbox(now: Date = Date()) -> Date? {
+        if case .active = sessionMigration { return legacyReceiptCutoff }
+        return now.addingTimeInterval(-30 * 24 * 60 * 60)
+    }
+
     func sameRecipient(personID: String, deviceID: String) -> Bool {
         NativeAuthorityBinding.samePerson(self.personID, personID) && ExactText(self.deviceID) == ExactText(deviceID)
     }
