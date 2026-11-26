@@ -589,7 +589,7 @@ final class SampleWorkspaceUITests: XCTestCase {
         let start = ProcessInfo.processInfo.systemUptime
         card.tap()
         let list = app.collectionViews["fyi-list"]
-        let first = list.staticTexts["Bulletin 1034"]
+        let first = fyiHeading("Bulletin 1034", in: list)
         XCTAssertTrue(first.waitForExistence(timeout: 5))
         let opened = ProcessInfo.processInfo.systemUptime
         list.swipeUp()

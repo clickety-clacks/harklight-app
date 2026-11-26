@@ -459,24 +459,21 @@ final class ConversationSampleUITests: XCTestCase {
                 "normal-reply-item-sample-information-0"
             ]
             XCTAssertTrue(normalReply.waitForExistence(timeout: 10), app.debugDescription)
-            let finalRequest = app.descendants(matching: .any)[
-                "request-row-sample-information-0"
-            ]
             let normalQuote = normalReply.staticTexts.matching(
                 NSPredicate(format: "label CONTAINS %@", "Newest unseen chat reply")
             ).firstMatch
             XCTAssertTrue(normalQuote.waitForExistence(timeout: 5), app.debugDescription)
 
-            // Drive the list to its actual end. The parent request is the final
-            // row after the normal reply in this fixture, so this measures the
-            // reply at its final reachable position relative to the tab bar.
-            for _ in 0..<12 {
-                inboxList.swipeUp()
+            // The parent FYI is now represented by the Inbox digest. The
+            // reply itself is the final row in this fixture.
+            for _ in 0..<12 { inboxList.swipeUp() }
+            guard normalReply.waitForExistence(timeout: 5) else {
+                XCTFail("The final reply row was not reachable at \(size.name).\n\(app.debugDescription)")
+                return
             }
-            XCTAssertTrue(finalRequest.waitForExistence(timeout: 5), app.debugDescription)
-            let endRowFrame = finalRequest.frame
+            let endRowFrame = normalReply.frame
             inboxList.swipeUp()
-            XCTAssertEqual(finalRequest.frame.minY, endRowFrame.minY, accuracy: 1,
+            XCTAssertEqual(normalReply.frame.minY, endRowFrame.minY, accuracy: 1,
                            "The list should already be at its end before measuring reply clearance at \(size.name).\n\(app.debugDescription)")
             XCTAssertTrue(normalReply.isHittable,
                           "The last reply must remain visible at the list end at \(size.name).\n\(app.debugDescription)")
