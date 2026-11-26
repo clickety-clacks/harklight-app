@@ -108,6 +108,41 @@ final class ConversationPresentationTests: XCTestCase {
         return (try LivePresentationStore(store: repository, context: context), repository, key)
     }
 
+    func testSharedFYILegacySeenActionFollowsTheOpenedFlagLifecycle() throws {
+        let message = #"{"title":"Launch","message_type":"fyi","answer_ui":{"schema":"attention-client.actions/1","actions":[{"id":"seen","label":"Seen","kind":"value","value":{"acknowledgment":"seen"}}]}}"#
+        let item = try sharedItem(policy: "null", settled: false, message: message)
+        let (store, repository, key) = try sharedStore(item)
+        let context = store.notificationContext
+        func row() throws -> InboxRequestRow { try XCTUnwrap(store.inboxRow(for: key)) }
+
+        XCTAssertEqual(try row().fyiSeenAction, .openedFlag)
+        XCTAssertTrue(try row().isActiveFYI)
+        XCTAssertTrue(store.markFYISeen(key, requestRevision: item.requestRevision))
+        try store.refreshFromDurableStore()
+        XCTAssertTrue(try row().fyiOpenedFlagPending)
+        XCTAssertEqual(try row().informationalSeenStatus, .pending)
+        XCTAssertNil(try row().fyiSeenAction)
+        let opened = try XCTUnwrap(repository.snapshot(context: context).pendingMessageOpens.first)
+        XCTAssertTrue(try repository.retireMessageOpen(opened.operationID, rejected: true, context: context))
+        try store.refreshFromDurableStore()
+        XCTAssertTrue(try row().fyiOpenedFlagFailed)
+        XCTAssertEqual(try row().fyiSeenAction, .openedFlag)
+
+        var model = ServerModelV2()
+        model.putForTesting(try sharedItem(policy: "null", settled: false, message: message, seen: true))
+        try repository.restoreCachedServerState(
+            ServerModelV2Projection.cachedState(model, identity: context.identity), context: context)
+        try store.refreshFromDurableStore()
+        let confirmed = try row()
+        XCTAssertEqual(confirmed.informationalSeenStatus, .confirmed)
+        XCTAssertFalse(confirmed.isUnseenFYI)
+        XCTAssertTrue(confirmed.isRepliedFYI)
+        XCTAssertFalse(confirmed.isActiveFYI)
+        XCTAssertFalse(confirmed.fyiOpenedFlagFailed)
+        XCTAssertNil(confirmed.fyiSeenAction)
+        XCTAssertTrue(try repository.inboxOperationInventory(context: context).isEmpty)
+    }
+
     func testSharedFYIDecodesNullPolicyAndLegacyItemHasNoRoster() throws {
         let shared = try sharedItem(policy: "null")
         XCTAssertNil(shared.shared?.answerPolicy)
@@ -118,7 +153,8 @@ final class ConversationPresentationTests: XCTestCase {
 
     private func sharedItem(policy: String = #"{"kind":"first"}"#, includeShared: Bool = true,
                             answeredByViewer: Bool = false, canAnswer: Bool = false,
-                            settled: Bool = true, answers: String = "[]") throws -> APIItem {
+                            settled: Bool = true, answers: String = "[]",
+                            message: String = #"{"title":"Launch"}"#, seen: Bool = false) throws -> APIItem {
         let shared = includeShared ? #"""
         ,"shared":{"shared_id":"shared","chat_writable":false,"can_answer":\#(canAnswer),"answer_policy":\#(policy),
           "members":[
@@ -133,7 +169,7 @@ final class ConversationPresentationTests: XCTestCase {
         """#
         let json = #"""
         {"item_id":"local","rev":40,"sender":"Studio","request_revision":2,
-          "message":{"title":"Launch"},"files":[],"seen":false,
+          "message":\#(message),"files":[],"seen":\#(seen),
           "chat":{"available":true,"started":true,"read_position":"entry-1","unread_replies":1,"reply_group":"earlier_chat_replies"},
           "rank":{"key":"a","section":"\#(settled ? "resolved" : "current")","group":"common"}\#(terminal)\#(shared)}
         """#
