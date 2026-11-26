@@ -447,6 +447,30 @@ final class HTTPSClientAPITransportTests: XCTestCase {
         XCTAssertEqual(retry.url?.path, request.path)
     }
 
+    func testRestoredReconciliationReadsHeldWritesWithoutResending() async throws {
+        let persistence = MemoryOutboxPersistence()
+        let fixture = SignInFixture()
+        let entries = ["outcome_uncertain", "accepted_reconcile"].map { token in
+            var entry = OutboxEntry(idempotencyKey: UUID(), target: "item:fixture", operation: "reply",
+                write: FrozenWrite(method: .post, path: "/v2/items/fixture/replies", body: Data("{}".utf8)),
+                createdAt: Date(timeIntervalSince1970: 1), outcomeUnknown: true, attempts: 1)
+            entry.failure = OutboxFailure(status: token == "accepted_reconcile" ? 202 : 0, token: token)
+            return entry
+        }
+        try persistence.save(entries)
+        let outbox = try ActionOutbox(persistence: persistence, transport: fixture, outcomes: RecordingOutcomes(),
+            errors: NoopErrorLog(), onReconcile: { _ in
+                (try? await fixture.send(.get("/v2/me"))) != nil
+            })
+        await outbox.resumeReconciliation()
+        await outbox.resumeReconciliation()
+        await outbox.flush()
+        let sent = await fixture.requests
+        XCTAssertEqual(sent.map(\.method), [.get, .get])
+        XCTAssertEqual(sent.map(\.path), ["/v2/me", "/v2/me"])
+        XCTAssertEqual(try persistence.load().map(\.failure?.token), ["outcome_uncertain", "accepted_reconcile"])
+    }
+
     func testRefusedQueuedReplyCanReplaceOnlyItsFileHandles() async throws {
         let fixture = SignInFixture()
         let persistence = MemoryOutboxPersistence()
