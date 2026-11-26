@@ -418,7 +418,7 @@ struct NativeSharedSignInView: View {
                     }
                     .font(.footnote)
                 }
-                Button("View unsent queue") { showingUnsentQueue = true }
+                Button("View unsent messages") { showingUnsentQueue = true }
                     .font(.footnote)
                 if let message {
                     Text(message).font(.footnote)
@@ -434,7 +434,7 @@ struct NativeSharedSignInView: View {
         }
         .sheet(isPresented: $showingUnsentQueue) {
             NavigationStack {
-                PreviousDeviceUnsentTextView(title: "Unsent queue",
+                PreviousDeviceUnsentTextView(title: "Unsent messages",
                     explanation: "These messages are saved on this device.") {
                     try launch.signedOutQueueText()
                 }

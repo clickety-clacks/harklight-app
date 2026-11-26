@@ -779,9 +779,9 @@ final class NativeAppLaunch {
         }
         if entry.operation == "answer" {
             if let comment = fields?["comment"] as? String, !comment.isEmpty { return ExactText(comment) }
-            return ExactText("Queued answer")
+            return ExactText("Unsent answer")
         }
-        if entry.operation == "reply" { return ExactText("Queued reply") }
+        if entry.operation == "reply" { return ExactText("Unsent reply") }
         return nil
     }
 

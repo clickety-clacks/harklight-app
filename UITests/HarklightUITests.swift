@@ -16,10 +16,10 @@ final class HarklightUITests: XCTestCase {
         XCTAssertTrue(app.buttons["Continue"].exists)
         XCTAssertFalse(app.staticTexts["Last used"].exists)
         XCTAssertFalse(app.buttons["View saved messages"].exists)
-        let queue = app.buttons["View unsent queue"]
+        let queue = app.buttons["View unsent messages"]
         XCTAssertTrue(queue.exists)
         queue.tap()
-        XCTAssertTrue(app.navigationBars["Unsent queue"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.navigationBars["Unsent messages"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["There is no unsent text on this device."].exists)
         XCTAssertFalse(app.secureTextFields["Full invitation"].exists)
         XCTAssertFalse(app.secureTextFields["Password"].exists)
