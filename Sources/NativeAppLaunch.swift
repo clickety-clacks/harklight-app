@@ -758,6 +758,33 @@ final class NativeAppLaunch {
         return Set(saved + (archive.stagedRevokedText ?? [])).sorted { $0.rawValue < $1.rawValue }
     }
 
+    func signedOutQueueText() throws -> [ExactText] {
+        var values: [ExactText] = []
+        for archive in try guidedJoinStore.archivedDepartures() where archive.removed && archive.v2SignOut == true {
+            values.append(contentsOf: try recoveredUnsentText(for: archive))
+            let (_, context) = try reopenArchivedStore(for: archive.record)
+            let directory = try NativeRelayLifecycle.v2Directory(for: context.identity)
+            let outbox = FileOutboxPersistence(url: directory.appendingPathComponent("outbox-v2.json"))
+            values.append(contentsOf: try outbox.load().compactMap(Self.signedOutWriteText))
+        }
+        var seen = Set<ExactText>()
+        return values.filter { seen.insert($0).inserted }
+    }
+
+    static func signedOutWriteText(_ entry: OutboxEntry) -> ExactText? {
+        guard entry.failure?.token != "accepted_reconcile" else { return nil }
+        let fields = entry.write.body.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        if entry.operation == "reply", let text = fields?["text"] as? String, !text.isEmpty {
+            return ExactText(text)
+        }
+        if entry.operation == "answer" {
+            if let comment = fields?["comment"] as? String, !comment.isEmpty { return ExactText(comment) }
+            return ExactText("Queued answer")
+        }
+        if entry.operation == "reply" { return ExactText("Queued reply") }
+        return nil
+    }
+
     private var disconnectedStore: LivePresentationStore? {
         if case let .disconnected(presentation) = state { return presentation }
         return nil
@@ -960,7 +987,8 @@ final class NativeAppLaunch {
         observeV2Connection(lifecycle)
         try lifecycle.activate(store: presentation.attentionStore, context: context,
                                      deviceURL: installation.deviceURL, clientIdentity: installation.keychainIdentity,
-                                     trustedRootDER: installation.trustedRootDER)
+                                     trustedRootDER: installation.trustedRootDER,
+                                     legacyReceiptCutoff: record.receiptCutoffBeforeOpeningOutbox())
         if let access = lifecycle.v2AccountAccess {
             applyV2AccountAccess(access, for: context)
         }

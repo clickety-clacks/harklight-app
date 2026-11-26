@@ -794,11 +794,12 @@ final class NativeRelayLifecycle {
 
 
     func activate(store: ClientRepository, context: ProfileContext, deviceURL: URL,
-                  clientIdentity: SecIdentity, trustedRootDER: Data,
+                  clientIdentity: SecIdentity, trustedRootDER: Data, legacyReceiptCutoff: Date?,
                   diagnostics: NativeClientDiagnosticJournal? = nil) throws {
         let transport = try HTTPSClientAPITransport(baseURL: deviceURL,
             clientIdentity: TrustedKeychainIdentity(clientIdentity), trustedRootDER: trustedRootDER)
-        try activate(store: store, context: context, transport: transport, diagnostics: diagnostics)
+        try activate(store: store, context: context, transport: transport,
+                     legacyReceiptCutoff: legacyReceiptCutoff, diagnostics: diagnostics)
     }
 
     func activate(store: ClientRepository, context: ProfileContext, transport: HTTPSClientAPITransport,

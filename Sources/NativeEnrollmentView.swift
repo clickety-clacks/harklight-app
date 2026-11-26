@@ -371,6 +371,7 @@ struct NativeSharedSignInView: View {
     @State private var code = ""
     @State private var rememberMethod = false
     @State private var rememberedMethod: NativeSignInMethod?
+    @State private var showingUnsentQueue = false
     @State private var busy = false
     @State private var message: String?
     @State private var sheet = NativeSignInSheet()
@@ -417,6 +418,8 @@ struct NativeSharedSignInView: View {
                     }
                     .font(.footnote)
                 }
+                Button("View unsent queue") { showingUnsentQueue = true }
+                    .font(.footnote)
                 if let message {
                     Text(message).font(.footnote)
                     ShareLink(item: launch.diagnostics.shareText) {
@@ -428,6 +431,15 @@ struct NativeSharedSignInView: View {
             .frame(maxWidth: 430)
             .padding(24)
             .frame(maxWidth: .infinity)
+        }
+        .sheet(isPresented: $showingUnsentQueue) {
+            NavigationStack {
+                PreviousDeviceUnsentTextView(title: "Unsent queue",
+                    explanation: "These messages are saved on this device.") {
+                    try launch.signedOutQueueText()
+                }
+                .toolbar { Button("Done") { showingUnsentQueue = false } }
+            }
         }
         .disabled(busy)
         .onChange(of: server) {
