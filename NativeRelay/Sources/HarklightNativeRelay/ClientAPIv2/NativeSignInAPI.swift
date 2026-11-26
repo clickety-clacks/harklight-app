@@ -10,11 +10,11 @@ public enum NativeSignInMethod: String, Codable, Sendable, CaseIterable {
 }
 
 public struct NativeSignInAPI: Sendable {
-    struct Transaction: Codable, Sendable {
-        let reference: String
-        let verifier: String
+    public struct Transaction: Codable, Sendable {
+        public let reference: String
+        public let verifier: String
 
-        func sheetURL(origin: URL, method: NativeSignInMethod) -> URL? {
+        public func sheetURL(origin: URL, method: NativeSignInMethod) -> URL? {
             guard var url = URLComponents(url: origin, resolvingAgainstBaseURL: false),
                   url.scheme == "https", let host = url.host, !host.isEmpty,
                   url.user == nil, url.password == nil, url.query == nil, url.fragment == nil,
@@ -29,7 +29,7 @@ public struct NativeSignInAPI: Sendable {
             return url.url
         }
 
-        func matchesCallback(_ callback: URL) -> Bool {
+        public func matchesCallback(_ callback: URL) -> Bool {
             guard let url = URLComponents(url: callback, resolvingAgainstBaseURL: false),
                   url.scheme == "harklight", url.host == "sign-in",
                   url.user == nil, url.password == nil, url.port == nil,
@@ -48,7 +48,7 @@ public struct NativeSignInAPI: Sendable {
         public let personID: String
         public let deviceID: String
         let duplicate: Bool
-        let method: NativeSignInMethod?
+        public let method: NativeSignInMethod?
         let oldDevice: OldDevice?
 
         enum CodingKeys: String, CodingKey {
@@ -63,7 +63,7 @@ public struct NativeSignInAPI: Sendable {
 
     public init(transport: any ClientAPITransport) { self.transport = transport }
 
-    func methods() async throws -> [NativeSignInMethod] {
+    public func methods() async throws -> [NativeSignInMethod] {
         struct Response: Decodable {
             let methods: [String]
         }
@@ -72,7 +72,7 @@ public struct NativeSignInAPI: Sendable {
             .compactMap(NativeSignInMethod.init(rawValue:))
     }
 
-    func begin() async throws -> Transaction {
+    public func begin() async throws -> Transaction {
         struct Response: Decodable {
             let transaction: String
         }
@@ -84,7 +84,7 @@ public struct NativeSignInAPI: Sendable {
         return Transaction(reference: reference, verifier: verifier)
     }
 
-    func verifyOwnerCode(_ code: String, transaction: String) async throws {
+    public func verifyOwnerCode(_ code: String, transaction: String) async throws {
         _ = try await post("/sign-in/code", ["transaction": transaction, "code": code])
     }
 
@@ -98,11 +98,11 @@ public struct NativeSignInAPI: Sendable {
         public let token: String
     }
 
-    struct Device: Decodable, Identifiable, Sendable {
-        let id: String
-        let label: String
-        let signedInAt: Int64?
-        let current: Bool
+    public struct Device: Decodable, Identifiable, Sendable {
+        public let id: String
+        public let label: String
+        public let signedInAt: Int64?
+        public let current: Bool
 
         enum CodingKeys: String, CodingKey {
             case id = "device_id"
@@ -143,11 +143,11 @@ public struct NativeSignInAPI: Sendable {
         _ = try await post("/v2/auth/migration-complete", ["signature": signature])
     }
 
-    func signOut() async throws {
+    public func signOut() async throws {
         _ = try await transport.send(APIRequest(method: .post, path: "/v2/auth/sign-out"))
     }
 
-    func devices() async throws -> [Device] {
+    public func devices() async throws -> [Device] {
         struct Response: Decodable {
             let devices: [Device]
         }
@@ -155,7 +155,7 @@ public struct NativeSignInAPI: Sendable {
         return try JSONDecoder().decode(Response.self, from: response.body).devices
     }
 
-    func isKnown(deviceID: String) async throws -> Bool {
+    public func isKnown(deviceID: String) async throws -> Bool {
         struct Response: Decodable {
             let known: Bool
         }
@@ -163,7 +163,7 @@ public struct NativeSignInAPI: Sendable {
         return try JSONDecoder().decode(Response.self, from: response.body).known
     }
 
-    func removeDevice(_ deviceID: String) async throws {
+    public func removeDevice(_ deviceID: String) async throws {
         let path = "/v2/devices/" + ClientAPIWrites.component(ExactText(deviceID))
         _ = try await transport.send(APIRequest(method: .delete, path: path))
     }

@@ -97,13 +97,57 @@ enum NativeAuthorityBinding {
     }
 }
 
+struct NativePendingSignIn: Codable {
+    let origin: URL
+    let transaction: NativeSignInAPI.Transaction
+    let rememberMethod: Bool
+    var redemption: NativeSessionRedemption?
+}
+
 struct NativeEnrollmentStore {
     private let service: String
     private static let account = "current-installation"
+    private static let pendingSignInAccount = "pending-session-sign-in"
     private static let v2APNsAccount = "client-api-v2-apns-token"
 
     init(service: String = "co.clicketyclacks.Harklight.native-enrollment") {
         self.service = service
+    }
+
+    func pendingSignIn() throws -> NativePendingSignIn? {
+        try loadData(account: Self.pendingSignInAccount).map {
+            try JSONDecoder().decode(NativePendingSignIn.self, from: $0)
+        }
+    }
+
+    func savePendingSignIn(_ pending: NativePendingSignIn) throws {
+        try saveData(JSONEncoder().encode(pending), account: Self.pendingSignInAccount)
+    }
+
+    func clearPendingSignIn() throws {
+        let status = SecItemDelete([kSecClass as String: kSecClassGenericPassword,
+                                   kSecAttrService as String: service,
+                                   kSecAttrAccount as String: Self.pendingSignInAccount] as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else {
+            throw NativeEnrollmentError.identityStorage
+        }
+    }
+
+    func retainSignedInSession(origin: URL, proof: NativeSessionProof, result: NativeSignInAPI.Result,
+                               label: String) throws -> NativeEnrollmentRecord {
+        guard let host = origin.host, !result.personID.isEmpty, !result.deviceID.isEmpty else {
+            throw NativeEnrollmentError.invalidIdentity
+        }
+        let current = try load()
+        guard current == nil || current?.v2Revoked == true else { throw NativeJoinError.existingAccount }
+        let port = origin.port ?? 443
+        var record = NativeEnrollmentRecord(host: host, enrollmentPort: port, relayPort: port,
+            trustedRootDER: Data(), identityLabel: "", deviceLabel: label, deviceID: result.deviceID,
+            approvalCode: "", statusSecret: "", expiresAt: nil, statusExpiresAt: nil, personID: result.personID,
+            localProfileAuthority: origin.absoluteString)
+        record.sessionMigration = .active(origin: origin, proof: proof)
+        try save(record)
+        return record
     }
 
     func load() throws -> NativeEnrollmentRecord? {
