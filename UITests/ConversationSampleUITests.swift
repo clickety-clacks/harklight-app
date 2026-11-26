@@ -577,7 +577,10 @@ final class ConversationSampleUITests: XCTestCase {
                 $0.frame.minX <= startElement.frame.midX && $0.frame.maxX >= startElement.frame.midX
             }
             let barBottom = bars.map(\.frame.maxY).filter { $0 > startElement.frame.minY }.max()
-            if gesture.deltaY > 0, let barBottom {
+            // A side panel's zone counts from its visible content, below that bar;
+            // a sheet keeps its drag from the top of the history.
+            let isSidePanel = history.frame.width < app.windows.firstMatch.frame.width * 0.5
+            if gesture.deltaY > 0, isSidePanel, let barBottom {
                 start = startElement.coordinate(withNormalizedOffset: CGVector(dx: gesture.startX, dy: 0))
                     .withOffset(CGVector(dx: 0, dy: barBottom + 24 - startElement.frame.minY))
             }

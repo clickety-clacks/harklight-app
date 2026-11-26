@@ -628,7 +628,7 @@ final class HarklightUITests: XCTestCase {
                        "Notice detail keeps one toolbar Seen control.")
         XCTAssertFalse(app.staticTexts["Seen available"].exists)
         attachScreenshot("Notice detail Seen available", from: app)
-        let listVisibleAlongsideDetail = app.searchFields.firstMatch.isHittable
+        let listVisibleAlongsideDetail = listVisibleBesideDetail(in: app)
         finishSeen.tap()
         guard listVisibleAlongsideDetail else {
             XCTAssertTrue(app.scrollViews["message-card-scroll"].waitForNonExistence(timeout: 5),

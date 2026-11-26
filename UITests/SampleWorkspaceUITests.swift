@@ -1051,7 +1051,7 @@ final class SampleWorkspaceUITests: XCTestCase {
         let finish = app.buttons["request-finish"]
         XCTAssertTrue(finish.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(finish.isEnabled, app.debugDescription)
-        let listVisibleAlongsideDetail = app.searchFields.firstMatch.isHittable
+        let listVisibleAlongsideDetail = listVisibleBesideDetail(in: app)
         let detail = app.scrollViews["message-card-scroll"]
         finish.tap()
         if listVisibleAlongsideDetail {
@@ -1210,7 +1210,7 @@ final class SampleWorkspaceUITests: XCTestCase {
                       "The No comment selection survives leaving the detail.")
         let submit = app.buttons["request-finish"]
         XCTAssertTrue(submit.isEnabled, app.debugDescription)
-        let listVisibleAlongsideDetail = app.searchFields.firstMatch.isHittable
+        let listVisibleAlongsideDetail = listVisibleBesideDetail(in: app)
         let detail = app.scrollViews["message-card-scroll"]
         submit.tap()
         if listVisibleAlongsideDetail {
@@ -1520,7 +1520,7 @@ final class SampleWorkspaceUITests: XCTestCase {
         XCTAssertEqual(app.buttons.matching(identifier: "request-seen-action").count, 1)
         XCTAssertEqual(app.buttons.matching(identifier: "request-finish-seen").count, 1)
         capture("seen-detail-with-body-and-toolbar-actions", app)
-        let listVisibleAlongsideDetail = app.searchFields.firstMatch.isHittable
+        let listVisibleAlongsideDetail = listVisibleBesideDetail(in: app)
         let detail = app.scrollViews["message-card-scroll"]
         bodySeen.tap()
         if listVisibleAlongsideDetail {
