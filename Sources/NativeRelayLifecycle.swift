@@ -771,6 +771,14 @@ final class NativeRelayLifecycle {
             .appendingPathComponent(digest, isDirectory: true)
     }
 
+    static func transferOutbox(from source: ProfileIdentity, to destination: ProfileIdentity,
+                               legacyReceiptCutoff: Date?) throws {
+        guard source != destination else { return }
+        let original = FileOutboxPersistence(url: try v2Directory(for: source).appendingPathComponent("outbox-v2.json"))
+        let next = FileOutboxPersistence(url: try v2Directory(for: destination).appendingPathComponent("outbox-v2.json"))
+        try original.transferPending(to: next, legacyReceiptCutoff: legacyReceiptCutoff)
+    }
+
     static func clearV2Storage(for record: NativeEnrollmentRecord) throws {
         guard let person = record.personID else { throw NativeEnrollmentError.invalidIdentity }
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText(record.profileAuthority),

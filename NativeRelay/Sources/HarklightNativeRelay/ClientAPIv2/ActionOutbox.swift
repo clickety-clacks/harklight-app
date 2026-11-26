@@ -463,6 +463,25 @@ public final class FileOutboxPersistence: OutboxPersisting, @unchecked Sendable 
         return try JSONDecoder().decode([OutboxEntry].self, from: Data(contentsOf: url))
     }
 
+    /// Transfer the exact frozen intents after the caller proves saved-queue ownership.
+    public func transferPending(to destination: FileOutboxPersistence, legacyReceiptCutoff: Date?) throws {
+        let source = try load()
+        var target = try destination.load()
+        var carried = source.filter { $0.failure == nil || $0.requiresReconciliation }
+        guard !carried.isEmpty else { return }
+        if let legacyReceiptCutoff {
+            for index in carried.indices where carried[index].failure == nil &&
+                carried[index].outcomeUnknown && carried[index].createdAt <= legacyReceiptCutoff {
+                carried[index].failure = OutboxFailure(status: 0, token: "outcome_uncertain")
+            }
+        }
+        let targetKeys = Set(target.map(\.id))
+        target.append(contentsOf: carried.filter { !targetKeys.contains($0.id) })
+        try destination.save(target)
+        let moved = Set(carried.map(\.id))
+        try save(source.filter { !moved.contains($0.id) })
+    }
+
     public func save(_ entries: [OutboxEntry]) throws {
         lock.lock(); defer { lock.unlock() }
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),

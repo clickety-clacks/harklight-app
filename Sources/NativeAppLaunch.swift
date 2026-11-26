@@ -1119,7 +1119,7 @@ final class NativeAppLaunch {
             guard activeEnrollmentRecord?.sameNotificationProfile(as: record) == true else { return }
             let recovery = presentation.prepareRevokedTextRecovery()
             try enrollment.markV2Revoked(record)
-            try guidedJoinStore.archiveRevokedInstallation(record, stagedText: recovery.staged, clearActive: true)
+            try guidedJoinStore.archiveRevokedInstallation(record, stagedText: recovery.staged, clearActive: true, v2SignOut: true)
             await NativeRelayLifecycle.shared.deactivate()
             presentation.enterReadOnlyMode()
             activeEnrollmentRecord = nil
@@ -1166,6 +1166,10 @@ final class NativeAppLaunch {
         }
         guard let redemption = pending.redemption else { throw NativeEnrollmentError.invalidIdentity }
         let result = try await api.redeem(redemption)
+        if result.oldDevice != .attached {
+            try await restoreAuthorizedOutboxes(origin: pending.origin, result: result, proof: redemption.proof,
+                                                  provedDeviceID: legacy?.deviceID)
+        }
         let record = try enrollment.retainSignedInSession(origin: pending.origin, proof: redemption.proof,
                                                            result: result, label: label, attachedLegacy: legacy)
         if let prior = archivedAccountDepartures.last(where: { $0.record.signedInOrigin == pending.origin }),
@@ -1177,6 +1181,37 @@ final class NativeAppLaunch {
         }
         try enrollment.clearPendingSignIn()
         try await connectSignedInSession(record)
+    }
+
+    private func restoreAuthorizedOutboxes(origin: URL, result: NativeSignInAPI.Result,
+                                           proof: NativeSessionProof, provedDeviceID: String?) async throws {
+        let candidates = archivedAccountDepartures.filter {
+            $0.record.v2Revoked == true && $0.v2SignOut != true &&
+                NativeAuthorityBinding.samePerson($0.record.personID, result.personID)
+        }
+        guard !candidates.isEmpty else { return }
+        let transport = try HTTPSClientAPITransport(origin: origin, bearer: proof.bearer)
+        defer { transport.close() }
+        let api = NativeSignInAPI(transport: transport)
+        let destination = ProfileIdentity(trustedRelayAuthority: ExactText(origin.absoluteString),
+                                           personID: ExactText(result.personID), deviceID: ExactText(result.deviceID))
+        for candidate in candidates {
+            let record = candidate.record
+            let authorized: Bool
+            if let savedOrigin = record.signedInOrigin {
+                authorized = savedOrigin == origin
+            } else if result.oldDevice == .removed, provedDeviceID == record.deviceID {
+                authorized = true
+            } else {
+                authorized = try await api.isKnown(deviceID: record.deviceID)
+            }
+            guard authorized else { continue }
+            let source = ProfileIdentity(trustedRelayAuthority: ExactText(record.profileAuthority),
+                                          personID: ExactText(result.personID), deviceID: ExactText(record.deviceID))
+            try NativeRelayLifecycle.transferOutbox(from: source, to: destination,
+                                                    legacyReceiptCutoff: record.signedInOrigin == nil
+                                                        ? Date().addingTimeInterval(-30 * 24 * 60 * 60) : nil)
+        }
     }
 
     private func recoveryRecord(origin: URL) throws -> NativeEnrollmentRecord? {
