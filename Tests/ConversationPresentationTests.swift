@@ -83,7 +83,7 @@ final class ConversationPresentationTests: XCTestCase {
         let item = try sharedItem(policy: #"{"kind":"named","people":["other"]}"#, settled: false)
         let (store, repository, key) = try sharedStore(item)
         let request = try XCTUnwrap(store.request(for: key))
-        let selector = try XCTUnwrap(request.selector)
+        let selector = try repository.selector(for: key, context: store.notificationContext)
         XCTAssertFalse(try XCTUnwrap(store.inboxRow(for: key)).canNoComment)
         XCTAssertFalse(store.submitNoCommentFromUser(key, requestRevision: request.requestRevision))
         XCTAssertThrowsError(try store.submit(key, explicitCompatibilityAction: ExactText("yes"),
