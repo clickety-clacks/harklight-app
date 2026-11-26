@@ -357,6 +357,13 @@ final class NativeAppLaunch {
             await NativeRelayLifecycle.shared.deactivate()
             return
         }
+        if let record = try? enrollment.load(), case .active = record.sessionMigration {
+            do { try await connectSignedInSession(record) }
+            catch {
+                diagnostics.record(area: .connection, phase: .approvedConnection, transition: .failed, error: error)
+            }
+            return
+        }
         await guidedJoin.restore()
     }
 
@@ -767,7 +774,18 @@ final class NativeAppLaunch {
 
     /// Opens the signed-in account’s local store and connects it to the Client API v2 projection.
     func activate(_ installation: NativeInstallationMaterial) async throws {
-        guard installation.context.transportMode == .relay else {
+        try await activate(context: installation.context) {
+            if case let .active(origin, proof) = self.activeEnrollmentRecord?.sessionMigration {
+                return try HTTPSClientAPITransport(origin: origin, bearer: proof.bearer)
+            }
+            return try HTTPSClientAPITransport(baseURL: installation.deviceURL,
+                clientIdentity: TrustedKeychainIdentity(installation.keychainIdentity),
+                trustedRootDER: installation.trustedRootDER)
+        }
+    }
+
+    private func activate(context: ProfileContext, makeTransport: () throws -> HTTPSClientAPITransport) async throws {
+        guard context.transportMode == .relay else {
             throw AttentionStoreError.fixtureOnlyOperation
         }
         let generation = UUID()
@@ -785,7 +803,6 @@ final class NativeAppLaunch {
             try await finishSessionMigration(record, origin: origin, proof: proof, signature: signature)
             guard activationGeneration == generation else { return }
         }
-        let context = installation.context
         let (store, fileStorage) = try await Task.detached(priority: .userInitiated) {
             let persistence = try FilePendingActionPersistence.applicationSupport()
             let fileStorage = try ConversationFileStorage(identity: context.identity)
@@ -808,16 +825,8 @@ final class NativeAppLaunch {
         NativeRelayLifecycle.shared.errorLog = errorLog
         observeV2Connection(NativeRelayLifecycle.shared)
         do {
-            let lifecycle = NativeRelayLifecycle.shared
-            if case let .active(origin, proof) = activeEnrollmentRecord?.sessionMigration {
-                try lifecycle.activate(store: store, context: context,
-                    transport: HTTPSClientAPITransport(origin: origin, bearer: proof.bearer),
-                    diagnostics: diagnostics)
-            } else {
-                try lifecycle.activate(store: store, context: context, deviceURL: installation.deviceURL,
-                    clientIdentity: installation.keychainIdentity, trustedRootDER: installation.trustedRootDER,
-                    diagnostics: diagnostics)
-            }
+            try NativeRelayLifecycle.shared.activate(store: store, context: context,
+                transport: makeTransport(), diagnostics: diagnostics)
         } catch {
             if activationGeneration != generation { return }
             diagnostics.record(area: .connection, phase: .approvedConnection, transition: .failed,
@@ -1063,6 +1072,20 @@ final class NativeAppLaunch {
         } catch {
             enrollmentMessage = "The app could not clear this device's saved enrolment. Try again."
             return false
+        }
+    }
+
+    func connectSignedInSession(_ record: NativeEnrollmentRecord) async throws {
+        guard let personID = record.personID,
+              case let .active(origin, proof) = record.sessionMigration else {
+            throw NativeEnrollmentError.invalidIdentity
+        }
+        let context = ProfileContext(identity: ProfileIdentity(
+            trustedRelayAuthority: ExactText(record.profileAuthority), personID: ExactText(personID),
+            deviceID: ExactText(record.deviceID)), transportMode: .relay)
+        activeEnrollmentRecord = record
+        try await activate(context: context) {
+            try HTTPSClientAPITransport(origin: origin, bearer: proof.bearer)
         }
     }
 
