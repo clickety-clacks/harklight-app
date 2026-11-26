@@ -515,6 +515,14 @@ final class Build356StoreUpgradeTests: XCTestCase {
 // the same simulator. Ordinary unit runs do not make or reuse enrollment state.
 @MainActor
 final class BuildLegacyA1StoreUpgradeTests: XCTestCase {
+    func testCertificateOnlyRecoveryIncludesSameHostOnTrustedAlternatePort() throws {
+        let record = NativeEnrollmentRecord(host: "relay.example.test", enrollmentPort: 443, relayPort: 8443,
+            trustedRootDER: Data(), identityLabel: "fixture", deviceID: "fixture-device",
+            approvalCode: "", statusSecret: "", expiresAt: nil, statusExpiresAt: nil, personID: "fixture-person")
+        XCTAssertTrue(record.matchesRecoveryOrigin(try XCTUnwrap(URL(string: "https://relay.example.test:9443"))))
+        XCTAssertFalse(record.matchesRecoveryOrigin(try XCTUnwrap(URL(string: "https://another.example.test:9443"))))
+    }
+
     func testOverlapProtectsAgedLegacyWritesBeforeActivation() throws {
         let record = NativeEnrollmentRecord(host: "relay.example.test", enrollmentPort: 443, relayPort: 8443,
             trustedRootDER: Data(), identityLabel: "fixture", deviceID: "fixture-device",

@@ -15,6 +15,7 @@ final class HarklightUITests: XCTestCase {
         XCTAssertTrue(app.textFields["Server"].exists)
         XCTAssertTrue(app.buttons["Continue"].exists)
         XCTAssertFalse(app.staticTexts["Last used"].exists)
+        XCTAssertFalse(app.buttons["View saved messages"].exists)
         XCTAssertFalse(app.secureTextFields["Full invitation"].exists)
         XCTAssertFalse(app.secureTextFields["Password"].exists)
     }
