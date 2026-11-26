@@ -261,6 +261,12 @@ public struct APIPushPrincipal: Codable, Equatable, Sendable {
     public let serverID: ExactText
     public let personID: ExactText
     public let deviceID: ExactText?
+
+    public init(serverID: ExactText, personID: ExactText, deviceID: ExactText?) {
+        self.serverID = serverID
+        self.personID = personID
+        self.deviceID = deviceID
+    }
 }
 
 // MARK: Decoding

@@ -1074,26 +1074,50 @@ final class NativeAppLaunch {
         migratingSession = true
         defer { migratingSession = false }
         let generation = activationGeneration
-        let lifecycle = NativeRelayLifecycle.shared
         let material = try enrollment.material(from: record)
         var current = record
 
         if current.sessionMigration == nil {
-            let legacy = try HTTPSClientAPITransport(baseURL: material.deviceURL,
-                clientIdentity: TrustedKeychainIdentity(material.keychainIdentity), trustedRootDER: material.trustedRootDER)
-            defer { legacy.close() }
-            let api = NativeSignInAPI(transport: legacy)
-            guard let principal = try await api.migrationPrincipal() else { return }
-            guard principal.personID == material.context.identity.personID,
-                  principal.deviceID == material.context.identity.deviceID else {
-                throw NativeEnrollmentError.wrongApprovedDevice
+            guard let started = try await startSessionMigration(current, material: material, generation: generation) else {
+                return
             }
-            let grant = try await api.migrationGrant()
-            let pending = try NativeSessionRedemption(credential: .migration(token: grant.token),
-                label: record.deviceLabel ?? UIDevice.current.name, proof: NativeSessionProof())
-            current = try persistMigration(.redeeming(origin: grant.origin, pending: pending, principal: principal),
-                                           for: current, generation: generation)
+            current = started
         }
+        do {
+            try await continueSessionMigration(current, material: material, generation: generation)
+        } catch let error as APIError where error.status == 401 {
+            // Replacement is available only while the original mTLS device is still authorized.
+            guard let latest = try enrollment.load(),
+                  latest.sameNotificationProfile(as: record),
+                  let replaced = try await startSessionMigration(latest, material: material, generation: generation) else {
+                throw error
+            }
+            try await continueSessionMigration(replaced, material: material, generation: generation)
+        }
+    }
+
+    private func startSessionMigration(_ record: NativeEnrollmentRecord, material: NativeInstallationMaterial,
+                                       generation: UUID) async throws -> NativeEnrollmentRecord? {
+        let legacy = try HTTPSClientAPITransport(baseURL: material.deviceURL,
+            clientIdentity: TrustedKeychainIdentity(material.keychainIdentity), trustedRootDER: material.trustedRootDER)
+        defer { legacy.close() }
+        let api = NativeSignInAPI(transport: legacy)
+        guard let principal = try await api.migrationPrincipal() else { return nil }
+        guard principal.personID == material.context.identity.personID,
+              principal.deviceID == material.context.identity.deviceID else {
+            throw NativeEnrollmentError.wrongApprovedDevice
+        }
+        let grant = try await api.migrationGrant()
+        let pending = try NativeSessionRedemption(credential: .migration(token: grant.token),
+            label: record.deviceLabel ?? UIDevice.current.name, proof: NativeSessionProof())
+        return try persistMigration(.redeeming(origin: grant.origin, pending: pending, principal: principal),
+                                    for: record, generation: generation)
+    }
+
+    private func continueSessionMigration(_ record: NativeEnrollmentRecord, material: NativeInstallationMaterial,
+                                          generation: UUID) async throws {
+        var current = record
+        let lifecycle = NativeRelayLifecycle.shared
         if case let .redeeming(origin, pending, principal) = current.sessionMigration {
             let transport = try HTTPSClientAPITransport(origin: origin)
             defer { transport.close() }
