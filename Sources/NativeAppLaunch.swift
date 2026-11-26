@@ -55,6 +55,7 @@ final class NativeAppLaunch {
     private(set) var foregroundConnectProgress: NativeForegroundConnectProgress?
     private(set) var foregroundConnectDiagnostic: NativeForegroundConnectDiagnostic?
     @ObservationIgnored private var migratingSession = false
+    @ObservationIgnored private var signingOutSession = false
     private(set) var activeEnrollmentRecord: NativeEnrollmentRecord?
     private(set) var disconnectedAccount: NativeAccountDeparture?
     private(set) var disconnectedArchive: LivePresentationStore?
@@ -372,6 +373,10 @@ final class NativeAppLaunch {
               let record = try? enrollment.load(), record.isApproved,
               !isDisconnectBusy(for: NativeAccountDeparture(
                 record: record, replacement: nil, removed: false)) else { return }
+        if case .active = record.sessionMigration {
+            await signOutSession(record)
+            return
+        }
         disconnectMessage = nil
         do {
             try guidedJoin.prepareStandaloneRemoval(record)
@@ -1072,6 +1077,59 @@ final class NativeAppLaunch {
         } catch {
             enrollmentMessage = "The app could not clear this device's saved enrolment. Try again."
             return false
+        }
+    }
+
+    var hasDeviceSession: Bool {
+        if case .active = activeEnrollmentRecord?.sessionMigration { return true }
+        return false
+    }
+
+    func signedInDevices() async throws -> [NativeSignInAPI.Device] {
+        let transport = try sessionTransport()
+        defer { transport.close() }
+        return try await NativeSignInAPI(transport: transport).devices()
+    }
+
+    func removeSignedInDevice(_ id: String) async throws {
+        let transport = try sessionTransport()
+        defer { transport.close() }
+        try await NativeSignInAPI(transport: transport).removeDevice(id)
+    }
+
+    private func sessionTransport() throws -> HTTPSClientAPITransport {
+        guard case let .active(origin, proof) = activeEnrollmentRecord?.sessionMigration else {
+            throw NativeEnrollmentError.invalidIdentity
+        }
+        return try HTTPSClientAPITransport(origin: origin, bearer: proof.bearer)
+    }
+
+    private func signOutSession(_ record: NativeEnrollmentRecord) async {
+        guard !signingOutSession, case let .live(presentation) = state else { return }
+        signingOutSession = true
+        defer { signingOutSession = false }
+        disconnectMessage = nil
+        do {
+            let transport = try sessionTransport()
+            defer { transport.close() }
+            await NativeRelayLifecycle.shared.prepareV2SignOut(for: record)
+            do { try await NativeSignInAPI(transport: transport).signOut() }
+            catch let error as APIError where error.status == 401 {}
+            guard activeEnrollmentRecord?.sameNotificationProfile(as: record) == true else { return }
+            let recovery = presentation.prepareRevokedTextRecovery()
+            try enrollment.markV2Revoked(record)
+            try guidedJoinStore.archiveRevokedInstallation(record, stagedText: recovery.staged, clearActive: true)
+            await NativeRelayLifecycle.shared.deactivate()
+            presentation.enterReadOnlyMode()
+            activeEnrollmentRecord = nil
+            activationGeneration = UUID()
+            refreshArchivedAccounts()
+            state = .enrollmentRequired
+        } catch {
+            if (try? enrollment.load()?.v2Revoked) != true {
+                try? await connectSignedInSession(record)
+            }
+            disconnectMessage = "Sign-out could not be confirmed. Try again."
         }
     }
 
