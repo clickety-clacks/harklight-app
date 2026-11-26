@@ -405,23 +405,28 @@ final class HarklightUITests: XCTestCase {
         let back = workspaceBackButton(in: app)
         if back.exists { back.tap() }
         let inbox = workspaceTab("Inbox", in: app)
-        let row = app.descendants(matching: .any)["request-row-facilities-01"]
+        let list = app.collectionViews.firstMatch
+        let row = list.descendants(matching: .any)["request-row-facilities-01"]
+        let unconfirmed = "Submission unconfirmed · saved draft retained"
+        let answeredLocally = "Answered locally · nothing sent"
         XCTAssertTrue(inbox.waitForExistence(timeout: 5), app.debugDescription)
         if !inbox.isSelected { inbox.tap() }
         XCTAssertTrue(inbox.isSelected, app.debugDescription)
         XCTAssertFalse(row.waitForExistence(timeout: 2),
                        "A server-answered request no longer appears in Inbox.")
-        XCTAssertFalse(app.staticTexts["Submission unconfirmed · saved draft retained"].exists,
+        XCTAssertFalse(list.staticTexts[unconfirmed].exists,
                        "A server-answered request is not shown as a failed response.")
-        XCTAssertFalse(app.staticTexts["Answered locally · nothing sent"].exists,
+        XCTAssertFalse(list.staticTexts[answeredLocally].exists,
                        "The list must not claim this device's answer was accepted.")
         attachScreenshot("Server-answered response removed from Inbox", from: app)
 
         workspaceTab("Replied", in: app).tap()
         XCTAssertTrue(row.waitForExistence(timeout: 5),
                       "The server-answered request appears in Replied.")
-        XCTAssertFalse(app.staticTexts["Submission unconfirmed · saved draft retained"].exists)
-        XCTAssertFalse(app.staticTexts["Answered locally · nothing sent"].exists)
+        XCTAssertFalse(list.staticTexts[unconfirmed].exists)
+        XCTAssertFalse(list.staticTexts[answeredLocally].exists)
+        XCTAssertFalse(row.label.contains(unconfirmed))
+        XCTAssertFalse(row.label.contains(answeredLocally))
         attachScreenshot("Server-answered response in Replied", from: app)
     }
 
@@ -433,9 +438,11 @@ final class HarklightUITests: XCTestCase {
 
         let message = app.staticTexts["inbox-warning-message"]
         assertInboxWarningDoesNotCoverDetail(in: app)
-        let back = workspaceBackButton(in: app)
-        XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
-        back.tap()
+        if !listVisibleBesideDetail(in: app) {
+            let back = workspaceBackButton(in: app)
+            XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
+            back.tap()
+        }
         let row = app.descendants(matching: .any)["request-row-facilities-01"]
         let inbox = workspaceTab("Inbox", in: app)
         if !inbox.isSelected { inbox.tap() }
@@ -784,9 +791,11 @@ final class HarklightUITests: XCTestCase {
     private func assertInboxWarningDoesNotCoverDetail(in app: XCUIApplication,
                                                         file: StaticString = #filePath, line: UInt = #line) {
         let warning = app.staticTexts["inbox-warning-message"].firstMatch
-        let card = app.scrollViews["message-card-scroll"]
         if listVisibleBesideDetail(in: app), warning.exists {
-            XCTAssertLessThanOrEqual(warning.frame.maxX, card.frame.minX,
+            let heading = app.buttons["request-heading"]
+            XCTAssertTrue(heading.exists, "The request stays open beside the Inbox.",
+                          file: file, line: line)
+            XCTAssertLessThanOrEqual(warning.frame.maxX, heading.frame.minX,
                                      "The warning stays in the Inbox column beside the detail.",
                                      file: file, line: line)
         } else {
