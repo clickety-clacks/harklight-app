@@ -87,6 +87,34 @@ final class HTTPSClientAPITransportTests: XCTestCase {
         XCTAssertNil(model.heldCursor)
     }
 
+    func testSharedDiscoveryCanReadMeAfterTheServerWithdrawsOptIn() async throws {
+        let api = transport { request in
+            if request.value(forHTTPHeaderField: "Harklight-Features") != nil {
+                return .init(status: 400, chunks: [Data(#"{"error":"unsupported","retryable":false}"#.utf8)])
+            }
+            return .init(status: 200, chunks: [Data(#"{"server":{"id":"server"},"principal":{"person_id":"person"}}"#.utf8)])
+        }
+        let model = ServerModelV2Store(fileURL: nil)
+        let access = ClientAPIAccess(transport: api)
+        access.restorePause(from: model, savedMePaused: false, errors: NoopErrorLog())
+        _ = try model.configureSharedMessages(serverID: ExactText("server"))
+        let response = try await access.send(.get("/v2/me"))
+        let me = try APIMe(json: JSONValue.parse(response.body))
+        XCTAssertNil(me.sharedMessagesServerID)
+        let requests = StubURLProtocol.lock.withLock { StubURLProtocol.seen }
+        XCTAssertEqual(requests.map { $0.value(forHTTPHeaderField: "Harklight-Features") }, ["shared_messages", nil])
+    }
+
+    func testSharedDiscoveryRequiresAnAdvertisedCapabilityAndAffiliation() throws {
+        func discovered(_ capability: Bool, affiliations: String) throws -> ExactText? {
+            let wire = #"{"features":{"shared_messages":\#(capability)},"server":{"id":"server"},"principal":{"person_id":"person","organization_ids":\#(affiliations)}}"#
+            return try APIMe(json: JSONValue.parse(Data(wire.utf8))).sharedMessagesServerID
+        }
+        XCTAssertEqual(try discovered(true, affiliations: #"["org"]"#), ExactText("server"))
+        XCTAssertNil(try discovered(true, affiliations: "[]"))
+        XCTAssertNil(try discovered(false, affiliations: #"["org"]"#))
+    }
+
     func testAWriteCarriesItsKeyAndPreconditionAndAReplayedAnswerIsMarked() async throws {
         let key = UUID()
         let api = transport { _ in

@@ -136,7 +136,15 @@ public final class ClientAPIAccess: ClientAPITransport, @unchecked Sendable {
         let allowPaused = request.method == .get && request.path == "/v2/me"
         try check(allowPaused: allowPaused)
         do {
-            let response = try await transport.send(scoped(request))
+            let scopedRequest = scoped(request)
+            let response: APIResponse
+            do {
+                response = try await transport.send(scopedRequest)
+            } catch let error as APIError where allowPaused && scopedRequest.sharedMessages &&
+                error.token == .unsupported {
+                // Discovery still works after the Server withdraws opt-in.
+                response = try await transport.send(request)
+            }
             // An accepted write still has a receipt even if access changed
             // while sending it. The caller must be able to settle its key.
             if request.method == .get { try check(allowPaused: allowPaused) }

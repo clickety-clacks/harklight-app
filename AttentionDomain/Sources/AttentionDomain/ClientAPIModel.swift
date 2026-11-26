@@ -702,7 +702,10 @@ public struct APIMe: Equatable, Sendable {
     public let body: JSONValue
 
     public var sharedMessagesServerID: ExactText? {
-        guard features["shared_messages"] == true else { return nil }
+        guard features["shared_messages"] == true,
+              let organizationIDs = body.uniqueValue(named: "principal")?
+                .uniqueValue(named: "organization_ids")?.arrayValues,
+              organizationIDs.contains(where: { $0.stringValue?.rawValue.isEmpty == false }) else { return nil }
         return pushPrincipal?.serverID
     }
 
