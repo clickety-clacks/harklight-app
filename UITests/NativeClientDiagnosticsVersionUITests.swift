@@ -6,13 +6,14 @@ final class NativeClientDiagnosticsVersionUITests: XCTestCase {
         let app = XCUIApplication()
         app.launch()
 
-        let invitation = app.secureTextFields["Full invitation"]
-        XCTAssertTrue(invitation.waitForExistence(timeout: 5), app.debugDescription)
-        invitation.tap()
-        invitation.typeText("harklight://join#invalid")
-        app.buttons["Check invitation"].tap()
+        let server = app.textFields["Server"]
+        XCTAssertTrue(server.waitForExistence(timeout: 5), app.debugDescription)
+        server.tap()
+        let value = try XCTUnwrap(server.value as? String)
+        server.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: value.count) + "invalid")
+        app.buttons["Continue"].tap()
 
-        XCTAssertTrue(app.staticTexts["Joining could not be confirmed"].waitForExistence(timeout: 5),
+        XCTAssertTrue(app.staticTexts["Sign-in couldn’t be completed. Try again."].waitForExistence(timeout: 5),
                       app.debugDescription)
         let shareDiagnostics = app.buttons["enrollment-client-diagnostics-share"]
         XCTAssertTrue(shareDiagnostics.waitForExistence(timeout: 5), app.debugDescription)

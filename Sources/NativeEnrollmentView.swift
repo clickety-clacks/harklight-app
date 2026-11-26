@@ -417,7 +417,13 @@ struct NativeSharedSignInView: View {
                     }
                     .font(.footnote)
                 }
-                if let message { Text(message).font(.footnote) }
+                if let message {
+                    Text(message).font(.footnote)
+                    ShareLink(item: launch.diagnostics.shareText) {
+                        Label("Share diagnostic history", systemImage: "square.and.arrow.up")
+                    }
+                    .accessibilityIdentifier("enrollment-client-diagnostics-share")
+                }
             }
             .frame(maxWidth: 430)
             .padding(24)
@@ -430,7 +436,6 @@ struct NativeSharedSignInView: View {
             rememberedMethod = nil
             code = ""
         }
-        .task { run(loadMethods) }
     }
 
     private func loadMethods() async throws {
@@ -470,7 +475,11 @@ struct NativeSharedSignInView: View {
             defer { busy = false }
             do { try await operation() }
             catch let error as ASWebAuthenticationSessionError where error.code == .canceledLogin {}
-            catch { message = "Sign-in couldn’t be completed. Try again." }
+            catch {
+                launch.diagnostics.record(area: .connection, phase: .approvedConnection,
+                                          transition: .failed, error: error)
+                message = "Sign-in couldn’t be completed. Try again."
+            }
         }
     }
 
