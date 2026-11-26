@@ -271,6 +271,7 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
 
     /// Reads `/v2/me` until it succeeds, waiting longer after each failure:
     /// until it is read on a first run nothing can be published.
+    @discardableResult
     func readMeUntilRead(userInitiated: Bool = false) async -> Bool {
         var attempt = 0
         while !Task.isCancelled {
@@ -1086,7 +1087,9 @@ extension ClientAPIv2Connection {
         await sendSavedContentOpens()
         await sendSavedConversationReads()
         do {
-            for saved in try repository.inboxOperationInventory(context: context) where Self.canHandOffAnswer(saved) {
+            for saved in try repository.inboxOperationInventory(context: context) where
+                Self.canHandOffAnswer(saved) &&
+                model.snapshot.items[saved.requestKey.messageID]?.shared?.canAnswer != false {
                 await handOffItemAction("answer", operationID: saved.operationID) {
                     try await handOffAnswer(saved, retryRefused: false)
                 }
