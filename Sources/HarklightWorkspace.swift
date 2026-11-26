@@ -2205,6 +2205,10 @@ struct InboxList: View {
     /// When a filter shrinks the list while it is scrolled down, the lazy stack
     /// can keep its old visible range and draw none of the matching rows, so a
     /// filter change starts the list again at its first row.
+    private struct WarningScrollTarget: Hashable {
+        let index: Int
+    }
+
     private func showFirstRow(using proxy: ScrollViewProxy, in tab: InboxWorkspaceTab) {
         if showsFreeOrder || normalOrder == .posted {
             for entry in normalListEntries {
@@ -2554,6 +2558,7 @@ struct InboxList: View {
                     .font(.footnote)
                     .foregroundStyle(.hkSecondary)
                     .accessibilityIdentifier("inbox-warning-message")
+                    .id(WarningScrollTarget(index: index))
             }
             if tab == .inbox, let route = notificationNavigation, route.isPending {
                 let rowState = notificationPendingPresentation.flatMap {
@@ -2697,6 +2702,8 @@ struct InboxList: View {
             guard activeTab == tab else { return }
             if restoreLastViewed {
                 restoreLastViewed(using: proxy, in: tab)
+            } else if search.isEmpty, !warnings.isEmpty {
+                proxy.scrollTo(WarningScrollTarget(index: warnings.startIndex), anchor: .top)
             } else {
                 showFirstRow(using: proxy, in: tab)
             }
