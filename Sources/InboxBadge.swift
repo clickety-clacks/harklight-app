@@ -12,10 +12,14 @@ enum InboxBadge {
                       showsLocalExamples: Bool) -> Int {
         let items = showsLocalExamples ? samples.inboxItems(appendingTo: requests)
             : requests.map(InboxItem.request)
-        return items.filter {
+        let messageCount = items.filter {
             !$0.hasProgressMarker && !$0.belongsToReplied && !$0.isRetracted &&
                 !$0.isSettledFYI && !$0.hasPendingSeenAnswer
         }.count
+        let sharedChatCount = requests.reduce(0) { count, row in
+            count + (row.isRetracted ? 0 : row.sharedUnreadChatCount ?? 0)
+        }
+        return messageCount + sharedChatCount
     }
 }
 

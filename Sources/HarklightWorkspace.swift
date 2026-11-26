@@ -683,6 +683,7 @@ struct InboxRequestRow: Identifiable {
     var hasMessageLoadWarning = false
     var isRetracted = false
     var chatUnread: Bool? = nil
+    var sharedUnreadChatCount: Int? = nil
     var initials: String = ""
     var emphasis: InboxRowEmphasis = .standard
     var messageType: HarklightMessageType? = nil

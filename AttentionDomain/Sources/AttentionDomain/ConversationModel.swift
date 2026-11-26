@@ -519,18 +519,21 @@ public struct ConversationThread: Equatable, Codable, Sendable {
         turns.last(where: \.isIncomingReply)
     }
 
+    public var unreadSharedChatCount: Int? {
+        guard let sharedUnreadReplies else { return nil }
+        let serverPosition = sharedReadThroughConversationSequence ?? 0
+        let localPosition = accountReadThroughConversationSequence ?? 0
+        guard localPosition > serverPosition else { return sharedUnreadReplies }
+        let newlyRead = turns.count {
+            guard $0.isIncomingReply, let position = $0.conversationSequence else { return false }
+            return position > serverPosition && position <= localPosition
+        }
+        return max(0, sharedUnreadReplies - newlyRead)
+    }
+
     /// An incoming reply arrived after Chat last showed this request's replies.
     public var hasUnreadAgentReply: Bool {
-        if let sharedUnreadReplies {
-            let serverPosition = sharedReadThroughConversationSequence ?? 0
-            let localPosition = accountReadThroughConversationSequence ?? 0
-            guard localPosition > serverPosition else { return sharedUnreadReplies > 0 }
-            let newlyRead = turns.count {
-                guard $0.isIncomingReply, let position = $0.conversationSequence else { return false }
-                return position > serverPosition && position <= localPosition
-            }
-            return sharedUnreadReplies > newlyRead
-        }
+        if let unreadSharedChatCount { return unreadSharedChatCount > 0 }
         guard let latest = latestIncomingReply else { return false }
         if let accountReadThroughConversationSequence,
            let latestSequence = latest.conversationSequence {

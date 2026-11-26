@@ -2481,6 +2481,7 @@ final class LivePresentationStore {
             hasMessageLoadWarning: hasMessageLoadWarning,
             isRetracted: retracted,
             chatUnread: listChatUnread(request.key),
+            sharedUnreadChatCount: conversation(for: request.key)?.unreadSharedChatCount,
             submissionProgress: submissionProgress[request.key].map { progress in
                 InboxRowSubmissionProgress(
                     state: progress.state == .awaiting ? .awaiting : .notSent(detail: progress.detail))
