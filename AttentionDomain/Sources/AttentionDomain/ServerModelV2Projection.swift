@@ -53,7 +53,8 @@ public enum ServerModelV2Projection {
             var conversation = thread(for: item, key: key, entries: entries)
             conversation.handoffCaptions = handoffCaptions
             if handoffCaptions {
-                for entry in entries where model.needsHandoffCaptionRefresh(entry) {
+                for entry in entries where model.needsHandoffCaptionRefresh(entry) &&
+                    (entry.speaker?.id ?? identity.personID) == identity.personID {
                     conversation.facts[entry.entryID]?.handoffCaptionRefreshPending = true
                 }
             }
@@ -119,6 +120,9 @@ public enum ServerModelV2Projection {
                                         revision: item.requestRevision, payload: item.message)
         thread.terminal = terminalState(item.terminal)
         thread.chatNeverCloses = true
+        thread.shared = item.shared
+        thread.answerSpeaker = item.terminal?.speaker
+        if item.shared != nil { thread.sharedUnreadReplies = item.chat.unreadReplies }
         // Round 13: an item sent without a session has no conversation.
         if item.chat.available == false { thread.hasNoConversation = true }
         if item.terminal?.state == "retracted" {
@@ -140,9 +144,10 @@ public enum ServerModelV2Projection {
                 author: author, sessionHandle: item.itemID, text: entry.text ?? ExactText(""),
                 inReplyTo: entry.inReplyTo, files: entry.files.map(file),
                 contentRedacted: entry.state == "retracted" || entry.state == "withdrawn" ? true : nil,
-                kind: kind, resultStatus: entry.result?.status, conversationSequence: entry.position)
+                kind: kind, resultStatus: entry.result?.status, conversationSequence: entry.position,
+                speaker: entry.speaker)
             thread.turns.append(turn)
-            if let delivery = entry.delivery {
+            if let delivery = entry.delivery, author != .person || turn.isOwnTurn {
                 var facts = ConversationTurnFacts(acceptedAtMilliseconds: entry.atMs)
                 facts.delivered = delivery.delivered ?? false
                 facts.personDelivery = delivery
@@ -163,6 +168,7 @@ public enum ServerModelV2Projection {
         if let read = item.chat.readPosition,
            let position = entries.first(where: { $0.entryID == read })?.position {
             thread.accountReadThroughConversationSequence = position
+            if item.shared != nil { thread.sharedReadThroughConversationSequence = position }
         }
         return thread
     }

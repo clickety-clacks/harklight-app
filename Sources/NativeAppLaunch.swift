@@ -1881,8 +1881,9 @@ final class LivePresentationStore {
     }
 
     private func listChatUnread(_ key: RequestKey) -> Bool? {
-        guard let thread = conversation(for: key),
-              thread.turns.contains(where: { turn in
+        guard let thread = conversation(for: key) else { return nil }
+        if thread.sharedUnreadReplies != nil { return thread.hasUnreadAgentReply }
+        guard thread.turns.contains(where: { turn in
                   switch turn.kind {
                   case .none, .some(.discussion), .some(.reply):
                       return true // Older chat turns have no kind.
@@ -1896,7 +1897,7 @@ final class LivePresentationStore {
     // The saved read position is visible immediately, while the client sends it to the server.
     func markConversationRead(_ key: RequestKey) {
         guard !isReadOnly,
-              let latest = conversationThreads[key]?.latestAgentReply else { return }
+              let latest = conversationThreads[key]?.latestIncomingReply else { return }
         markConversationRead(key, through: latest.id)
     }
 
@@ -1905,7 +1906,7 @@ final class LivePresentationStore {
     func markConversationRead(_ key: RequestKey, through turnID: ExactText) {
         guard !isReadOnly,
               conversationThreads[key]?.turns.contains(where: {
-                  $0.id == turnID && $0.kind == .reply && $0.author != .person
+                  $0.id == turnID && $0.isIncomingReply
               }) == true else { return }
         let readKey = ConversationReadKey(request: key, turnID: turnID)
         guard pendingConversationReadUpdates.insert(readKey).inserted else { return }
@@ -2416,7 +2417,8 @@ final class LivePresentationStore {
         if hasAcceptedSenderRevision { statusParts.append("Updated") }
         if request.inboxStateIsCurrent {
             let lifecycle = retracted ? retractionLabel(for: request) :
-                request.defaultAnswerStatusText ??
+                conversation(for: request.key)?.sharedAnswerStatusText ??
+                    request.defaultAnswerStatusText ??
                     String(localized: LiveLifecycleTitle(request.lifecycleStatus).label)
             if request.lifecycleStatus != .open || retracted || request.defaultAnswerStatusText != nil ||
                 hasAcceptedSenderRevision {

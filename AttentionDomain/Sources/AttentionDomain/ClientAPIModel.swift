@@ -95,6 +95,33 @@ public struct APIAnswer: Equatable, Codable, Sendable {
     public let label: ExactText?
 }
 
+public struct APISpeaker: Equatable, Codable, Sendable {
+    public let kind: String
+    public let id: ExactText
+    public let displayName: ExactText
+    public let handle: ExactText?
+}
+
+public struct APISharedMember: Equatable, Codable, Sendable {
+    public let person: APISpeaker
+    public let seenRevision: UInt64?
+    public let seenAtMs: UInt64?
+}
+
+public struct APISharedAnswer: Equatable, Codable, Sendable {
+    public let personID: ExactText
+    public let terminal: APITerminal
+}
+
+public struct APISharedItem: Equatable, Codable, Sendable {
+    public let sharedID: ExactText
+    public let chatWritable: Bool
+    public let canAnswer: Bool
+    public let answerPolicy: JSONValue?
+    public let members: [APISharedMember]
+    public let answers: [APISharedAnswer]
+}
+
 public struct APITerminal: Equatable, Codable, Sendable {
     /// answered, cleared, expired, superseded or retracted.
     public let state: String
@@ -102,6 +129,9 @@ public struct APITerminal: Equatable, Codable, Sendable {
     /// Answered by any client of this person, not only this device.
     public let byThisPerson: Bool
     public let answer: APIAnswer?
+
+    public let speaker: APISpeaker?
+    public let answerID: ExactText?
 
     public var isNoComment: Bool { answer?.kind == "no_comment" }
 }
@@ -148,6 +178,7 @@ public struct APIItem: Equatable, Codable, Sendable {
     /// Today's per-person arrival counter; the new-messages area orders by it.
     /// Absent for items from before free order, which are earlier messages.
     public let arrival: UInt64?
+    public let shared: APISharedItem?
 }
 
 public struct APIEntryDelivery: Equatable, Codable, Sendable {
@@ -168,6 +199,8 @@ public struct APIEntryDelivery: Equatable, Codable, Sendable {
 
 public struct APIEntry: Equatable, Codable, Sendable {
     public let entryID: ExactText
+    public let speaker: APISpeaker?
+    public let sharedEntryID: ExactText?
     public let itemID: ExactText
     public let rev: UInt64
     /// Immutable creation order within the item; entries sort by it.
@@ -360,12 +393,43 @@ extension APIAnswer {
     }
 }
 
+extension APISpeaker {
+    fileprivate init(_ reader: Reader) throws {
+        kind = try reader.string("kind").rawValue
+        id = try reader.string("id")
+        displayName = try reader.string("display_name")
+        handle = try reader.optionalString("handle")
+    }
+}
+
+extension APISharedItem {
+    fileprivate init(_ reader: Reader) throws {
+        sharedID = try reader.string("shared_id")
+        chatWritable = try reader.bool("chat_writable")
+        canAnswer = try reader.bool("can_answer")
+        answerPolicy = reader.raw("answer_policy")
+        members = try reader.array("members").map { value in
+            let member = try Reader(value, "item.shared.members")
+            return APISharedMember(person: try APISpeaker(member.object("person")),
+                                   seenRevision: try member.optionalUnsigned("seen_revision"),
+                                   seenAtMs: try member.optionalUnsigned("seen_at_ms"))
+        }
+        answers = try reader.array("answers").map { value in
+            let answer = try Reader(value, "item.shared.answers")
+            return APISharedAnswer(personID: try answer.string("person_id"),
+                                   terminal: try APITerminal(answer.object("terminal")))
+        }
+    }
+}
+
 extension APITerminal {
     fileprivate init(_ reader: Reader) throws {
         state = try reader.string("state").rawValue
         atMs = try reader.unsigned("at_ms")
         byThisPerson = try reader.optionalBool("by_this_person") ?? false
         answer = try reader.optionalObject("answer").map(APIAnswer.init)
+        speaker = try reader.optionalObject("speaker").map(APISpeaker.init)
+        answerID = try reader.optionalString("answer_id")
     }
 }
 
@@ -412,6 +476,7 @@ extension APIItem {
                             level: try rank.optionalString("level")?.rawValue)
         createdAtMs = try reader.optionalUnsigned("created_at_ms")
         arrival = try reader.optionalUnsigned("arrival")
+        shared = try reader.optionalObject("shared").map(APISharedItem.init)
         guard rev >= 1 else { throw ClientAPIModelError.invalid("item.rev") }
     }
 }
@@ -420,6 +485,8 @@ extension APIEntry {
     public init(json: JSONValue) throws {
         let reader = try Reader(json, "entry")
         entryID = try reader.string("entry_id")
+        speaker = try reader.optionalObject("speaker").map(APISpeaker.init)
+        sharedEntryID = try reader.optionalString("shared_entry_id")
         itemID = try reader.string("item_id")
         rev = try reader.unsigned("rev")
         position = try reader.unsigned("position")

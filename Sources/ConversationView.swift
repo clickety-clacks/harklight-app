@@ -481,7 +481,7 @@ private struct ConversationHistoryContent: View, Equatable {
                                 }
                             }
                             .onScrollVisibilityChange(threshold: 0.5) { isVisible in
-                                guard turn.kind == .reply, turn.author != .person else { return }
+                                guard turn.isIncomingReply else { return }
                                 if isVisible {
                                     visibleAgentReplyTurnIDs.insert(turn.id)
                                     NativePushedViewCoordinator.shared.performReadIfContentIsActive(for: key) {
@@ -1390,7 +1390,7 @@ private struct ConversationTurnView: View {
     let replyContext: String?
     let retracted: Bool
     let inspect: (ConversationFile, UInt64) -> Void
-    private var isOwnTurn: Bool { turn.author == .person }
+    private var isOwnTurn: Bool { turn.isOwnTurn }
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: HarklightDesignSystem.shape(.card))
@@ -1423,12 +1423,12 @@ private struct ConversationTurnView: View {
             }
             ForEach(turn.files) { file in
                 Button { inspect(file, turn.binding.revision) } label: { Label(file.name.rawValue, systemImage: "doc") }.font(.caption)
-                if turn.author == .person {
+                if isOwnTurn {
                     ConversationFileFacts(transfer: facts.fileTransfers[file.id] ?? .unknown,
                         use: facts.fileUses[file.id] ?? .unknown, local: local)
                 }
             }
-            if turn.author == .person {
+            if isOwnTurn {
                 ConversationSentChatStatus(turn: turn, facts: facts, availability: availability,
                     hasReply: hasReply, conversationAgentName: sender, local: local, personFeed: personFeed, handoffCaptions: handoffCaptions)
             }
@@ -1448,7 +1448,12 @@ private struct ConversationTurnView: View {
     @ViewBuilder
     private var authorLabel: some View {
         switch turn.author {
-        case .person: Text("You")
+        case .person:
+            if isOwnTurn {
+                Text("You")
+            } else if let speaker = turn.speaker {
+                Text(verbatim: speaker.displayName.rawValue)
+            }
         case .origin: Text(verbatim: sender)
         case .agent: Text("Agent")
         case .server: Text("Harklight")

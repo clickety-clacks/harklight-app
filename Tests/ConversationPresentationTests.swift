@@ -22,15 +22,19 @@ final class ConversationPresentationTests: XCTestCase {
         }
         let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
             personID: ExactText("reader"), deviceID: ExactText("device"))
-        let thread = try XCTUnwrap(ServerModelV2Projection.cachedState(model, identity: identity)
+        let restored = try JSONDecoder().decode(ServerModelV2.self, from: JSONEncoder().encode(model))
+        var thread = try XCTUnwrap(ServerModelV2Projection.cachedState(restored, identity: identity)
             .conversations.values.first)
         XCTAssertEqual(thread.turns.map(\.isOwnTurn), [true, false, true, true])
         XCTAssertEqual(thread.latestIncomingReply?.id, ExactText("entry-2"))
         XCTAssertTrue(thread.hasUnreadAgentReply)
+        thread.accountReadThroughConversationSequence = 2
+        XCTAssertFalse(thread.hasUnreadAgentReply)
         XCTAssertNil(thread.latestAgentReply)
         XCTAssertFalse(thread.isComposerOpen)
         XCTAssertEqual(thread.shared?.members.map(\.seenRevision), [2, nil, 1])
         XCTAssertEqual(thread.answerSpeaker?.displayName, ExactText("Dana"))
+        XCTAssertEqual(thread.sharedAnswerStatusText, "Answered by Dana")
         XCTAssertEqual(thread.shared?.canAnswer, false)
     }
 

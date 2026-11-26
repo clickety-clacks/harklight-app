@@ -2804,10 +2804,10 @@ public final class ClientRepository: @unchecked Sendable {
         let turn: ConversationTurn?
         if let requestedTurnID {
             turn = thread.turns.first {
-                $0.id == requestedTurnID && $0.kind == .reply && $0.author != .person
+                $0.id == requestedTurnID && $0.isIncomingReply
             }
         } else {
-            turn = thread.latestAgentReply
+            turn = thread.latestIncomingReply
         }
         guard let turn else {
             return ConversationReadUpdate(pendingPosition: nil, thread: thread,
@@ -2943,7 +2943,7 @@ public final class ClientRepository: @unchecked Sendable {
         var next = state
         guard var conversation = next.conversation, var thread = conversation.threads[binding.request],
               let draft = thread.drafts[binding.revision] else { throw ConversationError.missingRequest }
-        guard thread.chatNeverCloses == true else { throw ConversationError.closed }
+        guard thread.chatNeverCloses == true, thread.shared?.chatWritable != false else { throw ConversationError.closed }
         guard !draft.text.rawValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !draft.files.isEmpty else {
             throw ConversationError.emptyDraft
         }
@@ -3612,7 +3612,7 @@ public final class ClientRepository: @unchecked Sendable {
             operationID: turn.operationID,
             files: try turn.files.map { try externalizingConversationFiles(in: $0, using: references, allowInlinePersistence: allowInlinePersistence) },
             contentRedacted: turn.contentRedacted, kind: turn.kind, resultStatus: turn.resultStatus,
-            conversationSequence: turn.conversationSequence, deliveryAcks: turn.deliveryAcks)
+            conversationSequence: turn.conversationSequence, deliveryAcks: turn.deliveryAcks, speaker: turn.speaker)
     }
 
     private static func externalizingConversationFiles(in draft: ConversationDraft,

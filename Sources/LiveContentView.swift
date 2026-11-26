@@ -1668,6 +1668,8 @@ struct LiveRequestDetail: View {
         let isRetracted: Bool
         let retractionLabel: String
         let conversationIndicator: Bool?
+        let shared: APISharedItem?
+        let sharedAnswerStatusText: String?
     }
 
     let request: PresentedRequest
@@ -1819,6 +1821,8 @@ struct LiveRequestDetail: View {
               !store.isReadOnly, !store.isRetracted(request.key),
               request.lifecycleStatus == .open,
               request.intentReceipt == nil else { return false }
+        if request.informationalSeenStatus == nil,
+           store.conversation(for: request.key)?.shared?.canAnswer == false { return false }
         switch request.projection {
         case .sender:
             return true
@@ -1852,7 +1856,9 @@ struct LiveRequestDetail: View {
             hasAcceptedUpdate: thread?.acceptedUpdates.isEmpty == false,
             isRetracted: thread?.isRetracted == true || retractionOutcome != nil,
             retractionLabel: label,
-            conversationIndicator: thread.map { $0.hasUnreadAgentReply })
+            conversationIndicator: thread.map { $0.hasUnreadAgentReply },
+            shared: thread?.shared,
+            sharedAnswerStatusText: thread?.sharedAnswerStatusText)
     }
 
     private var localReplySession: ReplyEditorDraftSession? {
@@ -2414,6 +2420,7 @@ struct LiveRequestDetail: View {
     private var lifecycleStatusText: String? {
         guard request.inboxStateIsCurrent else { return nil }
         if storePresentationSnapshot.isRetracted { return storePresentationSnapshot.retractionLabel }
+        if let answerStatus = storePresentationSnapshot.sharedAnswerStatusText { return answerStatus }
         // Pending is shown by the control that is sending, not as a line.
         if isSupersedesReadOnly || (request.lifecycleStatus != .open &&
             request.lifecycleStatus != .answered && request.lifecycleStatus != .pending &&
@@ -2455,6 +2462,23 @@ struct LiveRequestDetail: View {
                     deadline: byWhenDate, stake: request.stakeText?.rawValue,
                     key: request.key, supersedesMessageIDs: request.supersedesMessageIDs,
                     secondaryTextColor: detailColors.secondary)
+                if let shared = storePresentationSnapshot.shared, !shared.members.isEmpty {
+                    DisclosureGroup("People and Seen") {
+                        VStack(alignment: .leading, spacing: 8) {
+                            ForEach(shared.members, id: \.person.id) { member in
+                                let seen = member.seenRevision == request.requestRevision
+                                LabeledContent {
+                                    Text(seen ? "Seen" : "Unseen")
+                                        .foregroundStyle(detailColors.secondary)
+                                } label: {
+                                    Text(verbatim: member.person.displayName.rawValue)
+                                }
+                            }
+                        }
+                        .font(.subheadline)
+                    }
+                    .accessibilityIdentifier("request-shared-members")
+                }
                 if !request.supersededByMessageKeys.isEmpty {
                     ReplacedByMessagesSection(
                         replacementKeys: request.supersededByMessageKeys,
@@ -4302,6 +4326,14 @@ private struct FailedResponseDialog: View {
         .frame(minWidth: 280, minHeight: 260)
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
+    }
+}
+
+extension ConversationThread {
+    var sharedAnswerStatusText: String? {
+        guard shared != nil, let answerSpeaker else { return nil }
+        let name = answerSpeaker.displayName.rawValue
+        return String(localized: "Answered by \(name)")
     }
 }
 
