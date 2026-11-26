@@ -1144,8 +1144,12 @@ final class NativeAppLaunch {
         return pending
     }
 
-    func finishSharedSignIn(_ pending: NativePendingSignIn, code: String? = nil) async throws {
-        var pending = pending
+    func finishSharedSignIn(_ expected: NativePendingSignIn, code: String? = nil) async throws {
+        guard var pending = try enrollment.pendingSignIn(), pending.origin == expected.origin,
+              pending.transaction.reference == expected.transaction.reference,
+              pending.transaction.verifier == expected.transaction.verifier else {
+            throw NativeJoinError.superseded
+        }
         let transport = try HTTPSClientAPITransport(origin: pending.origin)
         defer { transport.close() }
         let api = NativeSignInAPI(transport: transport)
