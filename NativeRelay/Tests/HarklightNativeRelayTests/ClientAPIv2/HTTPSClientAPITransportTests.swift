@@ -246,6 +246,31 @@ final class HTTPSClientAPITransportTests: XCTestCase {
         XCTAssertEqual(bodies[2]["transaction"], "fixture-transaction")
     }
 
+    func testSheetCallbackMustCarryOnlyThePendingReference() throws {
+        let transaction = NativeSignInAPI.Transaction(reference: "test+ref", verifier: "secret")
+        let origin = try XCTUnwrap(URL(string: "https://server.example:8443"))
+        let url = try XCTUnwrap(transaction.sheetURL(origin: origin, method: .apple))
+        let components = try XCTUnwrap(URLComponents(url: url, resolvingAgainstBaseURL: false))
+        XCTAssertEqual(components.host, "server.example")
+        XCTAssertEqual(components.port, 8443)
+        XCTAssertEqual(components.path, "/sign-in")
+        XCTAssertEqual(Set(components.queryItems ?? []), [
+            URLQueryItem(name: "return", value: "app"),
+            URLQueryItem(name: "transaction", value: "test+ref"),
+            URLQueryItem(name: "method", value: "apple")
+        ])
+        XCTAssertTrue(transaction.matchesCallback(try XCTUnwrap(URL(string: "harklight://sign-in?transaction=test%2Bref"))))
+        for rejected in [
+            "harklight://sign-in?transaction=other",
+            "harklight://sign-in?transaction=test%2Bref&transaction=other",
+            "harklight://sign-in?transaction=test%2Bref&token=unexpected",
+            "https://sign-in?transaction=test%2Bref",
+            "harklight://join?transaction=test%2Bref"
+        ] {
+            XCTAssertFalse(transaction.matchesCallback(try XCTUnwrap(URL(string: rejected))))
+        }
+    }
+
     private func decodeBase64URL(_ string: String) throws -> Data {
         XCTAssertFalse(string.contains("="))
         let base64 = string.replacingOccurrences(of: "-", with: "+")

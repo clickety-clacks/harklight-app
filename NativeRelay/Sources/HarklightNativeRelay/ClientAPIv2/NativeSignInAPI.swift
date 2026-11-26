@@ -12,6 +12,29 @@ struct NativeSignInAPI: Sendable {
     struct Transaction: Codable, Sendable {
         let reference: String
         let verifier: String
+
+        func sheetURL(origin: URL, method: NativeSignInMethod) -> URL? {
+            guard var url = URLComponents(url: origin, resolvingAgainstBaseURL: false),
+                  url.scheme == "https", let host = url.host, !host.isEmpty,
+                  url.user == nil, url.password == nil, url.query == nil, url.fragment == nil,
+                  url.path.isEmpty || url.path == "/" else { return nil }
+            url.path = "/sign-in"
+            url.queryItems = [
+                URLQueryItem(name: "return", value: "app"),
+                URLQueryItem(name: "transaction", value: reference),
+                URLQueryItem(name: "method", value: method.rawValue)
+            ]
+            url.percentEncodedQuery = url.percentEncodedQuery?.replacingOccurrences(of: "+", with: "%2B")
+            return url.url
+        }
+
+        func matchesCallback(_ callback: URL) -> Bool {
+            guard let url = URLComponents(url: callback, resolvingAgainstBaseURL: false),
+                  url.scheme == "harklight", url.host == "sign-in",
+                  url.user == nil, url.password == nil, url.port == nil,
+                  url.path.isEmpty, url.fragment == nil else { return false }
+            return url.queryItems == [URLQueryItem(name: "transaction", value: reference)]
+        }
     }
 
     struct Result: Decodable, Sendable {
