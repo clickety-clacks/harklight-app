@@ -348,9 +348,10 @@ final class HTTPSClientAPITransportTests: XCTestCase {
         let fixture = SignInFixture()
         let persistence = MemoryOutboxPersistence()
         let outbox = try ActionOutbox(persistence: persistence, transport: fixture,
-                                     outcomes: RecordingOutcomes(), errors: NoopErrorLog())
+                                     outcomes: RecordingOutcomes(), errors: NoopErrorLog(), startsPaused: true)
         let write = FrozenWrite(method: .post, path: "/v2/items/fixture/reply", body: Data("{}".utf8))
         let entry = try await outbox.submit(target: "item:fixture", operation: "reply", write: write)
+        await outbox.resumeSending()
         await outbox.flush()
         XCTAssertEqual(try persistence.load().first?.failure?.token, "accepted_reconcile")
         _ = try await outbox.submit(target: entry.target, operation: entry.operation,
