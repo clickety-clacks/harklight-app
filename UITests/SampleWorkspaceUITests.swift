@@ -1909,10 +1909,20 @@ final class SampleWorkspaceUITests: XCTestCase {
             XCTAssertTrue(app.scrollViews["message-card-scroll"].waitForExistence(timeout: 5))
             capture("corrected-duo-" + name + "-card", app)
             app.buttons["Chat"].tap()
-            let composer = app.textViews["sample-chat-composer"]
-            XCTAssertTrue(composer.waitForExistence(timeout: 5))
-            composer.tap(); composer.typeText("Local orientation " + name)
-            let send = app.buttons["Send locally"]
+            let composers = app.textViews.matching(identifier: "sample-chat-composer")
+            let visibleComposer = NSPredicate { _, _ in
+                composers.allElementsBoundByIndex.filter(\.isHittable).count == 1
+            }
+            let composerIsReachable = XCTNSPredicateExpectation(predicate: visibleComposer, object: nil)
+            guard XCTWaiter().wait(for: [composerIsReachable], timeout: 5) == .completed,
+                  let composer = composers.allElementsBoundByIndex.first(where: \.isHittable) else {
+                XCTFail("Exactly one Chat composer must be reachable at \(name). \(app.debugDescription)")
+                return
+            }
+            composer.tap()
+            composer.typeText("Local orientation " + name)
+            let send = app.buttons.matching(identifier: "Send locally")
+                .allElementsBoundByIndex.first(where: \.isHittable) ?? app.buttons["Send locally"].firstMatch
             XCTAssertTrue(send.isHittable)
             send.tap()
             XCTAssertTrue(app.staticTexts["Local orientation " + name].waitForExistence(timeout: 5))
