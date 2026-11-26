@@ -2503,6 +2503,7 @@ final class LivePresentationStore {
             defaultAnswerStatus: request.defaultAnswerStatusText)
 
         if row.isFYI {
+            row.usesSharedSeenFlag = thread?.shared.map { $0.answerPolicy == nil } == true
             row.fyiGroupingEnabled = !isReadOnly
             row.fyiIsSuperseded = request.lifecycleStatus == .superseded
             row.fyiAnsweredOtherwise = (request.lifecycleStatus == .answered || request.lifecycleStatus == .noComment) &&
@@ -2523,7 +2524,7 @@ final class LivePresentationStore {
             row.fyiPriority = item.priority
             row.fyiPriorityScore = item.score
             row.canReportFYISeen = item.itemSeen != nil && canSendToCurrentServer &&
-                (request.informationalSeenStatus == nil ||
+                (row.usesSharedSeenFlag || request.informationalSeenStatus == nil ||
                     (row.isProgressFYI && request.lifecycleStatus == .open && request.intentReceipt == nil))
         }
         if row.isProgressFYI {
@@ -2532,7 +2533,7 @@ final class LivePresentationStore {
             row.canAnswerProgressFYISeen = canAnswerSeen
         }
         if row.isFYI, !isReadOnly {
-            let usesOpenedFlag = request.informationalSeenStatus == nil ||
+            let usesOpenedFlag = row.usesSharedSeenFlag || request.informationalSeenStatus == nil ||
                 (row.isProgressFYI && !row.fyiProgressIsFinished)
             row.fyiOpenedFlagPending = usesOpenedFlag && request.itemOpenPending
             row.fyiOpenedFlagFailed = usesOpenedFlag && request.itemOpenFailed && row.isActiveFYI
@@ -2720,9 +2721,6 @@ final class LivePresentationStore {
             return false
         case .answer:
             // An explicit Seen tap must not submit an unrelated buffered draft.
-            if conversation(for: key)?.shared != nil {
-                return enqueueOpenedFlag(request)
-            }
             return submitAnswerFromUser(key, answerDraftOverride: RequestDraft(inputs: [:]),
                 explicitCompatibilityAction: ExactText("seen"), requestRevision: requestRevision)
         }

@@ -1079,6 +1079,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
                                                         interface: currentRevisionRequest.interface(deliveredFileNames: deliveredFileNames))
                             : nil,
                         inboxViewEntry: inboxViewEntry,
+                        usesSharedSeenFlag: thread?.shared.map { $0.answerPolicy == nil } == true,
                         itemOpenPending: opensByRequest[item.request.key]?.contains {
                             $0.requestRevision == presentedRevision
                         } == true,
@@ -1231,6 +1232,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
                          currentRevisionByWhenMilliseconds: Int? = nil,
                          defaultAnswerAction: ProjectedActionReference? = nil,
                          inboxViewEntry: InboxViewEntry? = nil,
+                         usesSharedSeenFlag: Bool = false,
                          itemOpenPending: Bool = false,
                          itemOpenFailed: Bool = false,
                          inboxReplyPriorities: [UInt64: InboxMessagePriority] = [:],
@@ -1412,7 +1414,9 @@ public final class AttentionDomainPort: @unchecked Sendable {
                                 intentReceipt: hasAccountTerminal ? nil : submission.map { receipt($0, context: context) },
                                 projection: projection,
                                 informationalSeenStatus: informationalSeenStatus(for: request,
-                                    status: status, remote: remote, submission: submission),
+                                    status: status, remote: remote, submission: submission,
+                                    usesSharedSeenFlag: usesSharedSeenFlag,
+                                    itemSeen: inboxViewEntry?.itemSeen, itemOpenPending: itemOpenPending),
                                 messageType: request.messageType,
                                 messageKind: request.messageKind,
                                 messageProgress: MessageProgress.read(from: request.originalPayload),
@@ -1482,7 +1486,16 @@ public final class AttentionDomainPort: @unchecked Sendable {
     private func informationalSeenStatus(for request: StoredRequest,
                                          status: AppLifecycleStatus,
                                          remote: RemoteRequestState?,
-                                         submission: Submission?) -> InformationalSeenStatus? {
+                                         submission: Submission?,
+                                         usesSharedSeenFlag: Bool,
+                                         itemSeen: Bool?,
+                                         itemOpenPending: Bool) -> InformationalSeenStatus? {
+        if usesSharedSeenFlag {
+            guard request.hasExplicitInformationalSeenAction else { return nil }
+            if itemSeen == true { return .confirmed }
+            if status == .open { return itemOpenPending ? .pending : .available }
+            return .resolvedWithoutSeen
+        }
         if remote?.state == .answered,
            remote?.accountAnswerOutcome == .seen {
             return .confirmed

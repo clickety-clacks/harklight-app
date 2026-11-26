@@ -708,6 +708,7 @@ struct InboxRequestRow: Identifiable {
     var serverPostedAt: Date? = nil
     var postedAt: Date? { serverPostedAt ?? createdAt }
     var fyiServerSeen: Bool? = nil
+    var usesSharedSeenFlag = false
     var fyiHasEnded = false
     var fyiOpenedFlagPending = false
     var fyiOpenedFlagFailed = false
@@ -769,6 +770,7 @@ struct InboxRequestRow: Identifiable {
 
     var fyiSeenAction: FYISeenAction? {
         guard !fyiHasEnded, isUnseenFYI, !isFYISeenPending else { return nil }
+        if usesSharedSeenFlag { return canReportFYISeen ? .openedFlag : nil }
         if isProgressFYI {
             if fyiProgressIsFinished { return canAnswerProgressFYISeen ? .answer : nil }
             return canReportFYISeen ? .openedFlag : nil
