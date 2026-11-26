@@ -118,7 +118,7 @@ struct HarklightApp: App {
                    let departure = launch.selectedArchivedAccount {
                     LiveContentView(store: archive, samples: samples, launch: launch,
                                     archiveDeparture: departure)
-                } else if launch.guidedJoin.isShowing {
+                } else if launch.guidedJoin.isShowing, launch.activeEnrollmentRecord != nil {
                     NativeEnrollmentView(launch: launch)
                 } else if launch.canOpenDisconnectedArchive && launch.isShowingDisconnectedArchive,
                           let archive = launch.disconnectedArchive {
