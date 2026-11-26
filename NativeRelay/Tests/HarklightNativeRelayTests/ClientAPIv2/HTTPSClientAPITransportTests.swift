@@ -1,4 +1,5 @@
 import AttentionDomain
+import CryptoKit
 import Foundation
 @testable import HarklightNativeRelay
 import XCTest
@@ -166,6 +167,36 @@ final class HTTPSClientAPITransportTests: XCTestCase {
         XCTAssertEqual(feed.value(forHTTPHeaderField: "Last-Event-ID"), "12")
         XCTAssertNil(write.value(forHTTPHeaderField: "Cookie"))
         XCTAssertNil(feed.value(forHTTPHeaderField: "Cookie"))
+    }
+
+    func testSignInProofUsesSPKIAndSignsTheExactTransactionAndSessionHash() throws {
+        let pending = try NativeSessionProof()
+        let encoded = try pending.signIn(reference: "fixture-transaction")
+        let expectedHash = SHA256.hash(data: Data(pending.bearer.utf8))
+            .map { String(format: "%02x", $0) }.joined()
+        XCTAssertEqual(encoded.sessionHash, expectedHash)
+        XCTAssertEqual(pending.bearer.count, 43)
+        let publicDER = try decodeBase64URL(encoded.publicKey)
+        let key = try P256.Signing.PublicKey(derRepresentation: publicDER)
+        let signature = try P256.Signing.ECDSASignature(derRepresentation: decodeBase64URL(encoded.signature))
+        XCTAssertTrue(key.isValidSignature(signature, for: Data(
+            "harklight-v2:sign-in\nfixture-transaction\n\(expectedHash)".utf8
+        )))
+        let restored = try JSONDecoder().decode(NativeSessionProof.self, from: JSONEncoder().encode(pending))
+        let activation = try P256.Signing.ECDSASignature(
+            derRepresentation: decodeBase64URL(restored.activationSignature())
+        )
+        XCTAssertEqual(restored.bearer, pending.bearer)
+        XCTAssertTrue(key.isValidSignature(activation, for: Data(
+            "harklight-v2:migration-complete\n\(expectedHash)".utf8
+        )))
+    }
+
+    private func decodeBase64URL(_ string: String) throws -> Data {
+        XCTAssertFalse(string.contains("="))
+        let base64 = string.replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        return try XCTUnwrap(Data(base64Encoded: base64 + String(repeating: "=", count: (4 - base64.count % 4) % 4)))
     }
 
     func testARefusalBecomesAnAPIErrorWithTokenRequestIdAndRetryAfter() async throws {
