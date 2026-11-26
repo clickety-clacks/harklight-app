@@ -125,6 +125,10 @@ public actor ChangeFeedSync {
         }
     }
 
+    func projectionScopeChanged() {
+        foregroundAttempt?.cancel()
+    }
+
     /// Push or background refresh: applies every batch from the cursor without
     /// holding a stream.
     public func catchUp(userInitiated: Bool = false) async throws {

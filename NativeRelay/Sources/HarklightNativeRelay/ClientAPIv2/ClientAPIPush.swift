@@ -38,13 +38,17 @@ public struct ClientAPIPush: Sendable {
     }
 
     public func register(token: ExactText, environment: APIPushEnvironment,
-                         revision: UInt64, idempotencyKey: UUID) async throws -> APIPushStatus {
+                         revision: UInt64, idempotencyKey: UUID, sharedMessages: Bool = false) async throws -> APIPushStatus {
         guard revision > 0 else { throw ClientAPIModelError.invalid("push.revision") }
-        let body = JSONValue.object([
+        var fields = [
             JSONMember("token", .string(token)),
             JSONMember("environment", .string(ExactText(environment.rawValue))),
             JSONMember("revision", .number(JSONNumber(lexeme: String(revision))))
-        ])
+        ]
+        if sharedMessages {
+            fields.append(JSONMember("features", .array([.string(ExactText("shared_messages"))])))
+        }
+        let body = JSONValue.object(fields)
         return try await request(APIRequest(method: .put, path: "/v2/devices/me/push",
                                             body: Data(body.jsonString.utf8), idempotencyKey: idempotencyKey))
     }
@@ -63,7 +67,8 @@ public struct ClientAPIPush: Sendable {
     ) async throws -> ClientAPIPushRegistrationState.Registration? {
         func send(_ intent: ClientAPIPushRegistrationState.Registration) async throws {
             _ = try await register(token: intent.token, environment: intent.environment,
-                                   revision: intent.revision, idempotencyKey: intent.operationID)
+                                   revision: intent.revision, idempotencyKey: intent.operationID,
+                                   sharedMessages: intent.sharedMessages == true)
         }
         do {
             try await send(saved)

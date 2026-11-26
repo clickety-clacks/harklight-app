@@ -90,7 +90,8 @@ public final class ServerModelSyncWriter: SyncModelWriting, @unchecked Sendable 
         } while page != nil
         guard let first else { throw FeedDecodingError.invalidBatch }
         let result = try store.rebaseline(items: items, keeping: unreadable, counts: first.counts,
-                                          position: first.position, ifUnchangedFrom: expected)
+                                          position: first.position, continuation: first.continuation,
+                                          ifUnchangedFrom: expected)
         guard result.installed else { throw SyncSnapshotSuperseded(position: result.position) }
         lock.withLock {
             if unreadableRebaselineRequested { rebaselinedForUnreadable = true }

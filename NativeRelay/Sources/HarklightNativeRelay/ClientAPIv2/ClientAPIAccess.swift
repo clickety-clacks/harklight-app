@@ -117,11 +117,26 @@ public final class ClientAPIAccess: ClientAPITransport, @unchecked Sendable {
         else if (error as? APIError)?.token == .accountPaused { pause() }
     }
 
+    private var sharedScope: (enabled: Bool, continuation: String?) {
+        let held = lock.withLock { model }?.snapshot
+        return (held?.sharedServerID != nil, held?.sharedContinuation?.rawValue)
+    }
+
+    private func scoped(_ request: APIRequest) -> APIRequest {
+        var request = request
+        request.sharedMessages = sharedScope.enabled
+        return request
+    }
+
+    private static var missingContinuation: APIError {
+        APIError(status: 410, token: .cursorExpired, retryable: false, requestID: nil)
+    }
+
     public func send(_ request: APIRequest) async throws -> APIResponse {
         let allowPaused = request.method == .get && request.path == "/v2/me"
         try check(allowPaused: allowPaused)
         do {
-            let response = try await transport.send(request)
+            let response = try await transport.send(scoped(request))
             // An accepted write still has a receipt even if access changed
             // while sending it. The caller must be able to settle its key.
             if request.method == .get { try check(allowPaused: allowPaused) }
@@ -135,7 +150,7 @@ public final class ClientAPIAccess: ClientAPITransport, @unchecked Sendable {
     public func download(_ request: APIRequest, to destination: URL) async throws -> APIResponse {
         try check()
         do {
-            let response = try await transport.download(request, to: destination)
+            let response = try await transport.download(scoped(request), to: destination)
             try check()
             return response
         } catch {
@@ -147,13 +162,27 @@ public final class ClientAPIAccess: ClientAPITransport, @unchecked Sendable {
     public func changeFeed(after: Rev) -> AsyncThrowingStream<FeedEvent, any Error> {
         do { try check() }
         catch { return AsyncThrowingStream { $0.finish(throwing: error) } }
+        let scope = sharedScope
+        if scope.enabled {
+            guard let continuation = scope.continuation else {
+                return AsyncThrowingStream { $0.finish(throwing: Self.missingContinuation) }
+            }
+            return transport.changeFeed(after: after, continuation: continuation)
+        }
         return transport.changeFeed(after: after)
     }
 
     public func changeBatch(after: Rev) async throws -> FeedBatch {
         try check()
         do {
-            let batch = try await transport.changeBatch(after: after)
+            let scope = sharedScope
+            let batch: FeedBatch
+            if scope.enabled {
+                guard let continuation = scope.continuation else { throw Self.missingContinuation }
+                batch = try await transport.changeBatch(after: after, continuation: continuation)
+            } else {
+                batch = try await transport.changeBatch(after: after)
+            }
             try check()
             return batch
         } catch {

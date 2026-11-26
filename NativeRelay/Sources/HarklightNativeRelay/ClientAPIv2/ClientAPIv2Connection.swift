@@ -179,9 +179,12 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
         }
         try Task.checkCancellation()
         let me = try APIMe(json: JSONValue.parse(response.body))
-        let update: (editingEnabled: Bool, resumed: Bool)? = lock.withLock {
+        let update: (editingEnabled: Bool, resumed: Bool, scopeChanged: Bool)? = try lock.withLock {
             let wasPaused = access.state == .paused
             guard access.applyMeAccountState(me.accountState, check: check) else { return nil }
+            let sharedServerID = me.pushPrincipal?.personID == context.identity.personID
+                ? me.sharedMessagesServerID : nil
+            let scopeChanged = try model.configureSharedMessages(serverID: sharedServerID)
             Self.saveHandoffCaptionFeature(me.handoffCaptionsEnabled, model: model, errors: errors)
             if meReadID == id {
                 pausedMeRead = nil
@@ -211,9 +214,13 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
             let available = access.state == .available
             let editingEnabled = available && me.features["priority_level_editing"] == true
             priorityLevelsEnabledFromServer = editingEnabled
-            return (editingEnabled, wasPaused && available)
+            return (editingEnabled, wasPaused && available, scopeChanged)
         }
         guard let update else { return me }
+        if update.scopeChanged {
+            await sync.projectionScopeChanged()
+            publishModel(allowUnbaselined: true)
+        }
         if update.resumed, access.state == .available { await outbox.resumeAfterReenrolment() }
         onMe(me)
         signalQueuedReplies()
@@ -910,7 +917,9 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
     public func resolveShowItem(itemID: ExactText) async throws -> APIItem? {
         // A held Show can outlive its item. Check the active account even
         // when a cached copy exists.
-        try await fetchCurrentItem(itemID)
+        if model.snapshot.items[itemID]?.shared != nil { return nil }
+        let item = try await fetchCurrentItem(itemID)
+        return item?.shared == nil ? item : nil
     }
 
     private func fetchCurrentItem(_ itemID: ExactText) async throws -> APIItem? {
@@ -988,12 +997,16 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
     }
 
     public func publishModel() {
+        publishModel(allowUnbaselined: false)
+    }
+
+    private func publishModel(allowUnbaselined: Bool) {
         lock.withLock {
             if settingsETag != nil, currentSettingsETag() == nil {
                 settingsETag = nil
                 settingsSignal?.yield(())
             }
-            guard model.heldCursor != nil, presentation.hasRules,
+            guard (allowUnbaselined || model.heldCursor != nil), presentation.hasRules,
                   let cached = try? presentation.cachedState(model.snapshot, identity: context.identity) else { return }
             do {
                 let awaitingEntries = hasAcceptedRepliesAwaitingEntries()
@@ -1018,7 +1031,10 @@ extension ClientAPIv2Connection {
     public func sendSavedContentOpens() async {
         do {
             for pending in try repository.snapshot(context: context).pendingMessageOpens {
-                let write = ClientAPIWrites.seen(itemID: pending.requestKey.messageID)
+                let itemID = pending.requestKey.messageID
+                let shared = model.snapshot.items[itemID]?.shared != nil
+                let write = ClientAPIWrites.seen(itemID: itemID,
+                    requestRevision: shared ? pending.requestRevision : nil)
                 await handOffItemAction(write.operation, operationID: pending.id) {
                     try await outbox.submit(target: write.target, operation: write.operation, write: write.write,
                                             idempotencyKey: pending.id, retryRefused: false) { [repository, context] in
@@ -1135,6 +1151,11 @@ extension ClientAPIv2Connection {
             let terminal: V2AnswerTerminalRefusal = error.token == .alreadyAnswered ? .alreadyAnswered : .alreadyRetracted
             try repository.recordAnswerRefusedClosed(intent, operationID: operationID, v2Terminal: terminal,
                                                       context: context)
+            if error.token == .alreadyAnswered,
+               let itemID = try repository.lookupIntent(intent, context: context)?.requestKey.messageID,
+               model.snapshot.items[itemID]?.shared != nil {
+                _ = try? await fetchCurrentItem(itemID)
+            }
         case .alreadyClosed:
             try repository.recordAnswerRefusedClosed(intent, operationID: operationID, context: context)
         case .staleRequest:

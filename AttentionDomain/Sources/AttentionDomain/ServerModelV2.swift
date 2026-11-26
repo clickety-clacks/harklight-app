@@ -8,6 +8,8 @@ import Foundation
 public struct ServerModelV2: Equatable, Codable, Sendable {
     public internal(set) var items: [ExactText: APIItem] = [:]
     public internal(set) var entries: [ExactText: [ExactText: APIEntry]] = [:]
+    public internal(set) var sharedServerID: ExactText?
+    public internal(set) var sharedContinuation: ExactText?
     public internal(set) var counts: APICounts?
     public internal(set) var settings: APISettings?
     public internal(set) var pushPrincipal: APIPushPrincipal?
@@ -87,6 +89,14 @@ public struct ServerModelV2: Equatable, Codable, Sendable {
     }
 
     // MARK: Writes through the gate
+
+    mutating func discardSharedItem(_ itemID: ExactText) {
+        items[itemID] = nil
+        arrivalOrder[itemID] = nil
+        gate.forget(Self.itemKey(itemID))
+        for entryID in (entries.removeValue(forKey: itemID) ?? [:]).keys { forgetEntry(entryID) }
+        loadedEntryItems.remove(itemID)
+    }
 
     private static func itemKey(_ id: ExactText) -> String { "item:\(id.rawValue)" }
     static func itemGateKey(_ id: ExactText) -> String { itemKey(id) }
@@ -250,6 +260,24 @@ public final class ServerModelV2Store: @unchecked Sendable {
         }
     }
 
+    /// Change projection scope before issuing a new baseline. The generation
+    /// fences requests begun under the previous scope, including old SSE.
+    @discardableResult
+    public func configureSharedMessages(serverID: ExactText?) throws -> Bool {
+        try lock.withLock {
+            guard model.sharedServerID != serverID else { return false }
+            try mutateLocked(cursor: nil, replacingCursor: true) { model in
+                for item in model.orderedItems where item.shared != nil {
+                    model.discardSharedItem(item.itemID)
+                }
+                model.sharedServerID = serverID
+                model.sharedContinuation = nil
+                model.counts = nil
+            }
+            return true
+        }
+    }
+
     public func seal() { lock.withLock { sealed = true } }
 
     public func saveAccountPause(_ paused: Bool) throws {
@@ -394,30 +422,36 @@ public final class ServerModelV2Store: @unchecked Sendable {
     /// Replaces the model from a full inbox and records its position as the
     /// cursor, in one save.
     public func rebaseline(items: [APIItem], keeping unreadable: Set<ExactText> = [], counts: APICounts,
-                           position: UInt64) throws {
+                           position: UInt64, continuation: ExactText? = nil) throws {
         try lock.withLock {
-            try installBaseline(items: items, keeping: unreadable, counts: counts, position: position)
+            try installBaseline(items: items, keeping: unreadable, counts: counts, position: position,
+                                continuation: continuation)
         }
     }
 
     /// Installs a snapshot only if Sync has held the same position since the
     /// read began. A reset may legitimately have a lower first-page position.
     public func rebaseline(items: [APIItem], keeping unreadable: Set<ExactText>, counts: APICounts,
-                           position: UInt64, ifUnchangedFrom expected: (revision: UInt64?, generation: UInt64))
+                           position: UInt64, continuation: ExactText? = nil, ifUnchangedFrom expected: (revision: UInt64?, generation: UInt64))
         throws -> (position: UInt64, installed: Bool) {
         try lock.withLock {
             if generation != expected.generation || cursor != expected.revision {
                 return (cursor ?? 0, false)
             }
-            try installBaseline(items: items, keeping: unreadable, counts: counts, position: position)
+            try installBaseline(items: items, keeping: unreadable, counts: counts, position: position,
+                                continuation: continuation)
             return (position, true)
         }
     }
 
     private func installBaseline(items: [APIItem], keeping unreadable: Set<ExactText>, counts: APICounts,
-                                 position: UInt64) throws {
+                                 position: UInt64, continuation: ExactText?) throws {
+        guard (model.sharedServerID != nil) == (continuation?.rawValue.isEmpty == false) else {
+            throw ClientAPIModelError.invalid("inbox.continuation")
+        }
         let resetsHistory = cursor.map { position < $0 } ?? false
         try mutateLocked(cursor: position, replacingCursor: true) { model in
+            model.sharedContinuation = continuation
             model.rebaseline(items: items, keeping: unreadable, counts: counts, position: position,
                              at: now(), resetsHistory: resetsHistory)
         }
@@ -436,10 +470,7 @@ public final class ServerModelV2Store: @unchecked Sendable {
         guard !sealed else { throw CancellationError() }
         var next = model
         try change(&next)
-        var nextCursor = cursor
-        if let newCursor {
-            nextCursor = replacingCursor ? newCursor : max(cursor ?? 0, newCursor)
-        }
+        let nextCursor = replacingCursor ? newCursor : newCursor.map { max(cursor ?? 0, $0) } ?? cursor
         let nextGeneration = replacingCursor ? generation + 1 : generation
         guard next != model || nextCursor != cursor || nextGeneration != generation else { return }
         if let fileURL {

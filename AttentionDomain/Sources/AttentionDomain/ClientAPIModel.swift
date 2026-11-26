@@ -605,6 +605,7 @@ public struct APIInboxPage: Equatable, Sendable {
     public let unreadable: [APIUnreadableResource]
     public let counts: APICounts
     public let nextPage: ExactText?
+    public let continuation: ExactText?
 
     public init(json: JSONValue) throws {
         let reader = try Reader(json, "inbox")
@@ -619,6 +620,7 @@ public struct APIInboxPage: Equatable, Sendable {
         self.unreadable = unreadable
         counts = try APICounts(json: reader.raw("counts") ?? .null)
         nextPage = try reader.optionalString("next_page")
+        continuation = try reader.optionalString("continuation")
     }
 }
 
@@ -698,6 +700,11 @@ public struct APIMe: Equatable, Sendable {
     /// Nil while the server has not supplied a usable file limit.
     public let uploadCap: APIUploadCap?
     public let body: JSONValue
+
+    public var sharedMessagesServerID: ExactText? {
+        guard features["shared_messages"] == true else { return nil }
+        return pushPrincipal?.serverID
+    }
 
     public var handoffCaptionsEnabled: Bool { features["handoff_captions"] == true }
 

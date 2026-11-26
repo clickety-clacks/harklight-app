@@ -96,6 +96,10 @@ public final class HTTPSClientAPITransport: ClientAPITransport, @unchecked Senda
             urlRequest.setValue(key.uuidString.lowercased(), forHTTPHeaderField: "Idempotency-Key")
         }
         if let ifMatch = request.ifMatch { urlRequest.setValue(ifMatch, forHTTPHeaderField: "If-Match") }
+        if request.sharedMessages { urlRequest.setValue("shared_messages", forHTTPHeaderField: "Harklight-Features") }
+        if let continuation = request.continuation {
+            urlRequest.setValue(continuation, forHTTPHeaderField: "Harklight-Continuation")
+        }
         return urlRequest
     }
 
@@ -115,7 +119,22 @@ public final class HTTPSClientAPITransport: ClientAPITransport, @unchecked Senda
     // MARK: Change feed
 
     public func changeFeed(after: Rev) -> AsyncThrowingStream<FeedEvent, any Error> {
-        var feedRequest = urlRequest(for: .get("/v2/changes", query: ["after": String(after)]),
+        openFeed(after: after, continuation: nil)
+    }
+
+    public func changeFeed(after: Rev, continuation: String) -> AsyncThrowingStream<FeedEvent, any Error> {
+        openFeed(after: after, continuation: continuation)
+    }
+
+    private func changesRequest(after: Rev, continuation: String?) -> APIRequest {
+        var request = APIRequest.get("/v2/changes", query: ["after": String(after)])
+        request.sharedMessages = continuation != nil
+        request.continuation = continuation
+        return request
+    }
+
+    private func openFeed(after: Rev, continuation: String?) -> AsyncThrowingStream<FeedEvent, any Error> {
+        var feedRequest = urlRequest(for: changesRequest(after: after, continuation: continuation),
                                      accept: "text/event-stream")
         // Standard SSE resume; it takes precedence over `after` on the server.
         feedRequest.setValue(String(after), forHTTPHeaderField: "Last-Event-ID")
@@ -181,7 +200,15 @@ public final class HTTPSClientAPITransport: ClientAPITransport, @unchecked Senda
     /// Pending the accepted schema: each change in a batch is taken to be
     /// `{rev, kind, data}`, the same three parts a feed event carries.
     public func changeBatch(after: Rev) async throws -> FeedBatch {
-        let response = try await send(.get("/v2/changes", query: ["after": String(after)]))
+        try await readBatch(after: after, continuation: nil)
+    }
+
+    public func changeBatch(after: Rev, continuation: String) async throws -> FeedBatch {
+        try await readBatch(after: after, continuation: continuation)
+    }
+
+    private func readBatch(after: Rev, continuation: String?) async throws -> FeedBatch {
+        let response = try await send(changesRequest(after: after, continuation: continuation))
         guard let object = try JSONSerialization.jsonObject(with: response.body) as? [String: Any],
               let rev = object["rev"].flatMap(APIResponse.rev),
               let changes = object["changes"] as? [[String: Any]] else {
