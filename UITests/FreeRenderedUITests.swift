@@ -151,9 +151,14 @@ final class FreeRenderedUITests: XCTestCase {
     }
 
     private func returnToInbox(_ app: XCUIApplication) {
-        if !listVisibleBesideDetail(in: app) {
-            let back = workspaceBackButton(in: app)
-            if back.exists && back.isHittable {
+        let list = app.collectionViews.firstMatch
+        let listVisible = list.exists &&
+            list.cells.allElementsBoundByIndex.prefix(8).contains { $0.isHittable }
+        if !listVisible {
+            let back = app.buttons.matching(
+                NSPredicate(format: "identifier == 'BackButton' OR label == 'Back'")
+            ).allElementsBoundByIndex.first { $0.isHittable }
+            if let back {
                 back.tap()
             } else {
                 let sidebar = app.buttons["Show Sidebar"]
@@ -161,7 +166,7 @@ final class FreeRenderedUITests: XCTestCase {
                 sidebar.tap()
             }
         }
-        XCTAssertTrue(app.collectionViews.firstMatch.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(list.waitForExistence(timeout: 5), app.debugDescription)
     }
 
     private func dismissChat(_ app: XCUIApplication) {
