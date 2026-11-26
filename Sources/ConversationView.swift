@@ -111,6 +111,10 @@ struct ConversationPanel: View {
     @State private var previewURL: URL?
     @State private var openingFile = false
     @State private var fileError: String?
+    /// Where Chat's visible content starts, below any bar over it, in global
+    /// coordinates. A side panel can reach the window top under the message's
+    /// navigation bar, so the top-drag zone is measured from here too.
+    @State private var visibleContentTop: CGFloat = 0
     @Environment(\.verticalSizeClass) private var verticalSizeClass
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Environment(\.scenePhase) private var scenePhase
@@ -144,6 +148,13 @@ struct ConversationPanel: View {
         }
     }
 
+    /// A Chat sheet closes on a drag from its top 96 points. A side panel
+    /// reaches the window top under the message's navigation bar, so its zone
+    /// is measured from where its visible content starts.
+    private var topDragLimit: CGFloat {
+        onDismissChat == nil ? 96 : max(96, visibleContentTop + 46)
+    }
+
     private var chatDismissGesture: some Gesture {
         DragGesture(minimumDistance: 80, coordinateSpace: .global)
             .onEnded { value in
@@ -154,7 +165,7 @@ struct ConversationPanel: View {
                     return
                 }
                 guard vertical >= 80, vertical > abs(horizontal) * 1.35,
-                      value.startLocation.y <= 96 else { return }
+                      value.startLocation.y <= topDragLimit else { return }
                 dismissChat()
             }
     }
@@ -293,6 +304,9 @@ struct ConversationPanel: View {
             }
         }
         .simultaneousGesture(chatDismissGesture)
+        .onGeometryChange(for: CGFloat.self) { proxy in
+            proxy.frame(in: .global).minY + proxy.safeAreaInsets.top
+        } action: { visibleContentTop = $0 }
         .modifier(V2DiscussionOnOpen(store: store, key: key))
         .onAppear {
             if scenePhase == .active { NativeNotificationRouter.shared.conversationBecameVisible(key) }

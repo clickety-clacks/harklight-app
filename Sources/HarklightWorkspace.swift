@@ -209,24 +209,25 @@ enum InboxMessageTab: String, Hashable {
     case replied
 }
 
-/// The root tab bar: Inbox and Replied, and the search tab the system
-/// shows as a separate round button at the trailing end.
-enum InboxRootTab: Hashable {
-    case inbox
-    case replied
-    case search
+/// Inbox and Replied are two views of the same messages, so they switch in
+/// the list column's own toolbar rather than as app-level tabs.
+struct InboxMailboxPicker: View {
+    @Binding var selection: InboxWorkspaceTab
+
+    var body: some View {
+        Picker("Mailbox", selection: $selection) {
+            Text("Inbox").tag(InboxWorkspaceTab.inbox)
+            Text("Replied").tag(InboxWorkspaceTab.replied)
+        }
+        .pickerStyle(.segmented)
+        .fixedSize()
+        .accessibilityIdentifier("inbox-mailbox-picker")
+    }
 }
 
 enum InboxWorkspaceTab: Hashable {
     case inbox
     case replied
-
-    var rootTab: InboxRootTab {
-        switch self {
-        case .inbox: .inbox
-        case .replied: .replied
-        }
-    }
 
     var messageTab: InboxMessageTab {
         switch self {
@@ -947,10 +948,10 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     @AppStorage("harklight.fyi-list-replied") private var restoredFYIWasReplied = false
     @State private var checkedFYIRestoration = false
     @State private var inboxOrder = InboxOrder.priority
-    @State private var selectedTab: InboxMessageTab = .inbox
+    private var selectedTab: InboxMessageTab { workspaceTab.messageTab }
     @State private var workspaceTab: InboxWorkspaceTab = .inbox
-    @State private var rootTab: InboxRootTab = .inbox
     @State private var search = ""
+    @State private var searchPresented = false
     @FocusState private var searchFieldFocused: Bool
     @State private var testNotificationNavigation: NativeInboxNavigation?
     @State private var listTabOnMessageEntry: InboxMessageTab?
@@ -990,12 +991,9 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         )
     }
 
-    /// On iPhone search filters only the Search tab's list; Inbox and Replied
-    /// always show everything. On iPad the list's own search field filters it
-    /// in place, so detail position and next/previous follow the same results.
-    private var activeSearch: String {
-        rootTab == .search || usesListSearch ? search : ""
-    }
+    /// The list's search field filters the list in place, so detail position
+    /// and next/previous follow the same results.
+    private var activeSearch: String { search }
 
     private var usesFreeOrder: Bool {
         InboxFreeOrder.isSupported(version: conversationStore?.presentation.inboxFreeOrderVersion,
@@ -1004,7 +1002,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
 
     private var cardNavigationIDs: [InboxSelection] {
         let query = activeSearch.trimmingCharacters(in: .whitespacesAndNewlines)
-        let order: InboxOrder = rootTab == .inbox && workspaceTab == .inbox && query.isEmpty
+        let order: InboxOrder = workspaceTab == .inbox && query.isEmpty
             ? inboxOrder : .priority
         return cardNavigationIDs(for: workspaceTab, query: query, order: order)
     }
@@ -1322,7 +1320,6 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         conversationStore?.navigateMessage(from: oldKey, to: newKey)
         if let newKey { selectRequest(newKey) }
         workspaceTab = tab
-        selectedTab = tab.messageTab
         selection = next
         restoringTabPath = oldPath != nextPath
         relatedMessageNavigationPath = nextPath
@@ -1375,22 +1372,21 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     }
 
     private var navigationSelection: Binding<InboxSelection?> {
-        navigationSelection(for: workspaceTab)
-    }
-
-    private func navigationSelection(for tab: InboxWorkspaceTab) -> Binding<InboxSelection?> {
-        Binding(get: { workspaceTab == tab ? selection : nil }, set: { next in
-            guard workspaceTab == tab else { return }
+        Binding(get: { selection }, set: { next in
             guard next != selection else { return }
             if next != nil { splitPresentation.dismissOverlay() }
             navigate(to: next)
         })
     }
 
-    private func detailPath(for tab: InboxWorkspaceTab) -> Binding<[RelatedMessageTarget]> {
-        Binding(get: { workspaceTab == tab ? relatedMessageNavigationPath : [] }, set: { path in
-            guard workspaceTab == tab else { return }
-            relatedMessageNavigationPath = path
+    /// The list's Inbox | Replied switch. Switching keeps each list's own
+    /// remembered detail (switchBrowsingTab) and starts the other list
+    /// unfiltered, as switching tabs did.
+    private var mailboxSelection: Binding<InboxWorkspaceTab> {
+        Binding(get: { workspaceTab }, set: { tab in
+            guard tab != workspaceTab else { return }
+            if !search.isEmpty { search = "" }
+            switchBrowsingTab(to: tab)
         })
     }
 
@@ -1430,6 +1426,10 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                         guard fyis(for: tab).contains(where: { $0.key == key && !$0.isRetracted }) else { return }
                         relatedMessageNavigationPath.append(.fyi(key))
                     }
+                    // Each list's FYIs are their own list, so switching Inbox |
+                    // Replied starts the other one fresh rather than reusing
+                    // this one's scroll position.
+                    .id(tab)
                 case let .notificationPending(serial)?:
                     if let presentation = notificationPendingPresentation(for: serial) {
                         InboxNotificationPendingDetail(
@@ -1507,8 +1507,6 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             }
             .environment(\.isFYIDetail, item == .fyis)
         }
-        .toolbar(horizontalSizeClass == .compact && item != nil ? .hidden : .automatic,
-                 for: .tabBar)
     }
 
     private func relatedPathChanged(from oldPath: [RelatedMessageTarget],
@@ -1573,22 +1571,20 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
 
     @ViewBuilder
     private func inboxSplitView(for tab: InboxWorkspaceTab, inlineChat: Bool,
-                                geometry: GeometryProxy, searching: Bool = false) -> some View {
-        let column = Binding(get: { workspaceTab == tab ? preferredCompactColumn : .sidebar },
-                             set: { if workspaceTab == tab { preferredCompactColumn = $0 } })
-        let splitView = NavigationSplitView(preferredCompactColumn: column) {
+                                geometry: GeometryProxy) -> some View {
+        let splitView = NavigationSplitView(preferredCompactColumn: $preferredCompactColumn) {
             InboxList(tab: tab, rows: rows, warnings: visibleWarnings,
-                  fyiInboxRow: !searching ? fyiInboxRow(for: tab) : nil,
+                  fyiInboxRow: search.isEmpty ? fyiInboxRow(for: tab) : nil,
                   activeFYIsOnly: activeFYIsOnly,
-                  inboxOrder: tab == .inbox && !searching ? $inboxOrder : nil,
+                  inboxOrder: tab == .inbox ? $inboxOrder : nil,
                   showsBasicOrderMarker: showsBasicOrderMarker, isRefreshing: isRefreshing,
                   refreshInbox: refreshInbox,
                   conversationStore: conversationStore,
                   replyItemAreaStore: conversationStore?.replyItemAreaStore,
                   openReplyItem: openReplyItem,
-                  selected: navigationSelection(for: tab),
+                  selected: navigationSelection,
                       workspaceTab: $workspaceTab,
-                      search: searching || usesListSearch ? $search : .constant(""),
+                      search: $search,
                       lastViewedSelection: lastViewedSelection,
                       restoreLastViewed: restoreLastViewedOnReturn,
                       didRestoreLastViewed: { restoreLastViewedOnReturn = false },
@@ -1600,16 +1596,26 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                       notificationNavigation: visibleNotificationNavigation,
                       notificationPendingPresentation: notificationPendingListPresentation,
                       triggerNotification: exposesNotificationTestAction
-                          ? { triggerNotificationTestAction() } : nil)
-            .modifier(InboxListSearchFieldModifier(active: usesListSearch, text: searchTextBinding))
+                          ? { triggerNotificationTestAction() } : nil,
+                      isRegularSidebar: horizontalSizeClass == .regular)
+            .searchable(text: searchTextBinding, isPresented: $searchPresented,
+                        prompt: "Search messages")
+            .searchFocused($searchFieldFocused)
+            .toolbar {
+                ToolbarItem(placement: .bottomBar) {
+                    InboxMailboxPicker(selection: mailboxSelection)
+                }
+                ToolbarSpacer(.flexible, placement: .bottomBar)
+                DefaultToolbarItem(kind: .search, placement: .bottomBar)
+            }
             .background(alignment: .topLeading) {
                 InboxSplitPresentationReader(presentation: splitPresentation)
                     .frame(width: 1, height: 1)
                     .allowsHitTesting(false)
             }
         } detail: {
-            NavigationStack(path: detailPath(for: tab)) {
-                detailContent(for: workspaceTab == tab ? selection : nil, tab: tab, inlineChat: inlineChat,
+            NavigationStack(path: $relatedMessageNavigationPath) {
+                detailContent(for: selection, tab: tab, inlineChat: inlineChat,
                               geometry: geometry)
             }
 
@@ -1630,9 +1636,6 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
 
     /// On iPad the open message's type tint runs behind the floating list
     /// panel to the screen edge; with nothing open the page shows.
-    /// iPad searches with a field at the top of the list; iPhone uses the
-    /// Search tab.
-    private var usesListSearch: Bool { UIDevice.current.userInterfaceIdiom == .pad }
 
     private var searchTextBinding: Binding<String> {
         Binding(get: { search }, set: { value in
@@ -1727,40 +1730,11 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                                              isPad: UIDevice.current.userInterfaceIdiom == .pad)
             let landscape = layout.landscape
             let inlineChat = layout.inlineChat
-            let tabs = TabView(selection: $rootTab) {
-                Tab(value: .inbox) {
-                    inboxSplitView(for: .inbox, inlineChat: inlineChat,
-                                   geometry: geometry)
-                } label: {
-                    // TabView fills SF Symbol variants; keep this stock symbol’s outline and solid dot.
-                    Label {
-                        Text("Inbox")
-                    } icon: {
-                        Image(uiImage: UIImage(systemName: "envelope.badge")!)
-                    }
-                }
-
-                Tab("Replied", systemImage: "envelope.open", value: .replied) {
-                    inboxSplitView(for: .replied, inlineChat: inlineChat,
-                                   geometry: geometry)
-                }
-
-                // On iPhone the search role gives the system's round search
-                // button at the trailing end; it searches the list the person
-                // came from. On iPad search is a field at the top of the list
-                // instead (usesListSearch): after a search in the system search
-                // tab, iPad reply editors could no longer take the keyboard.
-                if !usesListSearch {
-                    Tab(value: .search, role: .search) {
-                        inboxSplitView(for: workspaceTab, inlineChat: inlineChat,
-                                       geometry: geometry, searching: true)
-                            .id(workspaceTab)
-                            .searchable(text: searchTextBinding, prompt: "Search messages")
-                            .searchFocused($searchFieldFocused)
-                    }
-                }
-            }
-            .tabViewSearchActivation(.searchTabSelection)
+            // One split view at the root, as Apple's Mail does: the Inbox |
+            // Replied switch and search belong to the list column, so they
+            // leave with it when only the message shows.
+            let split = inboxSplitView(for: workspaceTab, inlineChat: inlineChat,
+                                       geometry: geometry)
             .preference(key: ReplyEditorFocusKey.self, value: searchFieldFocused)
             .onChange(of: searchFieldFocused) { _, focused in
                 if focused {
@@ -1769,24 +1743,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                 }
             }
             .tint(HarklightDesignSystem.palette(for: colorScheme).amber)
-            .onChange(of: rootTab) { _, newRootTab in
-                switch newRootTab {
-                case .inbox: switchBrowsingTab(to: .inbox)
-                case .replied: switchBrowsingTab(to: .replied)
-                case .search:
-                    if selection == .fyis { navigate(to: nil) }
-                    // One tap on the search tab focuses its field on iPhone. The
-                    // search list is rebuilt for the tab it searches, so focus is
-                    // set here as well as by the system activation. iPad leaves the
-                    // field unfocused so the keyboard does not cover the view.
-                    if horizontalSizeClass == .compact {
-                        Task { @MainActor in searchFieldFocused = true }
-                    }
-                }
-                if newRootTab != .search, !search.isEmpty { search = "" }
-            }
             .onChange(of: workspaceTab) { _, newTab in
-                selectedTab = newTab.messageTab
                 guard newTab != .inbox,
                       let route = activeNotificationNavigation, route.isPending,
                       case let .notificationPending(serial)? = selection,
@@ -1800,13 +1757,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                       serial == route.serial else { return }
                 dismissPendingNotification()
             }
-            .onChange(of: selectedTab) { _, tab in
-                workspaceTab = tab == .replied ? .replied : .inbox
-            }
-            .onChange(of: workspaceTab) { _, tab in
-                if rootTab != .search { rootTab = tab.rootTab }
-            }
-            tabs
+            split
             .onChange(of: activeNotificationNavigation, initial: true) { _, route in
                 guard let route,
                       InboxNotificationNavigationPolicy.shouldApply(
@@ -1828,9 +1779,10 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                 let previous = selection
                 relatedMessageNavigationPath.removeAll()
                 workspaceTab = destination.workspaceTab
-                rootTab = destination.workspaceTab.rootTab
-                selectedTab = destination.selectedTab
                 search = destination.search
+                // A routed message closes list search, as leaving the old
+                // Search tab did, so the list returns unfiltered.
+                if destination.search.isEmpty { searchPresented = false }
                 selection = destination.selection
                 rememberFYIRestoration(from: previous)
                 if let key = route.request {
@@ -1902,7 +1854,6 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                selection == nil, notificationNavigation == nil {
                 if restoredFYIWasReplied {
                     switchBrowsingTab(to: .replied)
-                    rootTab = .replied
                 }
                 navigate(to: .fyis)
             }
@@ -1922,8 +1873,8 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                 conversationStore?.dismissStaleAnswerDialog()
                 settings = false
                 switchBrowsingTab(to: .inbox)
-                rootTab = .inbox
                 search = ""
+                searchPresented = false
                 navigate(to: .request(dialog.requestKey))
             }
             Button("Dismiss", role: .cancel) {
@@ -1964,6 +1915,10 @@ struct InboxList: View {
     let notificationNavigation: NativeInboxNavigation?
     var notificationPendingPresentation: InboxNotificationPendingPresentation? = nil
     let triggerNotification: (() -> Void)?
+    /// Whether the window is regular width, so the list is the split view's
+    /// floating sidebar. Read from the scene by the owner: inside a split
+    /// view the sidebar column itself always reports a compact width.
+    var isRegularSidebar = false
     @Environment(\.accessibilityReduceMotion) private var systemReduceMotion
     @Environment(\.harklightReduceMotionOverride) private var reduceMotionOverride
     private var reduceMotion: Bool {
@@ -1994,15 +1949,13 @@ struct InboxList: View {
         HarklightDesignSystem.palette(for: colorScheme)
     }
 
-    /// Rows sit on the page background on iPhone. On iPad the list is in the
-    /// system's floating glass sidebar, so rows leave the glass showing.
+    /// Rows sit on the page background in a compact width. In a regular width
+    /// the list is in the system's floating glass sidebar, so rows leave the
+    /// glass showing.
     private var rowSurface: Color {
-        isPadSidebar ? .clear : designPalette.background
+        isRegularSidebar ? .clear : designPalette.background
     }
 
-    private var isPadSidebar: Bool {
-        UIDevice.current.userInterfaceIdiom == .pad && horizontalSizeClass != .compact
-    }
 
     private var listTint: Color {
         guard let selected,
@@ -2706,14 +2659,13 @@ struct InboxList: View {
                 brandAndStatusHeader
             }
             .sharedBackgroundVisibility(.hidden)
-            let isPad = UIDevice.current.userInterfaceIdiom == .pad
             let sortMenu = inboxOrder.map {
                 InboxSortMenu(order: $0, title: "Sort Inbox", identifier: "inbox-sort",
-                              usesStackedLabel: isPad)
+                              usesStackedLabel: isRegularSidebar)
             }
-            if showsInboxSort, let sortMenu, isPad {
-                // The iPad sidebar can overflow separate trailing items as a
-                // group. Place the two controls in one item's shared space.
+            if showsInboxSort, let sortMenu, isRegularSidebar {
+                // A regular-width sidebar can overflow separate trailing items
+                // as a group. Place the two controls in one item's shared space.
                 ToolbarItem(placement: .topBarTrailing) {
                     HStack(spacing: 4) {
                         sortMenu
@@ -3456,20 +3408,6 @@ private struct ReplyItemNormalRowContent: View {
         .inboxRowSurface(priority: priority, openType: selected ? .request : nil)
         .accessibilityElement(children: .combine)
         .accessibilityLabel(String(localized: "Chat reply from \(senderLabel) about \(MessageMarkdown.visibleText(parentTitle))"))
-    }
-}
-
-/// The iPad list's own search field, in the list column.
-private struct InboxListSearchFieldModifier: ViewModifier {
-    let active: Bool
-    let text: Binding<String>
-
-    func body(content: Content) -> some View {
-        if active {
-            content.searchable(text: text, placement: .sidebar, prompt: "Search messages")
-        } else {
-            content
-        }
     }
 }
 

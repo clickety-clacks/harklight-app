@@ -147,7 +147,9 @@ final class SampleWorkspaceUITests: XCTestCase {
         app.buttons["Posted"].tap()
         XCTAssertEqual(sort.label, "Sort: Posted")
         let list = app.collectionViews.firstMatch
-        for _ in 0..<4 where !selected.isHittable {
+        // The list's bottom bar floats over its last rows; scroll the row clear of it.
+        let barTop = workspaceTab("Inbox", in: app).frame.minY
+        for _ in 0..<4 where !selected.isHittable || selected.frame.maxY > barTop {
             list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.84))
                 .press(forDuration: 0.05, thenDragTo:
                     list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.36)))
@@ -1049,7 +1051,7 @@ final class SampleWorkspaceUITests: XCTestCase {
         let finish = app.buttons["request-finish"]
         XCTAssertTrue(finish.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(finish.isEnabled, app.debugDescription)
-        let listVisibleAlongsideDetail = app.searchFields.firstMatch.isHittable
+        let listVisibleAlongsideDetail = listVisibleBesideDetail(in: app)
         let detail = app.scrollViews["message-card-scroll"]
         finish.tap()
         if listVisibleAlongsideDetail {
@@ -1208,7 +1210,7 @@ final class SampleWorkspaceUITests: XCTestCase {
                       "The No comment selection survives leaving the detail.")
         let submit = app.buttons["request-finish"]
         XCTAssertTrue(submit.isEnabled, app.debugDescription)
-        let listVisibleAlongsideDetail = app.searchFields.firstMatch.isHittable
+        let listVisibleAlongsideDetail = listVisibleBesideDetail(in: app)
         let detail = app.scrollViews["message-card-scroll"]
         submit.tap()
         if listVisibleAlongsideDetail {
@@ -1238,7 +1240,7 @@ final class SampleWorkspaceUITests: XCTestCase {
 
     private func selectMessageTab(_ title: String, in app: XCUIApplication,
                                   file: StaticString = #filePath, line: UInt = #line) {
-        let closeSearch = app.buttons["Close"]
+        let closeSearch = app.buttons.matching(NSPredicate(format: "label ==[c] %@", "close")).firstMatch
         if closeSearch.exists { closeSearch.tap() }
 
         let destination = workspaceTab(title, in: app)
@@ -1518,7 +1520,7 @@ final class SampleWorkspaceUITests: XCTestCase {
         XCTAssertEqual(app.buttons.matching(identifier: "request-seen-action").count, 1)
         XCTAssertEqual(app.buttons.matching(identifier: "request-finish-seen").count, 1)
         capture("seen-detail-with-body-and-toolbar-actions", app)
-        let listVisibleAlongsideDetail = app.searchFields.firstMatch.isHittable
+        let listVisibleAlongsideDetail = listVisibleBesideDetail(in: app)
         let detail = app.scrollViews["message-card-scroll"]
         bodySeen.tap()
         if listVisibleAlongsideDetail {
@@ -1695,7 +1697,7 @@ final class SampleWorkspaceUITests: XCTestCase {
         for kind in kinds {
             showList(app)
             clearSearch(in: app)
-            let closeSearch = app.buttons["Close"]
+            let closeSearch = app.buttons.matching(NSPredicate(format: "label ==[c] %@", "close")).firstMatch
             if closeSearch.exists && closeSearch.isHittable { closeSearch.tap() }
             let inboxTab = workspaceTab("Inbox", in: app)
             let repliedTab = workspaceTab("Replied", in: app)
@@ -1989,11 +1991,14 @@ final class SampleWorkspaceUITests: XCTestCase {
             XCTAssertTrue(sidebarToggle.waitForExistence(timeout: 5), app.debugDescription)
             XCTAssertTrue(list.exists, app.debugDescription)
             XCTAssertTrue(firstRow.waitForExistence(timeout: 5), app.debugDescription)
+            // The header row is checked through Settings, its control: the brand image is
+            // decorative and, without a window tab bar above it, sits in the top-leading
+            // corner that the system reserves for window controls in landscape.
             for _ in 0..<8 {
-                if brand.isHittable && firstRow.frame.minY >= settings.frame.maxY { break }
+                if settings.isHittable && firstRow.frame.minY >= settings.frame.maxY { break }
                 list.swipeDown()
             }
-            XCTAssertTrue(brand.isHittable, "The toolbar is visible at the list top.")
+            XCTAssertTrue(settings.isHittable, "The toolbar is visible at the list top.")
             XCTAssertGreaterThanOrEqual(firstRow.frame.minY, settings.frame.maxY,
                                         "The first row clears the restored toolbar at the top.")
             XCTAssertEqual(app.frame.width > app.frame.height, orientation == .landscapeLeft,
@@ -2007,22 +2012,22 @@ final class SampleWorkspaceUITests: XCTestCase {
 
             list.swipeUp()
             let hidden = expectation(for: NSPredicate(format: "isHittable == false"),
-                                     evaluatedWith: brand)
+                                     evaluatedWith: settings)
             wait(for: [hidden], timeout: 5)
             capture("native-header-\(name)-scrolled", app)
 
             list.swipeDown()
             let restored = expectation(for: NSPredicate(format: "isHittable == true"),
-                                       evaluatedWith: brand)
+                                       evaluatedWith: settings)
             wait(for: [restored], timeout: 5)
             for _ in 0..<8 {
-                if firstRow.isHittable && brand.isHittable &&
+                if firstRow.isHittable && settings.isHittable &&
                     settings.isHittable && sidebarToggle.isHittable &&
                     firstRow.frame.minY >= settings.frame.maxY { break }
                 list.swipeDown()
             }
             XCTAssertTrue(firstRow.isHittable, "The list returns to its top row.")
-            XCTAssertTrue(brand.isHittable, "The header is restored at the top.")
+            XCTAssertTrue(settings.isHittable, "The header is restored at the top.")
             XCTAssertTrue(settings.isHittable, "Settings returns with the header.")
             XCTAssertTrue(sidebarToggle.isHittable, "The sidebar toggle returns with the header.")
             XCTAssertGreaterThan(brand.frame.height, 20, "The restored brand has a visible frame.")

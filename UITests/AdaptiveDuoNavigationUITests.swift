@@ -216,7 +216,7 @@ final class AdaptiveDuoNavigationUITests: XCTestCase {
         XCTAssertTrue(check.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(check.isEnabled, app.debugDescription)
         let card = app.scrollViews["message-card-scroll"]
-        let listVisibleAlongsideDetail = app.searchFields.firstMatch.isHittable
+        let listVisibleAlongsideDetail = listVisibleBesideDetail(in: app)
         let counter = app.staticTexts.matching(
             NSPredicate(format: "label MATCHES '[0-9]+ of [0-9]+'")
         ).firstMatch

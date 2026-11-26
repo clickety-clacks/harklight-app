@@ -347,7 +347,7 @@ final class ConversationSampleUITests: XCTestCase {
             ]) + ["--harklight-test-reply-item-area",
                   "--harklight-test-normal-reply-priority=\(scenario)"]
             app.launch()
-            if historical { app.tabBars.buttons["Replied"].tap() }
+            if historical { workspaceTab("Replied", in: app).tap() }
             let row = app.descendants(matching: .any)["normal-reply-item-sample-information-0"]
             let list = app.collectionViews.firstMatch
             XCTAssertTrue(list.waitForExistence(timeout: 10), app.debugDescription)
@@ -487,7 +487,7 @@ final class ConversationSampleUITests: XCTestCase {
             let searchTab = workspaceTab("Search", in: app)
             XCTAssertTrue(inboxTab.waitForExistence(timeout: 5), app.debugDescription)
             XCTAssertTrue(repliedTab.exists, app.debugDescription)
-            // The Search tab exists on iPhone only; iPad searches from the list.
+            // Search sits beside the list switch where the width allows a bottom bar.
             let tabFrames = [inboxTab, repliedTab] + (searchTab.exists ? [searchTab] : [])
             let tabBarTop = tabFrames.map(\.frame.minY).min()!
             capture("last-normal-reply-above-tab-bar-\(size.name)", app)
@@ -568,8 +568,22 @@ final class ConversationSampleUITests: XCTestCase {
                           "The dismissal starts with the keyboard up.")
 
             let startElement = gesture.origin == "history" ? history : composer
-            let start = startElement.coordinate(
+            var start = startElement.coordinate(
                 withNormalizedOffset: CGVector(dx: gesture.startX, dy: gesture.startY))
+            // The history can now reach the window top, under the message's
+            // navigation bar, which takes a drag that starts there. Begin just
+            // below that bar, at the top of the visible Chat content.
+            let bars = app.navigationBars.allElementsBoundByIndex.filter {
+                $0.frame.minX <= startElement.frame.midX && $0.frame.maxX >= startElement.frame.midX
+            }
+            let barBottom = bars.map(\.frame.maxY).filter { $0 > startElement.frame.minY }.max()
+            // A side panel's zone counts from its visible content, below that bar;
+            // a sheet keeps its drag from the top of the history.
+            let isSidePanel = history.frame.width < app.windows.firstMatch.frame.width * 0.5
+            if gesture.deltaY > 0, isSidePanel, let barBottom {
+                start = startElement.coordinate(withNormalizedOffset: CGVector(dx: gesture.startX, dy: 0))
+                    .withOffset(CGVector(dx: 0, dy: barBottom + 24 - startElement.frame.minY))
+            }
             let end = start.withOffset(CGVector(dx: gesture.deltaX, dy: gesture.deltaY))
             start.press(forDuration: 0.05, thenDragTo: end,
                         withVelocity: .fast, thenHoldForDuration: 0.1)
@@ -1511,12 +1525,13 @@ final class ConversationSampleUITests: XCTestCase {
 
 @MainActor
 private func workspaceTab(_ title: String, in app: XCUIApplication) -> XCUIElement {
-    let tabBarButton = app.tabBars.buttons[title]
-    if tabBarButton.exists { return tabBarButton }
+    // Inbox and Replied are segments of the list's own switch.
+    let segment = app.segmentedControls["inbox-mailbox-picker"].buttons[title]
+    if segment.exists { return segment }
     return app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", title)).firstMatch
 }
 
-/// Search is a tab: selecting it raises the one search field.
+/// Search belongs to the list: a field, or a search button that raises it.
 @MainActor
 private func workspaceSearchField(in app: XCUIApplication) -> XCUIElement {
     let field = app.searchFields.firstMatch
@@ -1535,8 +1550,10 @@ private func workspaceSearchField(in app: XCUIApplication) -> XCUIElement {
 
 @MainActor
 private func workspaceBackButton(in app: XCUIApplication) -> XCUIElement {
-    let toolbarBack = app.toolbars.buttons["BackButton"]
-    if toolbarBack.exists { return toolbarBack }
+    // The list and the message each have a toolbar; use a Back control that is on screen.
+    let toolbarBack = app.toolbars.buttons.matching(identifier: "BackButton")
+        .allElementsBoundByIndex.first { !$0.frame.isEmpty }
+    if let toolbarBack { return toolbarBack }
 
     let navigationBack = app.navigationBars.buttons.matching(
         NSPredicate(format: "identifier == 'BackButton' OR label == 'Back'")
