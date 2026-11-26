@@ -23,6 +23,13 @@ struct NativeEnrollmentSettings {
     }
 }
 
+enum NativeSessionMigration: Codable, Equatable {
+    case redeeming(origin: URL, pending: NativeSessionRedemption)
+    case keyAttached(origin: URL, pending: NativeSessionRedemption)
+    case activating(origin: URL, proof: NativeSessionProof, signature: String)
+    case active(origin: URL, proof: NativeSessionProof)
+}
+
 struct NativeEnrollmentRecord: Codable, Equatable {
     var host: String
     var enrollmentPort: Int
@@ -47,6 +54,7 @@ struct NativeEnrollmentRecord: Codable, Equatable {
     /// endpoint migration; those records use their enrollment host.
     var localProfileAuthority: String? = nil
     var notificationProfileGeneration: UUID? = nil
+    var sessionMigration: NativeSessionMigration? = nil
 
     var isApproved: Bool { personID != nil }
     /// The invitation's person label, when it supplied one. Earlier builds saved
@@ -235,6 +243,18 @@ struct NativeEnrollmentStore {
         }
         record.foregroundRelayConfirmed = true
         try save(record)
+    }
+
+    func saveSessionMigration(_ migration: NativeSessionMigration?, for expected: NativeEnrollmentRecord) throws {
+        guard var current = try load(), current.isApproved, current.v2Revoked != true,
+              current.host == expected.host, current.trustedRootDER == expected.trustedRootDER,
+              current.deviceID == expected.deviceID, current.profileAuthority == expected.profileAuthority,
+              NativeAuthorityBinding.samePerson(current.personID, expected.personID),
+              current.sessionMigration == expected.sessionMigration else {
+            throw NativeJoinError.superseded
+        }
+        current.sessionMigration = migration
+        try save(current)
     }
 
     func clearAfterConfirmedRemoval(of expected: NativeEnrollmentRecord) throws {

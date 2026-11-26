@@ -525,6 +525,22 @@ final class BuildLegacyA1StoreUpgradeTests: XCTestCase {
         XCTAssertTrue(["361", "362"].contains(try String(contentsOf: writer, encoding: .utf8)))
         let enrollment = NativeEnrollmentStore(service: "harklight-a1-legacy-upgrade-test")
         let record = try XCTUnwrap(enrollment.load())
+        XCTAssertNil(record.sessionMigration)
+        let pending = try NativeSessionRedemption(credential: .migration(token: "fixture-grant"),
+                                                  label: "iPhone", proof: NativeSessionProof())
+        let origin = try XCTUnwrap(URL(string: "https://relay.example.test"))
+        try enrollment.saveSessionMigration(.redeeming(origin: origin, pending: pending), for: record)
+        let resumed = try XCTUnwrap(enrollment.load())
+        XCTAssertEqual(resumed.profileAuthority, record.profileAuthority)
+        XCTAssertEqual(resumed.personID, record.personID)
+        XCTAssertEqual(resumed.deviceID, record.deviceID)
+        XCTAssertEqual(resumed.v2PushRegistration, record.v2PushRegistration)
+        guard case let .redeeming(savedOrigin, savedPending) = resumed.sessionMigration else {
+            return XCTFail("Expected the Keychain to retain the pending migration")
+        }
+        XCTAssertEqual(savedOrigin, origin)
+        XCTAssertEqual(savedPending.request, pending.request)
+        XCTAssertEqual(savedPending.proof.bearer, pending.proof.bearer)
         let material = try enrollment.material(from: record)
         let context = material.context
         XCTAssertEqual(context.identity.trustedRelayAuthority, ExactText("relay.example.test"))
@@ -556,6 +572,6 @@ final class BuildLegacyA1StoreUpgradeTests: XCTestCase {
         XCTAssertEqual(queued.idempotencyKey.uuidString.lowercased(), "00000000-0000-4000-8000-000000000361")
         XCTAssertEqual(queued.write.method, .post)
         XCTAssertEqual(queued.write.path, "/v2/items/fixture-item/answer")
-        XCTAssertEqual(queued.write.body, Data(#"{"request_revision":1,"no_comment":true}"#.utf8))
+        XCTAssertEqual(queued.write.body, Data(#"{"request_revision":1}"#.utf8))
     }
 }

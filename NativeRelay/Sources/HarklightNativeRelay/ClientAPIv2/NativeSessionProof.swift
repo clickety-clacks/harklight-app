@@ -2,7 +2,7 @@ import CryptoKit
 import Foundation
 import Security
 
-struct NativeSessionProof: Codable, Sendable {
+public struct NativeSessionProof: Codable, Equatable, Sendable {
     struct SignInFields: Codable, Equatable, Sendable {
         let publicKey: String
         let sessionHash: String
@@ -20,9 +20,9 @@ struct NativeSessionProof: Codable, Sendable {
     }
 
     private let privateKeyBytes: Data
-    let bearer: String
+    public let bearer: String
 
-    init() throws {
+    public init() throws {
         privateKeyBytes = P256.Signing.PrivateKey().rawRepresentation
         bearer = try Self.randomSecret()
     }
@@ -48,7 +48,7 @@ struct NativeSessionProof: Codable, Sendable {
                             sessionHash: hash, signature: Self.base64URL(signature.derRepresentation))
     }
 
-    func activationSignature() throws -> String {
+    public func activationSignature() throws -> String {
         let key = try P256.Signing.PrivateKey(rawRepresentation: privateKeyBytes)
         let signature = try key.signature(for: Data("harklight-v2:migration-complete\n\(Self.commitment(bearer))".utf8))
         return Self.base64URL(signature.derRepresentation)
@@ -63,16 +63,16 @@ struct NativeSessionProof: Codable, Sendable {
 }
 
 /// Persist the encoded request and proof together before sending redemption.
-struct NativeSessionRedemption: Codable, Sendable {
-    enum Credential {
+public struct NativeSessionRedemption: Codable, Equatable, Sendable {
+    public enum Credential {
         case transaction(reference: String, verifier: String)
         case migration(token: String)
     }
 
-    let proof: NativeSessionProof
+    public let proof: NativeSessionProof
     private let body: Data
 
-    init(credential: Credential, label: String, proof: NativeSessionProof) throws {
+    public init(credential: Credential, label: String, proof: NativeSessionProof) throws {
         self.proof = proof
         var fields = ["label": label]
         let reference: String
@@ -92,7 +92,7 @@ struct NativeSessionRedemption: Codable, Sendable {
         body = try JSONEncoder().encode(fields)
     }
 
-    var request: APIRequest {
+    public var request: APIRequest {
         APIRequest(method: .post, path: "/v2/auth/sign-in", body: body)
     }
 }
