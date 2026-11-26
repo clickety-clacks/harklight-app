@@ -229,8 +229,7 @@ final class HarklightUITests: XCTestCase {
 
         _ = submitFacilitiesAnswer(in: app, x: 240, y: 610)
         applyFixtureOutcome("cleared", in: app)
-        XCTAssertFalse(warning.waitForExistence(timeout: 1),
-                       "A new unresolved-answer warning does not cover the detail toolbar.")
+        assertInboxWarningDoesNotCoverDetail(in: app)
         XCTAssertTrue(app.buttons["request-heading"].exists, app.debugDescription)
 
         let chat = app.buttons["Chat"]
@@ -433,8 +432,7 @@ final class HarklightUITests: XCTestCase {
         applyFixtureOutcome("cleared", in: app)
 
         let message = app.staticTexts["inbox-warning-message"]
-        XCTAssertFalse(message.waitForExistence(timeout: 1),
-                       "An unresolved send does not open a popover over the detail toolbar.")
+        assertInboxWarningDoesNotCoverDetail(in: app)
         let back = workspaceBackButton(in: app)
         XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
         back.tap()
@@ -783,17 +781,39 @@ final class HarklightUITests: XCTestCase {
         app.buttons["request-details-done"].tap()
     }
 
+    private func assertInboxWarningDoesNotCoverDetail(in app: XCUIApplication,
+                                                        file: StaticString = #filePath, line: UInt = #line) {
+        let warning = app.staticTexts["inbox-warning-message"].firstMatch
+        let card = app.scrollViews["message-card-scroll"]
+        if listVisibleBesideDetail(in: app), warning.exists {
+            XCTAssertLessThanOrEqual(warning.frame.maxX, card.frame.minX,
+                                     "The warning stays in the Inbox column beside the detail.",
+                                     file: file, line: line)
+        } else {
+            XCTAssertFalse(warning.waitForExistence(timeout: 1),
+                           "A detail-only screen must not show an Inbox warning over its toolbar.",
+                           file: file, line: line)
+        }
+        XCTAssertFalse(app.buttons["inbox-warning-button"].exists, file: file, line: line)
+    }
+
     private func openRequestDetails(in app: XCUIApplication) {
         let heading = app.buttons["request-heading"]
         XCTAssertTrue(heading.waitForExistence(timeout: 5))
         let scroll = app.scrollViews["message-card-scroll"]
-        let visibleTop = app.navigationBars.firstMatch.frame.maxY
+        func visibleTop() -> CGFloat {
+            let detail = scroll.frame
+            return app.navigationBars.allElementsBoundByIndex
+                .map(\.frame)
+                .filter { !$0.isEmpty && $0.minX < detail.midX && $0.maxX > detail.midX }
+                .map(\.maxY).max() ?? detail.minY
+        }
         for _ in 0..<8 {
-            if heading.isHittable && heading.frame.minY >= visibleTop { break }
+            if heading.isHittable && heading.frame.minY >= visibleTop() { break }
             scroll.swipeDown()
         }
         XCTAssertTrue(heading.isHittable, "The message heading must open request history.")
-        XCTAssertGreaterThanOrEqual(heading.frame.minY, visibleTop,
+        XCTAssertGreaterThanOrEqual(heading.frame.minY, visibleTop(),
                                     "The heading must be below the navigation bar before tapping it.")
         heading.tap()
         attachScreenshot("Request history interaction", from: app)
