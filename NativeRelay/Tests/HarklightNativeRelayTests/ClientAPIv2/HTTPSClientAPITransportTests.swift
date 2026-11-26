@@ -372,6 +372,30 @@ final class HTTPSClientAPITransportTests: XCTestCase {
         XCTAssertEqual(sent.first?.idempotencyKey, entry.id)
     }
 
+    func testLegacyReconnectHoldsAnAttemptThatAgedWhileTheConnectionWasOpen() async throws {
+        let fixture = SignInFixture()
+        let persistence = MemoryOutboxPersistence()
+        let firstCutoff = Date(timeIntervalSince1970: 10)
+        let created = Date(timeIntervalSince1970: 11)
+        let reconnectCutoff = Date(timeIntervalSince1970: 12)
+        let write = FrozenWrite(method: .post, path: "/v2/items/fixture/replies", body: Data("{}".utf8))
+        let entry = OutboxEntry(idempotencyKey: UUID(), target: "item:fixture", operation: "reply", write: write,
+                                createdAt: created, outcomeUnknown: false, attempts: 1)
+        try persistence.save([entry])
+        let old = try ActionOutbox(persistence: persistence, transport: fixture, outcomes: RecordingOutcomes(),
+            errors: NoopErrorLog(), startsPaused: true, legacyReceiptCutoff: firstCutoff)
+        let initiallyPending = await old.pending
+        XCTAssertEqual(initiallyPending.map(\.id), [entry.id])
+        await old.close()
+        let reconnected = try ActionOutbox(persistence: persistence, transport: fixture, outcomes: RecordingOutcomes(),
+            errors: NoopErrorLog(), startsPaused: true, legacyReceiptCutoff: reconnectCutoff)
+        await reconnected.resumeSending()
+        await reconnected.flush()
+        XCTAssertEqual(try persistence.load().first?.failure?.token, "outcome_uncertain")
+        let sent = await fixture.requests
+        XCTAssertTrue(sent.isEmpty)
+    }
+
     func testInterruptedLegacySendWithoutAnUnknownFlagIsHeld() async throws {
         let fixture = SignInFixture()
         let persistence = MemoryOutboxPersistence()
