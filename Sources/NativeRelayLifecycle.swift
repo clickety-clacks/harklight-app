@@ -794,7 +794,7 @@ final class NativeRelayLifecycle {
     }
 
     func activate(store: ClientRepository, context: ProfileContext, transport: HTTPSClientAPITransport,
-                  diagnostics: NativeClientDiagnosticJournal? = nil) throws {
+                  legacyReceiptCutoff: Date? = nil, diagnostics: NativeClientDiagnosticJournal? = nil) throws {
         let retainedFiles = try ConversationFileStorage(identity: context.identity)
         let attempt = UUID()
         let access = ClientAPIAccess(transport: transport) { [weak self] _ in
@@ -820,6 +820,7 @@ final class NativeRelayLifecycle {
         }
         let connection = try ClientAPIv2Connection(transport: access, repository: store, context: context,
             directory: Self.v2Directory(for: context.identity), errors: errorLog, foregroundOnlyWrites: true,
+            legacyReceiptCutoff: legacyReceiptCutoff,
             retainedUploadURL: { try retainedFiles.verifiedUploadURL(for: $0) },
             onLiveState: { [weak self] state in
                 guard state == .live else { return }

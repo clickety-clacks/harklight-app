@@ -47,6 +47,10 @@ public struct OutboxEntry: Codable, Equatable, Sendable, Identifiable {
 
     public var id: UUID { idempotencyKey }
 
+    var requiresReconciliation: Bool {
+        failure?.token == "accepted_reconcile" || failure?.token == "outcome_uncertain"
+    }
+
     /// Seen and read-position reports are independently monotonic facts. A
     /// slow reply must not hold either report for the same item.
     var sendingLane: String {
@@ -104,6 +108,7 @@ private struct ProtectedWriteOutcome: OutboxOutcomeHandling {
 /// Actions (design section 4) over the r2 API: the durable outbox. Writes
 /// never wait for, or depend on, Sync or the change feed.
 public actor ActionOutbox {
+    private let onReconcile: @Sendable (OutboxEntry) async -> Void
     private let persistence: any OutboxPersisting
     private let transport: any ClientAPITransport
     private let outcomes: any OutboxOutcomeHandling
@@ -127,11 +132,13 @@ public actor ActionOutbox {
     public init(persistence: any OutboxPersisting, transport: any ClientAPITransport,
                 outcomes: any OutboxOutcomeHandling, errors: any ErrorLogging,
                 startsPaused: Bool = false, canSend: @escaping @Sendable (OutboxEntry) -> Bool = { _ in true },
-                excludingSavedKeys: Set<UUID> = [],
+                excludingSavedKeys: Set<UUID> = [], legacyReceiptCutoff: Date? = nil,
+                onReconcile: @escaping @Sendable (OutboxEntry) async -> Void = { _ in },
                 onEntriesChanged: @escaping @Sendable ([OutboxEntry], [OutboxEntry]) -> Void = { _, _ in },
                 waitBeforeRetry: @escaping @Sendable (_ attempt: Int, _ retryAfter: TimeInterval?) async throws -> Void
                     = ActionOutbox.backoff) throws {
         self.persistence = persistence
+        self.onReconcile = onReconcile
         self.transport = transport
         self.outcomes = outcomes
         self.errors = errors
@@ -140,8 +147,14 @@ public actor ActionOutbox {
         self.onEntriesChanged = onEntriesChanged
         sendingPaused = startsPaused
         let saved = try persistence.load()
-        let admitted = saved.filter { !excludingSavedKeys.contains($0.id) }
-        if admitted.count != saved.count { try persistence.save(admitted) }
+        var admitted = saved.filter { !excludingSavedKeys.contains($0.id) }
+        if let legacyReceiptCutoff {
+            for index in admitted.indices where admitted[index].failure == nil &&
+                admitted[index].outcomeUnknown && admitted[index].createdAt <= legacyReceiptCutoff {
+                admitted[index].failure = OutboxFailure(status: 0, token: "outcome_uncertain")
+            }
+        }
+        if admitted != saved { try persistence.save(admitted) }
         entries = admitted
     }
 
@@ -188,7 +201,7 @@ public actor ActionOutbox {
             // Handing a pending write over again queues it once. Handing over
             // a refused one is the person's Retry: the server stores only
             // successes, so the same key is evaluated again.
-            guard retryRefused, existing.failure != nil || existing.waitsForInternalErrorRetry == true
+            guard !existing.requiresReconciliation, retryRefused, existing.failure != nil || existing.waitsForInternalErrorRetry == true
             else { return existing }
             var next = entries
             guard let index = next.firstIndex(where: { $0.id == existing.id }) else { return existing }
@@ -317,6 +330,12 @@ public actor ActionOutbox {
         do {
             let generation = outcomes.modelGeneration
             let response = try await transport.send(entry.request)
+            if response.status == 202, response.replayed,
+               (try? JSONDecoder().decode([String: String].self, from: response.body))?["code"] == "accepted_reconcile" {
+                update(entry.id) { $0.failure = OutboxFailure(status: 202, token: "accepted_reconcile") }
+                await onReconcile(entry)
+                return (true, .success(response))
+            }
             await outcomes.accepted(entry, response: response, generation: generation)
             remove(entry.idempotencyKey)
             resolveIfNoFailedWrite(entry.operation)

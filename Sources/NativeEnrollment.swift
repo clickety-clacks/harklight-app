@@ -55,6 +55,7 @@ struct NativeEnrollmentRecord: Codable, Equatable {
     var localProfileAuthority: String? = nil
     var notificationProfileGeneration: UUID? = nil
     var sessionMigration: NativeSessionMigration? = nil
+    var legacyReceiptCutoff: Date? = nil
 
     var isApproved: Bool { personID != nil }
     /// The invitation's person label, when it supplied one. Earlier builds saved
@@ -319,6 +320,9 @@ struct NativeEnrollmentStore {
               NativeAuthorityBinding.samePerson(current.personID, expected.personID),
               current.sessionMigration == expected.sessionMigration else {
             throw NativeJoinError.superseded
+        }
+        if case .active = migration, current.legacyReceiptCutoff == nil {
+            current.legacyReceiptCutoff = Date().addingTimeInterval(-30 * 24 * 60 * 60)
         }
         current.sessionMigration = migration
         try save(current)

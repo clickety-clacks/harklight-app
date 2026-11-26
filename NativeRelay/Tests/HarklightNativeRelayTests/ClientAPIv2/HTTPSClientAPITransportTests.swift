@@ -46,6 +46,9 @@ private actor SignInFixture: ClientAPITransport {
     func send(_ request: APIRequest) async throws -> APIResponse {
         requests.append(request)
         switch request.path {
+        case "/v2/items/fixture/reply":
+            return APIResponse(status: 202, requestID: nil,
+                body: Data(#"{"code":"accepted_reconcile"}"#.utf8), replayed: true)
         case "/v2/me":
             return APIResponse(status: 200, requestID: nil, body: Data(
                 #"{"server":{"id":"server-1"},"principal":{"person_id":"person-1","device_id":"device-1"},"auth_migration":true}"#.utf8
@@ -339,6 +342,44 @@ final class HTTPSClientAPITransportTests: XCTestCase {
             try await api.verifyMigrationPrincipal(other)
             XCTFail("A different device cannot activate the migration")
         } catch NativeSignInAPI.MigrationError.wrongPrincipal {}
+    }
+
+    func testAcceptedReconcileReceiptPreventsAnyResend() async throws {
+        let fixture = SignInFixture()
+        let persistence = MemoryOutboxPersistence()
+        let outbox = try ActionOutbox(persistence: persistence, transport: fixture,
+                                     outcomes: RecordingOutcomes(), errors: NoopErrorLog())
+        let write = FrozenWrite(method: .post, path: "/v2/items/fixture/reply", body: Data("{}".utf8))
+        let entry = try await outbox.submit(target: "item:fixture", operation: "reply", write: write)
+        await outbox.flush()
+        XCTAssertEqual(try persistence.load().first?.failure?.token, "accepted_reconcile")
+        _ = try await outbox.submit(target: entry.target, operation: entry.operation,
+                                    write: write, idempotencyKey: entry.id)
+        await outbox.flush()
+        let sent = await fixture.requests
+        XCTAssertEqual(sent.count, 1)
+        XCTAssertEqual(sent.first?.idempotencyKey, entry.id)
+    }
+
+    func testOldAmbiguousLegacyIntentRequiresReadReconciliation() async throws {
+        let fixture = SignInFixture()
+        let persistence = MemoryOutboxPersistence()
+        let entry = OutboxEntry(idempotencyKey: UUID(), target: "item:fixture", operation: "answer",
+            write: FrozenWrite(method: .post, path: "/v2/items/fixture/answer", body: Data("{}".utf8)),
+            createdAt: Date(timeIntervalSince1970: 1), outcomeUnknown: true, attempts: 1)
+        try persistence.save([entry])
+        let outbox = try ActionOutbox(persistence: persistence, transport: fixture, outcomes: RecordingOutcomes(),
+            errors: NoopErrorLog(), legacyReceiptCutoff: Date(timeIntervalSince1970: 2))
+        await outbox.flush()
+        let held = try XCTUnwrap(persistence.load().first)
+        XCTAssertEqual(held.id, entry.id)
+        XCTAssertEqual(held.write, entry.write)
+        XCTAssertEqual(held.failure?.token, "outcome_uncertain")
+        _ = try await outbox.submit(target: entry.target, operation: entry.operation,
+                                    write: entry.write, idempotencyKey: entry.id)
+        await outbox.flush()
+        let sent = await fixture.requests
+        XCTAssertTrue(sent.isEmpty)
     }
 
     private func decodeBase64URL(_ string: String) throws -> Data {

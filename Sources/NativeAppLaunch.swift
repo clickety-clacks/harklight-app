@@ -831,7 +831,8 @@ final class NativeAppLaunch {
         observeV2Connection(NativeRelayLifecycle.shared)
         do {
             try NativeRelayLifecycle.shared.activate(store: store, context: context,
-                transport: makeTransport(), diagnostics: diagnostics)
+                transport: makeTransport(), legacyReceiptCutoff: activeEnrollmentRecord?.legacyReceiptCutoff,
+                diagnostics: diagnostics)
         } catch {
             if activationGeneration != generation { return }
             diagnostics.record(area: .connection, phase: .approvedConnection, transition: .failed,

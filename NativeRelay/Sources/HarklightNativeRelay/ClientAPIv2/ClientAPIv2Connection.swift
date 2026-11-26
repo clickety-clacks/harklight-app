@@ -51,6 +51,7 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
     /// account; nil keeps everything in memory (tests and previews).
     public init(transport: any ClientAPITransport, repository: ClientRepository, context: ProfileContext,
                 directory: URL?, errors: any ErrorLogging, foregroundOnlyWrites: Bool = false,
+                legacyReceiptCutoff: Date? = nil,
                 waitBeforeRetry: @escaping @Sendable (Int) async throws -> Void = ChangeFeedSync.backoff,
                 outboxWaitBeforeRetry: @escaping @Sendable (Int, TimeInterval?) async throws -> Void = ActionOutbox.backoff,
                 meWaitBeforeRetry: @escaping @Sendable (Int) async throws -> Void = ChangeFeedSync.backoff,
@@ -127,6 +128,9 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
                     relay.connection?.canSendInCurrentScope == true &&
                     (entry.operation != "priority_levels" || relay.connection?.priorityLevelsEditingEnabled == true)
             }, excludingSavedKeys: try repository.heldPreviousProtocolOperations(context: context),
+            legacyReceiptCutoff: legacyReceiptCutoff, onReconcile: { entry in
+                await relay.connection?.reconcileAcceptedWrite(entry)
+            },
             onEntriesChanged: { old, new in
                 if old.filter({ $0.operation == "alerts" }) != new.filter({ $0.operation == "alerts" }) {
                     onPriorityLevelsChanged()
@@ -427,6 +431,21 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
     public func catchUp(forPush payload: JSONValue) async throws -> Bool {
         guard let hint = matchPush(payload) else { return false }
         return try await catchUp(forPushRevision: hint.revision)
+    }
+
+    private func reconcileAcceptedWrite(_ entry: OutboxEntry) async {
+        do {
+            try await sync.catchUp(userInitiated: false)
+            if entry.operation == "reply", let itemID = entry.resourceID {
+                try await modelWriter.loadEntries(of: ExactText(itemID))
+                publishModel()
+            }
+        } catch {
+            errors.report(ErrorLogReport(concern: .snapshot, connectionRole: .request,
+                operation: entry.operation, phase: "reconcile", reason: .api(error),
+                initiator: .forFailure(error), retryable: true,
+                correlation: .request(nil, operationID: entry.id)))
+        }
     }
 
     private func missingAcceptedReplyItems() -> Set<ExactText> {
