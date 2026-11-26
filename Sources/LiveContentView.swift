@@ -43,6 +43,34 @@ struct SeenActionPresentation: Equatable {
     }
 }
 
+enum SharedAnswerPresentation {
+    struct Row: Identifiable {
+        let id: ExactText
+        let name: String
+        let answer: String
+    }
+
+    static func rows(in shared: APISharedItem) -> [Row] {
+        shared.answers.compactMap { entry in
+            guard let answer = entry.terminal.answer else { return nil }
+            let speaker = entry.terminal.speaker
+            let name = shared.members.first { $0.person.id == entry.personID }?.person.displayName
+                ?? speaker?.displayName
+            guard let name else { return nil }
+            let summary: String = switch answer.kind {
+            case "no_comment": String(localized: "No comment")
+            case "choice": answer.label?.rawValue ?? String(localized: "Answered")
+            case "reply": answer.text?.rawValue ?? String(localized: "Answered")
+            case "default":
+                answer.text?.rawValue ?? answer.value?.jsonString ?? String(localized: "Answered by default")
+            case "result": answer.value?.jsonString ?? String(localized: "Answered")
+            default: String(localized: "Answered")
+            }
+            return Row(id: entry.personID, name: name.rawValue, answer: summary)
+        }
+    }
+}
+
 enum AnswerConfirmationText {
     static func formatted(accountAnswerOutcome: AccountAnswerOutcome?,
                          submittedAnswer: RequestDraft?,
@@ -2332,7 +2360,7 @@ struct LiveRequestDetail: View {
     /// a new one. A lost send stays locked apart from its Retry.
     var unlocksAfterDefinitiveFailure: Bool {
         guard localExample == nil, !context.isSupersedesTarget, !store.isReadOnly,
-              !store.isRetracted(request.key),
+              !store.isRetracted(request.key), store.canSubmitAnswer(for: request.key),
               request.lifecycleStatus == .open || request.lifecycleStatus == .pending,
               case .failed(_, editable: true)? = submissionPhase?.phase,
               submissionPhase?.kind != .seen else { return false }
@@ -2478,6 +2506,24 @@ struct LiveRequestDetail: View {
                         .font(.subheadline)
                     }
                     .accessibilityIdentifier("request-shared-members")
+                }
+                if let shared = storePresentationSnapshot.shared {
+                    let answers = SharedAnswerPresentation.rows(in: shared)
+                    if !answers.isEmpty {
+                        DisclosureGroup("Answers") {
+                            VStack(alignment: .leading, spacing: 8) {
+                                ForEach(answers) { answer in
+                                    LabeledContent {
+                                        Text(verbatim: answer.answer).textSelection(.enabled)
+                                    } label: {
+                                        Text(verbatim: answer.name)
+                                    }
+                                }
+                            }
+                            .font(.subheadline)
+                        }
+                        .accessibilityIdentifier("request-shared-answers")
+                    }
                 }
                 if !request.supersededByMessageKeys.isEmpty {
                     ReplacedByMessagesSection(

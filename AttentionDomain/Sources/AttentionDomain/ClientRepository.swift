@@ -671,7 +671,10 @@ public final class ClientRepository: @unchecked Sendable {
         if let activeID = state.intentByRequest[request.key] {
             throw AttentionStoreError.competingIntent(activeID)
         }
-        guard state.remoteStates[request.key]?.isTerminal != true else { throw AttentionStoreError.requestClosed }
+        guard state.remoteStates[request.key]?.isTerminal != true,
+              state.conversation?.threads[request.key]?.shared?.canAnswer != false else {
+            throw AttentionStoreError.requestClosed
+        }
         let operationID = UUID()
         let operation = relayAnswerOperation(request: request, answer: answer, operationID: operationID,
                                              requestRevision: selector.requestRevision)
@@ -750,7 +753,10 @@ public final class ClientRepository: @unchecked Sendable {
         if let activeID = state.intentByRequest[request.key] {
             throw AttentionStoreError.competingIntent(activeID)
         }
-        guard state.remoteStates[request.key]?.isTerminal != true else { throw AttentionStoreError.requestClosed }
+        guard state.remoteStates[request.key]?.isTerminal != true,
+              state.conversation?.threads[request.key]?.shared?.canAnswer != false else {
+            throw AttentionStoreError.requestClosed
+        }
         let operationID = UUID()
         let operation = JSONValue.object([
             JSONMember("type", .string(ExactText("answer_no_comment"))),
@@ -919,7 +925,8 @@ public final class ClientRepository: @unchecked Sendable {
         // The saved request already binds the intended revision and exact bytes.
         // The server decides whether it can still apply. A request with a known
         // final state is already unavailable.
-        guard state.remoteStates[submission.requestKey]?.isTerminal != true else {
+        guard state.remoteStates[submission.requestKey]?.isTerminal != true,
+              state.conversation?.threads[submission.requestKey]?.shared?.canAnswer != false else {
             throw AttentionStoreError.requestClosed
         }
         switch submission.disposition {
