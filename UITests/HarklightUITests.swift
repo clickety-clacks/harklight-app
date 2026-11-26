@@ -229,8 +229,7 @@ final class HarklightUITests: XCTestCase {
 
         _ = submitFacilitiesAnswer(in: app, x: 240, y: 610)
         applyFixtureOutcome("cleared", in: app)
-        XCTAssertFalse(warning.waitForExistence(timeout: 1),
-                       "A new unresolved-answer warning does not cover the detail toolbar.")
+        assertInboxWarningDoesNotCoverDetail(in: app)
         XCTAssertTrue(app.buttons["request-heading"].exists, app.debugDescription)
 
         let chat = app.buttons["Chat"]
@@ -406,23 +405,28 @@ final class HarklightUITests: XCTestCase {
         let back = workspaceBackButton(in: app)
         if back.exists { back.tap() }
         let inbox = workspaceTab("Inbox", in: app)
-        let row = app.descendants(matching: .any)["request-row-facilities-01"]
+        let list = app.collectionViews.firstMatch
+        let row = list.descendants(matching: .any)["request-row-facilities-01"]
+        let unconfirmed = "Submission unconfirmed · saved draft retained"
+        let answeredLocally = "Answered locally · nothing sent"
         XCTAssertTrue(inbox.waitForExistence(timeout: 5), app.debugDescription)
         if !inbox.isSelected { inbox.tap() }
         XCTAssertTrue(inbox.isSelected, app.debugDescription)
         XCTAssertFalse(row.waitForExistence(timeout: 2),
                        "A server-answered request no longer appears in Inbox.")
-        XCTAssertFalse(app.staticTexts["Submission unconfirmed · saved draft retained"].exists,
+        XCTAssertFalse(list.staticTexts[unconfirmed].exists,
                        "A server-answered request is not shown as a failed response.")
-        XCTAssertFalse(app.staticTexts["Answered locally · nothing sent"].exists,
+        XCTAssertFalse(list.staticTexts[answeredLocally].exists,
                        "The list must not claim this device's answer was accepted.")
         attachScreenshot("Server-answered response removed from Inbox", from: app)
 
         workspaceTab("Replied", in: app).tap()
         XCTAssertTrue(row.waitForExistence(timeout: 5),
                       "The server-answered request appears in Replied.")
-        XCTAssertFalse(app.staticTexts["Submission unconfirmed · saved draft retained"].exists)
-        XCTAssertFalse(app.staticTexts["Answered locally · nothing sent"].exists)
+        XCTAssertFalse(list.staticTexts[unconfirmed].exists)
+        XCTAssertFalse(list.staticTexts[answeredLocally].exists)
+        XCTAssertFalse(row.label.contains(unconfirmed))
+        XCTAssertFalse(row.label.contains(answeredLocally))
         attachScreenshot("Server-answered response in Replied", from: app)
     }
 
@@ -433,11 +437,12 @@ final class HarklightUITests: XCTestCase {
         applyFixtureOutcome("cleared", in: app)
 
         let message = app.staticTexts["inbox-warning-message"]
-        XCTAssertFalse(message.waitForExistence(timeout: 1),
-                       "An unresolved send does not open a popover over the detail toolbar.")
-        let back = workspaceBackButton(in: app)
-        XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
-        back.tap()
+        assertInboxWarningDoesNotCoverDetail(in: app)
+        if !listVisibleBesideDetail(in: app) {
+            let back = workspaceBackButton(in: app)
+            XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
+            back.tap()
+        }
         let row = app.descendants(matching: .any)["request-row-facilities-01"]
         let inbox = workspaceTab("Inbox", in: app)
         if !inbox.isSelected { inbox.tap() }
@@ -783,17 +788,49 @@ final class HarklightUITests: XCTestCase {
         app.buttons["request-details-done"].tap()
     }
 
+    private func assertInboxWarningDoesNotCoverDetail(in app: XCUIApplication,
+                                                       file: StaticString = #filePath, line: UInt = #line) {
+        let warnings = app.staticTexts.matching(identifier: "inbox-warning-message")
+        if listVisibleBesideDetail(in: app) {
+            let heading = app.buttons["request-heading"]
+            XCTAssertTrue(heading.exists, "The request stays open beside the Inbox.",
+                          file: file, line: line)
+            let detailLeadingEdge = heading.frame.minX
+            let warningInDetail = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                warnings.allElementsBoundByIndex.contains { warning in
+                    let frame = warning.frame
+                    return !frame.isEmpty && frame.maxX > detailLeadingEdge
+                }
+            }, object: nil)
+            warningInDetail.isInverted = true
+            XCTAssertEqual(XCTWaiter.wait(for: [warningInDetail], timeout: 1), .completed,
+                           "Every warning must stay in the Inbox column beside the detail.",
+                           file: file, line: line)
+        } else {
+            XCTAssertFalse(warnings.firstMatch.waitForExistence(timeout: 1),
+                           "A detail-only screen must not show an Inbox warning over its toolbar.",
+                           file: file, line: line)
+        }
+        XCTAssertFalse(app.buttons["inbox-warning-button"].exists, file: file, line: line)
+    }
+
     private func openRequestDetails(in app: XCUIApplication) {
         let heading = app.buttons["request-heading"]
         XCTAssertTrue(heading.waitForExistence(timeout: 5))
         let scroll = app.scrollViews["message-card-scroll"]
-        let visibleTop = app.navigationBars.firstMatch.frame.maxY
+        func visibleTop() -> CGFloat {
+            let detail = scroll.frame
+            return app.navigationBars.allElementsBoundByIndex
+                .map(\.frame)
+                .filter { !$0.isEmpty && $0.minX < detail.midX && $0.maxX > detail.midX }
+                .map(\.maxY).max() ?? detail.minY
+        }
         for _ in 0..<8 {
-            if heading.isHittable && heading.frame.minY >= visibleTop { break }
+            if heading.isHittable && heading.frame.minY >= visibleTop() { break }
             scroll.swipeDown()
         }
         XCTAssertTrue(heading.isHittable, "The message heading must open request history.")
-        XCTAssertGreaterThanOrEqual(heading.frame.minY, visibleTop,
+        XCTAssertGreaterThanOrEqual(heading.frame.minY, visibleTop(),
                                     "The heading must be below the navigation bar before tapping it.")
         heading.tap()
         attachScreenshot("Request history interaction", from: app)
