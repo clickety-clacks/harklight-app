@@ -66,8 +66,10 @@ public struct OutboxEntry: Codable, Equatable, Sendable, Identifiable {
     }
 
     var request: APIRequest {
-        APIRequest(method: write.method, path: write.path, body: write.body, contentType: write.contentType,
-                   idempotencyKey: idempotencyKey, ifMatch: write.ifMatch)
+        var request = APIRequest(method: write.method, path: write.path, body: write.body,
+                                 contentType: write.contentType, idempotencyKey: idempotencyKey, ifMatch: write.ifMatch)
+        request.queuedRetry = operation == "reply" && attempts > 0
+        return request
     }
 }
 

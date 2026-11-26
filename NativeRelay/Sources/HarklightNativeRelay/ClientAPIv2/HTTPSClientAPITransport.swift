@@ -115,6 +115,9 @@ public final class HTTPSClientAPITransport: ClientAPITransport, @unchecked Senda
         if let key = request.idempotencyKey {
             urlRequest.setValue(key.uuidString.lowercased(), forHTTPHeaderField: "Idempotency-Key")
         }
+        if request.queuedRetry, bearer != nil {
+            urlRequest.setValue("true", forHTTPHeaderField: "Harklight-Queued-Retry")
+        }
         if let ifMatch = request.ifMatch { urlRequest.setValue(ifMatch, forHTTPHeaderField: "If-Match") }
         if request.sharedMessages { urlRequest.setValue("shared_messages", forHTTPHeaderField: "Harklight-Features") }
         if let continuation = request.continuation {

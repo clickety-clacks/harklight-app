@@ -37,6 +37,7 @@ public struct APIRequest: Equatable, Sendable {
     public var ifMatch: String?
     var sharedMessages = false
     var continuation: String?
+    var queuedRetry = false
 
     public init(method: Method, path: String, query: [String: String] = [:], body: Data? = nil,
                 contentType: String? = nil, idempotencyKey: UUID? = nil, ifMatch: String? = nil,

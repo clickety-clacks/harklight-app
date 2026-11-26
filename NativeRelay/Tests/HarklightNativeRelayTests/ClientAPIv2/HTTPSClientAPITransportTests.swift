@@ -406,6 +406,22 @@ final class HTTPSClientAPITransportTests: XCTestCase {
         XCTAssertEqual(try destination.load(), received)
     }
 
+    func testQueuedReplyRetryHeaderLeavesFrozenRequestUntouched() throws {
+        let api = transport(bearer: "fixture-bearer") { _ in .init(status: 204, chunks: []) }
+        let body = Data(#"{"text":"fixture","file_ids":["upload-1"]}"#.utf8)
+        let key = UUID()
+        var request = APIRequest(method: .post, path: "/v2/items/fixture/replies",
+                                 body: body, idempotencyKey: key)
+        XCTAssertNil(api.urlRequest(for: request).value(forHTTPHeaderField: "Harklight-Queued-Retry"))
+        request.queuedRetry = true
+        let retry = api.urlRequest(for: request)
+        XCTAssertEqual(retry.value(forHTTPHeaderField: "Harklight-Queued-Retry"), "true")
+        XCTAssertEqual(retry.value(forHTTPHeaderField: "Idempotency-Key"), key.uuidString.lowercased())
+        XCTAssertEqual(retry.httpBody, body)
+        XCTAssertEqual(retry.httpMethod, "POST")
+        XCTAssertEqual(retry.url?.path, request.path)
+    }
+
     private func decodeBase64URL(_ string: String) throws -> Data {
         XCTAssertFalse(string.contains("="))
         let base64 = string.replacingOccurrences(of: "-", with: "+")
