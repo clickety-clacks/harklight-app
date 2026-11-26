@@ -252,7 +252,8 @@ final class ClientAPIPriorityLevelsTests: XCTestCase {
         await transport.holdMe(meGate)
         let run = Task { await connection.runForeground() }
         defer { meGate.release(); run.cancel() }
-        try await waitForSettings { transport.base.openFeedCount == 1 }
+        try await waitForSettings { await transport.meReads == 1 }
+        XCTAssertEqual(transport.base.openFeedCount, 0, "Startup waits for discovery before opening the feed.")
         await connection.outbox.flush()
         let beforeMe = await transport.puts
         XCTAssertTrue(beforeMe.isEmpty, "A saved true flag cannot authorize a replay before /me.")
@@ -284,6 +285,7 @@ private actor PrioritySettingsTransport: ClientAPITransport {
     nonisolated let base = FakeClientAPIServer()
     private(set) var puts: [APIRequest] = []
     private(set) var settingsReads = 0
+    private(set) var meReads = 0
     private var revision = 1
     private var name = "Old"
     private var featureEnabled: Bool
@@ -321,6 +323,7 @@ private actor PrioritySettingsTransport: ClientAPITransport {
     func send(_ request: APIRequest) async throws -> APIResponse {
         switch (request.method, request.path) {
         case (.get, "/v2/me"):
+            meReads += 1
             let enabled = featureEnabled
             if let meGate { await meGate.wait() }
             let body = #"{"account":{"state":"active"},"features":{"priority_level_editing":\#(enabled)},"limits":{}}"#

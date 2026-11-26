@@ -9,6 +9,7 @@ public struct ClientAPIPushRegistrationState: Codable, Equatable, Sendable {
         public let environment: APIPushEnvironment
         public let revision: UInt64
         public let operationID: UUID
+        public let sharedMessages: Bool?
         public fileprivate(set) var accepted: Bool
     }
 
@@ -20,12 +21,14 @@ public struct ClientAPIPushRegistrationState: Codable, Equatable, Sendable {
 
     public init() {}
 
-    public mutating func prepareRegistration(token: ExactText, environment: APIPushEnvironment) throws -> Registration? {
+    public mutating func prepareRegistration(token: ExactText, environment: APIPushEnvironment,
+                                             sharedMessages: Bool = false) throws -> Registration? {
         guard removalID == nil, permissionRemovalID == nil else { return nil }
-        if let registration, registration.token == token, registration.environment == environment {
+        if let registration, registration.token == token, registration.environment == environment,
+           (registration.sharedMessages == true) == sharedMessages {
             return registration.accepted ? nil : registration
         }
-        return try replaceRegistration(token: token, environment: environment, after: 0)
+        return try replaceRegistration(token: token, environment: environment, sharedMessages: sharedMessages, after: 0)
     }
 
     /// Only a definitive 412 followed by authenticated settings permits
@@ -33,7 +36,8 @@ public struct ClientAPIPushRegistrationState: Codable, Equatable, Sendable {
     public mutating func replaceStaleRegistration(_ refused: Registration,
                                                   serverRevision: UInt64) throws -> Registration? {
         guard removalID == nil, permissionRemovalID == nil, registration == refused, !refused.accepted else { return nil }
-        return try replaceRegistration(token: refused.token, environment: refused.environment, after: serverRevision)
+        return try replaceRegistration(token: refused.token, environment: refused.environment,
+                                       sharedMessages: refused.sharedMessages == true, after: serverRevision)
     }
 
     public mutating func confirmRegistration(_ completed: Registration) {
@@ -84,11 +88,11 @@ public struct ClientAPIPushRegistrationState: Codable, Equatable, Sendable {
     }
 
     private mutating func replaceRegistration(token: ExactText, environment: APIPushEnvironment,
-                                               after serverRevision: UInt64) throws -> Registration {
+                                               sharedMessages: Bool, after serverRevision: UInt64) throws -> Registration {
         let previous = max(revisionFloor, serverRevision)
         guard previous < UInt64(Int64.max) else { throw ClientAPIModelError.invalid("push.revision") }
         let intent = Registration(token: token, environment: environment, revision: previous + 1,
-                                  operationID: UUID(), accepted: false)
+                                  operationID: UUID(), sharedMessages: sharedMessages ? true : nil, accepted: false)
         revisionFloor = intent.revision
         registration = intent
         return intent

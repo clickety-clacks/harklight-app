@@ -43,6 +43,32 @@ extension ServerModelV2Store {
 }
 
 final class ServerModelV2Tests: XCTestCase {
+    func testSharedBaselinePersistsItsContinuationAndDowngradeDropsSharedContent() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let store = ServerModelV2Store(fileURL: url)
+        let ordinary = try APIItem(json: V2Fixture.json(V2Fixture.item("ordinary", rev: 2, rankKey: "a")))
+        let shared = try APIItem(json: V2Fixture.json(V2Fixture.item("shared", rev: 3, rankKey: "b",
+            extra: #""shared":{"shared_id":"room","chat_writable":true,"can_answer":true,"answer_policy":{"kind":"first"},"members":[],"answers":[]} "#)))
+        try store.rebaseline(items: [ordinary], counts: APICounts(unresolved: 1), position: 10)
+        XCTAssertTrue(try store.configureSharedMessages(serverID: ExactText("server")))
+        XCTAssertNil(store.heldCursor)
+        XCTAssertThrowsError(try store.rebaseline(items: [ordinary, shared],
+            counts: APICounts(unresolved: 2), position: 15))
+        try store.rebaseline(items: [ordinary, shared], counts: APICounts(unresolved: 2),
+                             position: 15, continuation: ExactText("token"))
+        try store.apply([], cursor: 16)
+        let restored = ServerModelV2Store(fileURL: url)
+        XCTAssertEqual(restored.heldCursor, 16)
+        XCTAssertEqual(restored.snapshot.sharedContinuation, ExactText("token"))
+        let stale = restored.syncPosition.generation
+        XCTAssertTrue(try restored.configureSharedMessages(serverID: nil))
+        XCTAssertNil(restored.heldCursor)
+        XCTAssertNil(restored.snapshot.sharedContinuation)
+        XCTAssertEqual(restored.snapshot.orderedItems.map { $0.itemID }, [ExactText("ordinary")])
+        XCTAssertThrowsError(try restored.apply([], cursor: 17, generation: stale))
+    }
+
     func testAnItemDecodesIgnoringUnknownMembersAndKeepsTheMessageExactly() throws {
         let message = #"{"title":"Deploy","message_type":"fyi","progress":{"percent":40,"stage":""},"score":0.930}"#
         let item = try APIItem(json: V2Fixture.json(V2Fixture.item("i1", rev: 3, rankKey: "a", message: message)))

@@ -64,6 +64,7 @@ public actor ChangeFeedSync {
     private let waitBeforeRetry: @Sendable (_ attempt: Int) async throws -> Void
     private let onLiveState: @Sendable (LiveState) -> Void
     private let onShow: @Sendable (Data) async -> Void
+    private let onSharedCapabilityRefusal: @Sendable () async -> Bool
     public private(set) var liveState: LiveState = .catchingUp {
         didSet { if liveState != oldValue { onLiveState(liveState) } }
     }
@@ -72,13 +73,15 @@ public actor ChangeFeedSync {
                 errors: any ErrorLogging,
                 waitBeforeRetry: @escaping @Sendable (_ attempt: Int) async throws -> Void = ChangeFeedSync.backoff,
                 onLiveState: @escaping @Sendable (LiveState) -> Void = { _ in },
-                onShow: @escaping @Sendable (Data) async -> Void = { _ in }) {
+                onShow: @escaping @Sendable (Data) async -> Void = { _ in },
+                onSharedCapabilityRefusal: @escaping @Sendable () async -> Bool = { false }) {
         self.transport = transport
         self.model = model
         self.errors = errors
         self.waitBeforeRetry = waitBeforeRetry
         self.onLiveState = onLiveState
         self.onShow = onShow
+        self.onSharedCapabilityRefusal = onSharedCapabilityRefusal
     }
 
     /// 1, 2, 4 … 60 seconds between attempts.
@@ -107,6 +110,17 @@ public actor ChangeFeedSync {
             if openedThisRound { attempt = 0 }
             switch end {
             case .superseded: continue
+            case let .sharedScopeRefused(error, phase):
+                // The failed attempt has stopped. Discovery can now change
+                // the generation without cancelling its own recovery task.
+                if await onSharedCapabilityRefusal() {
+                    attempt = 0
+                    continue
+                }
+                report(Self.feedOperation, phase: phase, error: error, initiator: .serverClosed)
+                liveState = .paused(.serverClosed)
+                attempt += 1
+                do { try await waitBeforeRetry(attempt) } catch { return }
             case .revoked:
                 liveState = .stopped
                 return
@@ -123,6 +137,10 @@ public actor ChangeFeedSync {
                 do { try await waitBeforeRetry(attempt) } catch { return }
             }
         }
+    }
+
+    func projectionScopeChanged() {
+        foregroundAttempt?.cancel()
     }
 
     /// Push or background refresh: applies every batch from the cursor without
@@ -199,6 +217,7 @@ public actor ChangeFeedSync {
 
     private enum FeedEnd {
         case superseded
+        case sharedScopeRefused(APIError, phase: String)
         case internalError
         case dropped(ErrorLogInitiator, retryPromptly: Bool)
         case revoked
@@ -298,7 +317,7 @@ public actor ChangeFeedSync {
             } catch {
                 return endAfterRequestFailure(error, phase: "rebaseline")
             }
-        } catch let error as APIError where error.token == .internalError {
+        } catch let error as APIError where error.token == .internalError || error.isSharedCapabilityRefusal {
             return endAfterRequestFailure(error, phase: followingFeed ? "stream" : "batch")
         } catch let error as APIError where error.token == .accountPaused {
             report(Self.feedOperation, phase: "open", error: error, initiator: .serverClosed)
@@ -338,6 +357,9 @@ public actor ChangeFeedSync {
     }
 
     private func endAfterRequestFailure(_ error: any Error, phase: String) -> FeedEnd {
+        if let api = error as? APIError, api.isSharedCapabilityRefusal {
+            return .sharedScopeRefused(api, phase: phase)
+        }
         if let api = error as? APIError, api.token == .internalError {
             report(Self.feedOperation, phase: phase, error: api, initiator: .serverClosed)
             return pauseForInternalError(api)

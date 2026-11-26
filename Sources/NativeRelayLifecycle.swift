@@ -829,6 +829,7 @@ final class NativeRelayLifecycle {
                     let feature = RemoteFeatureFlag.priorityLevelEditing.name
                     let fields = me.features[feature].map { [JSONMember(feature, .bool($0))] } ?? []
                     self.featureFlags.replace(RemoteFeatureFlagSnapshot(field: .object(fields)), connectionID: attempt)
+                    self.requestV2PushRegistration()
                 }
             }, onPriorityLevelsChanged: { [weak self] in
                 Task { @MainActor [weak self] in
@@ -937,7 +938,9 @@ final class NativeRelayLifecycle {
         guard activeTransportAttemptID == attempt, v2ShowLookup == nil, let pending = pendingV2Show,
               let item = v2Connection?.model.snapshot.items[ExactText(pending.show.itemID)] else { return }
         pendingV2Show = nil
-        let frame: ViewShowFrame = if item.terminal?.state == "retracted" {
+        let frame: ViewShowFrame = if item.shared != nil {
+            .clientAPIUnavailable(pending.show, reason: .notSent)
+        } else if item.terminal?.state == "retracted" {
             .clientAPIUnavailable(pending.show, reason: .retracted)
         } else {
             .clientAPI(pending.show, senderID: item.sender.rawValue)
@@ -1121,7 +1124,8 @@ final class NativeRelayLifecycle {
             }
             let environment: APIPushEnvironment = PushRegistrationProfile.current == .sandbox ? .sandbox : .production
             let saved = try enrollment.updateV2PushRegistration(for: record) {
-                try $0.prepareRegistration(token: ExactText(address), environment: environment)
+                try $0.prepareRegistration(token: ExactText(address), environment: environment,
+                                           sharedMessages: connection.model.snapshot.sharedServerID != nil)
             }
             guard let saved else {
                 if connection.model.snapshot.settings?.push == nil {

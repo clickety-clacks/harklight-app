@@ -90,6 +90,32 @@ final class ClientAPIPushTests: XCTestCase {
         XCTAssertEqual(production.revision, 14)
     }
 
+    @MainActor
+    func testSharedPushRegistrationFreezesOptInAndUsesANewRevisionToRemoveIt() async throws {
+        let transport = PushSettingsTransport()
+        let push = ClientAPIPush(transport: transport)
+        let token = ExactText(String(repeating: "a", count: 64))
+        var state = ClientAPIPushRegistrationState()
+        let original = try XCTUnwrap(state.prepareRegistration(token: token, environment: .sandbox,
+                                                               sharedMessages: true))
+        let accepted = try await push.reconcileRegistration(original) {
+            try state.replaceStaleRegistration(original, serverRevision: $0)
+        }
+        let bound = try XCTUnwrap(accepted)
+        state.confirmRegistration(bound)
+        let restored = try JSONDecoder().decode(ClientAPIPushRegistrationState.self, from: JSONEncoder().encode(state))
+        state = restored
+        XCTAssertNil(try state.prepareRegistration(token: token, environment: .sandbox, sharedMessages: true))
+        let legacy = try XCTUnwrap(state.prepareRegistration(token: token, environment: .sandbox, sharedMessages: false))
+        XCTAssertGreaterThan(legacy.revision, bound.revision)
+        XCTAssertNotEqual(legacy.operationID, bound.operationID)
+        _ = try await push.reconcileRegistration(legacy) { _ in nil }
+        let writes = await transport.requests.filter { $0.method == .put }
+        let bodies = try writes.map { try JSONValue.parse(XCTUnwrap($0.body)) }
+        XCTAssertEqual(bodies.first?.uniqueValue(named: "features"), .array([.string(ExactText("shared_messages"))]))
+        XCTAssertNil(bodies.last?.uniqueValue(named: "features"))
+    }
+
     func testSavedRemovalBlocksRegistrationUntilTheAccountIsKept() throws {
         let token = ExactText(String(repeating: "a", count: 64))
         var state = ClientAPIPushRegistrationState()

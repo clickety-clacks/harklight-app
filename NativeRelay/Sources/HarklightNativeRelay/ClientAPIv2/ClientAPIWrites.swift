@@ -21,8 +21,9 @@ public enum ClientAPIWrites {
     }
 
     /// `POST /v2/items/{item_id}/seen`.
-    public static func seen(itemID: ExactText) -> ClientAPIWrite {
-        write(itemID, "mark_seen", .post, "seen", body: .object([]))
+    public static func seen(itemID: ExactText, requestRevision: UInt64? = nil) -> ClientAPIWrite {
+        let fields = requestRevision.map { [JSONMember("request_revision", .number(JSONNumber(lexeme: String($0))))] } ?? []
+        return write(itemID, "mark_seen", .post, "seen", body: .object(fields))
     }
 
     /// `PUT /v2/items/{item_id}/read-position`.

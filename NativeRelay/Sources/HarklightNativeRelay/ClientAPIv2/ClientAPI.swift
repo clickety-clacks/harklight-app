@@ -35,6 +35,8 @@ public struct APIRequest: Equatable, Sendable {
     /// Minted once at user intent and persisted with the frozen request.
     public var idempotencyKey: UUID?
     public var ifMatch: String?
+    var sharedMessages = false
+    var continuation: String?
 
     public init(method: Method, path: String, query: [String: String] = [:], body: Data? = nil,
                 contentType: String? = nil, idempotencyKey: UUID? = nil, ifMatch: String? = nil,
@@ -144,6 +146,8 @@ public struct APIError: Error, Equatable, Sendable {
                   requestID: requestID ?? bodyRequestID, retryAfter: retryAfter)
     }
 
+    var isSharedCapabilityRefusal: Bool { status == 400 && token == .unsupported }
+
     /// A definitive refusal: the same request will never succeed. A paused
     /// account is not one: the request is kept until the pause ends.
     /// A 4xx without a contract body (for example from something in front
@@ -230,10 +234,20 @@ public protocol ClientAPITransport: Sendable {
     func changeFeed(after: Rev) -> AsyncThrowingStream<FeedEvent, any Error>
     /// `GET /v2/changes?after=` as one JSON batch.
     func changeBatch(after: Rev) async throws -> FeedBatch
+    func changeFeed(after: Rev, continuation: String) -> AsyncThrowingStream<FeedEvent, any Error>
+    func changeBatch(after: Rev, continuation: String) async throws -> FeedBatch
 }
 
 public extension ClientAPITransport {
     func close() {}
+
+    func changeFeed(after: Rev, continuation: String) -> AsyncThrowingStream<FeedEvent, any Error> {
+        AsyncThrowingStream { $0.finish(throwing: URLError(.unsupportedURL)) }
+    }
+
+    func changeBatch(after: Rev, continuation: String) async throws -> FeedBatch {
+        throw URLError(.unsupportedURL)
+    }
 
     func download(_ request: APIRequest, to destination: URL) async throws -> APIResponse {
         throw URLError(.unsupportedURL)

@@ -42,6 +42,8 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
     private var settingsReadID: UUID?
     private var pausedPriorityLevelsRead = false
     private var pausedMeRead: APIError?
+    private var negotiatedScope = false
+    private var negotiatingForegroundScope = false
     private var meReadID: UUID?
     private let lock = NSLock()
 
@@ -122,6 +124,7 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
         self.outbox = try ActionOutbox(persistence: persistence, transport: transport, outcomes: outcomes,
             errors: errors, startsPaused: foregroundOnlyWrites, canSend: { entry in
                 access.state == .available &&
+                    relay.connection?.canSendInCurrentScope == true &&
                     (entry.operation != "priority_levels" || relay.connection?.priorityLevelsEditingEnabled == true)
             }, excludingSavedKeys: try repository.heldPreviousProtocolOperations(context: context),
             onEntriesChanged: { old, new in
@@ -143,9 +146,17 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
                                            relay.connection?.signalQueuedReplies()
                                        }
                                        onLiveState(state)
-                                   }, onShow: onShow)
+                                   }, onShow: onShow, onSharedCapabilityRefusal: {
+                                       guard let connection = relay.connection,
+                                             connection.model.snapshot.sharedServerID != nil else { return false }
+                                       return (try? await connection.renegotiateSharedScope()) == true
+                                   })
         relay.connection = self
         access.restorePause(from: model, savedMePaused: savedMe?.accountState == "paused", errors: errors)
+    }
+
+    private var canSendInCurrentScope: Bool {
+        lock.withLock { !negotiatingForegroundScope && (negotiatedScope || model.snapshot.sharedServerID == nil) }
     }
 
     public var canPollMe: Bool { lock.withLock { pausedMeRead == nil } }
@@ -179,9 +190,13 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
         }
         try Task.checkCancellation()
         let me = try APIMe(json: JSONValue.parse(response.body))
-        let update: (editingEnabled: Bool, resumed: Bool)? = lock.withLock {
+        let update: (editingEnabled: Bool, resumed: Bool, scopeChanged: Bool)? = try lock.withLock {
             let wasPaused = access.state == .paused
             guard access.applyMeAccountState(me.accountState, check: check) else { return nil }
+            let sharedServerID = me.pushPrincipal?.personID == context.identity.personID
+                ? me.sharedMessagesServerID : nil
+            let scopeChanged = try model.configureSharedMessages(serverID: sharedServerID)
+            negotiatedScope = true
             Self.saveHandoffCaptionFeature(me.handoffCaptionsEnabled, model: model, errors: errors)
             if meReadID == id {
                 pausedMeRead = nil
@@ -211,9 +226,13 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
             let available = access.state == .available
             let editingEnabled = available && me.features["priority_level_editing"] == true
             priorityLevelsEnabledFromServer = editingEnabled
-            return (editingEnabled, wasPaused && available)
+            return (editingEnabled, wasPaused && available, scopeChanged)
         }
         guard let update else { return me }
+        if update.scopeChanged {
+            await sync.projectionScopeChanged()
+            publishModel(allowUnbaselined: true)
+        }
         if update.resumed, access.state == .available { await outbox.resumeAfterReenrolment() }
         onMe(me)
         signalQueuedReplies()
@@ -256,24 +275,26 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
 
     /// Reads `/v2/me` until it succeeds, waiting longer after each failure:
     /// until it is read on a first run nothing can be published.
-    func readMeUntilRead(userInitiated: Bool = false) async {
+    @discardableResult
+    func readMeUntilRead(userInitiated: Bool = false) async -> Bool {
         var attempt = 0
         while !Task.isCancelled {
             do {
                 try await refreshMe(userInitiated: userInitiated && attempt == 0)
-                return
+                return true
             } catch where Task.isCancelled || (error as? APIError)?.token == .internalError {
-                return
+                return false
             } catch {
                 errors.report(ErrorLogReport(concern: .snapshot, connectionRole: .request, operation: "me",
                     phase: "read", reason: .api(error), initiator: .forFailure(error),
                     retryable: !((error as? APIError)?.isPermanent ?? false),
                     correlation: .request((error as? APIError)?.requestID), httpStatus: (error as? APIError)?.status))
-                if access.state == .revoked { return }
+                if access.state == .revoked { return false }
                 attempt += 1
-                do { try await meWaitBeforeRetry(attempt) } catch { return }
+                do { try await meWaitBeforeRetry(attempt) } catch { return false }
             }
         }
+        return false
     }
 
     /// Sends every saved write that is still pending, once, under its saved
@@ -286,10 +307,11 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
     /// follows the change feed until cancelled or stopped by the server.
     public func runForeground() async {
         guard access.state != .revoked else { return }
-        if access.state == .paused {
-            await readMeUntilRead(userInitiated: true)
-            guard access.state == .available, !Task.isCancelled else { return }
-        }
+        publishModel()
+        lock.withLock { negotiatingForegroundScope = true }
+        let discovered = await readMeUntilRead(userInitiated: true)
+        lock.withLock { negotiatingForegroundScope = false }
+        guard discovered, access.state == .available, !Task.isCancelled else { return }
         let (signals, continuation) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
         let (settings, settingsContinuation) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
         let (queued, queuedContinuation) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
@@ -300,7 +322,6 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
             pausedReplyChecks.removeAll()
             pausedReplyUploads.removeAll()
             pausedPriorityLevelsRead = false
-            priorityLevelsEnabledFromServer = false
         }
         defer {
             lock.withLock {
@@ -319,7 +340,6 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
         queuedContinuation.yield(())
         await outbox.resumeSending()
         await withTaskGroup(of: Void.self) { group in
-            group.addTask { await self.readMeUntilRead(userInitiated: true) }
             group.addTask { await self.reconcileAcceptedRepliesWhileForeground(signals) }
             group.addTask {
                 for await _ in settings { await self.refreshSettings() }
@@ -337,8 +357,21 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
 
     /// Push or background refresh: applies every batch from the cursor.
     public func catchUp(userInitiated: Bool = false) async throws {
+        let wasShared = model.snapshot.sharedServerID != nil
+        do {
+            try await sync.catchUp(userInitiated: userInitiated)
+        } catch let error as APIError where wasShared && error.isSharedCapabilityRefusal {
+            guard try await renegotiateSharedScope(userInitiated: userInitiated) else { throw error }
+            try await sync.catchUp(userInitiated: userInitiated)
+        }
         if !foregroundOnlyWrites { sendSavedWrites() }
-        try await sync.catchUp(userInitiated: userInitiated)
+    }
+
+    private func renegotiateSharedScope(userInitiated: Bool = false) async throws -> Bool {
+        if model.snapshot.sharedServerID != nil {
+            _ = try await refreshMe(userInitiated: userInitiated)
+        }
+        return model.snapshot.sharedServerID == nil
     }
 
     /// Catches up from the saved cursor. A locator revision can skip
@@ -910,7 +943,9 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
     public func resolveShowItem(itemID: ExactText) async throws -> APIItem? {
         // A held Show can outlive its item. Check the active account even
         // when a cached copy exists.
-        try await fetchCurrentItem(itemID)
+        if model.snapshot.items[itemID]?.shared != nil { return nil }
+        let item = try await fetchCurrentItem(itemID)
+        return item?.shared == nil ? item : nil
     }
 
     private func fetchCurrentItem(_ itemID: ExactText) async throws -> APIItem? {
@@ -988,12 +1023,16 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
     }
 
     public func publishModel() {
+        publishModel(allowUnbaselined: false)
+    }
+
+    private func publishModel(allowUnbaselined: Bool) {
         lock.withLock {
             if settingsETag != nil, currentSettingsETag() == nil {
                 settingsETag = nil
                 settingsSignal?.yield(())
             }
-            guard model.heldCursor != nil, presentation.hasRules,
+            guard (allowUnbaselined || model.heldCursor != nil), presentation.hasRules,
                   let cached = try? presentation.cachedState(model.snapshot, identity: context.identity) else { return }
             do {
                 let awaitingEntries = hasAcceptedRepliesAwaitingEntries()
@@ -1018,7 +1057,10 @@ extension ClientAPIv2Connection {
     public func sendSavedContentOpens() async {
         do {
             for pending in try repository.snapshot(context: context).pendingMessageOpens {
-                let write = ClientAPIWrites.seen(itemID: pending.requestKey.messageID)
+                let itemID = pending.requestKey.messageID
+                let shared = model.snapshot.items[itemID]?.shared != nil
+                let write = ClientAPIWrites.seen(itemID: itemID,
+                    requestRevision: shared ? pending.requestRevision : nil)
                 await handOffItemAction(write.operation, operationID: pending.id) {
                     try await outbox.submit(target: write.target, operation: write.operation, write: write.write,
                                             idempotencyKey: pending.id, retryRefused: false) { [repository, context] in
@@ -1055,7 +1097,9 @@ extension ClientAPIv2Connection {
         await sendSavedContentOpens()
         await sendSavedConversationReads()
         do {
-            for saved in try repository.inboxOperationInventory(context: context) where Self.canHandOffAnswer(saved) {
+            for saved in try repository.inboxOperationInventory(context: context) where
+                Self.canHandOffAnswer(saved) &&
+                model.snapshot.items[saved.requestKey.messageID]?.shared?.canAnswer != false {
                 await handOffItemAction("answer", operationID: saved.operationID) {
                     try await handOffAnswer(saved, retryRefused: false)
                 }
@@ -1135,6 +1179,11 @@ extension ClientAPIv2Connection {
             let terminal: V2AnswerTerminalRefusal = error.token == .alreadyAnswered ? .alreadyAnswered : .alreadyRetracted
             try repository.recordAnswerRefusedClosed(intent, operationID: operationID, v2Terminal: terminal,
                                                       context: context)
+            if error.token == .alreadyAnswered,
+               let itemID = try repository.lookupIntent(intent, context: context)?.requestKey.messageID,
+               model.snapshot.items[itemID]?.shared != nil {
+                _ = try? await fetchCurrentItem(itemID)
+            }
         case .alreadyClosed:
             try repository.recordAnswerRefusedClosed(intent, operationID: operationID, context: context)
         case .staleRequest:
