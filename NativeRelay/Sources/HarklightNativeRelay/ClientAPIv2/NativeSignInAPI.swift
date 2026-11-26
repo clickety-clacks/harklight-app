@@ -117,7 +117,7 @@ public struct NativeSignInAPI: Sendable {
 
     public func migrationPrincipal() async throws -> APIPushPrincipal? {
         let me = try await readMe()
-        guard me.body.uniqueValue(named: "auth_migration") == .bool(true) else { return nil }
+        guard me.features["auth_migration"] == true else { return nil }
         guard let principal = me.pushPrincipal, principal.deviceID != nil else {
             throw MigrationError.wrongPrincipal
         }

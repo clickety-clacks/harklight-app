@@ -51,7 +51,7 @@ private actor SignInFixture: ClientAPITransport {
                 body: Data(#"{"code":"accepted_reconcile"}"#.utf8), replayed: true)
         case "/v2/me":
             return APIResponse(status: 200, requestID: nil, body: Data(
-                #"{"server":{"id":"server-1"},"principal":{"person_id":"person-1","device_id":"device-1"},"auth_migration":true}"#.utf8
+                #"{"server":{"id":"server-1"},"principal":{"person_id":"person-1","device_id":"device-1"},"features":{"auth_migration":true}}"#.utf8
             ))
         case "/v2/auth/methods":
             return APIResponse(status: 200, requestID: nil, body: Data(#"{"methods":["owner_code"]}"#.utf8))
@@ -328,6 +328,16 @@ final class HTTPSClientAPITransportTests: XCTestCase {
         XCTAssertEqual(sent[3].query, ["device_id": "old-device"])
         XCTAssertEqual(try JSONDecoder().decode([String: String].self, from: XCTUnwrap(sent[1].body)),
                        ["signature": "frozen-signature"])
+    }
+
+    func testMigrationStaysUnavailableWithoutTheMeFeature() async throws {
+        let api = transport { _ in
+            .init(status: 200, chunks: [Data(
+                #"{"server":{"id":"server-1"},"principal":{"person_id":"person-1","device_id":"device-1"}}"#.utf8
+            )])
+        }
+        let principal = try await NativeSignInAPI(transport: api).migrationPrincipal()
+        XCTAssertNil(principal)
     }
 
     func testMigrationRequiresTheSameServerPersonAndDeviceBeforeReadingTheFeed() async throws {
