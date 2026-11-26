@@ -1107,8 +1107,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         navigate(to: nil)
     }
 
-    private func navigate(from previous: InboxSelection?, to next: InboxSelection?,
-                          withinRetainedCardOrder: Bool = false) {
+    private func navigate(from previous: InboxSelection?, to next: InboxSelection?) {
         let nextRequest: RequestKey? = if case let .request(key)? = next { key } else { nil }
         if case let .request(previousKey)? = previous, nextRequest != previousKey {
             NativePushedViewCoordinator.shared.clearPassiveContent(previousKey)
@@ -1123,7 +1122,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             pushes.recordOwnOpen()
         }
         guard previous != next else { return }
-        if !withinRetainedCardOrder { retainedCardNavigationIDs = nil }
+        retainedCardNavigationIDs = nil
         if nextRequest != nil, !openedPassivePush { userOpenedMessage() }
         if let serial = InboxNotificationNavigationPolicy.dismissalSerial(
             from: previous, to: next, route: visibleNotificationNavigation) {
@@ -1719,7 +1718,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                       currentIDs.indices.contains(current + direction) else { return }
                 let next = currentIDs[current + direction]
                 navigatedBetweenMessages = true
-                navigate(from: selection, to: next, withinRetainedCardOrder: true)
+                navigate(to: next)
             }
     }
 
@@ -1761,7 +1760,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             .tint(HarklightDesignSystem.palette(for: colorScheme).amber)
             .onChange(of: cardNavigationIDs) { oldIDs, newIDs in
                 // A completed message can stay open after leaving the Inbox.
-                // Keep the sequence the person entered until they leave it.
+                // Keep its position and neighbors until another card is selected.
                 guard retainedCardNavigationIDs == nil, workspaceTab == .inbox,
                       let selection, oldIDs.contains(selection), !newIDs.contains(selection),
                       currentItem(for: selection)?.belongsToReplied == true else { return }

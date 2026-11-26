@@ -261,6 +261,70 @@ final class AdaptiveDuoNavigationUITests: XCTestCase {
         }
     }
 
+    func testFirstHopAfterSeenResumesCurrentInboxOrder() throws {
+        guard UIDevice.current.userInterfaceIdiom == .pad else {
+            throw XCTSkip("This test needs Inbox and detail to remain visible after Seen.")
+        }
+        XCUIDevice.shared.orientation = .landscapeLeft
+        let app = XCUIApplication()
+        app.launchArguments = ["--reset-attention-fixture", "--harklight-samples",
+                               "--harklight-ui-diagnostics", "--harklight-test-card-navigation"]
+        app.launch()
+
+        let row = app.descendants(matching: .any)["sample-information-2"]
+        XCTAssertTrue(row.waitForExistence(timeout: 5))
+        row.tap()
+        let diagnostic = app.descendants(matching: .any)["inbox-ui-diagnostics"].firstMatch
+        let counter = app.staticTexts.matching(
+            NSPredicate(format: "label MATCHES '[0-9]+ of [0-9]+'")
+        ).firstMatch
+        let previous = app.buttons["Previous message"]
+        let next = app.buttons["Next message"]
+        XCTAssertTrue(diagnostic.waitForExistence(timeout: 5))
+        XCTAssertTrue(counter.waitForExistence(timeout: 5))
+        XCTAssertTrue(previous.isHittable && next.isHittable, app.debugDescription)
+
+        func selectedCard() throws -> Substring {
+            try XCTUnwrap(diagnostic.label.split(separator: " ").first)
+        }
+
+        let middle = try selectedCard()
+        let initial = counter.label
+        let parts = initial.components(separatedBy: " of ").compactMap { Int($0) }
+        XCTAssertEqual(parts.count, 2, initial)
+        let position = try XCTUnwrap(parts.first)
+        let total = try XCTUnwrap(parts.last)
+        XCTAssertGreaterThan(position, 1)
+        XCTAssertLessThan(position, total)
+
+        previous.tap()
+        let leading = try selectedCard()
+        XCTAssertNotEqual(leading, middle)
+        next.tap()
+        XCTAssertEqual(try selectedCard(), middle)
+        next.tap()
+        let trailing = try selectedCard()
+        XCTAssertNotEqual(trailing, middle)
+        previous.tap()
+        XCTAssertEqual(try selectedCard(), middle)
+
+        let seen = app.buttons["request-finish-seen"]
+        XCTAssertTrue(seen.waitForExistence(timeout: 5))
+        seen.tap()
+        let confirmation = app.descendants(matching: .any)["request-seen-confirmation"]
+        XCTAssertTrue(confirmation.waitForExistence(timeout: 5))
+        XCTAssertEqual(try selectedCard(), middle)
+        XCTAssertEqual(counter.label, initial)
+
+        next.tap()
+        XCTAssertEqual(try selectedCard(), trailing, "Next from the completed card opens its former successor.")
+        XCTAssertEqual(counter.label, "\(position) of \(total - 1)",
+                       "The successor uses the updated Inbox count and position.")
+        previous.tap()
+        XCTAssertEqual(try selectedCard(), leading, "Previous skips the completed card.")
+        XCTAssertEqual(counter.label, "\(position - 1) of \(total - 1)")
+    }
+
     private func splitPresentation(in app: XCUIApplication) -> XCUIElement {
         app.descendants(matching: .any)["inbox-split-presentation"].firstMatch
     }
