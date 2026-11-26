@@ -138,8 +138,9 @@ final class ClientAPIv2ConnectionTests: XCTestCase {
         let repository = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
         let transport = WithMe(server, me: nil)
         let v2 = try connection(transport, repository)
+        _ = try v2.model.configureSharedMessages(serverID: ExactText("server"))
         let key = UUID()
-        _ = try await v2.outbox.enqueue(target: ExactText("a"), operation: "mark_seen",
+        _ = try await v2.outbox.submit(target: "a", operation: "mark_seen",
             write: ClientAPIWrites.seen(itemID: ExactText("a")).write, idempotencyKey: key)
         let run = Task { await v2.runForeground() }
         defer { run.cancel() }

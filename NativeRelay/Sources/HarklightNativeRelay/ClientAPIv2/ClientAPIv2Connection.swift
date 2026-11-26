@@ -42,6 +42,8 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
     private var settingsReadID: UUID?
     private var pausedPriorityLevelsRead = false
     private var pausedMeRead: APIError?
+    private var negotiatedScope = false
+    private var negotiatingForegroundScope = false
     private var meReadID: UUID?
     private let lock = NSLock()
 
@@ -122,6 +124,7 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
         self.outbox = try ActionOutbox(persistence: persistence, transport: transport, outcomes: outcomes,
             errors: errors, startsPaused: foregroundOnlyWrites, canSend: { entry in
                 access.state == .available &&
+                    relay.connection?.canSendInCurrentScope == true &&
                     (entry.operation != "priority_levels" || relay.connection?.priorityLevelsEditingEnabled == true)
             }, excludingSavedKeys: try repository.heldPreviousProtocolOperations(context: context),
             onEntriesChanged: { old, new in
@@ -146,6 +149,10 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
                                    }, onShow: onShow)
         relay.connection = self
         access.restorePause(from: model, savedMePaused: savedMe?.accountState == "paused", errors: errors)
+    }
+
+    private var canSendInCurrentScope: Bool {
+        lock.withLock { !negotiatingForegroundScope && (negotiatedScope || model.snapshot.sharedServerID == nil) }
     }
 
     public var canPollMe: Bool { lock.withLock { pausedMeRead == nil } }
@@ -185,6 +192,7 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
             let sharedServerID = me.pushPrincipal?.personID == context.identity.personID
                 ? me.sharedMessagesServerID : nil
             let scopeChanged = try model.configureSharedMessages(serverID: sharedServerID)
+            negotiatedScope = true
             Self.saveHandoffCaptionFeature(me.handoffCaptionsEnabled, model: model, errors: errors)
             if meReadID == id {
                 pausedMeRead = nil
@@ -263,24 +271,25 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
 
     /// Reads `/v2/me` until it succeeds, waiting longer after each failure:
     /// until it is read on a first run nothing can be published.
-    func readMeUntilRead(userInitiated: Bool = false) async {
+    func readMeUntilRead(userInitiated: Bool = false) async -> Bool {
         var attempt = 0
         while !Task.isCancelled {
             do {
                 try await refreshMe(userInitiated: userInitiated && attempt == 0)
-                return
+                return true
             } catch where Task.isCancelled || (error as? APIError)?.token == .internalError {
-                return
+                return false
             } catch {
                 errors.report(ErrorLogReport(concern: .snapshot, connectionRole: .request, operation: "me",
                     phase: "read", reason: .api(error), initiator: .forFailure(error),
                     retryable: !((error as? APIError)?.isPermanent ?? false),
                     correlation: .request((error as? APIError)?.requestID), httpStatus: (error as? APIError)?.status))
-                if access.state == .revoked { return }
+                if access.state == .revoked { return false }
                 attempt += 1
-                do { try await meWaitBeforeRetry(attempt) } catch { return }
+                do { try await meWaitBeforeRetry(attempt) } catch { return false }
             }
         }
+        return false
     }
 
     /// Sends every saved write that is still pending, once, under its saved
@@ -293,10 +302,11 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
     /// follows the change feed until cancelled or stopped by the server.
     public func runForeground() async {
         guard access.state != .revoked else { return }
-        if access.state == .paused {
-            await readMeUntilRead(userInitiated: true)
-            guard access.state == .available, !Task.isCancelled else { return }
-        }
+        publishModel()
+        lock.withLock { negotiatingForegroundScope = true }
+        let discovered = await readMeUntilRead(userInitiated: true)
+        lock.withLock { negotiatingForegroundScope = false }
+        guard discovered, access.state == .available, !Task.isCancelled else { return }
         let (signals, continuation) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
         let (settings, settingsContinuation) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
         let (queued, queuedContinuation) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
@@ -307,7 +317,6 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
             pausedReplyChecks.removeAll()
             pausedReplyUploads.removeAll()
             pausedPriorityLevelsRead = false
-            priorityLevelsEnabledFromServer = false
         }
         defer {
             lock.withLock {
@@ -326,7 +335,6 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
         queuedContinuation.yield(())
         await outbox.resumeSending()
         await withTaskGroup(of: Void.self) { group in
-            group.addTask { await self.readMeUntilRead(userInitiated: true) }
             group.addTask { await self.reconcileAcceptedRepliesWhileForeground(signals) }
             group.addTask {
                 for await _ in settings { await self.refreshSettings() }
@@ -344,8 +352,15 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
 
     /// Push or background refresh: applies every batch from the cursor.
     public func catchUp(userInitiated: Bool = false) async throws {
+        do {
+            try await sync.catchUp(userInitiated: userInitiated)
+        } catch let error as APIError where error.status == 400 && error.token == .unsupported &&
+            model.snapshot.sharedServerID != nil {
+            _ = try await refreshMe(userInitiated: userInitiated)
+            guard model.snapshot.sharedServerID == nil else { throw error }
+            try await sync.catchUp(userInitiated: userInitiated)
+        }
         if !foregroundOnlyWrites { sendSavedWrites() }
-        try await sync.catchUp(userInitiated: userInitiated)
     }
 
     /// Catches up from the saved cursor. A locator revision can skip
