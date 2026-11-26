@@ -790,6 +790,11 @@ final class NativeRelayLifecycle {
                   diagnostics: NativeClientDiagnosticJournal? = nil) throws {
         let transport = try HTTPSClientAPITransport(baseURL: deviceURL,
             clientIdentity: TrustedKeychainIdentity(clientIdentity), trustedRootDER: trustedRootDER)
+        try activate(store: store, context: context, transport: transport, diagnostics: diagnostics)
+    }
+
+    func activate(store: ClientRepository, context: ProfileContext, transport: HTTPSClientAPITransport,
+                  diagnostics: NativeClientDiagnosticJournal? = nil) throws {
         let retainedFiles = try ConversationFileStorage(identity: context.identity)
         let attempt = UUID()
         let access = ClientAPIAccess(transport: transport) { [weak self] _ in

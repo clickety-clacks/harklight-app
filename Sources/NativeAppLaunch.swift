@@ -802,12 +802,16 @@ final class NativeAppLaunch {
         NativeRelayLifecycle.shared.errorLog = errorLog
         observeV2Connection(NativeRelayLifecycle.shared)
         do {
-            try NativeRelayLifecycle.shared.activate(store: store,
-                                                      context: installation.context,
-                                                      deviceURL: installation.deviceURL,
-                                                      clientIdentity: installation.keychainIdentity,
-                                                      trustedRootDER: installation.trustedRootDER,
-                                                      diagnostics: diagnostics)
+            let lifecycle = NativeRelayLifecycle.shared
+            if case let .active(origin, proof) = activeEnrollmentRecord?.sessionMigration {
+                try lifecycle.activate(store: store, context: context,
+                    transport: HTTPSClientAPITransport(origin: origin, bearer: proof.bearer),
+                    diagnostics: diagnostics)
+            } else {
+                try lifecycle.activate(store: store, context: context, deviceURL: installation.deviceURL,
+                    clientIdentity: installation.keychainIdentity, trustedRootDER: installation.trustedRootDER,
+                    diagnostics: diagnostics)
+            }
         } catch {
             if activationGeneration != generation { return }
             diagnostics.record(area: .connection, phase: .approvedConnection, transition: .failed,
