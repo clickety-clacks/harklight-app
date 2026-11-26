@@ -510,3 +510,52 @@ final class Build356StoreUpgradeTests: XCTestCase {
         XCTAssertEqual(live.conversationDraft(for: key, revision: 1).text, ExactText("Build 356 conversation draft"))
     }
 }
+
+// The focused upgrade run seeds this sandbox by running the legacy build's source on
+// the same simulator. Ordinary unit runs do not make or reuse enrollment state.
+@MainActor
+final class BuildLegacyA1StoreUpgradeTests: XCTestCase {
+    func testOpensLegacyAccountInboxDraftsAndOutbox() throws {
+        let directory = try FileManager.default.url(for: .documentDirectory, in: .userDomainMask,
+            appropriateFor: nil, create: false).appendingPathComponent("BuildLegacyA1Fixture", isDirectory: true)
+        let writer = directory.appendingPathComponent("writer-build")
+        guard FileManager.default.fileExists(atPath: writer.path) else {
+            throw XCTSkip("Requires the synthetic sandbox written by build 361 or 362.")
+        }
+        XCTAssertTrue(["361", "362"].contains(try String(contentsOf: writer, encoding: .utf8)))
+        let enrollment = NativeEnrollmentStore(service: "harklight-a1-legacy-upgrade-test")
+        let record = try XCTUnwrap(enrollment.load())
+        let material = try enrollment.material(from: record)
+        let context = material.context
+        XCTAssertEqual(context.identity.trustedRelayAuthority, ExactText("relay.example.test"))
+        XCTAssertEqual(context.identity.personID, ExactText("synthetic-account"))
+        XCTAssertEqual(context.identity.deviceID, ExactText(record.deviceID))
+
+        let model = ServerModelV2Store(fileURL: directory.appendingPathComponent("server-model-v2.json"))
+        XCTAssertEqual(model.snapshot.items.count, 1)
+        let repository = try ClientRepository(context: context,
+            persistence: FilePendingActionPersistence(directoryURL: directory))
+        try repository.migratePendingItemActionsToClientAPI(context: context)
+        try repository.restoreCachedServerState(
+            ServerModelV2Projection.cachedState(model.snapshot, identity: context.identity), context: context)
+
+        let key = RequestKey(accountScope: context.identity.personID,
+            senderID: ExactText("fixture-sender"), messageID: ExactText("fixture-item"))
+        let live = try LivePresentationStore(store: repository, context: context)
+        XCTAssertEqual(live.presentation.requests.map(\.key), [key])
+        let port = AttentionDomainPort(store: repository)
+        let shown = try XCTUnwrap(port.inspect(context: port.context, request: key).requests.first)
+        XCTAssertEqual(shown.title, ExactText("Legacy question"))
+        XCTAssertNotNil(shown.selector)
+        XCTAssertEqual(try repository.snapshot(context: context).drafts[key]?
+            .compatibility.textByActionID[ExactText("reply")], ExactText("Legacy answer draft"))
+        XCTAssertEqual(live.conversationDraft(for: key, revision: 1).text, ExactText("Legacy conversation draft"))
+        let outbox = try FileOutboxPersistence(url: directory.appendingPathComponent("outbox.json")).load()
+        let queued = try XCTUnwrap(outbox.first)
+        XCTAssertEqual(outbox.count, 1)
+        XCTAssertEqual(queued.idempotencyKey.uuidString.lowercased(), "00000000-0000-4000-8000-000000000361")
+        XCTAssertEqual(queued.write.method, .post)
+        XCTAssertEqual(queued.write.path, "/v2/items/fixture-item/answer")
+        XCTAssertEqual(queued.write.body, Data(#"{"request_revision":1,"no_comment":true}"#.utf8))
+    }
+}
