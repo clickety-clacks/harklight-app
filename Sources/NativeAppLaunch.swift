@@ -1168,6 +1168,10 @@ final class NativeAppLaunch {
         let result = try await api.redeem(redemption)
         let record = try enrollment.retainSignedInSession(origin: pending.origin, proof: redemption.proof,
                                                            result: result, label: label, attachedLegacy: legacy)
+        if let prior = archivedAccountDepartures.last(where: { $0.record.signedInOrigin == pending.origin }),
+           !NativeAuthorityBinding.samePerson(prior.record.personID, result.personID) {
+            UserDefaults.standard.removeObject(forKey: Self.methodPreferenceKey(pending.origin))
+        }
         if pending.rememberMethod, let method = result.method {
             UserDefaults.standard.set(method.rawValue, forKey: Self.methodPreferenceKey(pending.origin))
         }

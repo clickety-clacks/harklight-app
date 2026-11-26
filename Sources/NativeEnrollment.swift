@@ -56,6 +56,7 @@ struct NativeEnrollmentRecord: Codable, Equatable {
     var notificationProfileGeneration: UUID? = nil
     var sessionMigration: NativeSessionMigration? = nil
     var legacyReceiptCutoff: Date? = nil
+    var signedInOrigin: URL? = nil
 
     var isApproved: Bool { personID != nil }
     /// The invitation's person label, when it supplied one. Earlier builds saved
@@ -82,7 +83,7 @@ struct NativeEnrollmentRecord: Codable, Equatable {
     }
 
     func matchesRecoveryOrigin(_ origin: URL) -> Bool {
-        if case let .active(knownOrigin, _) = sessionMigration { return knownOrigin == origin }
+        if let signedInOrigin { return signedInOrigin == origin }
         return origin.host?.lowercased() == host.lowercased() && origin.port == nil
     }
 
@@ -92,7 +93,7 @@ struct NativeEnrollmentRecord: Codable, Equatable {
              deviceLabel: deviceLabel, deviceID: deviceID, approvalCode: "", statusSecret: "",
              expiresAt: nil, statusExpiresAt: nil, personID: personID, v2Revoked: v2Revoked,
              serverDisplayName: serverDisplayName, accountDisplayName: accountDisplayName,
-             localProfileAuthority: localProfileAuthority)
+             localProfileAuthority: localProfileAuthority, signedInOrigin: signedInOrigin)
     }
 }
 
@@ -161,6 +162,7 @@ struct NativeEnrollmentStore {
             record = old
             record.v2Revoked = nil
         }
+        record.signedInOrigin = origin
         record.sessionMigration = .active(origin: origin, proof: proof)
         try save(record)
         return record
@@ -321,8 +323,11 @@ struct NativeEnrollmentStore {
               current.sessionMigration == expected.sessionMigration else {
             throw NativeJoinError.superseded
         }
-        if case .active = migration, current.legacyReceiptCutoff == nil {
-            current.legacyReceiptCutoff = Date().addingTimeInterval(-30 * 24 * 60 * 60)
+        if case let .active(origin, _) = migration {
+            current.signedInOrigin = origin
+            if current.legacyReceiptCutoff == nil {
+                current.legacyReceiptCutoff = Date().addingTimeInterval(-30 * 24 * 60 * 60)
+            }
         }
         current.sessionMigration = migration
         try save(current)
