@@ -10,6 +10,60 @@ import HarklightNativeRelay
 
 @MainActor
 final class ConversationPresentationTests: XCTestCase {
+    func testSharedChatIdentifiesPeopleByIDAndCountsOnlyIncomingTurns() throws {
+        var model = ServerModelV2()
+        try model.putForTesting(sharedItem())
+        for (position, speaker) in [(1, "reader"), (2, "other"), (3, nil), (4, "reader")] as [(Int, String?)] {
+            let attribution = speaker.map {
+                #","shared_entry_id":"shared-\#(position)","speaker":{"kind":"person","id":"\#($0)","display_name":"Dana","handle":null}"#
+            } ?? ""
+            let json = #"{"entry_id":"entry-\#(position)","item_id":"local","rev":\#(position + 40),"position":\#(position),"kind":"reply","author":"person","request_revision":2,"text":"Checking","files":[]\#(attribution)}"#
+            try model.putForTesting(APIEntry(json: JSONValue.parse(Data(json.utf8))))
+        }
+        let identity = ProfileIdentity(trustedRelayAuthority: ExactText("relay.example"),
+            personID: ExactText("reader"), deviceID: ExactText("device"))
+        let thread = try XCTUnwrap(ServerModelV2Projection.cachedState(model, identity: identity)
+            .conversations.values.first)
+        XCTAssertEqual(thread.turns.map(\.isOwnTurn), [true, false, true, true])
+        XCTAssertEqual(thread.latestIncomingReply?.id, ExactText("entry-2"))
+        XCTAssertTrue(thread.hasUnreadAgentReply)
+        XCTAssertNil(thread.latestAgentReply)
+        XCTAssertFalse(thread.isComposerOpen)
+        XCTAssertEqual(thread.shared?.members.map(\.seenRevision), [2, nil, 1])
+        XCTAssertEqual(thread.answerSpeaker?.displayName, ExactText("Dana"))
+        XCTAssertEqual(thread.shared?.canAnswer, false)
+    }
+
+    func testSharedFYIDecodesNullPolicyAndLegacyItemHasNoRoster() throws {
+        let shared = try sharedItem(policy: "null")
+        XCTAssertNil(shared.shared?.answerPolicy)
+        let legacy = try sharedItem(includeShared: false)
+        XCTAssertNil(legacy.shared)
+        XCTAssertNil(legacy.terminal?.speaker)
+    }
+
+    private func sharedItem(policy: String = #"{"kind":"first"}"#, includeShared: Bool = true) throws -> APIItem {
+        let shared = includeShared ? #"""
+        ,"shared":{"shared_id":"shared","chat_writable":false,"can_answer":false,"answer_policy":\#(policy),
+          "members":[
+            {"person":{"kind":"person","id":"other","display_name":"Dana"},"seen_revision":2,"seen_at_ms":290},
+            {"person":{"kind":"person","id":"reader","display_name":"Dana"},"seen_revision":null,"seen_at_ms":null},
+            {"person":{"kind":"person","id":"earlier","display_name":"Sam"},"seen_revision":1,"seen_at_ms":200}
+          ],"answers":[]}
+        """# : ""
+        let terminal = includeShared && policy == "null" ? "" : #"""
+        ,"terminal":{"state":"answered","at_ms":300,"answer":{"kind":"choice","id":"yes","label":"Yes"},
+          "by_this_person":false\#(includeShared ? #","answer_id":"answer","speaker":{"kind":"person","id":"other","display_name":"Dana"}"# : "")}
+        """#
+        let json = #"""
+        {"item_id":"local","rev":40,"sender":"Studio","request_revision":2,
+          "message":{"title":"Launch"},"files":[],"seen":false,
+          "chat":{"available":true,"started":true,"read_position":"entry-1","unread_replies":1,"reply_group":"earlier_chat_replies"},
+          "rank":{"key":"a","section":"resolved"}\#(terminal)\#(shared)}
+        """#
+        return try APIItem(json: JSONValue.parse(Data(json.utf8)))
+    }
+
     func testCachedServedTurnKeepsCaptionUntilSameRevisionContractRefresh() throws {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: url) }
