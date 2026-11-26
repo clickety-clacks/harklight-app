@@ -40,7 +40,7 @@ private final class StubURLProtocol: URLProtocol, @unchecked Sendable {
 }
 
 final class HTTPSClientAPITransportTests: XCTestCase {
-    private func transport(feedIdleInterval: Duration = .seconds(60),
+    private func transport(feedIdleInterval: Duration = .seconds(60), bearer: String? = nil,
                            _ handler: @escaping (URLRequest) -> StubURLProtocol.Reply) -> HTTPSClientAPITransport {
         StubURLProtocol.lock.withLock {
             StubURLProtocol.handler = handler
@@ -49,7 +49,7 @@ final class HTTPSClientAPITransportTests: XCTestCase {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [StubURLProtocol.self]
         return HTTPSClientAPITransport(baseURL: URL(string: "https://server.example:8443")!,
-                                       configuration: configuration, delegate: nil, feedIdleInterval: feedIdleInterval)
+                                       configuration: configuration, delegate: nil, feedIdleInterval: feedIdleInterval, bearer: bearer)
     }
 
     func testSharedRequestsAndBothFeedTransportsCarryTheirScope() async throws {
@@ -131,6 +131,41 @@ final class HTTPSClientAPITransportTests: XCTestCase {
         XCTAssertEqual(response.requestID, "req-7")
         XCTAssertTrue(response.replayed)
         XCTAssertEqual(response.rev, 42)
+    }
+
+    func testBearerCutoverPreservesFrozenWriteAndFeedCursor() async throws {
+        let key = UUID(uuidString: "00000000-0000-4000-8000-000000000001")!
+        let body = Data(#"{"request_rev":12,"comment":null}"#.utf8)
+        let request = APIRequest(method: .post, path: "/v2/items/item%2F1/answer",
+                                 body: body, idempotencyKey: key)
+        let legacy = transport { _ in .init(status: 204, chunks: []) }
+        _ = try await legacy.send(request)
+        let original = try XCTUnwrap(StubURLProtocol.lock.withLock { StubURLProtocol.seen.first })
+
+        let session = transport(bearer: "fixture-bearer") { request in
+            if request.value(forHTTPHeaderField: "Accept") == "text/event-stream" {
+                return .init(status: 200, headers: ["Content-Type": "text/event-stream"],
+                             chunks: [Data("event: heartbeat\ndata: {}\n\n".utf8)])
+            }
+            return .init(status: 204, headers: ["Idempotent-Replayed": "true"], chunks: [])
+        }
+        let reply = try await session.send(request)
+        XCTAssertTrue(reply.replayed)
+        for try await _ in session.changeFeed(after: 12) {}
+        let sent = StubURLProtocol.lock.withLock { StubURLProtocol.seen }
+        XCTAssertEqual(sent.count, 2)
+        let write = try XCTUnwrap(sent.first)
+        let feed = try XCTUnwrap(sent.last)
+        XCTAssertEqual(write.url?.path, original.url?.path)
+        XCTAssertEqual(write.httpMethod, original.httpMethod)
+        XCTAssertEqual(write.httpBody, original.httpBody)
+        XCTAssertEqual(write.value(forHTTPHeaderField: "Idempotency-Key"),
+                       original.value(forHTTPHeaderField: "Idempotency-Key"))
+        XCTAssertEqual(write.value(forHTTPHeaderField: "Authorization"), "Bearer fixture-bearer")
+        XCTAssertEqual(feed.value(forHTTPHeaderField: "Authorization"), "Bearer fixture-bearer")
+        XCTAssertEqual(feed.value(forHTTPHeaderField: "Last-Event-ID"), "12")
+        XCTAssertNil(write.value(forHTTPHeaderField: "Cookie"))
+        XCTAssertNil(feed.value(forHTTPHeaderField: "Cookie"))
     }
 
     func testARefusalBecomesAnAPIErrorWithTokenRequestIdAndRetryAfter() async throws {
