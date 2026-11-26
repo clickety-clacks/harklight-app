@@ -828,7 +828,7 @@ final class NativeRelayLifecycle {
         }
         let connection = try ClientAPIv2Connection(transport: access, repository: store, context: context,
             directory: Self.v2Directory(for: context.identity), errors: errorLog, foregroundOnlyWrites: true,
-            legacyReceiptCutoff: legacyReceiptCutoff,
+            legacyReceiptCutoff: legacyReceiptCutoff, usesDeviceSessions: transport.usesDeviceSession,
             retainedUploadURL: { try retainedFiles.verifiedUploadURL(for: $0) },
             onLiveState: { [weak self] state in
                 guard state == .live else { return }

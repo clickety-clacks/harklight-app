@@ -49,9 +49,11 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
 
     /// `directory` holds the model, outbox and last `/v2/me` for this
     /// account; nil keeps everything in memory (tests and previews).
+    private let usesDeviceSessions: Bool
+
     public init(transport: any ClientAPITransport, repository: ClientRepository, context: ProfileContext,
                 directory: URL?, errors: any ErrorLogging, foregroundOnlyWrites: Bool = false,
-                legacyReceiptCutoff: Date? = nil,
+                legacyReceiptCutoff: Date? = nil, usesDeviceSessions: Bool = false,
                 waitBeforeRetry: @escaping @Sendable (Int) async throws -> Void = ChangeFeedSync.backoff,
                 outboxWaitBeforeRetry: @escaping @Sendable (Int, TimeInterval?) async throws -> Void = ActionOutbox.backoff,
                 meWaitBeforeRetry: @escaping @Sendable (Int) async throws -> Void = ChangeFeedSync.backoff,
@@ -82,6 +84,7 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
         self.files = files
         self.replyUploads = try retainedUploadURL.map { try QueuedReplyUploads(directory: directory, files: files, source: $0) }
         self.foregroundOnlyWrites = foregroundOnlyWrites
+        self.usesDeviceSessions = usesDeviceSessions
         self.repository = repository
         self.context = context
         self.errors = errors
@@ -709,6 +712,22 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
             let pending = await outbox.pending
             let failed = await outbox.failedWrites
             if let saved = (pending + failed).first(where: { $0.id == operation }) {
+                if retryRefused, usesDeviceSessions, let replyUploads,
+                   saved.failure?.status == 400,
+                   saved.failure?.token == APIErrorToken.invalidField.rawValue,
+                   saved.failure?.field == "file_ids", let frozen = ActionOutbox.replyBody(saved.write) {
+                    let stillQueued: @Sendable () throws -> Bool = { [repository, context] in
+                        try repository.queuedChatMessages(context: context).contains { $0.operationID == operation }
+                    }
+                    try await replyUploads.replaceRejectedHandles(operation, handles: frozen.files)
+                    let refreshed = try await replyUploads.prepare(message, operation: operation,
+                        cap: presentation.uploadCap, stillQueued: stillQueued)
+                    guard try await replyUploads.handOff(operation, stillQueued: stillQueued) else { return }
+                    let replacement = ClientAPIWrites.reply(itemID: message.binding.request.messageID,
+                                                          text: ExactText(frozen.text), fileIDs: refreshed)
+                    try await outbox.replaceRejectedReplyFiles(operation, with: replacement.write)
+                    return
+                }
                 try await outbox.submit(target: saved.target, operation: saved.operation, write: saved.write,
                                         idempotencyKey: operation, retryRefused: retryRefused)
                 return

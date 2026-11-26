@@ -124,13 +124,15 @@ public struct APIError: Error, Equatable, Sendable {
     public let retryable: Bool
     public let requestID: String?
     public let retryAfter: TimeInterval?
+    public let field: String?
 
     public init(status: Int, token: APIErrorToken, retryable: Bool, requestID: String?,
-                retryAfter: TimeInterval? = nil) {
+                retryAfter: TimeInterval? = nil, field: String? = nil) {
         self.status = status
         self.token = token
         self.retryable = token == .internalError ? false : retryable
         self.requestID = requestID
+        self.field = field
         self.retryAfter = token == .internalError ? nil : retryAfter
     }
 
@@ -144,7 +146,7 @@ public struct APIError: Error, Equatable, Sendable {
         let retryable = (object?["retryable"] as? Bool) ?? (status >= 500 || status == 429 || status == 408)
         let bodyRequestID = object?["request_id"] as? String
         self.init(status: status, token: token, retryable: retryable,
-                  requestID: requestID ?? bodyRequestID, retryAfter: retryAfter)
+                  requestID: requestID ?? bodyRequestID, retryAfter: retryAfter, field: object?["field"] as? String)
     }
 
     var isSharedCapabilityRefusal: Bool { status == 400 && token == .unsupported }

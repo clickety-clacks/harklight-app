@@ -104,6 +104,16 @@ actor QueuedReplyUploads {
         return handles
     }
 
+    func replaceRejectedHandles(_ operation: UUID, handles: [String]) throws {
+        guard !working.contains(operation) else { throw ConversationError.pendingSubmission }
+        guard var group = groups[operation],
+              group.uploads.compactMap({ $0.handle?.value.rawValue }) == handles else { return }
+        group.uploads = group.uploads.map {
+            Upload(file: $0.file, key: UUID(), contentType: $0.contentType, handle: nil)
+        }
+        try save(group, for: operation)
+    }
+
     /// Blocks cancellation of the local intent once the write can enter the
     /// outbox. Retry still uses the same handles if hand-off was interrupted.
     func handOff(_ operation: UUID, stillQueued: @Sendable () throws -> Bool) throws -> Bool {

@@ -26,7 +26,7 @@ public struct OutboxEntry: Codable, Equatable, Sendable, Identifiable {
     public let target: String
     /// The Error Log operation name, for example `mark_seen` or `answer`.
     public let operation: String
-    public let write: FrozenWrite
+    public internal(set) var write: FrozenWrite
     public let createdAt: Date
     /// True once a send ended without a known outcome; the resend uses the
     /// same key, so the server applies it at most once.
@@ -76,6 +76,7 @@ public struct OutboxEntry: Codable, Equatable, Sendable, Identifiable {
 public struct OutboxFailure: Codable, Equatable, Sendable {
     public let status: Int
     public let token: String
+    var field: String? = nil
 }
 
 public protocol OutboxPersisting: Sendable {
@@ -186,6 +187,39 @@ public actor ActionOutbox {
             $0.operation == operation && ($0.failure != nil || $0.waitsForInternalErrorRetry == true)
         }) else { return }
         errors.resolve(concern: .actions, operation: operation, resolvedBy: resolvedBy)
+    }
+
+    func replaceRejectedReplyFiles(_ key: UUID, with write: FrozenWrite) throws {
+        guard !closed, let index = entries.firstIndex(where: { $0.id == key }) else { throw CancellationError() }
+        let entry = entries[index]
+        guard entry.operation == "reply", entry.failure?.status == 400,
+              entry.failure?.token == APIErrorToken.invalidField.rawValue, entry.failure?.field == "file_ids",
+              write.method == entry.write.method, write.path == entry.write.path,
+              write.contentType == entry.write.contentType, write.ifMatch == entry.write.ifMatch,
+              let old = Self.replyBody(entry.write), let replacement = Self.replyBody(write),
+              old.text.utf8.elementsEqual(replacement.text.utf8), old.files != replacement.files,
+              old.files.count == replacement.files.count else {
+            throw URLError(.badServerResponse)
+        }
+        var next = entries
+        next[index].write = write
+        next[index].failure = nil
+        next[index].outsideContractFailures = nil
+        try persistence.save(next)
+        entries = next
+        startSending(entry.sendingLane)
+    }
+
+    static func replyBody(_ write: FrozenWrite) -> (text: String, files: [String])? {
+        struct Reply: Decodable {
+            let text: String
+            let file_ids: [String]
+        }
+        guard let body = write.body,
+              let fields = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+              Set(fields.keys) == ["text", "file_ids"],
+              let reply = try? JSONDecoder().decode(Reply.self, from: body) else { return nil }
+        return (reply.text, reply.file_ids)
     }
 
     /// Records the intent durably, minting its key once, and sends it. If the
@@ -369,7 +403,7 @@ public actor ActionOutbox {
             // sees always has its record, and a Retry handed over at once
             // finds the write already failed.
             update(entry.idempotencyKey) {
-                $0.failure = OutboxFailure(status: error.status, token: error.token.rawValue)
+                $0.failure = OutboxFailure(status: error.status, token: error.token.rawValue, field: error.field)
             }
             report(entry, phase: "send", error: error, initiator: .unknown, retryable: false)
             await outcomes.rejected(entry, error: error)

@@ -6,6 +6,7 @@ public final class HTTPSClientAPITransport: ClientAPITransport, @unchecked Senda
     private let baseURL: URL
     private let session: URLSession
     private let bearer: String?
+    public var usesDeviceSession: Bool { bearer != nil }
     private let feedIdleInterval: Duration
 
     /// `baseURL` is the device listener, for example `https://host:port`.
