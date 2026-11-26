@@ -1075,6 +1075,58 @@ final class NativeAppLaunch {
         }
     }
 
+    func beginSharedSignIn(origin: URL, rememberMethod: Bool) async throws -> NativePendingSignIn {
+        let transport = try HTTPSClientAPITransport(origin: origin)
+        defer { transport.close() }
+        let transaction = try await NativeSignInAPI(transport: transport).begin()
+        let pending = NativePendingSignIn(origin: origin, transaction: transaction,
+                                          rememberMethod: rememberMethod, redemption: nil)
+        try enrollment.savePendingSignIn(pending)
+        return pending
+    }
+
+    func finishSharedSignIn(_ pending: NativePendingSignIn, code: String? = nil) async throws {
+        var pending = pending
+        let transport = try HTTPSClientAPITransport(origin: pending.origin)
+        defer { transport.close() }
+        let api = NativeSignInAPI(transport: transport)
+        if let code {
+            try await api.verifyOwnerCode(code, transaction: pending.transaction.reference)
+        }
+        let label = UIDevice.current.name
+        if pending.redemption == nil {
+            pending.redemption = try NativeSessionRedemption(credential: .transaction(
+                reference: pending.transaction.reference, verifier: pending.transaction.verifier),
+                label: label, proof: NativeSessionProof())
+            try enrollment.savePendingSignIn(pending)
+        }
+        guard let redemption = pending.redemption else { throw NativeEnrollmentError.invalidIdentity }
+        let result = try await api.redeem(redemption)
+        let record = try enrollment.retainSignedInSession(origin: pending.origin, proof: redemption.proof,
+                                                           result: result, label: label)
+        if pending.rememberMethod, let method = result.method {
+            UserDefaults.standard.set(method.rawValue, forKey: Self.methodPreferenceKey(pending.origin))
+        }
+        try enrollment.clearPendingSignIn()
+        try await connectSignedInSession(record)
+    }
+
+    func retrySharedSignIn(origin: URL) async throws -> Bool {
+        guard let pending = try enrollment.pendingSignIn(), pending.origin == origin,
+              pending.redemption != nil else { return false }
+        do {
+            try await finishSharedSignIn(pending)
+            return true
+        } catch let error as APIError where error.status == 401 {
+            try enrollment.clearPendingSignIn()
+            return false
+        }
+    }
+
+    static func methodPreferenceKey(_ origin: URL) -> String {
+        "harklight-last-sign-in-method:" + origin.absoluteString
+    }
+
     func connectSignedInSession(_ record: NativeEnrollmentRecord) async throws {
         guard let personID = record.personID,
               case let .active(origin, proof) = record.sessionMigration else {

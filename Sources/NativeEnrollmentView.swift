@@ -1,3 +1,6 @@
+import AuthenticationServices
+import HarklightNativeRelay
+import UIKit
 import SwiftUI
 
 @MainActor
@@ -356,5 +359,156 @@ struct UnconfirmedAccountRemovalNotice: View {
                 Text(message).foregroundStyle(.hkSecondary)
             }
         }
+    }
+}
+
+@MainActor
+struct NativeSharedSignInView: View {
+    let launch: NativeAppLaunch
+    @State private var server = "https://app.harklight.net"
+    @State private var origin: URL?
+    @State private var methods: [NativeSignInMethod] = []
+    @State private var code = ""
+    @State private var rememberMethod = false
+    @State private var rememberedMethod: NativeSignInMethod?
+    @State private var busy = false
+    @State private var message: String?
+    @State private var sheet = NativeSignInSheet()
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 16) {
+                Text("Harklight").font(.largeTitle.bold())
+                Text("Sign in").font(.title2)
+                TextField("Server", text: $server)
+                    .keyboardType(.URL)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .textFieldStyle(.roundedBorder)
+                Button("Continue") { run(loadMethods) }
+                    .buttonStyle(.bordered)
+                if let origin {
+                    ForEach(methods, id: \.self) { method in
+                        if method == .ownerCode {
+                            SecureField("One-time code", text: $code)
+                                .textContentType(.oneTimeCode)
+                                .textFieldStyle(.roundedBorder)
+                        }
+                        Button {
+                            run { try await signIn(method, origin: origin) }
+                        } label: {
+                            HStack {
+                                Text(title(for: method))
+                                if rememberedMethod == method {
+                                    Text("Last used").font(.caption)
+                                }
+                            }
+                            .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(method == .ownerCode && code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
+                    Toggle("Remember my sign-in preference on this device", isOn: $rememberMethod)
+                        .font(.footnote)
+                    Button("Use my remembered preference") {
+                        let saved = UserDefaults.standard.string(forKey: NativeAppLaunch.methodPreferenceKey(origin))
+                            .flatMap(NativeSignInMethod.init(rawValue:))
+                        rememberedMethod = saved.flatMap { methods.contains($0) ? $0 : nil }
+                    }
+                    .font(.footnote)
+                }
+                if let message { Text(message).font(.footnote) }
+            }
+            .frame(maxWidth: 430)
+            .padding(24)
+            .frame(maxWidth: .infinity)
+        }
+        .disabled(busy)
+        .onChange(of: server) {
+            origin = nil
+            methods = []
+            rememberedMethod = nil
+            code = ""
+        }
+        .task { run(loadMethods) }
+    }
+
+    private func loadMethods() async throws {
+        let value = server.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard var components = URLComponents(string: value) else { throw URLError(.badURL) }
+        components.host = components.host?.lowercased()
+        if components.port == 443 { components.port = nil }
+        if components.path == "/" { components.path = "" }
+        guard let selected = components.url else { throw URLError(.badURL) }
+        let transport = try HTTPSClientAPITransport(origin: selected)
+        defer { transport.close() }
+        if try await launch.retrySharedSignIn(origin: selected) { return }
+        methods = try await NativeSignInAPI(transport: transport).methods()
+        origin = selected
+    }
+
+    private func signIn(_ method: NativeSignInMethod, origin: URL) async throws {
+        let pending = try await launch.beginSharedSignIn(origin: origin, rememberMethod: rememberMethod)
+        if method == .ownerCode {
+            try await launch.finishSharedSignIn(pending, code: code.trimmingCharacters(in: .whitespacesAndNewlines))
+            return
+        }
+        guard let url = pending.transaction.sheetURL(origin: origin, method: method) else {
+            throw URLError(.badURL)
+        }
+        let callback = try await sheet.authenticate(url)
+        guard pending.transaction.matchesCallback(callback) else { throw URLError(.badServerResponse) }
+        try await launch.finishSharedSignIn(pending)
+    }
+
+    private func run(_ operation: @escaping @MainActor () async throws -> Void) {
+        guard !busy else { return }
+        busy = true
+        message = nil
+        Task { @MainActor in
+            defer { busy = false }
+            do { try await operation() }
+            catch let error as ASWebAuthenticationSessionError where error.code == .canceledLogin {}
+            catch { message = "Sign-in couldn’t be completed. Try again." }
+        }
+    }
+
+    private func title(for method: NativeSignInMethod) -> String {
+        switch method {
+        case .google: "Sign in with Google"
+        case .apple: "Sign in with Apple"
+        case .emailCode: "Use an emailed code"
+        case .ownerCode: "Sign in with code"
+        case .passkey: "Use a passkey"
+        }
+    }
+}
+
+@MainActor
+private final class NativeSignInSheet: NSObject, ASWebAuthenticationPresentationContextProviding {
+    private var session: ASWebAuthenticationSession?
+    private var anchor: ASPresentationAnchor?
+
+    func authenticate(_ url: URL) async throws -> URL {
+        guard let anchor = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene })
+            .first(where: { $0.activationState == .foregroundActive })?.keyWindow else {
+            throw URLError(.cannotConnectToHost)
+        }
+        self.anchor = anchor
+        defer { self.anchor = nil; session = nil }
+        return try await withCheckedThrowingContinuation { continuation in
+            let session = ASWebAuthenticationSession(url: url, callbackURLScheme: "harklight") { url, error in
+                if let url { continuation.resume(returning: url) }
+                else { continuation.resume(throwing: error ?? URLError(.badServerResponse)) }
+            }
+            session.presentationContextProvider = self
+            session.prefersEphemeralWebBrowserSession = true
+            self.session = session
+            if !session.start() { continuation.resume(throwing: URLError(.cannotConnectToHost)) }
+        }
+    }
+
+    func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
+        anchor ?? ASPresentationAnchor()
     }
 }

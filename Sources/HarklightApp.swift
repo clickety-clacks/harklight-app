@@ -131,7 +131,7 @@ struct HarklightApp: App {
                 } else {
                     switch launch.state {
                     case .enrollmentRequired:
-                        NativeEnrollmentView(launch: launch)
+                        NativeSharedSignInView(launch: launch)
                     case .reenrolmentRequired:
                         v2ReenrolmentView
                     case let .fixture(store):
