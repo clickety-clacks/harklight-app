@@ -1152,9 +1152,23 @@ final class ConversationSampleUITests: XCTestCase {
         XCTAssertTrue(composer.waitForExistence(timeout: 5))
         XCTAssertFalse(app.otherElements["conversation-upload-cleanup-status"].exists, "Closing chat alone does not leave its message")
         dismissChatSheet(app)
-        let back = app.navigationBars.buttons.firstMatch
-        XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
-        back.tap()
+        let back = workspaceBackButton(in: app)
+        if UIDevice.current.userInterfaceIdiom != .pad || (back.exists && back.isHittable) {
+            XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
+            back.tap()
+        } else {
+            showInbox(app)
+            let other = app.descendants(matching: .any)["request-row-sample-review-0"]
+            guard let list = listContainer(app, containing: other),
+                  reveal(other, in: list, app: app) else { return }
+            other.tap()
+            let detail = app.scrollViews["message-card-scroll"]
+            XCTAssertTrue(detail.staticTexts["Review the studio welcome text"].waitForExistence(timeout: 5),
+                          "Selecting another row leaves the message in a split view.")
+            showInbox(app)
+            guard let list = listContainer(app, containing: row),
+                  reveal(row, in: list, app: app) else { return }
+        }
         XCTAssertTrue(row.waitForExistence(timeout: 5))
         row.tap()
         app.buttons["Chat"].tap()
@@ -1293,6 +1307,8 @@ final class ConversationSampleUITests: XCTestCase {
         func open(_ id: String, search: String, closed: Bool = false) {
             app.terminate()
             app.launch()
+            let sidebar = app.buttons["Show Sidebar"]
+            if sidebar.exists && sidebar.isHittable { sidebar.tap() }
             XCTAssertTrue(app.buttons["inbox-settings"].waitForExistence(timeout: 10))
             enterSearch(search, in: app)
             let row = app.descendants(matching: .any)["request-row-" + id]
@@ -1382,13 +1398,23 @@ final class ConversationSampleUITests: XCTestCase {
         let inputSurface = app.otherElements["sample-chat-input-surface"]
         // The saved accessibility hierarchy exposes the native presentation's
         // history and composer but has no Sheet node, so anchor the swipe to the history.
-        let history = app.scrollViews.firstMatch
+        let history = app.scrollViews["conversation-history-scroll"]
         XCTAssertTrue(composer.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(inputSurface.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(history.exists, app.debugDescription)
-        let start = history.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.03))
-        let end = history.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.85))
-        start.press(forDuration: 0.1, thenDragTo: end)
+        if UIDevice.current.userInterfaceIdiom == .pad {
+            let window = app.windows.firstMatch
+            let sheetLeft = history.frame.minX
+            XCTAssertGreaterThan(sheetLeft, window.frame.minX,
+                                 "The centered Chat sheet needs a visible dismissal area.")
+            window.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0))
+                .withOffset(CGVector(dx: (sheetLeft - window.frame.minX) / 2,
+                                     dy: history.frame.midY - window.frame.minY)).tap()
+        } else {
+            let start = history.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.03))
+            let end = history.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.85))
+            start.press(forDuration: 0.1, thenDragTo: end)
+        }
         XCTAssertTrue(inputSurface.waitForNonExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(composer.waitForNonExistence(timeout: 5), app.debugDescription)
     }
