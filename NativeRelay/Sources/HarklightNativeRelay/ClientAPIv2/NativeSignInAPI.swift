@@ -1,3 +1,4 @@
+import AttentionDomain
 import Foundation
 
 public enum NativeSignInMethod: String, Codable, Sendable, CaseIterable {
@@ -88,6 +89,58 @@ struct NativeSignInAPI: Sendable {
     func redeem(_ pending: NativeSessionRedemption) async throws -> Result {
         let response = try await transport.send(pending.request)
         return try JSONDecoder().decode(Result.self, from: response.body)
+    }
+
+    struct MigrationGrant: Decodable, Sendable {
+        let origin: URL
+        let token: String
+    }
+
+    struct Device: Decodable, Identifiable, Sendable {
+        let id: String
+        let label: String
+        let signedInAt: Int64?
+        let current: Bool
+
+        enum CodingKeys: String, CodingKey {
+            case id = "device_id"
+            case signedInAt = "signed_in_at"
+            case label, current
+        }
+    }
+
+    func migrationGrant() async throws -> MigrationGrant {
+        let response = try await transport.send(APIRequest(method: .post, path: "/v2/auth/migration-grants"))
+        return try JSONDecoder().decode(MigrationGrant.self, from: response.body)
+    }
+
+    func completeMigration(signature: String) async throws {
+        _ = try await post("/v2/auth/migration-complete", ["signature": signature])
+    }
+
+    func signOut() async throws {
+        _ = try await transport.send(APIRequest(method: .post, path: "/v2/auth/sign-out"))
+    }
+
+    func devices() async throws -> [Device] {
+        struct Response: Decodable {
+            let devices: [Device]
+        }
+        let response = try await transport.send(.get("/v2/devices"))
+        return try JSONDecoder().decode(Response.self, from: response.body).devices
+    }
+
+    func isKnown(deviceID: String) async throws -> Bool {
+        struct Response: Decodable {
+            let known: Bool
+        }
+        let response = try await transport.send(.get("/v2/devices/known", query: ["device_id": deviceID]))
+        return try JSONDecoder().decode(Response.self, from: response.body).known
+    }
+
+    func removeDevice(_ deviceID: String) async throws {
+        let path = "/v2/devices/" + ClientAPIWrites.component(ExactText(deviceID))
+        _ = try await transport.send(APIRequest(method: .delete, path: path))
     }
 
     private func post(_ path: String, _ fields: [String: String]) async throws -> APIResponse {

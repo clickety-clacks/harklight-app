@@ -52,6 +52,18 @@ private actor SignInFixture: ClientAPITransport {
             return APIResponse(status: 200, requestID: nil, body: Data(#"{"transaction":"fixture-transaction"}"#.utf8))
         case "/sign-in/code":
             return APIResponse(status: 204, requestID: nil, body: Data())
+        case "/v2/auth/migration-grants":
+            return APIResponse(status: 200, requestID: nil, body: Data(
+                #"{"origin":"https://server.example","token":"fixture-grant"}"#.utf8
+            ))
+        case "/v2/auth/migration-complete", "/v2/auth/sign-out", "/v2/devices/old-device":
+            return APIResponse(status: 204, requestID: nil, body: Data())
+        case "/v2/devices":
+            return APIResponse(status: 200, requestID: nil, body: Data(
+                #"{"devices":[{"device_id":"old-device","label":"iPhone","signed_in_at":null,"current":false}]}"#.utf8
+            ))
+        case "/v2/devices/known":
+            return APIResponse(status: 200, requestID: nil, body: Data(#"{"known":true}"#.utf8))
         case "/v2/auth/sign-in":
             return APIResponse(status: 200, requestID: nil, body: Data(
                 #"{"person_id":"person-1","device_id":"device-1","duplicate":false,"method":"owner_code"}"#.utf8
@@ -288,6 +300,27 @@ final class HTTPSClientAPITransportTests: XCTestCase {
         ] {
             XCTAssertFalse(transaction.matchesCallback(try XCTUnwrap(URL(string: rejected))))
         }
+    }
+
+    func testMigrationAndDeviceManagementUseTheSpecifiedRoutes() async throws {
+        let fixture = SignInFixture()
+        let api = NativeSignInAPI(transport: fixture)
+        let grant = try await api.migrationGrant()
+        XCTAssertEqual(grant.origin.absoluteString, "https://server.example")
+        XCTAssertEqual(grant.token, "fixture-grant")
+        try await api.completeMigration(signature: "frozen-signature")
+        let devices = try await api.devices()
+        XCTAssertEqual(devices.first?.id, "old-device")
+        XCTAssertNil(devices.first?.signedInAt)
+        let known = try await api.isKnown(deviceID: "old-device")
+        XCTAssertTrue(known)
+        try await api.removeDevice("old-device")
+        try await api.signOut()
+        let sent = await fixture.requests
+        XCTAssertEqual(sent.map(\.method), [.post, .post, .get, .get, .delete, .post])
+        XCTAssertEqual(sent[3].query, ["device_id": "old-device"])
+        XCTAssertEqual(try JSONDecoder().decode([String: String].self, from: XCTUnwrap(sent[1].body)),
+                       ["signature": "frozen-signature"])
     }
 
     private func decodeBase64URL(_ string: String) throws -> Data {
