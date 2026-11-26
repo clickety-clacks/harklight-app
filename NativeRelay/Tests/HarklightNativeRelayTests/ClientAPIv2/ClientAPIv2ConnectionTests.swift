@@ -19,12 +19,14 @@ private final class WithMe: ClientAPITransport, @unchecked Sendable {
     var me: String?
     /// Fails this many `/v2/me` reads first.
     var failMe = 0
+    var refuseShared = false
     private(set) var meReads = 0
     init(_ server: FakeClientAPIServer, me: String?) {
         self.server = server
         self.me = me
     }
     func send(_ request: APIRequest) async throws -> APIResponse {
+        if refuseShared && request.sharedMessages { throw Self.sharedUnavailable }
         guard request.path == "/v2/me" else { return try await server.send(request) }
         meReads += 1
         if failMe > 0 { failMe -= 1; throw URLError(.networkConnectionLost) }
@@ -33,6 +35,14 @@ private final class WithMe: ClientAPITransport, @unchecked Sendable {
     }
     func changeFeed(after: Rev) -> AsyncThrowingStream<FeedEvent, any Error> { server.changeFeed(after: after) }
     func changeBatch(after: Rev) async throws -> FeedBatch { try await server.changeBatch(after: after) }
+    func changeBatch(after: Rev, continuation: String) async throws -> FeedBatch {
+        if refuseShared { throw Self.sharedUnavailable }
+        return try await server.changeBatch(after: after)
+    }
+
+    private static var sharedUnavailable: APIError {
+        APIError(status: 400, token: .unsupported, retryable: false, requestID: nil)
+    }
 }
 
 /// Refuses every request, as with no connection.
@@ -122,19 +132,43 @@ final class ClientAPIv2ConnectionTests: XCTestCase {
                        "An in-memory cursor cannot skip a push after its saved model is gone.")
     }
 
-    func testNothingIsPublishedUntilTheRulesAreRead() async throws {
+    func testForegroundDoesNotStartSyncOrSavedWritesBeforeMe() async throws {
         let server = FakeClientAPIServer()
         server.inboxItems = [V2Fixture.item("a", rev: 1, rankKey: "a")]
         let repository = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
         let transport = WithMe(server, me: nil)
         let v2 = try connection(transport, repository)
+        let key = UUID()
+        _ = try await v2.outbox.enqueue(target: ExactText("a"), operation: "mark_seen",
+            write: ClientAPIWrites.seen(itemID: ExactText("a")).write, idempotencyKey: key)
         let run = Task { await v2.runForeground() }
-        await soon("the baseline is held") { v2.model.heldCursor != nil }
-        XCTAssertTrue(try itemIDs(repository).isEmpty, "Without /v2/me no screen is judged by the wrong rules.")
+        defer { run.cancel() }
+        await soon("startup retries discovery") { transport.meReads >= 2 }
+        XCTAssertNil(v2.model.heldCursor)
+        XCTAssertTrue(server.received.isEmpty, "Neither Sync nor the saved write uses an unnegotiated scope.")
         transport.me = me
+        await soon("the baseline is published") { (try? self.itemIDs(repository)) == ["a"] }
+        await soon("the saved write is sent") { server.received.contains { $0.idempotencyKey == key } }
+    }
+
+    func testBackgroundCatchUpRenegotiatesAfterSharedOptInIsWithdrawn() async throws {
+        let server = FakeClientAPIServer()
+        server.inboxItems = [V2Fixture.item("ordinary", rev: 1, rankKey: "a")]
+        let repository = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        let transport = WithMe(server, me: me)
+        let v2 = try connection(transport, repository)
         try await v2.refreshMe()
-        XCTAssertEqual(try itemIDs(repository), ["a"])
-        run.cancel()
+        _ = try v2.model.configureSharedMessages(serverID: ExactText("server"))
+        try v2.model.rebaseline(items: [], counts: APICounts(unresolved: 0),
+                                position: 40, continuation: ExactText("old-token"))
+        transport.refuseShared = true
+
+        try await v2.catchUp()
+
+        XCTAssertEqual(transport.meReads, 2)
+        XCTAssertNil(v2.model.snapshot.sharedContinuation)
+        XCTAssertEqual(try itemIDs(repository), ["ordinary"])
+        XCTAssertEqual(v2.model.heldCursor, server.head)
     }
 
     func testARelaunchShowsTheSavedModelUnderTheSavedRulesBeforeAnyRequest() async throws {
