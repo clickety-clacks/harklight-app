@@ -79,7 +79,7 @@ final class ClientAPIv2ConnectionTests: XCTestCase {
 
     private func connection(_ transport: any ClientAPITransport, _ repository: ClientRepository,
                             directory: URL? = nil,
-                            errors: RecordingErrorLogV2 = RecordingErrorLogV2()) throws -> ClientAPIv2Connection {
+                            errors: any ErrorLogging = RecordingErrorLogV2()) throws -> ClientAPIv2Connection {
         try ClientAPIv2Connection(transport: transport, repository: repository, context: context,
                                   directory: directory, errors: errors,
                                   waitBeforeRetry: { _ in try await Task.sleep(for: .milliseconds(20)) },
@@ -310,6 +310,39 @@ final class ClientAPIv2ConnectionTests: XCTestCase {
         XCTAssertEqual(failed.map(\.idempotencyKey), [refused.idempotencyKey], "It stays failed, with Retry.")
         run.cancel()
         second.cancel()
+    }
+
+    func testSuccessfulPublishClearsOnlyTheRecoveredInboxWarning() async throws {
+        let server = FakeClientAPIServer()
+        server.inboxItems = [V2Fixture.item("a", rev: 1, rankKey: "a")]
+        let persistence = MemoryPendingActionPersistence()
+        let repository = try ClientRepository(context: context, persistence: persistence)
+        let errors = ErrorLogStore(fileURL: nil, build: .unavailable)
+        let v2 = try connection(WithMe(server, me: me), repository, errors: errors)
+        try await v2.refreshMe()
+        try await v2.catchUp()
+        XCTAssertEqual(try itemIDs(repository), ["a"])
+
+        persistence.failNextCommit()
+        _ = server.commit("item", V2Fixture.item("b", rev: Int(server.head) + 1, rankKey: "b"))
+        try await v2.catchUp()
+        XCTAssertEqual(try itemIDs(repository), ["a"])
+        guard case let .failing(failure)? = ErrorLogDisplay.inContext(
+            records: errors.records, surface: .inbox, now: Date()) else {
+            return XCTFail("The local publish failure must remain visible in Inbox.")
+        }
+        XCTAssertEqual(failure.operation, "publish")
+        XCTAssertEqual(failure.phase, "restore")
+        XCTAssertEqual(failure.code, "restore_persistence")
+
+        errors.report(ErrorLogReport(concern: .snapshot, connectionRole: .request,
+            operation: "me_save", phase: "save", reason: .app("save_failed"), retryable: true))
+        _ = server.commit("item", V2Fixture.item("c", rev: Int(server.head) + 1, rankKey: "c"))
+        try await v2.catchUp()
+        XCTAssertEqual(try itemIDs(repository), ["a", "b", "c"])
+        let recovered = try XCTUnwrap(errors.records.first { $0.id == failure.id })
+        XCTAssertTrue(recovered.isResolved, "A successful repository restore clears its earlier failure.")
+        XCTAssertEqual(errors.records.filter { !$0.isResolved }.map(\.operation), ["me_save"])
     }
 
     func testAFailedPublishRecordsItsCauseByName() {
