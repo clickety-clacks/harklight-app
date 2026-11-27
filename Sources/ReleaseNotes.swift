@@ -875,10 +875,32 @@ struct ReleaseNotesHistoryView: View {
     let notes: [HarklightReleaseNote]
 
     var body: some View {
-        List {
-            ForEach(notes) { note in
-                ReleaseNoteSection(note: note)
+        // The grouped List's UIKit focus guides can abort
+        // during a long history scroll on iPad. The history is read-only.
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 24) {
+                ForEach(notes) { note in
+                    VStack(alignment: .leading, spacing: 8) {
+                        ReleaseNoteHeading(note: note)
+                            .accessibilityAddTraits(.isHeader)
+                            .padding(.horizontal, 16)
+                        VStack(spacing: 0) {
+                            ForEach(note.highlights) { highlight in
+                                if highlight.id != note.highlights.first?.id {
+                                    Divider().padding(.leading, 16)
+                                }
+                                ReleaseNoteRow(highlight: highlight)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding(.horizontal, 16)
+                                    .padding(.vertical, 10)
+                            }
+                        }
+                        .background(.hkGroup, in: RoundedRectangle(cornerRadius: 12))
+                    }
+                }
             }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 24)
         }
         .harklightListSurface(.sheet)
         .navigationTitle("Release notes")
@@ -919,26 +941,34 @@ private struct ReleaseNoteSection: View {
             }
             .listRowBackground(Rectangle().fill(.hkGroup))
         } header: {
-            VStack(alignment: .leading, spacing: 2) {
-                if let buildIdentifier = note.buildIdentifier {
-                    Text("Version \(note.marketingVersion) · Build \(buildIdentifier)",
-                         comment: "Marketing version and first shipped build for this release-note entry.")
-                } else if let confirmedBuild = note.confirmedContainingBuildIdentifier {
-                    Text("Version \(note.marketingVersion) · First confirmed in Build \(confirmedBuild)",
-                         comment: "Earliest evidenced containing build; earlier shipment is unconfirmed.")
-                } else if let historyDateDescription = note.historyDateDescription {
-                    Text("Version \(note.marketingVersion) · \(historyDateDescription)",
-                         comment: "Marketing version and date associated with this history-only entry.")
-                }
-                if note.buildIdentifier != nil || note.confirmedContainingBuildIdentifier != nil,
-                   let historyDateDescription = note.historyDateDescription {
-                    Text(historyDateDescription)
-                }
-            }
-            .harklightType(.settingsHeading)
-            .foregroundStyle(.hkLabel)
-            .textCase(nil)
+            ReleaseNoteHeading(note: note)
         }
+    }
+}
+
+private struct ReleaseNoteHeading: View {
+    let note: HarklightReleaseNote
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            if let buildIdentifier = note.buildIdentifier {
+                Text("Version \(note.marketingVersion) · Build \(buildIdentifier)",
+                     comment: "Marketing version and first shipped build for this release-note entry.")
+            } else if let confirmedBuild = note.confirmedContainingBuildIdentifier {
+                Text("Version \(note.marketingVersion) · First confirmed in Build \(confirmedBuild)",
+                     comment: "Earliest evidenced containing build; earlier shipment is unconfirmed.")
+            } else if let historyDateDescription = note.historyDateDescription {
+                Text("Version \(note.marketingVersion) · \(historyDateDescription)",
+                     comment: "Marketing version and date associated with this history-only entry.")
+            }
+            if note.buildIdentifier != nil || note.confirmedContainingBuildIdentifier != nil,
+               let historyDateDescription = note.historyDateDescription {
+                Text(historyDateDescription)
+            }
+        }
+        .harklightType(.settingsHeading)
+        .foregroundStyle(.hkLabel)
+        .textCase(nil)
     }
 }
 
