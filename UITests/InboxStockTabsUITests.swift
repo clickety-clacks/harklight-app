@@ -353,7 +353,8 @@ final class InboxStockTabsUITests: XCTestCase {
     func testInboxAndRepliedPullToRefreshRunAndKeepFailureVisible() {
         for title in ["Inbox", "Replied"] {
             let app = XCUIApplication()
-            app.launchArguments = ["--reset-attention-fixture", "--harklight-test-list-refresh"]
+            app.launchArguments = ["--reset-attention-fixture", "--harklight-test-list-refresh",
+                                   "--harklight-ui-diagnostics"]
             if title == "Replied" { app.launchArguments.append("--harklight-samples") }
             app.launch()
 
@@ -373,9 +374,11 @@ final class InboxStockTabsUITests: XCTestCase {
                 finish.tap()
                 XCTAssertTrue(app.staticTexts["Answered locally · nothing sent"].waitForExistence(timeout: 5),
                               app.debugDescription)
-                let back = workspaceBackButton(in: app)
-                XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
-                back.tap()
+                if !listVisibleBesideDetail(in: app) {
+                    let back = workspaceBackButton(in: app)
+                    XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
+                    back.tap()
+                }
                 leaveWorkspaceSearch(in: app)
             }
 
@@ -392,10 +395,14 @@ final class InboxStockTabsUITests: XCTestCase {
             let warning = app.staticTexts["inbox-warning-message"].firstMatch
             XCTAssertFalse(warning.exists,
                            "\(title) must start without a warning so an existing status cannot satisfy the refresh check.\n\(app.debugDescription)")
-            let refreshStart = firstRow.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.1))
-            refreshStart.press(forDuration: 0.05,
-                               thenDragTo: refreshStart.withOffset(CGVector(dx: 0, dy: 310)),
-                               withVelocity: .slow, thenHoldForDuration: 0.3)
+            if UIDevice.current.userInterfaceIdiom == .pad {
+                list.swipeDown()
+            } else {
+                let refreshStart = firstRow.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.1))
+                refreshStart.press(forDuration: 0.05,
+                                   thenDragTo: refreshStart.withOffset(CGVector(dx: 0, dy: 310)),
+                                   withVelocity: .slow, thenHoldForDuration: 0.3)
+            }
 
             XCTAssertTrue(warning.waitForExistence(timeout: 8), app.debugDescription)
             XCTAssertEqual(warning.label, "Waiting for the server. Your pending actions are saved.")
