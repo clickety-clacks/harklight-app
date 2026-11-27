@@ -352,6 +352,7 @@ final class ClientAPIv2ConnectionTests: XCTestCase {
         server.inboxItems = [V2Fixture.item("a", rev: 1, rankKey: "a")]
         let persistence = MemoryPendingActionPersistence()
         let repository = try ClientRepository(context: context, persistence: persistence)
+        let port = AttentionDomainPort(store: repository)
         let errors = ErrorLogStore(fileURL: nil, build: .unavailable)
         let v2 = try connection(WithMe(server, me: me), repository, directory: directory, errors: errors)
         try await v2.refreshMe()
@@ -360,7 +361,17 @@ final class ClientAPIv2ConnectionTests: XCTestCase {
         persistence.failNextCommit()
         let savedRevision = server.commit("item", V2Fixture.item("b", rev: Int(server.head) + 1, rankKey: "b"))
         try await v2.catchUp()
-        XCTAssertEqual(try itemIDs(repository), ["a"])
+        let visible = try port.observe(context: port.context)
+        XCTAssertEqual(visible.requests.map(\.key.messageID.rawValue), ["a"])
+        let saved = try XCTUnwrap(visible.requests.first)
+        let opened = try XCTUnwrap(port.inspect(context: port.context, request: saved.key).requests.first)
+        XCTAssertEqual(opened.title, ExactText("Question"))
+        XCTAssertNotNil(opened.selector, "The committed row remains inspectable.")
+        let pendingKey = RequestKey(accountScope: saved.key.accountScope, senderID: saved.key.senderID,
+                                    messageID: ExactText("b"))
+        XCTAssertThrowsError(try port.inspect(context: port.context, request: pendingKey),
+                             "The fetched-only row must not acquire an action selector.")
+        XCTAssertTrue(try repository.snapshot(context: context).pendingMessageOpens.isEmpty)
         XCTAssertEqual(v2.model.heldCursor, savedRevision)
         let storedModel = ServerModelV2Store(fileURL: directory.appendingPathComponent("server-model-v2.json"))
         XCTAssertEqual(storedModel.heldCursor, savedRevision)
