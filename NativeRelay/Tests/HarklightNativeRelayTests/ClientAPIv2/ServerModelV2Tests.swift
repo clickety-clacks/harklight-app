@@ -78,6 +78,29 @@ final class ServerModelV2Tests: XCTestCase {
         XCTAssertEqual(item.availability?.state, "not_listening")
     }
 
+    func testAlarmMarkerSurvivesBaselineAndRevisionWithoutChangingRankOrder() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let store = ServerModelV2Store(fileURL: url)
+        let ordinary = try APIItem(json: V2Fixture.json(V2Fixture.item("ordinary", rev: 1, rankKey: "b")))
+        let marked = try APIItem(json: V2Fixture.json(V2Fixture.item("marked", rev: 2, rankKey: "a",
+            message: #"{"title":"Alarm sample","alarm":true}"#)))
+        try store.rebaseline(items: [ordinary, marked], counts: APICounts(unresolved: 2), position: 2)
+
+        let restored = ServerModelV2Store(fileURL: url)
+        XCTAssertEqual(restored.snapshot.orderedItems.map(\.itemID), [ExactText("marked"), ExactText("ordinary")])
+        let key = RequestKey(accountScope: ExactText("person"), senderID: marked.sender, messageID: marked.itemID)
+        let saved = try XCTUnwrap(restored.snapshot.items[marked.itemID])
+        XCTAssertTrue(StoredRequest(key: key, originalPayload: saved.message).isAlarm)
+        XCTAssertFalse(StoredRequest(key: key, originalPayload: ordinary.message).isAlarm)
+
+        let cleared = V2Fixture.item("marked", rev: 3, rankKey: "c", message: #"{"title":"Revised"}"#)
+        try restored.apply(kind: "item", rev: 3, data: V2Fixture.json(cleared))
+        let revised = try XCTUnwrap(restored.snapshot.items[marked.itemID])
+        XCTAssertFalse(StoredRequest(key: key, originalPayload: revised.message).isAlarm)
+        XCTAssertEqual(restored.snapshot.orderedItems.map(\.itemID), [ExactText("ordinary"), ExactText("marked")])
+    }
+
     func testABlankProgressStageItemIsKeptNotDropped() throws {
         let store = ServerModelV2Store(fileURL: nil)
         for (id, progress) in [("blank", #"{"percent":40,"stage":""}"#), ("absent", #"{"percent":40}"#)] {

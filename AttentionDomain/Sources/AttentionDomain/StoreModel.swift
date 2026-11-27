@@ -600,6 +600,12 @@ public struct StoredRequest: Equatable, Codable, Sendable {
         return MessageKindValue(rawValue: rawValue)
     }
 
+    /// The server marks Alarm within the retained message. Other values leave
+    /// the ordinary priority presentation in place.
+    public var isAlarm: Bool {
+        originalPayload.uniqueValue(named: "alarm") == .bool(true)
+    }
+
     /// Sender-authored creation time, retained in the original message as Unix
     /// milliseconds. This is display metadata only; inbox order comes from the
     /// server-assigned acceptance order.

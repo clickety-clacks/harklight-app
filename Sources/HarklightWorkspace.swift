@@ -99,19 +99,22 @@ extension HarklightMessageType {
 }
 
 enum InboxPriorityDisplay: String, Equatable {
+    case alarm
     case urgent = "now"
     case high
     case low
 
     var title: LocalizedStringResource {
         switch self {
+        case .alarm: "Alarm"
         case .urgent: "Urgent"
         case .high: "High priority"
         case .low: "Low priority"
         }
     }
 
-    static func forEntry(score: Double?, priority: InboxMessagePriority?) -> Self? {
+    static func forEntry(score: Double?, priority: InboxMessagePriority?, isAlarm: Bool = false) -> Self? {
+        if isAlarm { return .alarm }
         if let score, score.isFinite, (0.0...1.0).contains(score) {
             return forScore(score)
         }
@@ -696,6 +699,7 @@ struct InboxRequestRow: Identifiable {
     /// by the send queue; nil when nothing is outstanding.
     var submissionProgress: InboxRowSubmissionProgress? = nil
     var tier: InboxAttentionTier = .middle
+    var isAlarm = false
     var inboxPriority: InboxMessagePriority? = nil
     var inboxScore: Double? = nil
     var inboxReplyPriorities: [UInt64: InboxMessagePriority] = [:]
@@ -2842,7 +2846,7 @@ struct InboxPriorityRowTreatment: Equatable {
         -> InboxPriorityRowTreatment? {
         let palette = HarklightDesignSystem.palette(for: colorScheme)
         return switch level {
-        case .urgent?: Self(washHex: palette.derived.urgentWash, edgeHex: palette.color.coral)
+        case .alarm?, .urgent?: Self(washHex: palette.derived.urgentWash, edgeHex: palette.color.coral)
         case .high?: Self(washHex: palette.derived.highWash, edgeHex: palette.color.amber)
         case .low?, nil: nil
         }
@@ -3000,8 +3004,9 @@ struct InboxRowContent: View {
     private var iconRole: MessageIconRole { row.messageMetadata.iconRole(for: messageType) }
 
     private var priorityMarkerLevel: InboxPriorityDisplay? {
-        guard let level = InboxPriorityDisplay.forEntry(score: row.inboxScore, priority: row.inboxPriority),
-              level == .high || level == .urgent else { return nil }
+        guard let level = InboxPriorityDisplay.forEntry(
+            score: row.inboxScore, priority: row.inboxPriority, isAlarm: row.isAlarm),
+              level == .high || level == .urgent || level == .alarm else { return nil }
         return level
     }
 
@@ -3191,7 +3196,7 @@ struct InboxRowContent: View {
         .padding(.horizontal, HarklightDesignSystem.shape(.rowHorizontalPadding))
         .padding(.vertical, HarklightDesignSystem.shape(.rowVerticalPadding))
         .foregroundStyle(palette.text)
-        .inboxRowSurface(priority: InboxPriorityDisplay.forEntry(score: row.inboxScore, priority: row.inboxPriority),
+        .inboxRowSurface(priority: priorityMarkerLevel,
                          openType: selected ? messageType : nil)
         .accessibilityElement(children: .combine)
     }
@@ -3368,7 +3373,7 @@ private struct ReplyItemNormalRowContent: View {
         return switch priority {
         case .urgent: String(localized: "Previous priority: Urgent")
         case .high: String(localized: "Previous priority: High priority")
-        case .low: nil
+        case .alarm, .low: nil
         }
     }
 
