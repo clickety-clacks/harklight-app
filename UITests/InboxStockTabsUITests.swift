@@ -196,10 +196,66 @@ final class InboxStockTabsUITests: XCTestCase {
         guard UIDevice.current.userInterfaceIdiom == .phone else {
             throw XCTSkip("Requires an iPhone mailbox toolbar.")
         }
+        let originalOrientation = XCUIDevice.shared.orientation
+        defer { XCUIDevice.shared.orientation = originalOrientation }
+        XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()
         app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
         app.launch()
+        verifyMailboxSearchButton(in: app)
+    }
 
+    func testRegularWidthPhoneMailboxSearchStartsAsAButton() throws {
+        guard UIDevice.current.userInterfaceIdiom == .phone else {
+            throw XCTSkip("Requires an iPhone mailbox toolbar.")
+        }
+        let originalOrientation = XCUIDevice.shared.orientation
+        let originalAppearance = XCUIDevice.shared.appearance
+        defer {
+            XCUIDevice.shared.orientation = originalOrientation
+            XCUIDevice.shared.appearance = originalAppearance
+        }
+        XCUIDevice.shared.orientation = .landscapeLeft
+        XCUIDevice.shared.appearance = .light
+
+        let app = XCUIApplication()
+        app.launchArguments = ["--reset-attention-fixture", "--harklight-samples",
+                               "--harklight-ui-diagnostics"]
+        app.launch()
+        let diagnostics = app.descendants(matching: .any)["inbox-ui-diagnostics"].firstMatch
+        XCTAssertTrue(diagnostics.waitForExistence(timeout: 10))
+        guard diagnostics.label.contains("sizeClass=regular") else {
+            throw XCTSkip("Requires an iPhone that has a regular horizontal size class in landscape.")
+        }
+        attachScreenshot("Regular-width iPhone mailbox at rest", from: app)
+        verifyMailboxSearchButton(in: app)
+    }
+
+    func testRegularWidthIPadMailboxSearchStartsAsAButton() throws {
+        guard UIDevice.current.userInterfaceIdiom == .pad else {
+            throw XCTSkip("Requires an iPad mailbox sidebar.")
+        }
+        let originalOrientation = XCUIDevice.shared.orientation
+        let originalAppearance = XCUIDevice.shared.appearance
+        defer {
+            XCUIDevice.shared.orientation = originalOrientation
+            XCUIDevice.shared.appearance = originalAppearance
+        }
+        XCUIDevice.shared.orientation = .landscapeLeft
+        XCUIDevice.shared.appearance = .light
+
+        let app = XCUIApplication()
+        app.launchArguments = ["--reset-attention-fixture", "--harklight-samples",
+                               "--harklight-ui-diagnostics"]
+        app.launch()
+        let diagnostics = app.descendants(matching: .any)["inbox-ui-diagnostics"].firstMatch
+        XCTAssertTrue(diagnostics.waitForExistence(timeout: 10))
+        XCTAssertTrue(diagnostics.label.contains("sizeClass=regular"))
+        attachScreenshot("Regular-width iPad mailbox at rest", from: app)
+        verifyMailboxSearchButton(in: app)
+    }
+
+    private func verifyMailboxSearchButton(in app: XCUIApplication) {
         let picker = app.segmentedControls["inbox-mailbox-picker"]
         let searchButton = app.buttons.matching(
             NSPredicate(format: "label IN %@", ["Search", "Search messages"])).firstMatch
@@ -208,7 +264,7 @@ final class InboxStockTabsUITests: XCTestCase {
         XCTAssertTrue(searchButton.waitForExistence(timeout: 5))
         XCTAssertTrue(searchButton.isHittable)
         XCTAssertFalse(app.searchFields.allElementsBoundByIndex.contains(where: \.isHittable))
-        attachScreenshot("Compact mailbox and collapsed search button", from: app)
+        attachScreenshot("Mailbox and collapsed search button", from: app)
 
         searchButton.tap()
         let field = app.searchFields.firstMatch
@@ -221,8 +277,16 @@ final class InboxStockTabsUITests: XCTestCase {
         field.typeText("Archive")
         let approval = app.descendants(matching: .any)["sample-approval-0"]
         XCTAssertTrue(approval.waitForExistence(timeout: 5))
-        leaveWorkspaceSearch(in: app)
+        if UIDevice.current.userInterfaceIdiom == .pad {
+            let clear = field.buttons["Clear text"]
+            XCTAssertTrue(clear.exists && clear.isHittable)
+            clear.tap()
+        } else {
+            leaveWorkspaceSearch(in: app)
+        }
         XCTAssertTrue(searchButton.waitForExistence(timeout: 5))
+        XCTAssertTrue(searchButton.isHittable)
+        XCTAssertFalse(app.searchFields.allElementsBoundByIndex.contains(where: \.isHittable))
         XCTAssertTrue(picker.buttons["Inbox"].isSelected)
     }
 

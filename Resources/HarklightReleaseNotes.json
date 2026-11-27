@@ -187,7 +187,7 @@
     {
       "id": "post-215-saved-data-connection-fix",
       "marketingVersion": "0.2.0",
-      "testFlightBuildNumber": null,
+      "testFlightBuildNumber": 363,
       "highlights": [
         {
           "id": "protocol-0-2-compatibility",
@@ -272,6 +272,19 @@
           "symbol": "doc.on.doc",
           "title": "Copy a whole message",
           "detail": "The message text menu offers Select All so you can copy the whole message as well as a selected passage. This fix is pending formal testing."
+        }
+      ]
+    },
+    {
+      "id": "mailbox-controls-all-layouts",
+      "marketingVersion": "0.2.0",
+      "testFlightBuildNumber": null,
+      "highlights": [
+        {
+          "id": "mailbox-controls-all-layouts",
+          "symbol": "magnifyingglass",
+          "title": "Consistent Inbox controls on iPhone and iPad",
+          "detail": "Inbox and Replied have one outline at every width. Tap the Search button to open and focus the search field."
         }
       ]
     }
