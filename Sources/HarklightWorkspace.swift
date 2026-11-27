@@ -2389,6 +2389,7 @@ struct InboxList: View {
     }
 
     private func updateScrollPhase(from oldPhase: ScrollPhase, to newPhase: ScrollPhase) {
+        if newPhase == .interacting { sidebarRefreshArmed = false }
         if oldPhase == .interacting, newPhase != .interacting {
             let shouldRefresh = sidebarRefreshArmed
             sidebarRefreshArmed = false
