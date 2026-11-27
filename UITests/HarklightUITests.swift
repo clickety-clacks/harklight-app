@@ -499,7 +499,7 @@ final class HarklightUITests: XCTestCase {
         // returns after Back, so measure the row from the header's visible bottom edge.
         let navigationBar = app.navigationBars.firstMatch
         let visibleListAnchor: () -> CGFloat = {
-            let visibleHeaderBottom = brand.isHittable
+            let visibleHeaderBottom = brand.exists && brand.isHittable
                 ? navigationBar.frame.maxY
                 : navigationBar.frame.minY
             return review.frame.minY - max(list.frame.minY, visibleHeaderBottom)
@@ -527,12 +527,8 @@ final class HarklightUITests: XCTestCase {
         XCTAssertTrue(review.exists, "The tapped untouched request remains in Inbox after native Back.")
         XCTAssertTrue(facilities.exists, "The other untouched request remains in Inbox after native Back.")
         attachScreenshot("Last viewed row in Inbox", from: app)
-        let kept = NSPredicate { _, _ in
-            abs(visibleListAnchor() - scrolledAnchor) <= 1
-        }
-        let keptPosition = XCTNSPredicateExpectation(predicate: kept, object: nil)
-        XCTAssertEqual(XCTWaiter().wait(for: [keptPosition], timeout: 3), .completed,
-                       "Back without switching messages must preserve the tapped row's visible position below the header: \(visibleListAnchor()), expected \(scrolledAnchor).\n\(app.debugDescription)")
+        XCTAssertEqual(visibleListAnchor(), scrolledAnchor, accuracy: 1,
+                       "Returning without switching messages preserves the tapped row's visible position below the header.\n\(app.debugDescription)")
     }
 
     func testSplitViewAdaptationKeepsTheSelectedMessage() {
