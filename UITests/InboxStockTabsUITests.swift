@@ -231,6 +231,30 @@ final class InboxStockTabsUITests: XCTestCase {
         verifyMailboxSearchButton(in: app)
     }
 
+    func testRegularWidthIPadMailboxSearchStartsAsAButton() throws {
+        guard UIDevice.current.userInterfaceIdiom == .pad else {
+            throw XCTSkip("Requires an iPad mailbox sidebar.")
+        }
+        let originalOrientation = XCUIDevice.shared.orientation
+        let originalAppearance = XCUIDevice.shared.appearance
+        defer {
+            XCUIDevice.shared.orientation = originalOrientation
+            XCUIDevice.shared.appearance = originalAppearance
+        }
+        XCUIDevice.shared.orientation = .landscapeLeft
+        XCUIDevice.shared.appearance = .light
+
+        let app = XCUIApplication()
+        app.launchArguments = ["--reset-attention-fixture", "--harklight-samples",
+                               "--harklight-ui-diagnostics"]
+        app.launch()
+        let diagnostics = app.descendants(matching: .any)["inbox-ui-diagnostics"].firstMatch
+        XCTAssertTrue(diagnostics.waitForExistence(timeout: 10))
+        XCTAssertTrue(diagnostics.label.contains("sizeClass=regular"))
+        attachScreenshot("Regular-width iPad mailbox at rest", from: app)
+        verifyMailboxSearchButton(in: app)
+    }
+
     private func verifyMailboxSearchButton(in app: XCUIApplication) {
         let picker = app.segmentedControls["inbox-mailbox-picker"]
         let searchButton = app.buttons.matching(

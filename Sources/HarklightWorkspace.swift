@@ -972,10 +972,6 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     @State private var dismissedInlineChatRequests: Set<RequestKey> = []
     @State private var windowSize: CGSize?
 
-    private var usesCollapsedMailboxControls: Bool {
-        UIDevice.current.userInterfaceIdiom == .phone || horizontalSizeClass == .compact
-    }
-
     private var rows: [InboxItem] {
         showsLocalExamples ? samples.inboxItems(appendingTo: requests) : requests.map { .request($0) }
     }
@@ -1614,13 +1610,13 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                       isRegularSidebar: horizontalSizeClass == .regular)
             .searchable(text: searchTextBinding, isPresented: $searchPresented,
                         prompt: "Search messages")
-            .searchToolbarBehavior(usesCollapsedMailboxControls ? .minimize : .automatic)
+            .searchToolbarBehavior(.minimize)
             .searchFocused($searchFieldFocused)
             .toolbar {
                 ToolbarItem(placement: .bottomBar) {
                     InboxMailboxPicker(selection: mailboxSelection)
                 }
-                .sharedBackgroundVisibility(usesCollapsedMailboxControls ? .hidden : .automatic)
+                .sharedBackgroundVisibility(.hidden)
                 ToolbarSpacer(.flexible, placement: .bottomBar)
                 DefaultToolbarItem(kind: .search, placement: .bottomBar)
             }
