@@ -12,7 +12,15 @@ final class FreeRenderedUITests: XCTestCase {
             XCTAssertTrue(list.waitForExistence(timeout: 10), app.debugDescription)
             let normal = element("request-row-sample-approval-0", in: app)
             reveal(normal, in: list)
-            if swipeLeft { normal.swipeLeft() } else { normal.swipeRight() }
+            if UIDevice.current.userInterfaceIdiom == .pad {
+                let start = normal.coordinate(withNormalizedOffset: CGVector(dx: swipeLeft ? 0.78 : 0.22, dy: 0.5))
+                let end = normal.coordinate(withNormalizedOffset: CGVector(dx: swipeLeft ? 0.18 : 0.82, dy: 0.5))
+                start.press(forDuration: 0.05, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 0)
+            } else if swipeLeft {
+                normal.swipeLeft()
+            } else {
+                normal.swipeRight()
+            }
             let action = app.buttons["inbox-no-comment"]
             let eligible = action.waitForExistence(timeout: 5)
             XCTAssertTrue(eligible, app.debugDescription)
