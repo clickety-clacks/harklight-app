@@ -1610,11 +1610,13 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                       isRegularSidebar: horizontalSizeClass == .regular)
             .searchable(text: searchTextBinding, isPresented: $searchPresented,
                         prompt: "Search messages")
+            .searchToolbarBehavior(horizontalSizeClass == .compact ? .minimize : .automatic)
             .searchFocused($searchFieldFocused)
             .toolbar {
                 ToolbarItem(placement: .bottomBar) {
                     InboxMailboxPicker(selection: mailboxSelection)
                 }
+                .sharedBackgroundVisibility(horizontalSizeClass == .compact ? .hidden : .automatic)
                 ToolbarSpacer(.flexible, placement: .bottomBar)
                 DefaultToolbarItem(kind: .search, placement: .bottomBar)
             }
