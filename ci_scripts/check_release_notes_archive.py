@@ -109,22 +109,22 @@ def first_parent(repo: Path, head: str) -> str:
 def requires_release_note(repo: Path, parent: str, head: str) -> bool:
     changed = git(repo, "diff", "--name-only", "--no-renames", "-z", parent, head, "--",
                   *APP_PATHS).split("\0")
-    if not any(path and path != NOTES_PATH for path in changed):
-        return False
+    return any(path and path != NOTES_PATH for path in changed)
 
-    # GitHub's PR checkout is a synthetic merge. The trailer can also live on
-    # the incoming tip, so CI checks the same decision before and after merge.
-    revisions = git(repo, "rev-list", "--parents", "-n", "1", head).split()
-    for revision in [head, *revisions[2:]]:
-        trailers = git(repo, "show", "-s", "--format=%(trailers:key=Release-Notes,valueonly)",
-                       revision).splitlines()
-        for trailer in trailers:
-            decision, separator, reason = trailer.partition(":")
-            if decision.strip() == "none" and separator and reason.strip():
-                print(f"Release notes explicitly waived for an internal change: {reason.strip()}")
-                return False
 
-    return True
+def displayed_highlights(entry: dict) -> list[tuple[str, str]]:
+    return [(highlight["title"], highlight["detail"]) for highlight in entry["highlights"]]
+
+
+def omit_carried_pending_entry(repo: Path, head: str) -> None:
+    contents = git(repo, "show", f"{head}:{NOTES_PATH}")
+    document = json.loads(contents)
+    released = [entry for entry in document["entries"] if entry.get("testFlightBuildNumber") is not None]
+    if len(released) < len(document["entries"]):
+        document["entries"] = released
+        (repo / NOTES_PATH).write_text(json.dumps(document, ensure_ascii=False, indent=2) + "\n",
+                                       encoding="utf-8")
+        print("Omitted the carried pending entry from this archive; stamped history is preserved.")
 
 
 def check(repo: Path, commit: str) -> tuple[Optional[str], bool]:
@@ -159,35 +159,41 @@ def check(repo: Path, commit: str) -> tuple[Optional[str], bool]:
         return None, False
 
     pending_id = pending[0]["id"]
-    previous_entries_by_id = {}
-    if tree_file_exists(repo, parent):
-        previous_entries = read_entries(repo, parent, "first-parent")
-        previous_entries_by_id = {entry["id"]: entry for entry in previous_entries}
-    previous_pending_entry = previous_entries_by_id.get(pending_id)
-    if previous_pending_entry is not None:
-        if previous_pending_entry.get("testFlightBuildNumber") is not None:
-            raise CheckFailure(
-                f"pending release note {pending_id} was already released in the first parent"
-            )
-        if previous_pending_entry["highlights"] == pending[0]["highlights"]:
-            if requires_release_note(repo, parent, head):
-                raise CheckFailure(
-                    f"pending release note {pending_id} has unchanged highlights; "
-                    "update in-app What’s New for this App change"
-                )
-            return None, False
+    previous_entries = (
+        read_entries(repo, parent, "first-parent") if tree_file_exists(repo, parent) else []
+    )
+    previous_by_id = {entry["id"]: entry for entry in previous_entries}
+    previous = previous_by_id.get(pending_id)
+    if previous is not None and previous.get("testFlightBuildNumber") is not None:
+        raise CheckFailure(f"pending release note {pending_id} was already released in the first parent")
 
-    return pending_id, previous_pending_entry is not None
+    prior_pending = [
+        displayed_highlights(entry) for entry in previous_entries
+        if entry.get("testFlightBuildNumber") is None
+    ]
+    if displayed_highlights(pending[0]) in prior_pending:
+        if requires_release_note(repo, parent, head):
+            raise CheckFailure(
+                f"pending release note {pending_id} has unchanged text; "
+                "update in-app What’s New for this App change"
+            )
+        return None, False
+    return pending_id, previous is not None
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo", required=True, type=Path)
     parser.add_argument("--commit", required=True)
+    parser.add_argument("--prepare-archive", action="store_true",
+                        help="Exclude a carried pending entry from an otherwise valid archive.")
     args = parser.parse_args()
     try:
-        pending_id, was_updated = check(args.repo.resolve(), args.commit)
-    except CheckFailure as error:
+        repo = args.repo.resolve()
+        pending_id, was_updated = check(repo, args.commit)
+        if args.prepare_archive and pending_id is None:
+            omit_carried_pending_entry(repo, args.commit)
+    except (CheckFailure, OSError) as error:
         print(f"Release notes archive check failed: {error}", file=sys.stderr)
         return 1
     if pending_id is None:

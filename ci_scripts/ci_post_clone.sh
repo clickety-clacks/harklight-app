@@ -70,4 +70,4 @@ if [ "${CI_XCODEBUILD_ACTION:-}" != archive ]; then
     exit 0
 fi
 
-exec python3 "$repo/ci_scripts/check_release_notes_archive.py" --repo "$repo" --commit "$commit"
+exec python3 "$repo/ci_scripts/check_release_notes_archive.py" --repo "$repo" --commit "$commit" --prepare-archive
