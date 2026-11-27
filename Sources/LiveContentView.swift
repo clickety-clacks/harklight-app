@@ -1563,6 +1563,7 @@ struct MessageIDByline<Identity: View>: View {
 }
 
 private struct RequestDetailMetadata: View {
+    let isAlarm: Bool
     let inboxPriority: InboxMessagePriority?
     let inboxScore: Double?
     let deadline: Date?
@@ -1573,7 +1574,7 @@ private struct RequestDetailMetadata: View {
 
     var body: some View {
         Group {
-            if let priorityLabel = InboxPriorityDisplay.forEntry(score: inboxScore, priority: inboxPriority) {
+            if let priorityLabel = InboxPriorityDisplay.forEntry(score: inboxScore, priority: inboxPriority, isAlarm: isAlarm) {
                 Label {
                     Text(priorityLabel.title)
                 } icon: {
@@ -2485,7 +2486,7 @@ struct LiveRequestDetail: View {
                                                           hasSeenDescriptor: request.informationalSeenStatus != nil),
                     detail: .init(itemID: localExample == nil && !store.isLocalExample ? request.key.messageID : nil,
                                   onOpenDetails: { requestDetailsPresented = true }))
-                RequestDetailMetadata(inboxPriority: request.inboxPriority,
+                RequestDetailMetadata(isAlarm: request.isAlarm, inboxPriority: request.inboxPriority,
                     inboxScore: request.inboxScore,
                     deadline: byWhenDate, stake: request.stakeText?.rawValue,
                     key: request.key, supersedesMessageIDs: request.supersedesMessageIDs,
