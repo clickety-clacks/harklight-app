@@ -112,8 +112,11 @@ def requires_release_note(repo: Path, parent: str, head: str) -> bool:
     return any(path and path != NOTES_PATH for path in changed)
 
 
-def displayed_highlights(entry: dict) -> list[tuple[str, str]]:
-    return [(highlight["title"], highlight["detail"]) for highlight in entry["highlights"]]
+def displayed_highlights(entry: dict) -> frozenset[tuple[str, str]]:
+    return frozenset(
+        (highlight["title"].strip(), highlight["detail"].strip())
+        for highlight in entry["highlights"]
+    )
 
 
 def omit_carried_pending_entry(repo: Path, head: str) -> None:
