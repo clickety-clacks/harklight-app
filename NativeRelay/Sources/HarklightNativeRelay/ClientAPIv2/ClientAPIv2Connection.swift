@@ -360,16 +360,18 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
     public func catchUp(userInitiated: Bool = false) async throws {
         let wasShared = model.snapshot.sharedServerID != nil
         let wasPublicationPending = lock.withLock { repositoryPublicationPending }
+        // A separately persisted model can recover local publication even
+        // when the next request fails. Keep that request's own error visible.
+        defer {
+            if wasPublicationPending, access.state == .available {
+                publishModel(allowUnbaselined: false, onlyIfPending: true)
+            }
+        }
         do {
             try await sync.catchUp(userInitiated: userInitiated)
         } catch let error as APIError where wasShared && error.isSharedCapabilityRefusal {
             guard try await renegotiateSharedScope(userInitiated: userInitiated) else { throw error }
             try await sync.catchUp(userInitiated: userInitiated)
-        }
-        // The feed cursor belongs to the separately persisted server model.
-        // A later refresh can republish it even if there are no new changes.
-        if wasPublicationPending {
-            publishModel(allowUnbaselined: false, onlyIfPending: true)
         }
         if !foregroundOnlyWrites { sendSavedWrites() }
     }
