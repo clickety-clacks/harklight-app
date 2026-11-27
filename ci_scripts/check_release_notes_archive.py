@@ -10,6 +10,10 @@ from typing import Optional
 
 
 NOTES_PATH = "Resources/HarklightReleaseNotes.json"
+APP_PATHS = (
+    "Sources/", "Resources/", "AttentionDomain/Sources/", "NativeRelay/Sources/",
+    "Configuration/", "project.yml", "Harklight.xcodeproj/project.pbxproj",
+)
 
 
 class CheckFailure(Exception):
@@ -102,6 +106,27 @@ def first_parent(repo: Path, head: str) -> str:
     return parent
 
 
+def requires_release_note(repo: Path, parent: str, head: str) -> bool:
+    changed = git(repo, "diff", "--name-only", "--no-renames", "-z", parent, head, "--",
+                  *APP_PATHS).split("\0")
+    if not any(path and path != NOTES_PATH for path in changed):
+        return False
+
+    # GitHub's PR checkout is a synthetic merge. The trailer can also live on
+    # the incoming tip, so CI checks the same decision before and after merge.
+    revisions = git(repo, "rev-list", "--parents", "-n", "1", head).split()
+    for revision in [head, *revisions[2:]]:
+        trailers = git(repo, "show", "-s", "--format=%(trailers:key=Release-Notes,valueonly)",
+                       revision).splitlines()
+        for trailer in trailers:
+            decision, separator, reason = trailer.partition(":")
+            if decision.strip() == "none" and separator and reason.strip():
+                print(f"Release notes explicitly waived for an internal change: {reason.strip()}")
+                return False
+
+    return True
+
+
 def check(repo: Path, commit: str) -> tuple[Optional[str], bool]:
     head = git(repo, "rev-parse", "--verify", "HEAD^{commit}").strip()
     resolved_commit = git(repo, "rev-parse", "--verify", f"{commit}^{{commit}}").strip()
@@ -127,11 +152,13 @@ def check(repo: Path, commit: str) -> tuple[Optional[str], bool]:
                 f"stamped release note {entry['id']} must have a positive integer TestFlight number"
             )
 
+    parent = first_parent(repo, head)
     if not pending:
+        if requires_release_note(repo, parent, head):
+            raise CheckFailure("App changes need a new or updated pending in-app What’s New entry")
         return None, False
 
     pending_id = pending[0]["id"]
-    parent = first_parent(repo, head)
     previous_entries_by_id = {}
     if tree_file_exists(repo, parent):
         previous_entries = read_entries(repo, parent, "first-parent")
@@ -142,10 +169,13 @@ def check(repo: Path, commit: str) -> tuple[Optional[str], bool]:
             raise CheckFailure(
                 f"pending release note {pending_id} was already released in the first parent"
             )
-        if previous_pending_entry == pending[0]:
-            raise CheckFailure(
-                f"pending release note {pending_id} is unchanged since the first parent"
-            )
+        if previous_pending_entry["highlights"] == pending[0]["highlights"]:
+            if requires_release_note(repo, parent, head):
+                raise CheckFailure(
+                    f"pending release note {pending_id} has unchanged highlights; "
+                    "update in-app What’s New for this App change"
+                )
+            return None, False
 
     return pending_id, previous_pending_entry is not None
 
@@ -161,7 +191,7 @@ def main() -> int:
         print(f"Release notes archive check failed: {error}", file=sys.stderr)
         return 1
     if pending_id is None:
-        print("Release notes archive check passed: no pending entry; follow-up is tracked after merge.")
+        print("Release notes archive check passed: no fresh in-app entry needed for this change.")
     else:
         change = "updated" if was_updated else "new"
         print(f"Release notes archive check passed: {change} pending entry {pending_id}")

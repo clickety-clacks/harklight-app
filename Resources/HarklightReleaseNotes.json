@@ -187,7 +187,7 @@
     {
       "id": "post-215-saved-data-connection-fix",
       "marketingVersion": "0.2.0",
-      "testFlightBuildNumber": null,
+      "testFlightBuildNumber": 363,
       "highlights": [
         {
           "id": "protocol-0-2-compatibility",
@@ -272,6 +272,140 @@
           "symbol": "doc.on.doc",
           "title": "Copy a whole message",
           "detail": "The message text menu offers Select All so you can copy the whole message as well as a selected passage. This fix is pending formal testing."
+        }
+      ]
+    },
+    {
+      "id": "settings-error-log",
+      "marketingVersion": "0.2.0",
+      "testFlightBuildNumber": 343,
+      "highlights": [
+        {
+          "id": "settings-diagnostics",
+          "symbol": "list.bullet.rectangle",
+          "title": "Find connection details in Settings",
+          "detail": "Open Error Log to inspect and export connection and delivery errors."
+        },
+        {
+          "id": "shared-conversations",
+          "symbol": "person.2",
+          "title": "Read shared conversations",
+          "detail": "Shared conversations show messages and replies from the people who can access them when the Server supports sharing."
+        },
+        {
+          "id": "ipad-mailbox-layout",
+          "symbol": "sidebar.leading",
+          "title": "Browse messages beside the Inbox on iPad",
+          "detail": "Inbox and Replied stay in the sidebar while the selected message opens alongside them."
+        }
+      ]
+    },
+    {
+      "id": "inbox-fyi-digest",
+      "marketingVersion": "0.2.0",
+      "testFlightBuildNumber": 350,
+      "highlights": [
+        {
+          "id": "fyi-digest",
+          "symbol": "tray.full",
+          "title": "Read FYIs together",
+          "detail": "The Inbox groups FYIs in a digest so you can scan them in one place."
+        }
+      ]
+    },
+    {
+      "id": "alert-preferences",
+      "marketingVersion": "0.2.0",
+      "testFlightBuildNumber": 355,
+      "highlights": [
+        {
+          "id": "quiet-notifications",
+          "symbol": "bell",
+          "title": "Choose which messages alert you",
+          "detail": "In Settings, choose alerts for everything or for questions and urgent messages. Quiet messages still appear in the Inbox and count toward the badge."
+        }
+      ]
+    },
+    {
+      "id": "message-identification",
+      "marketingVersion": "0.2.0",
+      "testFlightBuildNumber": 353,
+      "highlights": [
+        {
+          "id": "copy-message-id",
+          "symbol": "doc.on.doc",
+          "title": "Copy the message ID",
+          "detail": "Copy a message’s ID from its details when you need to refer to the exact message."
+        }
+      ]
+    },
+    {
+      "id": "view-messages-across-devices",
+      "marketingVersion": "0.2.0",
+      "testFlightBuildNumber": 357,
+      "highlights": [
+        {
+          "id": "pushed-message-view",
+          "symbol": "rectangle.on.rectangle",
+          "title": "Open a message sent to your device",
+          "detail": "When another device on your account asks this device to show a message, opening that view leaves the message unread until you interact with it."
+        }
+      ]
+    },
+    {
+      "id": "connection-invitation-and-chat-history",
+      "marketingVersion": "0.2.0",
+      "testFlightBuildNumber": 360,
+      "highlights": [
+        {
+          "id": "keep-server-when-inspecting-invitation",
+          "symbol": "link",
+          "title": "Keep your current connection when opening an invitation",
+          "detail": "You can look at an invitation before deciding whether to change connections."
+        },
+        {
+          "id": "hide-unknown-chat-delivery",
+          "symbol": "bubble.left.and.bubble.right",
+          "title": "Read older Chat without a stuck Sending caption",
+          "detail": "Older messages with no delivery record stop showing Sending indefinitely."
+        }
+      ]
+    },
+    {
+      "id": "mailbox-warning-and-ipad-seen-navigation",
+      "marketingVersion": "0.2.0",
+      "testFlightBuildNumber": 366,
+      "highlights": [
+        {
+          "id": "keep-inbox-warnings-visible",
+          "symbol": "exclamationmark.triangle",
+          "title": "Keep Inbox warnings in view",
+          "detail": "Connection and unsent-answer warnings stay visible when you switch between Inbox and Replied."
+        },
+        {
+          "id": "ipad-seen-navigation",
+          "symbol": "arrow.up.arrow.down",
+          "title": "Keep your place after Seen on iPad",
+          "detail": "The message stays open with its position and navigation controls. After you move on, navigation uses the current Inbox."
+        }
+      ]
+    },
+    {
+      "id": "inbox-recovery-and-compact-search",
+      "marketingVersion": "0.2.0",
+      "testFlightBuildNumber": null,
+      "highlights": [
+        {
+          "id": "refresh-recovery",
+          "symbol": "arrow.clockwise",
+          "title": "Keep reading when Inbox refresh needs to recover",
+          "detail": "You can still open saved messages during a local save failure. When saving succeeds again, the Inbox shows the new messages and clears the matching refresh warning. First shipped in build 367."
+        },
+        {
+          "id": "compact-inbox-search",
+          "symbol": "magnifyingglass",
+          "title": "Open Search with one tap on iPhone",
+          "detail": "Inbox and Replied have a single outline. Tap the Search button to open the search field above the keyboard. First shipped in build 368."
         }
       ]
     }
