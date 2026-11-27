@@ -205,7 +205,7 @@ final class AdaptiveDuoNavigationUITests: XCTestCase {
 
     func testSeenReturnsToListOnlyWhenNoListPaneIsVisible() {
         let app = XCUIApplication()
-        app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
+        app.launchArguments = ["--reset-attention-fixture", "--harklight-samples", "--harklight-ui-diagnostics"]
         app.launch()
 
         let row = app.descendants(matching: .any)["sample-information-2"]
@@ -227,6 +227,9 @@ final class AdaptiveDuoNavigationUITests: XCTestCase {
         let total = Int(parts.last ?? "") ?? 0
         XCTAssertGreaterThan(index, 0, initialPosition)
         XCTAssertLessThan(index, total, "The fixture needs a following message.")
+        let navigation = app.descendants(matching: .any)["message-card-navigation"].firstMatch
+        XCTAssertTrue(navigation.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertEqual(navigation.label, "previous=true next=true")
         attachScreenshot("native-toolbar-check-before-seen")
         check.tap()
         if listVisibleAlongsideDetail {
@@ -235,19 +238,15 @@ final class AdaptiveDuoNavigationUITests: XCTestCase {
             let confirmation = app.descendants(matching: .any)["request-seen-confirmation"]
             XCTAssertTrue(confirmation.waitForExistence(timeout: 5), app.debugDescription)
             XCTAssertEqual(confirmation.value as? String, "Completed")
-            XCTAssertFalse(check.exists, "The toolbar action disappears after Seen is confirmed.")
+            XCTAssertTrue(check.exists, "The toolbar keeps the completed Seen status visible.")
+            XCTAssertEqual(check.label, "Seen")
+            XCTAssertFalse(check.isEnabled, "Confirmed Seen cannot be submitted again.")
             XCTAssertEqual(counter.label, initialPosition,
                            "Moving a Seen message to Replied must not reset its card position.")
             attachScreenshot("native-toolbar-check-after-seen")
 
-            let lower = card.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.8))
-            let upper = card.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.2))
-            lower.press(forDuration: 0.1, thenDragTo: upper, withVelocity: .slow,
-                        thenHoldForDuration: 4)
-            let nextPosition = "\(index + 1) of \(total)"
-            XCTAssertTrue(app.staticTexts[nextPosition].waitForExistence(timeout: 5),
-                          "Next remains available after the current message moves to Replied. \(app.debugDescription)")
-            attachScreenshot("native-toolbar-next-after-seen")
+            XCTAssertEqual(navigation.label, "previous=true next=true",
+                           "Both accessibility navigation actions remain available after the message moves to Replied.")
         } else {
             XCTAssertTrue(card.waitForNonExistence(timeout: 5),
                           "A single-pane view returns to Inbox after Seen is confirmed.")
@@ -260,6 +259,70 @@ final class AdaptiveDuoNavigationUITests: XCTestCase {
             XCTAssertTrue(row.waitForExistence(timeout: 5),
                           "The confirmed Seen row appears in Replied.")
         }
+    }
+
+    func testFirstHopAfterSeenResumesCurrentInboxOrder() throws {
+        guard UIDevice.current.userInterfaceIdiom == .pad else {
+            throw XCTSkip("This test needs Inbox and detail to remain visible after Seen.")
+        }
+        XCUIDevice.shared.orientation = .landscapeLeft
+        let app = XCUIApplication()
+        app.launchArguments = ["--reset-attention-fixture", "--harklight-samples",
+                               "--harklight-ui-diagnostics", "--harklight-test-card-navigation"]
+        app.launch()
+
+        let row = app.descendants(matching: .any)["sample-information-2"]
+        XCTAssertTrue(row.waitForExistence(timeout: 5))
+        row.tap()
+        let diagnostic = app.descendants(matching: .any)["inbox-ui-diagnostics"].firstMatch
+        let counter = app.staticTexts.matching(
+            NSPredicate(format: "label MATCHES '[0-9]+ of [0-9]+'")
+        ).firstMatch
+        let previous = app.buttons["Previous message"]
+        let next = app.buttons["Next message"]
+        XCTAssertTrue(diagnostic.waitForExistence(timeout: 5))
+        XCTAssertTrue(counter.waitForExistence(timeout: 5))
+        XCTAssertTrue(previous.isHittable && next.isHittable, app.debugDescription)
+
+        func selectedCard() throws -> Substring {
+            try XCTUnwrap(diagnostic.label.split(separator: " ").first)
+        }
+
+        let middle = try selectedCard()
+        let initial = counter.label
+        let parts = initial.components(separatedBy: " of ").compactMap { Int($0) }
+        XCTAssertEqual(parts.count, 2, initial)
+        let position = try XCTUnwrap(parts.first)
+        let total = try XCTUnwrap(parts.last)
+        XCTAssertGreaterThan(position, 1)
+        XCTAssertLessThan(position, total)
+
+        previous.tap()
+        let leading = try selectedCard()
+        XCTAssertNotEqual(leading, middle)
+        next.tap()
+        XCTAssertEqual(try selectedCard(), middle)
+        next.tap()
+        let trailing = try selectedCard()
+        XCTAssertNotEqual(trailing, middle)
+        previous.tap()
+        XCTAssertEqual(try selectedCard(), middle)
+
+        let seen = app.buttons["request-finish-seen"]
+        XCTAssertTrue(seen.waitForExistence(timeout: 5))
+        seen.tap()
+        let confirmation = app.descendants(matching: .any)["request-seen-confirmation"]
+        XCTAssertTrue(confirmation.waitForExistence(timeout: 5))
+        XCTAssertEqual(try selectedCard(), middle)
+        XCTAssertEqual(counter.label, initial)
+
+        next.tap()
+        XCTAssertEqual(try selectedCard(), trailing, "Next from the completed card opens its former successor.")
+        XCTAssertEqual(counter.label, "\(position) of \(total - 1)",
+                       "The successor uses the updated Inbox count and position.")
+        previous.tap()
+        XCTAssertEqual(try selectedCard(), leading, "Previous skips the completed card.")
+        XCTAssertEqual(counter.label, "\(position - 1) of \(total - 1)")
     }
 
     private func splitPresentation(in app: XCUIApplication) -> XCUIElement {

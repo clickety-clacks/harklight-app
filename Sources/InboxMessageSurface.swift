@@ -136,6 +136,23 @@ struct MessageCardSurface<Content: View>: View {
                     }
                 }
             }
+            .uiDiagnostics("message-card-navigation",
+                           "previous=\(context.hasPrevious) next=\(context.hasNext)")
+            #if DEBUG
+            .overlay(alignment: .bottomTrailing) {
+                if ProcessInfo.processInfo.arguments.contains("--harklight-test-card-navigation") {
+                    HStack {
+                        Button("Previous message") { context.move(-1) }
+                            .disabled(!context.hasPrevious)
+                        Button("Next message") { context.move(1) }
+                            .disabled(!context.hasNext)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .padding(.trailing)
+                    .padding(.bottom, bottomControlClearance)
+                }
+            }
+            #endif
             .accessibilityAction(named: "Previous message") { if context.hasPrevious { context.move(-1) } }
             .accessibilityAction(named: "Next message") { if context.hasNext { context.move(1) } }
         }

@@ -944,6 +944,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.scenePhase) private var scenePhase
     @State private var selection: InboxSelection?
+    @State private var retainedCardNavigationIDs: [InboxSelection]?
     @State private var preferredCompactColumn: NavigationSplitViewColumn = .sidebar
     @State private var splitPresentation = InboxSplitPresentation()
     @State private var relatedMessageNavigationPath: [RelatedMessageTarget] = []
@@ -1121,6 +1122,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             pushes.recordOwnOpen()
         }
         guard previous != next else { return }
+        retainedCardNavigationIDs = nil
         if nextRequest != nil, !openedPassivePush { userOpenedMessage() }
         if let serial = InboxNotificationNavigationPolicy.dismissalSerial(
             from: previous, to: next, route: visibleNotificationNavigation) {
@@ -1660,11 +1662,17 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         return palette.typeTint(item.resolvedMessageType)
     }
 
+    private var detailCardNavigationIDs: [InboxSelection] {
+        guard let retainedCardNavigationIDs else { return cardNavigationIDs }
+        let available = Set(rows.map(\.id))
+        return retainedCardNavigationIDs.filter { available.contains($0) }
+    }
+
     private func cardContext(for id: InboxSelection, inlineChat: Bool = false,
                              reopenInlineChat: (() -> Void)? = nil,
                              inFYIList: Bool = false,
                              dismissToList: (() -> Void)? = nil) -> InboxCardContext {
-        let ids = inFYIList ? [] : cardNavigationIDs
+        let ids = inFYIList ? [] : detailCardNavigationIDs
         let index = ids.firstIndex(of: id)
         let hasPrevious = index.map { $0 > 0 } ?? false
         let hasNext = index.map { $0 + 1 < ids.count } ?? false
@@ -1705,8 +1713,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
             chatScrollTargetTurnID: chatScrollTargetTurnID,
             dismissToList: dismissToList ?? { navigate(to: nil) },
             messageType: rows.first(where: { $0.id == id })?.resolvedMessageType ?? .request) { direction in
-                // Resolve against today's list; the displayed identity stays stable on refresh.
-                let currentIDs = cardNavigationIDs
+                let currentIDs = detailCardNavigationIDs
                 guard let current = currentIDs.firstIndex(of: id),
                       currentIDs.indices.contains(current + direction) else { return }
                 let next = currentIDs[current + direction]
@@ -1751,7 +1758,17 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                 }
             }
             .tint(HarklightDesignSystem.palette(for: colorScheme).amber)
+            .onChange(of: cardNavigationIDs) { oldIDs, newIDs in
+                // A completed message can stay open after leaving the Inbox.
+                // Keep its position and neighbors until another card is selected.
+                guard retainedCardNavigationIDs == nil, workspaceTab == .inbox,
+                      let selection, oldIDs.contains(selection), !newIDs.contains(selection),
+                      currentItem(for: selection)?.belongsToReplied == true else { return }
+                retainedCardNavigationIDs = oldIDs
+            }
+            .onChange(of: inboxOrder) { _, _ in retainedCardNavigationIDs = nil }
             .onChange(of: workspaceTab) { _, newTab in
+                retainedCardNavigationIDs = nil
                 guard newTab != .inbox,
                       let route = activeNotificationNavigation, route.isPending,
                       case let .notificationPending(serial)? = selection,
@@ -1759,6 +1776,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                 dismissPendingNotification()
             }
             .onChange(of: search) { _, newSearch in
+                retainedCardNavigationIDs = nil
                 guard !newSearch.isEmpty,
                       let route = activeNotificationNavigation, route.isPending,
                       case let .notificationPending(serial)? = selection,
@@ -1772,6 +1790,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                         route, afterDismissedSerial: dismissedNotificationSerial) else { return }
                 if dismissedNotificationSerial != route.serial { dismissedNotificationSerial = nil }
                 settings = false
+                retainedCardNavigationIDs = nil
                 // Notification routing changes presentation only. Keep it out
                 // of ordinary navigation cleanup so a tap cannot mutate the domain.
                 let destination = InboxNotificationDestination(route: route, rows: rows,
@@ -1849,6 +1868,7 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
         }
         // Archived presentations share the view and have no persistence key.
         .onChange(of: fyiRoutePresentation) { _, _ in
+            retainedCardNavigationIDs = nil
             rememberedTabDetails.removeAll()
             guard selection == .fyis else { return }
             relatedMessageNavigationPath.removeAll()
