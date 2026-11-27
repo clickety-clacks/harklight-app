@@ -1037,6 +1037,7 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
             do {
                 let awaitingEntries = hasAcceptedRepliesAwaitingEntries()
                 try repository.restoreCachedServerState(cached, context: context, mergePriorityLevels: true)
+                errors.resolve(concern: .snapshot, operation: "publish")
                 if awaitingEntries, !hasAcceptedRepliesAwaitingEntries() {
                     errors.resolve(concern: .snapshot, operation: "confirm_reply")
                 }
