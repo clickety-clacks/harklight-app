@@ -79,7 +79,7 @@ final class ClientAPIv2ConnectionTests: XCTestCase {
 
     private func connection(_ transport: any ClientAPITransport, _ repository: ClientRepository,
                             directory: URL? = nil,
-                            errors: RecordingErrorLogV2 = RecordingErrorLogV2()) throws -> ClientAPIv2Connection {
+                            errors: any ErrorLogging = RecordingErrorLogV2()) throws -> ClientAPIv2Connection {
         try ClientAPIv2Connection(transport: transport, repository: repository, context: context,
                                   directory: directory, errors: errors,
                                   waitBeforeRetry: { _ in try await Task.sleep(for: .milliseconds(20)) },
@@ -310,6 +310,146 @@ final class ClientAPIv2ConnectionTests: XCTestCase {
         XCTAssertEqual(failed.map(\.idempotencyKey), [refused.idempotencyKey], "It stays failed, with Retry.")
         run.cancel()
         second.cancel()
+    }
+
+    func testSuccessfulPublishClearsOnlyTheRecoveredInboxWarning() async throws {
+        let server = FakeClientAPIServer()
+        server.inboxItems = [V2Fixture.item("a", rev: 1, rankKey: "a")]
+        let persistence = MemoryPendingActionPersistence()
+        let repository = try ClientRepository(context: context, persistence: persistence)
+        let errors = ErrorLogStore(fileURL: nil, build: .unavailable)
+        let v2 = try connection(WithMe(server, me: me), repository, errors: errors)
+        try await v2.refreshMe()
+        try await v2.catchUp()
+        XCTAssertEqual(try itemIDs(repository), ["a"])
+
+        persistence.failNextCommit()
+        _ = server.commit("item", V2Fixture.item("b", rev: Int(server.head) + 1, rankKey: "b"))
+        try await v2.catchUp()
+        XCTAssertEqual(try itemIDs(repository), ["a"])
+        guard case let .failing(failure)? = ErrorLogDisplay.inContext(
+            records: errors.records, surface: .inbox, now: Date()) else {
+            return XCTFail("The local publish failure must remain visible in Inbox.")
+        }
+        XCTAssertEqual(failure.operation, "publish")
+        XCTAssertEqual(failure.phase, "restore")
+        XCTAssertEqual(failure.code, "restore_persistence")
+
+        errors.report(ErrorLogReport(concern: .snapshot, connectionRole: .request,
+            operation: "me_save", phase: "save", reason: .app("save_failed"), retryable: true))
+        _ = server.commit("item", V2Fixture.item("c", rev: Int(server.head) + 1, rankKey: "c"))
+        try await v2.catchUp()
+        XCTAssertEqual(try itemIDs(repository), ["a", "b", "c"])
+        let recovered = try XCTUnwrap(errors.records.first { $0.id == failure.id })
+        XCTAssertTrue(recovered.isResolved, "A successful repository restore clears its earlier failure.")
+        XCTAssertEqual(errors.records.filter { !$0.isResolved }.map(\.operation), ["me_save"])
+    }
+
+    func testRefreshRepublishesTheSavedModelWithoutWaitingForAnotherMessage() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let server = FakeClientAPIServer()
+        server.inboxItems = [V2Fixture.item("a", rev: 1, rankKey: "a")]
+        let persistence = MemoryPendingActionPersistence()
+        let repository = try ClientRepository(context: context, persistence: persistence)
+        let port = AttentionDomainPort(store: repository)
+        let errors = ErrorLogStore(fileURL: nil, build: .unavailable)
+        let v2 = try connection(WithMe(server, me: me), repository, directory: directory, errors: errors)
+        try await v2.refreshMe()
+        try await v2.catchUp()
+
+        persistence.failNextCommit()
+        let savedRevision = server.commit("item", V2Fixture.item("b", rev: Int(server.head) + 1, rankKey: "b"))
+        try await v2.catchUp()
+        let visible = try port.observe(context: port.context)
+        XCTAssertEqual(visible.requests.map(\.key.messageID.rawValue), ["a"])
+        let saved = try XCTUnwrap(visible.requests.first)
+        let opened = try XCTUnwrap(port.inspect(context: port.context, request: saved.key).requests.first)
+        XCTAssertEqual(opened.title, ExactText("Question"))
+        XCTAssertNotNil(opened.selector, "The committed row remains inspectable.")
+        let pendingKey = RequestKey(accountScope: saved.key.accountScope, senderID: saved.key.senderID,
+                                    messageID: ExactText("b"))
+        XCTAssertThrowsError(try port.inspect(context: port.context, request: pendingKey),
+                             "The fetched-only row must not acquire an action selector.")
+        XCTAssertTrue(try repository.snapshot(context: context).pendingMessageOpens.isEmpty)
+        XCTAssertEqual(v2.model.heldCursor, savedRevision)
+        let storedModel = ServerModelV2Store(fileURL: directory.appendingPathComponent("server-model-v2.json"))
+        XCTAssertEqual(storedModel.heldCursor, savedRevision)
+        XCTAssertTrue(errors.records.contains { $0.operation == "publish" && !$0.isResolved })
+
+        try await v2.catchUp(userInitiated: true)
+        XCTAssertEqual(server.batchPositions.last, savedRevision)
+        XCTAssertEqual(try itemIDs(repository), ["a", "b"])
+        XCTAssertFalse(errors.records.contains { $0.operation == "publish" && !$0.isResolved })
+        XCTAssertTrue(server.received.allSatisfy { $0.method == .get })
+    }
+
+    func testFailedFetchDoesNotBlockRecoveryOfASavedModel() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let server = FakeClientAPIServer()
+        server.inboxItems = [V2Fixture.item("a", rev: 1, rankKey: "a")]
+        let persistence = MemoryPendingActionPersistence()
+        let repository = try ClientRepository(context: context, persistence: persistence)
+        let errors = ErrorLogStore(fileURL: nil, build: .unavailable)
+        let v2 = try connection(WithMe(server, me: me), repository, directory: directory, errors: errors)
+        try await v2.refreshMe()
+        try await v2.catchUp()
+
+        persistence.failNextCommit()
+        let revision = server.commit("item", V2Fixture.item("b", rev: Int(server.head) + 1, rankKey: "b"))
+        try await v2.catchUp()
+        XCTAssertEqual(try itemIDs(repository), ["a"])
+        XCTAssertEqual(v2.model.persistedCursor(), revision)
+        XCTAssertTrue(errors.records.contains { $0.operation == "publish" && !$0.isResolved })
+
+        server.nextBatchFailure = APIError(status: 503, token: .retryLater, retryable: true, requestID: "req-busy")
+        do {
+            try await v2.catchUp(userInitiated: true)
+            XCTFail("The refresh still needs to report the failed network request.")
+        } catch let error as APIError {
+            XCTAssertEqual(error.token, .retryLater)
+        }
+
+        XCTAssertEqual(try itemIDs(repository), ["a", "b"])
+        XCTAssertEqual(v2.model.persistedCursor(), revision)
+        XCTAssertFalse(errors.records.contains { $0.operation == "publish" && !$0.isResolved })
+        XCTAssertTrue(errors.records.contains { $0.operation == ChangeFeedSync.catchUpOperation && !$0.isResolved })
+        XCTAssertTrue(server.received.allSatisfy { $0.method == .get })
+    }
+
+    func testFailedModelSaveReplaysFromTheLastDurableCursor() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let server = FakeClientAPIServer()
+        server.inboxItems = [V2Fixture.item("a", rev: 1, rankKey: "a")]
+        let repository = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        let v2 = try connection(WithMe(server, me: me), repository, directory: directory)
+        try await v2.refreshMe()
+        try await v2.catchUp()
+        let baseline = try XCTUnwrap(v2.model.persistedCursor())
+
+        let modelFile = directory.appendingPathComponent("server-model-v2.json")
+        let savedFile = directory.appendingPathComponent("saved-model.json")
+        try FileManager.default.moveItem(at: modelFile, to: savedFile)
+        try FileManager.default.createDirectory(at: modelFile, withIntermediateDirectories: false)
+        let newRevision = server.commit("item", V2Fixture.item("b", rev: Int(server.head) + 1, rankKey: "b"))
+        do {
+            try await v2.catchUp()
+            XCTFail("A feed batch must not succeed without a saved model.")
+        } catch {
+            XCTAssertEqual(v2.model.heldCursor, baseline)
+            XCTAssertEqual(ServerModelV2Store(fileURL: savedFile).heldCursor, baseline)
+            XCTAssertEqual(try itemIDs(repository), ["a"])
+        }
+
+        try FileManager.default.removeItem(at: modelFile)
+        try FileManager.default.moveItem(at: savedFile, to: modelFile)
+        try await v2.catchUp(userInitiated: true)
+        XCTAssertEqual(server.batchPositions.last, baseline)
+        XCTAssertEqual(v2.model.persistedCursor(), newRevision)
+        XCTAssertEqual(try itemIDs(repository), ["a", "b"])
+        XCTAssertTrue(server.received.allSatisfy { $0.method == .get })
     }
 
     func testAFailedPublishRecordsItsCauseByName() {

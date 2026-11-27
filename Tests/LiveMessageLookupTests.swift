@@ -4,6 +4,50 @@ import XCTest
 
 @MainActor
 final class LiveMessageLookupTests: XCTestCase {
+    func testFailedSnapshotRestoreKeepsTheCommittedMessageSelectable() async throws {
+        let context = ProfileContext(identity: ProfileIdentity(
+            trustedRelayAuthority: ExactText("relay.example"),
+            personID: ExactText("restore-reader"), deviceID: ExactText("reader")), transportMode: .relay)
+        let persistence = MemoryPendingActionPersistence()
+        let domain = try ClientRepository(context: context, persistence: persistence)
+        let sender = ExactText("sender")
+        let existing = RequestKey(accountScope: context.identity.personID,
+                                  senderID: sender, messageID: ExactText("existing"))
+        let fetched = RequestKey(accountScope: context.identity.personID,
+                                 senderID: sender, messageID: ExactText("fetched"))
+        let existingPayload = try JSONValue.parse(Data(#"{"title":"Committed message"}"#.utf8))
+        let fetchedPayload = try JSONValue.parse(Data(#"{"title":"Fetched message"}"#.utf8))
+        let existingRequest = StoredRequest(key: existing, originalPayload: existingPayload)
+        let fetchedRequest = StoredRequest(key: fetched, originalPayload: fetchedPayload)
+        let fixture = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        for store in [domain, fixture] {
+            _ = try store.apply(RelayEvent(sequence: 1, body: .delivery(existingRequest, .message)),
+                                context: context)
+        }
+        _ = try fixture.apply(RelayEvent(sequence: 2, body: .delivery(fetchedRequest, .message)),
+                              context: context)
+        let snapshot = CachedAttentionServerState(identity: context.identity,
+            requests: try fixture.snapshot(context: context).requests, remoteStates: [:],
+            cursor: 2, conversationCursor: 0, conversations: [:], inboxView: nil,
+            currentRequestKeys: [existing, fetched])
+        let model = try await LivePresentationStore.makeForActivation(store: domain, context: context).presentation
+
+        persistence.failNextCommit()
+        XCTAssertThrowsError(try domain.restoreCachedServerState(snapshot, context: context))
+        try model.refreshFromDurableStore()
+        model.selectRequest(existing)
+        XCTAssertEqual(model.selectedRequest?.title, ExactText("Committed message"))
+        model.selectRequest(fetched)
+        XCTAssertEqual(model.selectedRequest?.key, existing)
+        XCTAssertEqual(try domain.snapshot(context: context).cursor, 1)
+        XCTAssertTrue(try domain.snapshot(context: context).pendingMessageOpens.isEmpty)
+
+        try domain.restoreCachedServerState(snapshot, context: context)
+        try model.refreshFromDurableStore()
+        model.selectRequest(fetched)
+        XCTAssertEqual(model.selectedRequest?.title, ExactText("Fetched message"))
+    }
+
     func testActivatedMessageAndSelectionFollowSenderRevisionWithoutRegressing() async throws {
         let context = ProfileContext(identity: ProfileIdentity(
             trustedRelayAuthority: ExactText("relay.example"),
