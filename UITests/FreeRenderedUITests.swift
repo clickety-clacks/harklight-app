@@ -61,7 +61,8 @@ final class FreeRenderedUITests: XCTestCase {
             // The reply opens its own parent's chat at the retained target.
             reveal(normalReply, in: list)
             normalReply.tap()
-            let replyText = app.staticTexts["Generated reply for the captured older chat"]
+            let chatHistory = app.scrollViews["conversation-history-scroll"]
+            let replyText = chatHistory.staticTexts["Generated reply for the captured older chat"]
             XCTAssertTrue(replyText.waitForExistence(timeout: 5), app.debugDescription)
             XCTAssertTrue(replyText.isHittable, app.debugDescription)
             XCTAssertTrue(heading.label.contains("Generated older parent"), app.debugDescription)
