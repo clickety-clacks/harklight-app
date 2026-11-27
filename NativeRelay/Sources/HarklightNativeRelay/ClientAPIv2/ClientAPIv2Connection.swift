@@ -45,6 +45,7 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
     private var negotiatedScope = false
     private var negotiatingForegroundScope = false
     private var meReadID: UUID?
+    private var repositoryPublicationPending = false
     private let lock = NSLock()
 
     /// `directory` holds the model, outbox and last `/v2/me` for this
@@ -358,11 +359,17 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
     /// Push or background refresh: applies every batch from the cursor.
     public func catchUp(userInitiated: Bool = false) async throws {
         let wasShared = model.snapshot.sharedServerID != nil
+        let wasPublicationPending = lock.withLock { repositoryPublicationPending }
         do {
             try await sync.catchUp(userInitiated: userInitiated)
         } catch let error as APIError where wasShared && error.isSharedCapabilityRefusal {
             guard try await renegotiateSharedScope(userInitiated: userInitiated) else { throw error }
             try await sync.catchUp(userInitiated: userInitiated)
+        }
+        // The feed cursor belongs to the separately persisted server model.
+        // A later refresh can republish it even if there are no new changes.
+        if wasPublicationPending {
+            publishModel(allowUnbaselined: false, onlyIfPending: true)
         }
         if !foregroundOnlyWrites { sendSavedWrites() }
     }
@@ -1026,8 +1033,9 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
         publishModel(allowUnbaselined: false)
     }
 
-    private func publishModel(allowUnbaselined: Bool) {
+    private func publishModel(allowUnbaselined: Bool, onlyIfPending: Bool = false) {
         lock.withLock {
+            guard !onlyIfPending || repositoryPublicationPending else { return }
             if settingsETag != nil, currentSettingsETag() == nil {
                 settingsETag = nil
                 settingsSignal?.yield(())
@@ -1037,11 +1045,13 @@ public final class ClientAPIv2Connection: @unchecked Sendable {
             do {
                 let awaitingEntries = hasAcceptedRepliesAwaitingEntries()
                 try repository.restoreCachedServerState(cached, context: context, mergePriorityLevels: true)
+                repositoryPublicationPending = false
                 errors.resolve(concern: .snapshot, operation: "publish")
                 if awaitingEntries, !hasAcceptedRepliesAwaitingEntries() {
                     errors.resolve(concern: .snapshot, operation: "confirm_reply")
                 }
             } catch {
+                repositoryPublicationPending = true
                 errors.report(ErrorLogReport(concern: .snapshot, connectionRole: .request, operation: "publish",
                     phase: "restore", reason: Self.restoreFailure(error), initiator: .unknown, retryable: true))
                 return

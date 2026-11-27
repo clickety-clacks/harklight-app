@@ -345,6 +345,34 @@ final class ClientAPIv2ConnectionTests: XCTestCase {
         XCTAssertEqual(errors.records.filter { !$0.isResolved }.map(\.operation), ["me_save"])
     }
 
+    func testRefreshRepublishesTheSavedModelWithoutWaitingForAnotherMessage() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let server = FakeClientAPIServer()
+        server.inboxItems = [V2Fixture.item("a", rev: 1, rankKey: "a")]
+        let persistence = MemoryPendingActionPersistence()
+        let repository = try ClientRepository(context: context, persistence: persistence)
+        let errors = ErrorLogStore(fileURL: nil, build: .unavailable)
+        let v2 = try connection(WithMe(server, me: me), repository, directory: directory, errors: errors)
+        try await v2.refreshMe()
+        try await v2.catchUp()
+
+        persistence.failNextCommit()
+        let savedRevision = server.commit("item", V2Fixture.item("b", rev: Int(server.head) + 1, rankKey: "b"))
+        try await v2.catchUp()
+        XCTAssertEqual(try itemIDs(repository), ["a"])
+        XCTAssertEqual(v2.model.heldCursor, savedRevision)
+        let storedModel = ServerModelV2Store(fileURL: directory.appendingPathComponent("server-model-v2.json"))
+        XCTAssertEqual(storedModel.heldCursor, savedRevision)
+        XCTAssertTrue(errors.records.contains { $0.operation == "publish" && !$0.isResolved })
+
+        try await v2.catchUp(userInitiated: true)
+        XCTAssertEqual(server.batchPositions.last, savedRevision)
+        XCTAssertEqual(try itemIDs(repository), ["a", "b"])
+        XCTAssertFalse(errors.records.contains { $0.operation == "publish" && !$0.isResolved })
+        XCTAssertTrue(server.received.allSatisfy { $0.method == .get })
+    }
+
     func testAFailedPublishRecordsItsCauseByName() {
         XCTAssertEqual(ClientAPIv2Connection.restoreFailure(AttentionStoreError.wrongAccount),
                        .app("restore_wrong_account"))
