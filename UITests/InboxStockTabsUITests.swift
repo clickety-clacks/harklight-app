@@ -277,8 +277,16 @@ final class InboxStockTabsUITests: XCTestCase {
         field.typeText("Archive")
         let approval = app.descendants(matching: .any)["sample-approval-0"]
         XCTAssertTrue(approval.waitForExistence(timeout: 5))
-        leaveWorkspaceSearch(in: app)
+        if UIDevice.current.userInterfaceIdiom == .pad {
+            let clear = field.buttons["Clear text"]
+            XCTAssertTrue(clear.exists && clear.isHittable)
+            clear.tap()
+        } else {
+            leaveWorkspaceSearch(in: app)
+        }
         XCTAssertTrue(searchButton.waitForExistence(timeout: 5))
+        XCTAssertTrue(searchButton.isHittable)
+        XCTAssertFalse(app.searchFields.allElementsBoundByIndex.contains(where: \.isHittable))
         XCTAssertTrue(picker.buttons["Inbox"].isSelected)
     }
 
