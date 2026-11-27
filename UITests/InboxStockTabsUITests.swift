@@ -192,6 +192,40 @@ final class InboxStockTabsUITests: XCTestCase {
         }
     }
 
+    func testCompactMailboxSearchButtonOpensFocusedFieldAboveKeyboard() throws {
+        guard UIDevice.current.userInterfaceIdiom == .phone else {
+            throw XCTSkip("Requires an iPhone mailbox toolbar.")
+        }
+        let app = XCUIApplication()
+        app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
+        app.launch()
+
+        let picker = app.segmentedControls["inbox-mailbox-picker"]
+        let searchButton = app.buttons.matching(
+            NSPredicate(format: "label IN %@", ["Search", "Search messages"])).firstMatch
+        XCTAssertTrue(picker.waitForExistence(timeout: 10))
+        XCTAssertTrue(picker.buttons["Inbox"].isSelected)
+        XCTAssertTrue(searchButton.waitForExistence(timeout: 5))
+        XCTAssertTrue(searchButton.isHittable)
+        XCTAssertFalse(app.searchFields.allElementsBoundByIndex.contains(where: \.isHittable))
+        attachScreenshot("Compact mailbox and collapsed search button", from: app)
+
+        searchButton.tap()
+        let field = app.searchFields.firstMatch
+        let keyboard = app.keyboards.firstMatch
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        XCTAssertTrue(keyboard.waitForExistence(timeout: 5))
+        XCTAssertLessThanOrEqual(field.frame.maxY, keyboard.frame.minY + 2)
+        attachScreenshot("Expanded search above keyboard", from: app)
+
+        field.typeText("Archive")
+        let approval = app.descendants(matching: .any)["sample-approval-0"]
+        XCTAssertTrue(approval.waitForExistence(timeout: 5))
+        leaveWorkspaceSearch(in: app)
+        XCTAssertTrue(searchButton.waitForExistence(timeout: 5))
+        XCTAssertTrue(picker.buttons["Inbox"].isSelected)
+    }
+
     func testListSearchSearchesTheSelectedMailbox() throws {
         let app = XCUIApplication()
         app.launchArguments = ["--reset-attention-fixture", "--harklight-samples"]
