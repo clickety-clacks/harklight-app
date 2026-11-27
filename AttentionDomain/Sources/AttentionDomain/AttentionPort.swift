@@ -337,6 +337,7 @@ public struct PresentedRequest: Equatable, Sendable {
     public let fyiInboxEntry: InboxViewEntry?
     public let itemOpenPending: Bool
     public let itemOpenFailed: Bool
+    public let isAlarm: Bool
     public let inboxPriority: InboxMessagePriority?
     public let inboxScore: Double?
     public let inboxThread: ExactText?
@@ -402,6 +403,7 @@ public struct PresentedRequest: Equatable, Sendable {
                 fyiInboxEntry: InboxViewEntry? = nil,
                 itemOpenPending: Bool = false,
                 itemOpenFailed: Bool = false,
+                isAlarm: Bool = false,
                 inboxPriority: InboxMessagePriority? = nil,
                 inboxScore: Double? = nil,
                 inboxThread: ExactText? = nil,
@@ -447,6 +449,7 @@ public struct PresentedRequest: Equatable, Sendable {
         self.fyiInboxEntry = fyiInboxEntry
         self.itemOpenPending = itemOpenPending
         self.itemOpenFailed = itemOpenFailed
+        self.isAlarm = isAlarm
         self.inboxPriority = inboxPriority
         self.inboxScore = inboxScore
         self.inboxThread = inboxThread
@@ -1426,6 +1429,7 @@ public final class AttentionDomainPort: @unchecked Sendable {
                                 fyiInboxEntry: inboxViewEntry,
                                 itemOpenPending: itemOpenPending,
                                 itemOpenFailed: itemOpenFailed,
+                                isAlarm: (status == .open || status == .pending) && request.isAlarm,
                                 inboxPriority: status == .open || status == .pending
                                     ? inboxViewEntry?.priority : nil,
                                 inboxScore: status == .open || status == .pending

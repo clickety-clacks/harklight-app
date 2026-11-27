@@ -391,6 +391,19 @@
       ]
     },
     {
+      "id": "mailbox-controls-all-layouts",
+      "marketingVersion": "0.2.0",
+      "testFlightBuildNumber": 370,
+      "highlights": [
+        {
+          "id": "mailbox-controls-all-layouts",
+          "symbol": "magnifyingglass",
+          "title": "Consistent Inbox controls on iPhone and iPad",
+          "detail": "Inbox and Replied have one outline at every width. Tap the Search button to open and focus the search field."
+        }
+      ]
+    },
+    {
       "id": "inbox-recovery-and-compact-search",
       "marketingVersion": "0.2.0",
       "testFlightBuildNumber": null,

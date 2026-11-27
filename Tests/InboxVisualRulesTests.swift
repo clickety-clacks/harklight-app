@@ -890,6 +890,15 @@ final class InboxVisualRulesTests: XCTestCase {
         XCTAssertNil(InboxPriorityDisplay.forScore(.infinity))
     }
 
+    func testAlarmUsesExistingPriorityPresentationRegardlessOfScore() {
+        for score in [nil, 0.10, 0.50, 0.95] {
+            let alarm = InboxPriorityDisplay.forEntry(score: score, priority: .normal, isAlarm: true)
+            XCTAssertEqual(alarm, .alarm)
+        }
+        XCTAssertEqual(String(localized: InboxPriorityDisplay.alarm.title), "Alarm")
+        XCTAssertEqual(InboxPriorityDisplay.forEntry(score: 0.10, priority: .now), .low)
+    }
+
     func testServerEntryPriorityFallsBackOnlyWhenScoreIsUnusable() {
         let priorities: [(InboxMessagePriority, InboxPriorityDisplay?)] = [
             (.low, .low), (.normal, nil), (.high, .high), (.now, .urgent)

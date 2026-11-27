@@ -2492,6 +2492,7 @@ final class LivePresentationStore {
                     state: progress.state == .awaiting ? .awaiting : .notSent(detail: progress.detail))
             },
             tier: .middle,
+            isAlarm: request.isAlarm,
             inboxPriority: request.inboxPriority,
             inboxScore: request.inboxScore,
             inboxReplyPriorities: request.inboxReplyPriorities,
