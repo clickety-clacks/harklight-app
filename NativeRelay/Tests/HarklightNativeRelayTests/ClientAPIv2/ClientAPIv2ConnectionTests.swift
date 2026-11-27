@@ -384,6 +384,40 @@ final class ClientAPIv2ConnectionTests: XCTestCase {
         XCTAssertTrue(server.received.allSatisfy { $0.method == .get })
     }
 
+    func testFailedModelSaveReplaysFromTheLastDurableCursor() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let server = FakeClientAPIServer()
+        server.inboxItems = [V2Fixture.item("a", rev: 1, rankKey: "a")]
+        let repository = try ClientRepository(context: context, persistence: MemoryPendingActionPersistence())
+        let v2 = try connection(WithMe(server, me: me), repository, directory: directory)
+        try await v2.refreshMe()
+        try await v2.catchUp()
+        let baseline = try XCTUnwrap(v2.model.persistedCursor())
+
+        let modelFile = directory.appendingPathComponent("server-model-v2.json")
+        let savedFile = directory.appendingPathComponent("saved-model.json")
+        try FileManager.default.moveItem(at: modelFile, to: savedFile)
+        try FileManager.default.createDirectory(at: modelFile, withIntermediateDirectories: false)
+        let newRevision = server.commit("item", V2Fixture.item("b", rev: Int(server.head) + 1, rankKey: "b"))
+        do {
+            try await v2.catchUp()
+            XCTFail("A feed batch must not succeed without a saved model.")
+        } catch {
+            XCTAssertEqual(v2.model.heldCursor, baseline)
+            XCTAssertEqual(ServerModelV2Store(fileURL: savedFile).heldCursor, baseline)
+            XCTAssertEqual(try itemIDs(repository), ["a"])
+        }
+
+        try FileManager.default.removeItem(at: modelFile)
+        try FileManager.default.moveItem(at: savedFile, to: modelFile)
+        try await v2.catchUp(userInitiated: true)
+        XCTAssertEqual(server.batchPositions.last, baseline)
+        XCTAssertEqual(v2.model.persistedCursor(), newRevision)
+        XCTAssertEqual(try itemIDs(repository), ["a", "b"])
+        XCTAssertTrue(server.received.allSatisfy { $0.method == .get })
+    }
+
     func testAFailedPublishRecordsItsCauseByName() {
         XCTAssertEqual(ClientAPIv2Connection.restoreFailure(AttentionStoreError.wrongAccount),
                        .app("restore_wrong_account"))
