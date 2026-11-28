@@ -7,8 +7,20 @@ import HarklightNativeRelay
 /// orientation or size class. Hiding an overlaid primary column leaves the
 /// split view's automatic layout policy intact when the window changes size.
 @MainActor
+@Observable
 private final class InboxSplitPresentation {
-    weak var reader: UIViewController?
+    @ObservationIgnored weak var reader: UIViewController?
+    private(set) var isOverlay = false
+
+    func update(from reader: UIViewController) {
+        self.reader = reader
+        guard let split = reader.splitViewController, !split.isCollapsed else {
+            if isOverlay { isOverlay = false }
+            return
+        }
+        let overlay = split.displayMode == .oneOverSecondary || split.displayMode == .twoOverSecondary
+        if isOverlay != overlay { isOverlay = overlay }
+    }
 
     func dismissOverlay() {
         guard let split = reader?.splitViewController, !split.isCollapsed else { return }
@@ -52,13 +64,22 @@ private struct InboxSplitPresentationReader: UIViewControllerRepresentable {
 
         override func viewDidAppear(_ animated: Bool) {
             super.viewDidAppear(animated)
-            presentation.reader = self
+            updatePresentation()
 
         }
 
         override func viewDidLayoutSubviews() {
             super.viewDidLayoutSubviews()
-            if view.window != nil { presentation.reader = self }
+            updatePresentation()
+        }
+
+        private func updatePresentation() {
+            // Layout can occur during a SwiftUI update. Publish the UIKit mode
+            // after that update, using the current hierarchy.
+            Task { @MainActor [weak self] in
+                guard let self, view.window != nil else { return }
+                presentation.update(from: self)
+            }
         }
     }
 
@@ -1586,6 +1607,10 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
     @ViewBuilder
     private func inboxSplitView(for tab: InboxWorkspaceTab, inlineChat: Bool,
                                 geometry: GeometryProxy) -> some View {
+        // iPad places native Search in the top toolbar, which already reads well.
+        // Only phones (Duo unfolded) push it against the overlay edge.
+        let isPortraitOverlay = UIDevice.current.userInterfaceIdiom == .phone
+            && geometry.size.height > geometry.size.width && splitPresentation.isOverlay
         let splitView = NavigationSplitView(preferredCompactColumn: $preferredCompactColumn) {
             InboxList(tab: tab, rows: rows, warnings: visibleWarnings,
                   fyiInboxRow: search.isEmpty ? fyiInboxRow(for: tab) : nil,
@@ -1623,6 +1648,11 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                 .sharedBackgroundVisibility(.hidden)
                 ToolbarSpacer(.flexible, placement: .bottomBar)
                 DefaultToolbarItem(kind: .search, placement: .bottomBar)
+                if isPortraitOverlay {
+                    // Keep the native Search control and inset it from the
+                    // overlay panel's trailing edge.
+                    ToolbarSpacer(.fixed, placement: .bottomBar)
+                }
             }
             .background(alignment: .topLeading) {
                 InboxSplitPresentationReader(presentation: splitPresentation)
