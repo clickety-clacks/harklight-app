@@ -445,6 +445,12 @@
           "symbol": "doc.text",
           "title": "Release notes scroll smoothly",
           "detail": "Scrolling through a long release history in Settings no longer closes the app on iPad."
+        },
+        {
+          "id": "ipad-sidebar-pull-to-refresh",
+          "symbol": "arrow.clockwise",
+          "title": "Pull to refresh on iPad",
+          "detail": "Pulling down the Inbox or Replied list beside a message on iPad refreshes it."
         }
       ]
     }
