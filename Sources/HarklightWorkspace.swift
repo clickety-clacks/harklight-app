@@ -1994,6 +1994,7 @@ struct InboxList: View {
     @State private var isUserScrolling = false
     @State private var requestedInGesture = false
     @State private var isFetchingOlderPage = false
+    @State private var sidebarRefreshArmed = false
     @State private var expandedThreadGroups: Set<InboxListEntryID> = []
     @State private var sortScroll = InboxSortScrollState()
     @State private var isProgressExpanded = false
@@ -2366,11 +2367,16 @@ struct InboxList: View {
         let distanceToBottom: CGFloat = max(0, extent - top)
         return InboxScrollMetrics(offsetY: geometry.contentOffset.y,
                                   distanceToBottom: distanceToBottom,
-                                  contentFits: extent == 0)
+                                  contentFits: extent == 0,
+                                  pulledPastRefreshThreshold: top <= -60)
     }
 
     private func updateScrollMetrics(from oldMetrics: InboxScrollMetrics,
                                      to newMetrics: InboxScrollMetrics) {
+        if isRegularSidebar, refreshInbox != nil, isUserScrolling, !isRefreshing,
+           newMetrics.pulledPastRefreshThreshold {
+            sidebarRefreshArmed = true
+        }
         let canPageOnDrag = newMetrics.contentFits || newMetrics.distanceToBottom <= 80
         // Pixel offsets are for this callback only; publishing each one invalidates the list.
         if canRequestOlderPageOnDrag != canPageOnDrag {
@@ -2383,6 +2389,14 @@ struct InboxList: View {
     }
 
     private func updateScrollPhase(from oldPhase: ScrollPhase, to newPhase: ScrollPhase) {
+        if newPhase == .interacting { sidebarRefreshArmed = false }
+        if oldPhase == .interacting, newPhase != .interacting {
+            let shouldRefresh = sidebarRefreshArmed
+            sidebarRefreshArmed = false
+            if shouldRefresh, isRegularSidebar, !isRefreshing, let refreshInbox {
+                Task { await refreshInbox() }
+            }
+        }
         let scrolling: Bool = newPhase == .interacting || newPhase == .decelerating
         if scrolling && !isUserScrolling { requestedInGesture = false }
         if isUserScrolling != scrolling { isUserScrolling = scrolling }
@@ -2846,7 +2860,9 @@ struct InboxList: View {
 
     var body: some View {
         ScrollViewReader { proxy in
-            if let refreshInbox {
+            // The native refresh control is not invoked by pulls in the
+            // regular split sidebar. Its scroll phase handles release instead.
+            if !isRegularSidebar, let refreshInbox {
                 renderedList(using: proxy)
                     .refreshable { await refreshInbox() }
             } else {
@@ -2864,6 +2880,7 @@ private struct InboxScrollMetrics: Equatable {
     let offsetY: CGFloat
     let distanceToBottom: CGFloat
     let contentFits: Bool
+    let pulledPastRefreshThreshold: Bool
 }
 
 /// The wash and leading edge that mark an urgent or high-priority row.
