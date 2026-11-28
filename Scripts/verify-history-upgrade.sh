@@ -29,7 +29,7 @@ working_tree() {
     local index tree
     index=$(mktemp) || return 1
     rm -f "$index"
-    GIT_INDEX_FILE="$index" git -C "$root" read-tree HEAD || { rm -f "$index"; return 1; }
+    GIT_INDEX_FILE="$index" git -C "$root" read-tree "$candidate^{tree}" || { rm -f "$index"; return 1; }
     GIT_INDEX_FILE="$index" git -C "$root" add -A || { rm -f "$index"; return 1; }
     tree=$(GIT_INDEX_FILE="$index" git -C "$root" write-tree) || { rm -f "$index"; return 1; }
     rm -f "$index"
@@ -43,6 +43,12 @@ fi
 # --no-renames reports both sides of a move, so removing production source by
 # moving it into UITests/ is still refused. Ignored files (build output and
 # generated test credentials) are not part of the recorded tree.
+overlay_list=$(mktemp)
+if ! git -C "$root" diff --no-renames --name-only -z "$candidate^{tree}" "$candidate_tree" > "$overlay_list"; then
+    rm -f "$overlay_list"
+    printf 'Could not list differences from the candidate commit.\n' >&2
+    exit 2
+fi
 overlay_paths=()
 while IFS= read -r -d '' path; do
     overlay_paths+=("$path")
@@ -57,7 +63,8 @@ while IFS= read -r -d '' path; do
     esac
     printf 'Only a test-only overlay may differ from the candidate commit; found %s\n' "$path" >&2
     exit 2
-done < <(git -C "$root" diff --no-renames --name-only -z "HEAD^{tree}" "$candidate_tree")
+done < "$overlay_list"
+rm -f "$overlay_list"
 export HARKLIGHT_HISTORY_CANDIDATE_TREE="$candidate_tree"
 HARKLIGHT_HISTORY_OVERLAY_PATHS=$(printf '%s\n' "${overlay_paths[@]+"${overlay_paths[@]}"}")
 export HARKLIGHT_HISTORY_OVERLAY_PATHS
