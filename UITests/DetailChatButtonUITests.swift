@@ -364,6 +364,19 @@ final class DetailChatButtonUITests: XCTestCase {
 
         let window = app.windows.firstMatch.frame
         let contentFrame = composer.frame
+        if UIDevice.current.userInterfaceIdiom == .pad {
+            let containers = app.descendants(matching: .any)
+                .containing(.textView, identifier: "sample-chat-composer")
+                .allElementsBoundByIndex
+            let frames = centeredPresentationFrames(in: containers, containing: contentFrame, window: window)
+            guard frames.count == 1 else {
+                XCTFail("Expected one centered native Chat presentation. \(app.debugDescription)")
+                return
+            }
+            let surfaces = app.otherElements.matching(identifier: "sample-chat-input-surface")
+            dismissPresentedChat(app, frames[0], surfaces, surfaces.count - 1)
+            return
+        }
         let containers = app.otherElements
             .containing(.textView, identifier: "sample-chat-composer")
             .allElementsBoundByIndex.map(\.frame)
