@@ -61,7 +61,8 @@ final class FreeRenderedUITests: XCTestCase {
             // The reply opens its own parent's chat at the retained target.
             reveal(normalReply, in: list)
             normalReply.tap()
-            let replyText = app.staticTexts["Generated reply for the captured older chat"]
+            let chatHistory = app.scrollViews["conversation-history-scroll"]
+            let replyText = chatHistory.staticTexts["Generated reply for the captured older chat"]
             XCTAssertTrue(replyText.waitForExistence(timeout: 5), app.debugDescription)
             XCTAssertTrue(replyText.isHittable, app.debugDescription)
             XCTAssertTrue(heading.label.contains("Generated older parent"), app.debugDescription)
@@ -151,12 +152,22 @@ final class FreeRenderedUITests: XCTestCase {
     }
 
     private func returnToInbox(_ app: XCUIApplication) {
-        if app.scrollViews["message-card-scroll"].exists {
-            let back = app.navigationBars.buttons.firstMatch
-            XCTAssertTrue(back.isHittable, app.debugDescription)
-            back.tap()
+        let list = app.collectionViews.firstMatch
+        let listVisible = list.exists &&
+            list.cells.allElementsBoundByIndex.prefix(8).contains { $0.isHittable }
+        if !listVisible {
+            let back = app.buttons.matching(
+                NSPredicate(format: "identifier == 'BackButton' OR label == 'Back'")
+            ).allElementsBoundByIndex.first { $0.isHittable }
+            if let back {
+                back.tap()
+            } else {
+                let sidebar = app.buttons["Show Sidebar"]
+                XCTAssertTrue(sidebar.isHittable, app.debugDescription)
+                sidebar.tap()
+            }
         }
-        XCTAssertTrue(app.collectionViews.firstMatch.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(list.waitForExistence(timeout: 5), app.debugDescription)
     }
 
     private func dismissChat(_ app: XCUIApplication) {
