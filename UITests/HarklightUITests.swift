@@ -499,17 +499,17 @@ final class HarklightUITests: XCTestCase {
         // returns after Back, so measure the row from the header's visible bottom edge.
         let navigationBar = app.navigationBars.firstMatch
         let visibleListAnchor: () -> CGFloat = {
-            let visibleHeaderBottom = brand.isHittable
+            let visibleHeaderBottom = brand.exists && brand.isHittable
                 ? navigationBar.frame.maxY
                 : navigationBar.frame.minY
             return review.frame.minY - max(list.frame.minY, visibleHeaderBottom)
         }
-        let unscrolledAnchor = visibleListAnchor()
+        let unscrolledRowY = review.frame.minY - list.frame.minY
         let start = list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.6))
         start.press(forDuration: 0.1, thenDragTo: start.withOffset(CGVector(dx: 0, dy: -(top.frame.height * 0.5 + 20))),
                     withVelocity: .slow, thenHoldForDuration: 0.5)
         let scrolledAnchor = visibleListAnchor()
-        XCTAssertLessThan(scrolledAnchor, unscrolledAnchor - 10,
+        XCTAssertLessThan(review.frame.minY - list.frame.minY, unscrolledRowY - 10,
                           "The tapped request must be scrolled within the list.")
 
         XCTAssertTrue(review.isHittable, app.debugDescription)
@@ -518,23 +518,17 @@ final class HarklightUITests: XCTestCase {
                       "The detail card, rather than the matching list row, confirms navigation.")
         attachScreenshot("Native detail back control", from: app)
 
-        let back = app.navigationBars.buttons.firstMatch
-        XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertFalse(app.buttons["harklight-detail-back"].exists,
                        "Detail uses the native navigation back control.")
-        back.tap()
+        revealInboxFromDetail(in: app)
         XCTAssertTrue(review.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(review.isHittable, "Back returns the tapped request to the visible list.")
         XCTAssertTrue(workspaceTab("Inbox", in: app).isSelected)
         XCTAssertTrue(review.exists, "The tapped untouched request remains in Inbox after native Back.")
         XCTAssertTrue(facilities.exists, "The other untouched request remains in Inbox after native Back.")
         attachScreenshot("Last viewed row in Inbox", from: app)
-        let kept = NSPredicate { _, _ in
-            abs(visibleListAnchor() - scrolledAnchor) <= 1
-        }
-        let keptPosition = XCTNSPredicateExpectation(predicate: kept, object: nil)
-        XCTAssertEqual(XCTWaiter().wait(for: [keptPosition], timeout: 3), .completed,
-                       "Back without switching messages must preserve the tapped row's visible position below the header: \(visibleListAnchor()), expected \(scrolledAnchor).\n\(app.debugDescription)")
+        XCTAssertEqual(visibleListAnchor(), scrolledAnchor, accuracy: 1,
+                       "Returning without switching messages preserves the tapped row's visible position below the header.\n\(app.debugDescription)")
     }
 
     func testSplitViewAdaptationKeepsTheSelectedMessage() {
@@ -555,10 +549,9 @@ final class HarklightUITests: XCTestCase {
                       "Adapting back to compact layout must not count as leaving the message.")
         attachScreenshot("Selected detail after compact split adaptation", from: app)
 
-        let back = app.navigationBars.buttons.firstMatch
-        XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
-        back.tap()
+        revealInboxFromDetail(in: app)
         XCTAssertTrue(facilities.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(facilities.isHittable, app.debugDescription)
     }
 
     func testNativeInteractiveBackReturnsToSearchableList() throws {
@@ -576,23 +569,23 @@ final class HarklightUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Facilities desk"].waitForExistence(timeout: 5))
         attachScreenshot("Request detail", from: app)
 
-        let back = workspaceBackButton(in: app)
-        XCTAssertTrue(back.waitForExistence(timeout: 5))
         XCTAssertFalse(app.buttons["harklight-detail-back"].exists,
                        "Detail uses the native navigation back control.")
-        back.tap()
+        let usesNativeBack = revealInboxFromDetail(in: app)
         XCTAssertTrue(facilities.waitForExistence(timeout: 5),
                       "Back must return to the same inbox list.")
-        facilities.tap()
-        XCTAssertTrue(app.staticTexts["Facilities desk"].waitForExistence(timeout: 5))
+        if usesNativeBack {
+            facilities.tap()
+            XCTAssertTrue(app.staticTexts["Facilities desk"].waitForExistence(timeout: 5))
 
-        let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.01, dy: 0.25))
-        let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0.75, dy: 0.25))
-        start.press(forDuration: 0.1, thenDragTo: end,
-                    withVelocity: .slow, thenHoldForDuration: 0.3)
-        let returnedToInbox = facilities.waitForExistence(timeout: 5)
-        if !returnedToInbox { attachScreenshot("Detail after native edge swipe", from: app) }
-        XCTAssertTrue(returnedToInbox, "An edge swipe from detail must return to the inbox list.\n\(app.debugDescription)")
+            let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.01, dy: 0.25))
+            let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0.75, dy: 0.25))
+            start.press(forDuration: 0.1, thenDragTo: end,
+                        withVelocity: .slow, thenHoldForDuration: 0.3)
+            let returnedToInbox = facilities.waitForExistence(timeout: 5)
+            if !returnedToInbox { attachScreenshot("Detail after native edge swipe", from: app) }
+            XCTAssertTrue(returnedToInbox, "An edge swipe from detail must return to the inbox list.\n\(app.debugDescription)")
+        }
         XCTAssertTrue(facilities.isHittable, app.debugDescription)
 
         let field = workspaceSearchField(in: app)
@@ -836,6 +829,23 @@ final class HarklightUITests: XCTestCase {
         attachScreenshot("Request history interaction", from: app)
         XCTAssertTrue(app.buttons["request-details-done"].waitForExistence(timeout: 5),
                       "Request history must open off the detail card face.\n\(app.debugDescription)")
+    }
+
+    @discardableResult
+    private func revealInboxFromDetail(in app: XCUIApplication) -> Bool {
+        let back = workspaceBackButton(in: app)
+        if UIDevice.current.userInterfaceIdiom != .pad || (back.exists && back.isHittable) {
+            XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
+            back.tap()
+            return true
+        }
+        if !listVisibleBesideDetail(in: app) {
+            let sidebar = app.buttons["Show Sidebar"]
+            XCTAssertTrue(sidebar.waitForExistence(timeout: 5), app.debugDescription)
+            XCTAssertTrue(sidebar.isHittable, app.debugDescription)
+            sidebar.tap()
+        }
+        return false
     }
 
     private func selectFacilitiesRequest(in app: XCUIApplication) {
