@@ -64,6 +64,45 @@ final class TwoDeviceServerCacheUITests: XCTestCase {
         snapshot("reply-confirmed", app)
     }
 
+    func testPreUpgradeMessagesAndHistoryRemainVisible() throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["HARKLIGHT_HISTORY_RELEASE_CHECK"] == "1" else {
+            throw XCTSkip("Requires preserved enrollment and messages seeded before an isolated upgrade.")
+        }
+
+        let unanswered = try configuredMessage("HISTORY_UNANSWERED")
+        let answered = try configuredMessage("HISTORY_ANSWERED")
+        let discussed = try configuredMessage("HISTORY_DISCUSSED")
+        guard let answer = environment["HARKLIGHT_HISTORY_ANSWER"], !answer.isEmpty,
+              let discussion = environment["HARKLIGHT_HISTORY_DISCUSSION"], !discussion.isEmpty,
+              let entryID = environment["HARKLIGHT_HISTORY_DISCUSSION_ENTRY"], !entryID.isEmpty else {
+            throw Failure.missing("expected pre-upgrade answer and discussion")
+        }
+
+        // Launch the already enrolled account without sample or diagnostic overrides.
+        let app = XCUIApplication()
+        XCUIDevice.shared.orientation = UIDevice.current.userInterfaceIdiom == .pad ? .landscapeLeft : .portrait
+        for launch in 1...2 {
+            app.launch()
+            try openMessage(unanswered, in: app, tab: "Inbox")
+            try openMessage(answered, in: app, tab: "Replied")
+            XCTAssertTrue(app.descendants(matching: .any)["request-answered"].firstMatch
+                .waitForExistence(timeout: observationTimeout))
+            let displayedAnswer = app.staticTexts["request-account-answer"]
+            XCTAssertTrue(displayedAnswer.waitForExistence(timeout: observationTimeout))
+            XCTAssertEqual(displayedAnswer.label, answer)
+
+            try openMessage(discussed, in: app, tab: "Inbox")
+            try tap(app.buttons["Chat"], stage: "open-pre-upgrade-discussion", in: app)
+            XCTAssertTrue(app.descendants(matching: .any)["conversation-turn-" + entryID].firstMatch
+                .waitForExistence(timeout: observationTimeout))
+            XCTAssertTrue(app.staticTexts[discussion].waitForExistence(timeout: observationTimeout))
+            attach("Launch \(launch): \(unanswered.id) Inbox; \(answered.id) Replied with answer; \(discussed.id) Inbox with Chat",
+                   named: "matched-pre-upgrade-items")
+            app.terminate()
+        }
+    }
+
     private struct Message {
         let id: String
         let title: String
@@ -74,6 +113,9 @@ final class TwoDeviceServerCacheUITests: XCTestCase {
     private func configuredMessage(_ name: String) throws -> Message {
         let environment = ProcessInfo.processInfo.environment
         guard environment["HARKLIGHT_ISOLATED_UI_DIAGNOSTIC"] == "1" else {
+            if environment["HARKLIGHT_HISTORY_RELEASE_CHECK"] == "1" {
+                throw Failure.missing("explicit isolated-server/account/device custody")
+            }
             throw XCTSkip("Requires explicit isolated-server/account/device custody; no default account is used.")
         }
         func required(_ suffix: String) throws -> String {
@@ -95,24 +137,32 @@ final class TwoDeviceServerCacheUITests: XCTestCase {
         return app
     }
 
-    private func findMessage(_ message: Message, in app: XCUIApplication) throws -> XCUIElement {
+    private func findMessage(_ message: Message, in app: XCUIApplication, tab: String? = nil) throws -> XCUIElement {
         let back = workspaceBackButton(in: app)
         if back.exists && back.isHittable { back.tap() }
         leaveWorkspaceSearch(in: app)
-        if !app.buttons["inbox-settings"].exists {
-            try tap(workspaceTab("Inbox", in: app), stage: "expand-inbox", in: app)
-        }
-        guard app.buttons["inbox-settings"].waitForExistence(timeout: observationTimeout) else {
-            // Do not capture an enrollment screen: invitation custody is
-            // separate, and the diagnostic never enrolls or resets an account.
-            throw Failure.missing("accepted signed-in inbox")
+        let row = app.descendants(matching: .any)["request-row-" + message.id].firstMatch
+        if UIDevice.current.userInterfaceIdiom == .pad, let tab,
+           ProcessInfo.processInfo.environment["HARKLIGHT_HISTORY_RELEASE_CHECK"] == "1" {
+            try tap(workspaceTab(tab, in: app), stage: "select-" + tab, in: app)
+            if row.waitForExistence(timeout: 5), row.isHittable { return row }
+        } else {
+            if !app.buttons["inbox-settings"].exists {
+                try tap(workspaceTab("Inbox", in: app), stage: "expand-inbox", in: app)
+            }
+            guard app.buttons["inbox-settings"].waitForExistence(timeout: observationTimeout) else {
+                // Enrollment is separate and this check never resets an account.
+                throw Failure.missing("accepted signed-in inbox")
+            }
+            if let tab {
+                try tap(workspaceTab(tab, in: app), stage: "select-" + tab, in: app)
+            }
         }
         let search = workspaceSearchField(in: app)
         try tap(search, stage: "search", in: app)
         let clear = search.buttons["Clear text"]
         if clear.exists { clear.tap() }
         search.typeText(message.title + "\n")
-        let row = app.descendants(matching: .any)["request-row-" + message.id].firstMatch
         guard row.waitForExistence(timeout: observationTimeout), row.isHittable else {
             snapshot("message-unavailable", app)
             throw Failure.missing("configured ordinary row")
@@ -120,8 +170,8 @@ final class TwoDeviceServerCacheUITests: XCTestCase {
         return row
     }
 
-    private func openMessage(_ message: Message, in app: XCUIApplication) throws {
-        let row = try findMessage(message, in: app)
+    private func openMessage(_ message: Message, in app: XCUIApplication, tab: String? = nil) throws {
+        let row = try findMessage(message, in: app, tab: tab)
         // The disposable messages have plain bodies without links; the row's
         // combined accessibility element is the actual navigation target.
         try tap(row, stage: "open-message", in: app)
