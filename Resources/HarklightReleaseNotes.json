@@ -406,7 +406,7 @@
     {
       "id": "inbox-recovery-and-compact-search",
       "marketingVersion": "0.2.0",
-      "testFlightBuildNumber": null,
+      "testFlightBuildNumber": 371,
       "highlights": [
         {
           "id": "refresh-recovery",
@@ -419,6 +419,19 @@
           "symbol": "magnifyingglass",
           "title": "Open Search with one tap on iPhone",
           "detail": "Inbox and Replied have a single outline. Tap the Search button to open the search field above the keyboard. First shipped in build 368."
+        }
+      ]
+    },
+    {
+      "id": "inbox-overlay-search-button",
+      "marketingVersion": "0.2.0",
+      "testFlightBuildNumber": null,
+      "highlights": [
+        {
+          "id": "inbox-overlay-search-button",
+          "symbol": "magnifyingglass",
+          "title": "More room around Search",
+          "detail": "When the Inbox panel opens over a message, the Search button sits clear of the panel edge."
         }
       ]
     }
