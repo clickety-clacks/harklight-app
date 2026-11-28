@@ -25,6 +25,19 @@ permissions:
   contents: read
 
 jobs:
+  release-notes:
+    name: In-app What's New
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Check in-app release notes
+        if: github.event_name != 'workflow_dispatch'
+        run: python3 ci_scripts/check_release_notes_archive.py --repo . --commit "$GITHUB_SHA"
+
   # Runner budget: pull requests run only the two short jobs below. The long
   # simulator jobs run at most one at a time each, and never per pull request,
   # so this repository cannot occupy every hosted macOS runner.

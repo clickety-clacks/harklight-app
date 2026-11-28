@@ -2,7 +2,7 @@
 set -u
 
 # Check tracked release notes for non-pull-request Xcode Cloud archives.
-# Note state is reported for follow-up and must never block a build.
+# A distribution archive must pass the same in-app check as Client CI.
 warn() {
     printf 'Release notes warning: %s\n' "$1" >&2
 }
@@ -23,6 +23,9 @@ commit=${CI_COMMIT:-}
 
 if [ -z "$repo" ] || [ -z "$commit" ]; then
     warn 'The source path or revision is unavailable.'
+    if [ "${CI_XCODEBUILD_ACTION:-}" = archive ]; then
+        exit 1
+    fi
     exit 0
 fi
 
@@ -67,7 +70,4 @@ if [ "${CI_XCODEBUILD_ACTION:-}" != archive ]; then
     exit 0
 fi
 
-if ! python3 "$repo/ci_scripts/check_release_notes_archive.py" --repo "$repo" --commit "$commit"; then
-    warn 'Tracked release notes could not be validated; continuing the archive. Complete the existing post-merge note-owner follow-up before the next TestFlight delivery.'
-fi
-exit 0
+exec python3 "$repo/ci_scripts/check_release_notes_archive.py" --repo "$repo" --commit "$commit" --prepare-archive
