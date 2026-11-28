@@ -7,14 +7,20 @@ check, does not satisfy this.
 
 ## Where it runs
 
-The check is part of the Harklight Server release gate. A Server release
-candidate is not promoted until the gate has passing iPhone, iPad and Web
-results for that exact candidate, all against the same upgraded fixture.
+The check is part of the Harklight Server release gate. For every new Server
+release published through the normal tagged build and publish path, the
+publish workflow requires an accepted run for the exact candidate. It rejects
+missing or mismatched iPhone, iPad and Web results from the same upgraded
+fixture. See the Server repository's
+[release publish workflow](https://github.com/clickety-clacks/harklight-server/blob/e3e40aa7ae652bf56e04396901ca58f568c085f0/.github/workflows/harklight-release-publish.yml#L50-L70)
+and its
+[history continuity guide](https://github.com/clickety-clacks/harklight-server/blob/e3e40aa7ae652bf56e04396901ca58f568c085f0/scripts/history-continuity/README.md#L60-L78).
 
-The App also needs this result before an App build is offered beyond Internal
-TestFlight to people who already use an earlier build. The check uses the
-current Server release candidate, or the latest released Server if none is
-pending.
+Promoting an App build beyond Internal TestFlight to people who already use an
+earlier build is a separate App release step. No workflow enforces it: the App
+release owner runs this check and keeps the passing results before promoting.
+The check uses the current Server release candidate, or the latest released
+Server if none is pending.
 
 ## How the App half runs
 
@@ -49,5 +55,5 @@ They record the client build, the candidate commit and its exact input tree,
 any test-only overlay paths, the Server version and commit, the fixture digest,
 and the matched messages. The script refuses a checkout that differs from the
 candidate commit outside `UITests/` or this script, including any change to the
-wrapper. The Server release gate accepts the App half only when both files
-match its candidate, fixture and expected messages.
+wrapper. The Server release gate accepts the App half only when both files match its
+candidate, fixture and expected messages.
