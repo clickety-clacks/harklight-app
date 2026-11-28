@@ -22,6 +22,32 @@ if [[ ! "$4" =~ ^[a-f0-9]{40}$ || "$candidate" != "$4" ]]; then
     exit 2
 fi
 
+# Bind results to the exact input tree, not only HEAD. A test-only overlay
+# (UI tests or this check's own script) is allowed and recorded; any other
+# difference from the candidate commit, including the wrapper, is refused.
+working_tree() {
+    local index
+    index=$(mktemp)
+    rm -f "$index"
+    GIT_INDEX_FILE="$index" git -C "$root" read-tree HEAD
+    GIT_INDEX_FILE="$index" git -C "$root" add -A
+    GIT_INDEX_FILE="$index" git -C "$root" write-tree
+    rm -f "$index"
+}
+candidate_tree=$(working_tree)
+overlay_paths=$(git -C "$root" diff --name-only "HEAD^{tree}" "$candidate_tree")
+while IFS= read -r path; do
+    [[ -z "$path" ]] && continue
+    case "$path" in
+        Scripts/verify.sh) ;;
+        UITests/*|Scripts/verify-history-upgrade.sh) continue ;;
+    esac
+    printf 'Only a test-only overlay may differ from the candidate commit; found %s\n' "$path" >&2
+    exit 2
+done <<< "$overlay_paths"
+export HARKLIGHT_HISTORY_CANDIDATE_TREE="$candidate_tree"
+export HARKLIGHT_HISTORY_OVERLAY_PATHS="$overlay_paths"
+
 fixture=$(python3 - "$3" <<'PYTHON'
 import json
 import re
@@ -91,6 +117,9 @@ export TEST_RUNNER_HARKLIGHT_HISTORY_DISCUSSION_ENTRY="$HARKLIGHT_HISTORY_DISCUS
 test_name=testPreUpgradeMessagesAndHistoryRemainVisible
 export HARKLIGHT_ONLY_TESTING="HarklightUITests/TwoDeviceServerCacheUITests/$test_name"
 
+case "$(cd "$(dirname "$HARKLIGHT_HISTORY_RESULTS")" && pwd)/" in
+    "$root"/*) printf 'Write results outside the checkout so the input tree stays exact.\n' >&2; exit 2 ;;
+esac
 mkdir "$HARKLIGHT_HISTORY_RESULTS"
 
 verify_device() {
@@ -132,6 +161,10 @@ if len(matches) != 1:
     candidate_build=$(/usr/libexec/PlistBuddy -c "Print CFBundleVersion" "$app_path/Info.plist")
     candidate_version=$(/usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" "$app_path/Info.plist")
     xcrun simctl shutdown "$device"
+    if [[ "$(working_tree)" != "$candidate_tree" ]]; then
+        printf 'The checkout changed during the %s check\n' "$form_factor" >&2
+        return 1
+    fi
     python3 - "$form_factor" "$candidate_version ($candidate_build) source $candidate" "$candidate" > "$HARKLIGHT_HISTORY_RESULTS/$form_factor.json" <<'PYTHON'
 import json
 import os
@@ -146,6 +179,8 @@ json.dump({
     "platform": platform,
     "client_build": client_build,
     "client_commit": client_commit,
+    "client_tree": os.environ["HARKLIGHT_HISTORY_CANDIDATE_TREE"],
+    "test_overlay_paths": [p for p in os.environ["HARKLIGHT_HISTORY_OVERLAY_PATHS"].splitlines() if p],
     "server_version": os.environ["HARKLIGHT_HISTORY_SERVER_VERSION"],
     "server_commit": os.environ["HARKLIGHT_HISTORY_SERVER_COMMIT"],
     "fixture_sha256": os.environ["HARKLIGHT_HISTORY_FIXTURE_SHA256"],
