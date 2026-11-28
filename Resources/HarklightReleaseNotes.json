@@ -425,13 +425,26 @@
     {
       "id": "inbox-overlay-search-button",
       "marketingVersion": "0.2.0",
-      "testFlightBuildNumber": null,
+      "testFlightBuildNumber": 372,
       "highlights": [
         {
           "id": "inbox-overlay-search-button",
           "symbol": "magnifyingglass",
           "title": "More room around Search",
           "detail": "When the Inbox panel opens over a message, the Search button sits clear of the panel edge."
+        }
+      ]
+    },
+    {
+      "id": "release-history-scroll",
+      "marketingVersion": "0.2.0",
+      "testFlightBuildNumber": null,
+      "highlights": [
+        {
+          "id": "release-history-scroll",
+          "symbol": "doc.text",
+          "title": "Release notes scroll smoothly",
+          "detail": "Scrolling through a long release history in Settings no longer closes the app on iPad."
         }
       ]
     }
