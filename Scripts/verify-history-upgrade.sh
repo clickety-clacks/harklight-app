@@ -15,7 +15,7 @@ fi
 : "${HARKLIGHT_HISTORY_PREDECESSOR_COMMIT:?Set the verified predecessor App source commit}"
 : "${HARKLIGHT_HISTORY_RESULTS:?Set a new directory for the platform result files}"
 
-root=$(cd "$(dirname "$0")/.." && pwd)
+root=$(cd "$(dirname "$0")/.." && pwd -P)
 candidate=$(git -C "$root" rev-parse HEAD)
 if [[ ! "$4" =~ ^[a-f0-9]{40}$ || "$candidate" != "$4" ]]; then
     printf 'The checkout must match the full App release candidate commit.\n' >&2
@@ -26,27 +26,41 @@ fi
 # (UI tests or this check's own script) is allowed and recorded; any other
 # difference from the candidate commit, including the wrapper, is refused.
 working_tree() {
-    local index
-    index=$(mktemp)
+    local index tree
+    index=$(mktemp) || return 1
     rm -f "$index"
-    GIT_INDEX_FILE="$index" git -C "$root" read-tree HEAD
-    GIT_INDEX_FILE="$index" git -C "$root" add -A
-    GIT_INDEX_FILE="$index" git -C "$root" write-tree
+    GIT_INDEX_FILE="$index" git -C "$root" read-tree HEAD || { rm -f "$index"; return 1; }
+    GIT_INDEX_FILE="$index" git -C "$root" add -A || { rm -f "$index"; return 1; }
+    tree=$(GIT_INDEX_FILE="$index" git -C "$root" write-tree) || { rm -f "$index"; return 1; }
     rm -f "$index"
+    [[ "$tree" =~ ^[a-f0-9]{40}$ ]] || return 1
+    printf '%s\n' "$tree"
 }
-candidate_tree=$(working_tree)
-overlay_paths=$(git -C "$root" diff --name-only "HEAD^{tree}" "$candidate_tree")
-while IFS= read -r path; do
-    [[ -z "$path" ]] && continue
+if ! candidate_tree=$(working_tree); then
+    printf 'Could not record the exact input tree.\n' >&2
+    exit 2
+fi
+# --no-renames reports both sides of a move, so removing production source by
+# moving it into UITests/ is still refused. Ignored files (build output and
+# generated test credentials) are not part of the recorded tree.
+overlay_paths=()
+while IFS= read -r -d '' path; do
+    overlay_paths+=("$path")
     case "$path" in
         Scripts/verify.sh) ;;
-        UITests/*|Scripts/verify-history-upgrade.sh) continue ;;
+        UITests/*|Scripts/verify-history-upgrade.sh)
+            if [[ -L "$root/$path" ]]; then
+                printf 'A symbolic link may not be part of the test overlay: %s\n' "$path" >&2
+                exit 2
+            fi
+            continue ;;
     esac
     printf 'Only a test-only overlay may differ from the candidate commit; found %s\n' "$path" >&2
     exit 2
-done <<< "$overlay_paths"
+done < <(git -C "$root" diff --no-renames --name-only -z "HEAD^{tree}" "$candidate_tree")
 export HARKLIGHT_HISTORY_CANDIDATE_TREE="$candidate_tree"
-export HARKLIGHT_HISTORY_OVERLAY_PATHS="$overlay_paths"
+HARKLIGHT_HISTORY_OVERLAY_PATHS=$(printf '%s\n' "${overlay_paths[@]+"${overlay_paths[@]}"}")
+export HARKLIGHT_HISTORY_OVERLAY_PATHS
 
 fixture=$(python3 - "$3" <<'PYTHON'
 import json
@@ -117,7 +131,8 @@ export TEST_RUNNER_HARKLIGHT_HISTORY_DISCUSSION_ENTRY="$HARKLIGHT_HISTORY_DISCUS
 test_name=testPreUpgradeMessagesAndHistoryRemainVisible
 export HARKLIGHT_ONLY_TESTING="HarklightUITests/TwoDeviceServerCacheUITests/$test_name"
 
-case "$(cd "$(dirname "$HARKLIGHT_HISTORY_RESULTS")" && pwd)/" in
+results_parent=$(cd "$(dirname "$HARKLIGHT_HISTORY_RESULTS")" && pwd -P) || exit 2
+case "$results_parent/" in
     "$root"/*) printf 'Write results outside the checkout so the input tree stays exact.\n' >&2; exit 2 ;;
 esac
 mkdir "$HARKLIGHT_HISTORY_RESULTS"
@@ -161,7 +176,8 @@ if len(matches) != 1:
     candidate_build=$(/usr/libexec/PlistBuddy -c "Print CFBundleVersion" "$app_path/Info.plist")
     candidate_version=$(/usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" "$app_path/Info.plist")
     xcrun simctl shutdown "$device"
-    if [[ "$(working_tree)" != "$candidate_tree" ]]; then
+    local now_tree
+    if ! now_tree=$(working_tree) || [[ "$now_tree" != "$candidate_tree" ]]; then
         printf 'The checkout changed during the %s check\n' "$form_factor" >&2
         return 1
     fi

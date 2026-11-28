@@ -41,6 +41,9 @@ Server if none is pending.
    HARKLIGHT_HISTORY_PREDECESSOR_VERSION=<version> \
    HARKLIGHT_HISTORY_PREDECESSOR_COMMIT=<commit> \
    HARKLIGHT_HISTORY_RESULTS=<new directory outside the checkout> \
+   HARKLIGHT_DIAGNOSTIC_HISTORY_UNANSWERED_TITLE=<title of the unanswered message> \
+   HARKLIGHT_DIAGNOSTIC_HISTORY_ANSWERED_TITLE=<title of the answered message> \
+   HARKLIGHT_DIAGNOSTIC_HISTORY_DISCUSSED_TITLE=<title of the message with a chat> \
    Scripts/verify-history-upgrade.sh <iphone-udid> <ipad-udid> <manifest.json> <candidate-commit>
    ```
 
@@ -55,5 +58,6 @@ They record the client build, the candidate commit and its exact input tree,
 any test-only overlay paths, the Server version and commit, the fixture digest,
 and the matched messages. The script refuses a checkout that differs from the
 candidate commit outside `UITests/` or this script, including any change to the
-wrapper. The Server release gate accepts the App half only when both files match its
+wrapper, and refuses symbolic links in the overlay. Ignored files, such as build
+output and generated test credentials, are not part of the recorded tree. The Server release gate accepts the App half only when both files match its
 candidate, fixture and expected messages.
