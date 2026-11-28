@@ -1609,8 +1609,12 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                                 geometry: GeometryProxy) -> some View {
         // iPad places native Search in the top toolbar, which already reads well.
         // Only phones (Duo unfolded) push it against the overlay edge.
+        // A phone with a regular width in portrait (unfolded Duo) shows this
+        // column only as an overlay. Its bottom bar's trailing edge extends
+        // past the visible panel, so trailing items are clipped there.
         let isPortraitOverlay = UIDevice.current.userInterfaceIdiom == .phone
-            && geometry.size.height > geometry.size.width && splitPresentation.isOverlay
+            && horizontalSizeClass == .regular
+            && geometry.size.height > geometry.size.width
         let splitView = NavigationSplitView(preferredCompactColumn: $preferredCompactColumn) {
             InboxList(tab: tab, rows: rows, warnings: visibleWarnings,
                   fyiInboxRow: search.isEmpty ? fyiInboxRow(for: tab) : nil,
@@ -1646,12 +1650,15 @@ struct HarklightInbox<RequestDetail: View, SettingsContent: View>: View {
                     InboxMailboxPicker(selection: mailboxSelection)
                 }
                 .sharedBackgroundVisibility(.hidden)
-                ToolbarSpacer(.flexible, placement: .bottomBar)
-                DefaultToolbarItem(kind: .search, placement: .bottomBar)
                 if isPortraitOverlay {
-                    // Keep the native Search control and inset it from the
-                    // overlay panel's trailing edge.
+                    // Keep Search with the leading controls, which stay
+                    // inside the visible overlay panel.
                     ToolbarSpacer(.fixed, placement: .bottomBar)
+                    DefaultToolbarItem(kind: .search, placement: .bottomBar)
+                    ToolbarSpacer(.flexible, placement: .bottomBar)
+                } else {
+                    ToolbarSpacer(.flexible, placement: .bottomBar)
+                    DefaultToolbarItem(kind: .search, placement: .bottomBar)
                 }
             }
             .background(alignment: .topLeading) {

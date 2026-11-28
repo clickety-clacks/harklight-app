@@ -451,6 +451,12 @@
           "symbol": "arrow.clockwise",
           "title": "Pull to refresh on iPad",
           "detail": "Pulling down the Inbox or Replied list beside a message on iPad refreshes it."
+        },
+        {
+          "id": "duo-overlay-search",
+          "symbol": "magnifyingglass",
+          "title": "Search fits the Inbox panel on unfolded Duo",
+          "detail": "When the Inbox panel opens over a message in portrait, Search sits next to Inbox and Replied instead of being cut off at the panel edge."
         }
       ]
     }
